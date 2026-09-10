@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build output
+packages/*/dist/
+*.tsbuildinfo
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Turbo
+.turbo/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# MAF runtime state (keep config templates, ignore local runs)
+.maf/runs/
+.maf/cache/

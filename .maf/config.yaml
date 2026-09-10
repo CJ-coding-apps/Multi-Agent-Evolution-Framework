@@ -1,0 +1,27 @@
+{
+  "version": "0.1.0",
+  "defaults": {
+    "adapter": "claude",
+    "worktree": true,
+    "circuit": {
+      "maxAttempts": 20,
+      "maxErrors": 5,
+      "tokenBudget": 200000,
+      "callsPerHour": 100
+    },
+    "lcm": {
+      "mode": "Upward",
+      "contextThreshold": 0.75,
+      "freshTailCount": 64
+    },
+    "dag": {
+      "maxConcurrent": 4,
+      "retry": {
+        "maxAttempts": 3,
+        "backoffMs": 1000,
+        "backoffFactor": 2,
+        "jitterMs": 500
+      }
+    }
+  }
+}

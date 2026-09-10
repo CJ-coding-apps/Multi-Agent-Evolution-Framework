@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": "src" },
+  "references": [
+    { "path": "../types" }, { "path": "../tools" }, { "path": "../git-ops" },
+    { "path": "../blackboard" }, { "path": "../lcm" }, { "path": "../lcm-adapter" },
+    { "path": "../memory-graph" }, { "path": "../attestation" }, { "path": "../policy-engine" },
+    { "path": "../approval-gate" }, { "path": "../tool-loop" }, { "path": "../dag-runner" },
+    { "path": "../prompt-injector" }, { "path": "../planning-agent" }, { "path": "../roles" }, { "path": "../transcript" },
+    { "path": "../adapters/base" }, { "path": "../adapters/claude" }, { "path": "../adapters/gemini" },
+    { "path": "../adapters/codex" }, { "path": "../adapters/ollama" }, { "path": "../adapters/openrouter" }
+  ],
+  "include": ["src"]
+}

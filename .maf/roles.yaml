@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "defaultRole": "coder",
+  "roles": [
+    {
+      "role": "coder",
+      "description": "Writes and modifies production code.",
+      "promptFile": "prompts/coder.md",
+      "allowedTools": [
+        "fs.read", "fs.write", "fs.delete", "fs.stat", "fs.list",
+        "grep",
+        "git.status", "git.diff", "git.add", "git.commit", "git.log", "git.reset",
+        "patch.apply",
+        "test.run"
+      ],
+      "policyTag": "coder",
+      "maxToolIterations": 12
+    },
+    {
+      "role": "tester",
+      "description": "Writes tests only; cannot modify production source.",
+      "promptFile": "prompts/tester.md",
+      "allowedTools": [
+        "fs.read", "fs.list", "fs.stat", "grep", "test.run", "patch.apply", "fs.write"
+      ],
+      "policyTag": "tester",
+      "maxToolIterations": 10
+    },
+    {
+      "role": "security",
+      "description": "Read-only security audit; flags CWE/OWASP issues as JSON.",
+      "promptFile": "prompts/security.md",
+      "allowedTools": [
+        "fs.read", "fs.list", "fs.stat", "grep", "git.diff", "git.log"
+      ],
+      "policyTag": "security",
+      "maxToolIterations": 6
+    },
+    {
+      "role": "reviewer",
+      "description": "Read-only diff review; approve or reject with suggestions.",
+      "promptFile": "prompts/reviewer.md",
+      "allowedTools": [
+        "fs.read", "grep", "git.diff", "git.log"
+      ],
+      "policyTag": "reviewer",
+      "maxToolIterations": 4
+    }
+  ]
+}

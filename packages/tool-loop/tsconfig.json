@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "composite": true,
+    "outDir": "dist", "rootDir": "src" },
+  "references": [
+    { "path": "../types" }, { "path": "../tools" }, { "path": "../git-ops" },
+    { "path": "../blackboard" }, { "path": "../policy-engine" }, { "path": "../attestation" }
+  ],
+  "include": ["src"]
+}

@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "references": [
+    { "path": "../types" },
+    { "path": "../tools" },
+    { "path": "../policy-engine" },
+    { "path": "../tool-loop" },
+    { "path": "../prompt-injector" },
+    { "path": "../git-ops" },
+    { "path": "../attestation" },
+    { "path": "../memory-graph" },
+    { "path": "../transcript" },
+    { "path": "../lcm-adapter" }
+  ],
+  "include": ["src"]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@maf/policy-engine",
+  "version": "0.1.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test dist/__tests__/*.test.js"
+  },
+  "dependencies": {
+    "@maf/types": "workspace:*",
+    "@maf/memory-graph": "workspace:*",
+    "minimatch": "^10.0.0"
+  },
+  "devDependencies": {
+    "typescript": "*",
+    "@types/node": "*"
+  }
+}

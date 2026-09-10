@@ -1,0 +1,34 @@
+{
+  "name": "@maf/roles",
+  "version": "0.1.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test dist/__tests__/*.test.js"
+  },
+  "dependencies": {
+    "@maf/types": "workspace:*",
+    "@maf/tools": "workspace:*",
+    "@maf/policy-engine": "workspace:*",
+    "@maf/tool-loop": "workspace:*",
+    "@maf/prompt-injector": "workspace:*",
+    "@maf/git-ops": "workspace:*",
+    "@maf/attestation": "workspace:*",
+    "@maf/memory-graph": "workspace:*",
+    "@maf/transcript": "workspace:*",
+    "@maf/lcm-adapter": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "*",
+    "@types/node": "*"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "rules": [
+    {
+      "id": "tester-write-only-tests",
+      "description": "Tester role may only write/patch files matching test path globs",
+      "priority": 80,
+      "predicate": {
+        "agentRole": "tester",
+        "toolId": ["fs.write", "patch.apply", "fs.delete"],
+        "allowedPathGlobs": [
+          "**/*test*",
+          "**/*spec*",
+          "**/tests/**",
+          "**/__tests__/**"
+        ]
+      },
+      "action": { "kind": "Deny", "reason": "Tester role may only modify test files" }
+    },
+    {
+      "id": "coder-no-secrets-dir",
+      "description": "Coder must not write into a secrets directory",
+      "priority": 90,
+      "predicate": {
+        "agentRole": "coder",
+        "toolId": ["fs.write", "patch.apply", "fs.delete"],
+        "pathGlob": "**/secrets/**"
+      },
+      "action": { "kind": "Deny", "reason": "secrets/** is off-limits to the coder role" }
+    },
+    {
+      "id": "deny-readonly-roles",
+      "description": "Reviewer and security roles are read-only",
+      "priority": 85,
+      "predicate": {
+        "agentRole": ["reviewer", "security"],
+        "toolId": ["fs.write", "patch.apply", "fs.delete", "git.add", "git.commit", "git.reset"]
+      },
+      "action": { "kind": "Deny", "reason": "Read-only role cannot mutate state" }
+    },
+    {
+      "id": "protect-lock-files",
+      "description": "Prevent writing to lock files without approval",
+      "priority": 95,
+      "predicate": {
+        "toolId": ["fs.write", "patch.apply"],
+        "pathGlob": "**/*.lock"
+      },
+      "action": { "kind": "Escalate", "requiresApproval": true }
+    },
+    {
+      "id": "protect-migrations",
+      "description": "Prevent editing migration files without approval",
+      "priority": 90,
+      "predicate": {
+        "toolId": ["fs.write", "patch.apply"],
+        "pathGlob": "**/migrations/**"
+      },
+      "action": { "kind": "Escalate", "requiresApproval": true }
+    },
+    {
+      "id": "deny-env-files",
+      "description": "Never write .env files",
+      "priority": 100,
+      "predicate": {
+        "toolId": ["fs.write"],
+        "pathGlob": "**/.env*"
+      },
+      "action": { "kind": "Deny", "reason": ".env files must be managed manually" }
+    }
+  ]
+}
