@@ -15,6 +15,9 @@ import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
 import { TranscriptLogger } from '@maf/transcript';
 import { createDefaultRegistry } from '@maf/tools';
 import { RoleRegistry, RoleDispatcher } from '@maf/roles';
+import { roleSetFromHarness } from '@maf/roles';
+import { HarnessStore, shortSha } from '@maf/harness-config';
+import type { HarnessConfig } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 
 const SECURITY_REVIEW_FALLBACK_PROMPT = `You are a security auditor. Review the supplied diff for vulnerabilities. Respond with a strict JSON block:
@@ -37,7 +40,8 @@ export function registerRunCommand(program: Command): void {
     .option('--no-worktree', 'Disable git worktree isolation')
     .option('--policy <path>', 'Path to policy YAML file', '.maf/policy.yaml')
     .option('--roles <path>', 'Path to roles YAML file', '.maf/roles.yaml')
-    .action(async (taskDescription: string, opts: { adapter: string; model?: string; dir: string; worktree: boolean; policy: string; roles: string }) => {
+    .option('--harness <ref>', 'Harness id, sha, or "current" (overrides --roles)')
+    .action(async (taskDescription: string, opts: { adapter: string; model?: string; dir: string; worktree: boolean; policy: string; roles: string; harness?: string }) => {
       const cwd         = path.resolve(opts.dir);
       const mafDir      = path.join(cwd, '.maf');
       const runId       = makeRunId(crypto.randomUUID());
@@ -56,7 +60,8 @@ export function registerRunCommand(program: Command): void {
         summarize: async (messages) => messages.map((m) => m.content.slice(0, 200)).join('\n'),
       });
       const graph     = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
-      const attestor  = new Attestor(runId, graph, path.join(mafDir, 'attestations'));
+      // Attestor constructed after harness resolution (harnessSha stamps ToolInvocation
+      // nodes); created in two steps below.
       const policy    = await PolicyEngine.fromYaml(path.resolve(cwd, opts.policy), graph);
       const rollback  = new RollbackManager(cwd);
       const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
@@ -73,11 +78,31 @@ export function registerRunCommand(program: Command): void {
       const adapter = await resolveAdapter(opts.adapter, adapterRegistry);
 
       const baseTools = createDefaultRegistry();
-      const roles = await RoleRegistry.fromYamlOrDefault(
-        path.resolve(cwd, opts.roles),
-        mafDir,
-        baseTools,
-      );
+
+      // ── Harness resolution (Phase 0): --harness loads a stored config; otherwise the
+      // legacy --roles file is parsed as today and wrapped as "legacy-default" (idempotent).
+      const harnessStore = new HarnessStore(mafDir);
+      let harness: HarnessConfig;
+      let roles: RoleRegistry;
+      if (opts.harness) {
+        harness = await harnessStore.load(opts.harness);
+        roles = RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), mafDir, baseTools);
+        console.log(`[maf] harness: ${harness.id} (${shortSha(harness.sha)})`);
+      } else {
+        const legacyRegistry = await RoleRegistry.fromYamlOrDefault(
+          path.resolve(cwd, opts.roles),
+          mafDir,
+          baseTools,
+        );
+        const legacyRoleSet = {
+          version: 1 as const,
+          defaultRole: legacyRegistry.getDefault().role,
+          roles: legacyRegistry.list(),
+        };
+        harness = await harnessStore.adoptLegacy(legacyRoleSet);
+        roles = legacyRegistry;
+      }
+      const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), undefined, harness.sha);
 
       const securityRole = roles.hasRole('security') ? roles.getRole('security') : undefined;
       const securityPrompt = securityRole
@@ -122,11 +147,16 @@ export function registerRunCommand(program: Command): void {
         cwd,
         sessionId,
         runId,
+        harness,
         ...(opts.model ? { modelOverride: opts.model } : {}),
       });
 
-      // Record run start in memory graph
-      await graph.addNode({ kind: 'Run', label: runId, properties: { taskDescription, adapter: opts.adapter }, runId });
+      // Record run start in memory graph (harness provenance)
+      await graph.addNode({
+        kind: 'Run', label: runId,
+        properties: { taskDescription, adapter: opts.adapter, harnessId: harness.id, harness_sha: harness.sha },
+        runId,
+      });
 
       // Generate DAG
       console.log('[maf] planning...');
@@ -144,10 +174,18 @@ export function registerRunCommand(program: Command): void {
         onNodeEnd:   (id, status) => console.log(`[maf] ← node ${id} ${status}`),
       });
 
-      // Bundle attestation
+      // Bundle attestation — the harness IS the build's config source (signed):
+      // configSource.uri points at the on-disk harness file, digest is its sha.
       const bundle = await attestor.bundle(
         { id: `@maf/adapter-${opts.adapter}@0.1.0`, modelVersion: opts.model ?? 'default' },
-        { configSource: { uri: path.join(mafDir, 'config.yaml'), digest: { sha256: '' } }, parameters: {}, environment: {} },
+        {
+          configSource: {
+            uri:    path.join(mafDir, 'harnesses', `${harness.sha}.yaml`),
+            digest: { sha256: harness.sha },
+          },
+          parameters:  { harnessId: harness.id },
+          environment: {},
+        },
         [],
       );
 

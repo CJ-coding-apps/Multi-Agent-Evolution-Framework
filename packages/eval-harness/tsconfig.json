@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "references": [
+    { "path": "../types" },
+    { "path": "../harness-config" },
+    { "path": "../memory-graph" },
+    { "path": "../attestation" }
+  ],
+  "include": ["src"]
+}

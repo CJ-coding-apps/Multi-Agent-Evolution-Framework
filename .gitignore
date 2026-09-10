@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 packages/*/dist/
+dist/
 *.tsbuildinfo
 
 # Coverage
@@ -29,6 +30,14 @@ Thumbs.db
 npm-debug.log*
 pnpm-debug.log*
 
-# MAF runtime state (keep config templates, ignore local runs)
+# MAF runtime state — keep .maf config templates (policy.yaml, roles.yaml,
+# config.yaml, prompts/), ignore everything a run produces locally.
 .maf/runs/
 .maf/cache/
+.maf/memory.kuzu
+.maf/lcm.db
+.maf/transcripts/
+.maf/attestations/
+.maf/harnesses/
+.maf/goldens/results/
+.maf/evolve/

@@ -6,6 +6,8 @@
     "rootDir": "src"
   },
   "references": [
+    { "path": "../processors" },
+    { "path": "../harness-config" },
     { "path": "../types" },
     { "path": "../tools" },
     { "path": "../policy-engine" },

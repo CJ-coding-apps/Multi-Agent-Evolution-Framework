@@ -12,15 +12,17 @@
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test dist/__tests__/*.test.js"
   },
   "dependencies": {
-    "@maf/types": "workspace:*",
-    "@maf/tools": "workspace:*",
-    "@maf/git-ops": "workspace:*",
+    "@maf/attestation": "workspace:*",
     "@maf/blackboard": "workspace:*",
+    "@maf/git-ops": "workspace:*",
     "@maf/policy-engine": "workspace:*",
-    "@maf/attestation": "workspace:*"
+    "@maf/processors": "workspace:*",
+    "@maf/tools": "workspace:*",
+    "@maf/types": "workspace:*"
   },
   "devDependencies": {
     "typescript": "*",

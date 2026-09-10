@@ -4,7 +4,7 @@ import path from 'node:path';
 import type {
   AttestorHandle, ToolCallRecord, AttestationBundle, SlsaProvenance,
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
-  RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord,
+  RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 
@@ -19,6 +19,7 @@ export class Attestor implements AttestorHandle {
     private readonly graph: MemoryGraph,
     private readonly attestationsDir: string,
     private readonly signingSecret: string = process.env['MAF_SIGNING_KEY'] ?? 'dev-secret',
+    private readonly harnessSha?: string,
   ) {}
 
   async record(call: Omit<ToolCallRecord, 'id'>): Promise<void> {
@@ -34,6 +35,7 @@ export class Attestor implements AttestorHandle {
         exitCode:  call.result.exitCode,
         durationMs: call.durationMs,
         policyVerdict: call.policyDecision.verdict,
+        ...(this.harnessSha ? { harness_sha: this.harnessSha } : {}),
       },
       runId: call.runId,
     });
@@ -51,7 +53,12 @@ export class Attestor implements AttestorHandle {
     this.securityFindings.push({ nodeId, result });
   }
 
-  async bundle(builder: SlsaBuilder, invocation: SlsaInvocation, materials: SlsaMaterial[]): Promise<AttestationBundle> {
+  async bundle(
+    builder: SlsaBuilder,
+    invocation: SlsaInvocation,
+    materials: SlsaMaterial[],
+    goldens?: GoldensSection,
+  ): Promise<AttestationBundle> {
     const provenance: SlsaProvenance = {
       buildType:  'https://maf.dev/build/v1',
       builder,
@@ -71,6 +78,7 @@ export class Attestor implements AttestorHandle {
       approvals:        this.approvals,
       diffHashes:       this.diffHashes,
       securityFindings: this.securityFindings,
+      ...(goldens ? { goldens } : {}),
       bundledAt:        new Date(),
     };
     const signature = crypto.createHmac('sha256', this.signingSecret)

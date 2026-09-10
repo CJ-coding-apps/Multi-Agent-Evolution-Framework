@@ -2,33 +2,50 @@
   "name": "@maf/cli",
   "version": "0.1.0",
   "main": "./dist/main.js",
-  "bin": { "maf": "./dist/main.js" },
-  "exports": { ".": { "import": "./dist/main.js" } },
-  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit", "start": "node dist/main.js" },
+  "bin": {
+    "maf": "./dist/main.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/main.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/main.js"
+  },
   "dependencies": {
-    "@maf/types": "workspace:*",
-    "@maf/tools": "workspace:*",
-    "@maf/git-ops": "workspace:*",
+    "@maf/adapter-base": "workspace:*",
+    "@maf/adapter-claude": "workspace:*",
+    "@maf/adapter-codex": "workspace:*",
+    "@maf/adapter-gemini": "workspace:*",
+    "@maf/adapter-ollama": "workspace:*",
+    "@maf/adapter-openrouter": "workspace:*",
+    "@maf/approval-gate": "workspace:*",
+    "@maf/attestation": "workspace:*",
     "@maf/blackboard": "workspace:*",
+    "@maf/dag-runner": "workspace:*",
+    "@maf/eval-harness": "workspace:*",
+    "@maf/evolver": "workspace:*",
+    "@maf/git-ops": "workspace:*",
+    "@maf/harness-config": "workspace:*",
     "@maf/lcm": "workspace:*",
     "@maf/lcm-adapter": "workspace:*",
     "@maf/memory-graph": "workspace:*",
-    "@maf/attestation": "workspace:*",
-    "@maf/policy-engine": "workspace:*",
-    "@maf/approval-gate": "workspace:*",
-    "@maf/tool-loop": "workspace:*",
-    "@maf/dag-runner": "workspace:*",
-    "@maf/prompt-injector": "workspace:*",
     "@maf/planning-agent": "workspace:*",
+    "@maf/policy-engine": "workspace:*",
+    "@maf/processors": "workspace:*",
+    "@maf/prompt-injector": "workspace:*",
     "@maf/roles": "workspace:*",
+    "@maf/tool-loop": "workspace:*",
+    "@maf/tools": "workspace:*",
     "@maf/transcript": "workspace:*",
-    "@maf/adapter-base": "workspace:*",
-    "@maf/adapter-claude": "workspace:*",
-    "@maf/adapter-gemini": "workspace:*",
-    "@maf/adapter-codex": "workspace:*",
-    "@maf/adapter-ollama": "workspace:*",
-    "@maf/adapter-openrouter": "workspace:*",
+    "@maf/types": "workspace:*",
     "commander": "^12.0.0"
   },
-  "devDependencies": { "typescript": "*", "@types/node": "*" }
+  "devDependencies": {
+    "typescript": "*",
+    "@types/node": "*"
+  }
 }

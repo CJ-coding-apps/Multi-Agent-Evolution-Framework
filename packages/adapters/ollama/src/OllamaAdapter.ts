@@ -45,6 +45,7 @@ export class OllamaAdapter extends BaseAdapter {
       supportsStreaming:    true,
       supportsToolCalling: false,
       supportsWorktrees:   false,
+      inProcessLoop:       false,
       maxConcurrentTasks:  2,
       nativePlugins:       [],
     };
@@ -57,6 +58,14 @@ export class OllamaAdapter extends BaseAdapter {
     } catch { return false; }
   }
 
+  /** Ollama sampling knobs: num_predict (token budget) + temperature (determinism). */
+  private optionsBag(options: AdapterInvokeOptions): { options?: Record<string, unknown> } {
+    const bag: Record<string, unknown> = {};
+    if (options.tokenBudget) bag['num_predict'] = options.tokenBudget;
+    if (options.temperature !== undefined) bag['temperature'] = options.temperature;
+    return Object.keys(bag).length > 0 ? { options: bag } : {};
+  }
+
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const start = Date.now();
     const messages = this.buildMessages(options);
@@ -64,7 +73,7 @@ export class OllamaAdapter extends BaseAdapter {
       model:   options.model ?? this.defaultModel,
       messages,
       stream:  false,
-      ...(options.tokenBudget ? { options: { num_predict: options.tokenBudget } } : {}),
+      ...this.optionsBag(options),
     };
 
     const controller = new AbortController();
@@ -100,6 +109,7 @@ export class OllamaAdapter extends BaseAdapter {
       model:   options.model ?? this.defaultModel,
       messages,
       stream:  true,
+      ...this.optionsBag(options),
     };
 
     const res = await fetch(`${this.baseUrl}/api/chat`, {

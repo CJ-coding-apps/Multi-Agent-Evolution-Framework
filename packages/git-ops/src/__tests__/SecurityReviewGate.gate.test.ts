@@ -12,7 +12,7 @@ function fakeAdapter(
   return {
     name: 'claude',
     capabilities: () => ({
-      supportsStreaming: false, supportsToolCalling: false,
+      supportsStreaming: false, supportsToolCalling: false, inProcessLoop: false,
       supportsWorktrees: false, maxConcurrentTasks: 1, nativePlugins: [],
     }),
     isAvailable: async () => true,

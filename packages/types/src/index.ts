@@ -234,7 +234,9 @@ export type MemoryNodeKind =
   | 'PolicyEvent'
   | 'Failure'
   | 'Approval'
-  | 'Attestation';
+  | 'Attestation'
+  | 'GoldenResult'
+  | 'EvolutionRound';
 
 export type MemoryRelation =
   | 'PRODUCED'
@@ -245,7 +247,8 @@ export type MemoryRelation =
   | 'SUMMARIZED_INTO'
   | 'APPROVED_BY'
   | 'ATTESTED_BY'
-  | 'MERGED_FROM';
+  | 'MERGED_FROM'
+  | 'SCORED_BY';
 
 export interface MemoryNode {
   id:         string;
@@ -421,6 +424,14 @@ export interface SecurityFindingsRecord {
   result: SecurityReviewResult;
 }
 
+export interface GoldensSection {
+  harnessSha:      string;
+  harnessId:       string;
+  solvedTaskIds:   string[];
+  total:           number;
+  ranAt:           string;
+}
+
 export interface AttestationBundle {
   runId:             RunId;
   provenance:        SlsaProvenance;
@@ -428,6 +439,8 @@ export interface AttestationBundle {
   approvals:         ReviewAttestation[];
   diffHashes:        Record<string, string>;
   securityFindings?: SecurityFindingsRecord[];
+  /** Golden-suite outcome for the harness under test (eval-harness runs only). */
+  goldens?:          GoldensSection;
   signature:         string;
   bundledAt:         Date;
 }
@@ -446,6 +459,8 @@ export interface AdapterCapabilities {
   supportsStreaming:   boolean;
   supportsToolCalling: boolean;
   supportsWorktrees:   boolean;
+  /** True when the adapter implements `TurnAdapter.sendTurn` (in-process loop). */
+  inProcessLoop:       boolean;
   maxConcurrentTasks:  number;
   nativePlugins:       string[];
 }
@@ -459,6 +474,9 @@ export interface AdapterInvokeOptions {
   tokenBudget?:     number;
   model?:           string;
   maxOutputBytes?:  number;
+  /** Pinned sampling temperature when the backend supports it (golden determinism).
+   *  Adapters that cannot control temperature MUST ignore it, never error. */
+  temperature?:     number;
 }
 
 export interface AdapterInvokeResult {
@@ -532,4 +550,63 @@ export interface CircuitBreakerConfig {
   maxErrors:        number;
   tokenBudget:      number;
   callsPerHour:     number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TURN ADAPTER — turn-level model access for the in-process loop (Phase 1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ToolCallRequest {
+  /** Correlation id echoed back by the matching tool TurnMessage. */
+  toolUseId: string;
+  toolName:  string;
+  input:     ToolInput;
+}
+
+export type TurnMessage =
+  | { kind: 'user';      text: string }
+  | { kind: 'assistant'; text: string; toolCalls: ToolCallRequest[] }
+  | { kind: 'tool';      toolUseId: string; toolName: string; content: string; isError?: boolean };
+
+export interface AssistantTurn {
+  text:         string;
+  toolCalls:    ToolCallRequest[];
+  tokensUsed?:  number;
+  /** Raw backend output for diagnostics/attestation (not shown to other processors). */
+  raw?:         string;
+  /**
+   * Per-block parse failures when decoding the tool-call wire protocol — e.g. a
+   * fenced `tool_call` block that was not valid JSON or lacked a string toolName.
+   * The in-process loop uses this to drive a bounded repair/retry (rather than
+   * silently dropping the model's botched tool call). Omitted when there are none.
+   */
+  parseErrors?: string[];
+}
+
+/**
+ * TurnAdapter — implemented by adapters that can drive a multi-turn conversation
+ * with explicit tool-call round-tripping, letting MAF's policy engine and
+ * processor pipeline intercept EVERY tool call (the legacy CliAdapter.invoke
+ * path dispatches one opaque invocation where tools are advisory).
+ *
+ * Pre-approved cross-package interface decision per HARNESSX_INTEGRATION_PLAN.md §10.5.
+ */
+export interface TurnAdapter extends CliAdapter {
+  sendTurn(history: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn>;
+}
+
+export function isTurnAdapter(a: CliAdapter): a is TurnAdapter {
+  return typeof (a as Partial<TurnAdapter>).sendTurn === 'function';
+}
+
+/**
+ * Coarse token estimate (~4 chars/token) for budget enforcement when a backend
+ * does not report real usage. CLI adapters (claude/codex) never populate
+ * AssistantTurn.tokensUsed, so the in-process loop falls back to this to make
+ * role.tokenBudget a real stop rather than a no-op. Deliberately an over-estimate
+ * on the safe side (fail-fast), never negative.
+ */
+export function estimateTokens(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
 }

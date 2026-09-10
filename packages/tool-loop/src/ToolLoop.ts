@@ -6,6 +6,7 @@ import { makeAgentId } from '@maf/types';
 import type { RollbackManager } from '@maf/git-ops';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { CircuitBreaker, CircuitBreakerError } from './CircuitBreaker.js';
+import { executeToolGated } from './gatedExec.js';
 
 export interface ToolLoopConfig {
   runId:          RunId;
@@ -55,32 +56,8 @@ export class ToolLoop {
     this.breaker.check();
 
     const ctx = this.buildContext();
-    const policyDecision = await this.config.policy.evaluate(tool.id, input, ctx);
-
-    const invokedAt = new Date();
-    const start = Date.now();
-
-    if (policyDecision.verdict === 'Deny') {
-      throw new PolicyViolationError(policyDecision);
-    }
-    if (policyDecision.verdict === 'Escalate') {
-      throw new PolicyViolationError(policyDecision);
-    }
-
     this.breaker.recordAttempt();
-    const result = await tool.execute(input, ctx);
-
-    await this.config.attestor.record({
-      toolId:         tool.id,
-      agentId:        this.agentId,
-      runId:          this.config.runId,
-      taskId:         this.config.taskId,
-      input,
-      result,
-      invokedAt,
-      durationMs:     Date.now() - start,
-      policyDecision,
-    });
+    const result = await executeToolGated(tool, input, ctx, this.config);
 
     if (result.exitCode !== 0) {
       this.breaker.recordError();

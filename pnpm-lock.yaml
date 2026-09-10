@@ -200,9 +200,18 @@ importers:
       '@maf/dag-runner':
         specifier: workspace:*
         version: link:../dag-runner
+      '@maf/eval-harness':
+        specifier: workspace:*
+        version: link:../eval-harness
+      '@maf/evolver':
+        specifier: workspace:*
+        version: link:../evolver
       '@maf/git-ops':
         specifier: workspace:*
         version: link:../git-ops
+      '@maf/harness-config':
+        specifier: workspace:*
+        version: link:../harness-config
       '@maf/lcm':
         specifier: workspace:*
         version: link:../lcm
@@ -218,6 +227,9 @@ importers:
       '@maf/policy-engine':
         specifier: workspace:*
         version: link:../policy-engine
+      '@maf/processors':
+        specifier: workspace:*
+        version: link:../processors
       '@maf/prompt-injector':
         specifier: workspace:*
         version: link:../prompt-injector
@@ -263,7 +275,64 @@ importers:
         specifier: '*'
         version: 5.9.3
 
+  packages/eval-harness:
+    dependencies:
+      '@maf/attestation':
+        specifier: workspace:*
+        version: link:../attestation
+      '@maf/harness-config':
+        specifier: workspace:*
+        version: link:../harness-config
+      '@maf/memory-graph':
+        specifier: workspace:*
+        version: link:../memory-graph
+      '@maf/types':
+        specifier: workspace:*
+        version: link:../types
+    devDependencies:
+      '@types/node':
+        specifier: '*'
+        version: 20.19.39
+      typescript:
+        specifier: '*'
+        version: 5.9.3
+
+  packages/evolver:
+    dependencies:
+      '@maf/eval-harness':
+        specifier: workspace:*
+        version: link:../eval-harness
+      '@maf/harness-config':
+        specifier: workspace:*
+        version: link:../harness-config
+      '@maf/memory-graph':
+        specifier: workspace:*
+        version: link:../memory-graph
+      '@maf/types':
+        specifier: workspace:*
+        version: link:../types
+    devDependencies:
+      '@types/node':
+        specifier: '*'
+        version: 20.19.39
+      typescript:
+        specifier: '*'
+        version: 5.9.3
+
   packages/git-ops:
+    dependencies:
+      '@maf/types':
+        specifier: workspace:*
+        version: link:../types
+    devDependencies:
+      '@types/node':
+        specifier: '*'
+        version: 20.19.39
+      typescript:
+        specifier: '*'
+        version: 5.9.3
+
+  packages/harness-config:
     dependencies:
       '@maf/types':
         specifier: workspace:*
@@ -371,6 +440,22 @@ importers:
         specifier: '*'
         version: 5.9.3
 
+  packages/processors:
+    dependencies:
+      '@maf/harness-config':
+        specifier: workspace:*
+        version: link:../harness-config
+      '@maf/types':
+        specifier: workspace:*
+        version: link:../types
+    devDependencies:
+      '@types/node':
+        specifier: '*'
+        version: 20.19.39
+      typescript:
+        specifier: '*'
+        version: 5.9.3
+
   packages/prompt-injector:
     dependencies:
       '@maf/lcm':
@@ -398,6 +483,9 @@ importers:
       '@maf/git-ops':
         specifier: workspace:*
         version: link:../git-ops
+      '@maf/harness-config':
+        specifier: workspace:*
+        version: link:../harness-config
       '@maf/lcm-adapter':
         specifier: workspace:*
         version: link:../lcm-adapter
@@ -407,6 +495,9 @@ importers:
       '@maf/policy-engine':
         specifier: workspace:*
         version: link:../policy-engine
+      '@maf/processors':
+        specifier: workspace:*
+        version: link:../processors
       '@maf/prompt-injector':
         specifier: workspace:*
         version: link:../prompt-injector
@@ -444,6 +535,9 @@ importers:
       '@maf/policy-engine':
         specifier: workspace:*
         version: link:../policy-engine
+      '@maf/processors':
+        specifier: workspace:*
+        version: link:../processors
       '@maf/tools':
         specifier: workspace:*
         version: link:../tools

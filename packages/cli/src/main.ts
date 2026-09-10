@@ -2,6 +2,10 @@
 import { Command } from 'commander';
 import { createAdapterRegistry } from './AdapterRegistry.js';
 import { registerRunCommand } from './commands/run.js';
+import { registerHarnessCommand } from './commands/harness.js';
+import { registerGoldensCommand } from './commands/goldens.js';
+import { registerEvolveCommand } from './commands/evolve.js';
+import { registerInProcessDemoCommand } from './commands/inprocessDemo.js';
 
 const program = new Command();
 
@@ -11,6 +15,10 @@ program
   .version('0.1.0');
 
 registerRunCommand(program);
+registerHarnessCommand(program);
+registerGoldensCommand(program);
+registerEvolveCommand(program);
+registerInProcessDemoCommand(program);
 
 // ── adapters list ─────────────────────────────────────────────────────────────
 program

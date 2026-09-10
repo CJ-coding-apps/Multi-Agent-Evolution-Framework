@@ -13,6 +13,7 @@ export class GeminiAdapter extends BaseAdapter {
       supportsStreaming:    true,
       supportsToolCalling: true,
       supportsWorktrees:   false,
+      inProcessLoop:       false,
       maxConcurrentTasks:  2,
       nativePlugins:       [],
     };

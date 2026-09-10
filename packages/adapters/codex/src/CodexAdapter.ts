@@ -1,11 +1,17 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord } from '@maf/types';
-import { BaseAdapter, spawnAndCollect, spawnStreaming } from '@maf/adapter-base';
+import type {
+  AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord,
+  TurnAdapter, TurnMessage, AssistantTurn,
+} from '@maf/types';
+import {
+  BaseAdapter, spawnAndCollect, spawnStreaming,
+  buildTurnSystemPrompt, serializeHistory, parseTurn,
+} from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
 
-export class CodexAdapter extends BaseAdapter {
+export class CodexAdapter extends BaseAdapter implements TurnAdapter {
   readonly name = 'codex' as const;
 
   capabilities(): AdapterCapabilities {
@@ -13,9 +19,36 @@ export class CodexAdapter extends BaseAdapter {
       supportsStreaming:    true,
       supportsToolCalling: true,
       supportsWorktrees:   true,
+      // Kept FALSE deliberately: `sendTurn` below drives tools through MAF's
+      // gate, but Codex's autonomous mode (--full-auto) would ALSO run tools,
+      // bypassing the gate. The RoleDispatcher gate requires BOTH sendTurn and
+      // this flag, so Codex stays on the CLI path until a non-autonomous Codex
+      // invocation is verified against a live binary — then flip to true.
+      inProcessLoop:       false,
       maxConcurrentTasks:  4,
       nativePlugins:       [],
     };
+  }
+
+  /**
+   * Turn-level model access using the shared MAF wire protocol. Codex has no
+   * `--system-prompt` flag, so the system block (role prompt + protocol + tool
+   * catalog) is prepended to the serialized history on stdin. Intentionally does
+   * NOT pass --full-auto: on this path MAF drives tool execution, not Codex.
+   */
+  async sendTurn(history: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
+    const systemBlock = buildTurnSystemPrompt(opts.systemPrompt, opts.tools);
+    const input = `${systemBlock}\n\n${serializeHistory(history)}`;
+    const args: string[] = [];
+    if (opts.model) args.push('--model', opts.model);
+    const result = await spawnAndCollect('codex', args, {
+      cwd:       opts.workingDir,
+      timeoutMs: opts.timeoutMs,
+      input,
+      env:       { ...process.env },
+      ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
+    });
+    return parseTurn(result.stdout);
   }
 
   async isAvailable(): Promise<boolean> {

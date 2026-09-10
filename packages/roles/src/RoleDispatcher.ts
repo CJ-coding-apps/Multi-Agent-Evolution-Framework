@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
 } from '@maf/types';
-import { makeTaskId } from '@maf/types';
+import { isTurnAdapter, makeTaskId } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -12,6 +12,12 @@ import type { MemoryGraph } from '@maf/memory-graph';
 import type { TranscriptLogger } from '@maf/transcript';
 import type { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import type { ReviewGate, SecurityReviewGate } from '@maf/git-ops';
+import type { HarnessConfig } from '@maf/harness-config';
+import {
+  ProcessorPipeline, createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS,
+} from '@maf/processors';
+import type { ProcessorDeps } from '@maf/processors';
+import { InProcessAgentLoop } from '@maf/tool-loop';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
 
@@ -33,6 +39,10 @@ export interface RoleDispatcherConfig {
   sessionId:      string;
   runId:          RunId;
   modelOverride?: string;
+  /** Pinned sampling temperature (e.g. 0 for golden determinism); forwarded to the adapter. */
+  temperature?:   number;
+  /** Phase 1: the resolved harness for this run (processor bundles live here). */
+  harness?:       HarnessConfig;
 }
 
 export interface RoleNodeOutput {
@@ -77,18 +87,100 @@ export class RoleDispatcher {
     const modelChoice = role.model ?? this.config.modelOverride;
     if (modelChoice) invokeOpts.model = modelChoice;
     if (role.tokenBudget) invokeOpts.tokenBudget = role.tokenBudget;
+    if (this.config.temperature !== undefined) invokeOpts.temperature = this.config.temperature;
 
-    const result = await this.config.adapter.invoke(invokeOpts);
+    // ── Phase 1 gate: in-process roles go through the processor pipeline loop ──
+    // Requires BOTH a sendTurn implementation AND the inProcessLoop capability:
+    // an adapter may ship sendTurn but keep the capability off (e.g. Codex, whose
+    // autonomous mode would bypass the gate) — that adapter must stay on CLI.
+    const wantsInProcess = (role.execution ?? 'cli') === 'in-process';
+    const adapter = this.config.adapter;
+    const canInProcess = isTurnAdapter(adapter) && adapter.capabilities().inProcessLoop;
+    if (wantsInProcess && !canInProcess) {
+      await this.config.transcript.append(
+        'system',
+        `[warn] role "${role.role}" requested execution=in-process but adapter "${adapter.name}" lacks the capability; falling back to CLI dispatch`,
+        { agentRole: role.role, nodeId: node.id },
+      );
+    }
 
-    const outputForMemory = result.output.slice(0, MAX_STORED_OUTPUT_CHARS);
+    let outputForMemory: string;
+    const ranInProcess = wantsInProcess && canInProcess;
+    if (ranInProcess) {
+      outputForMemory = await this.runInProcess(node, role, invokeOpts, taskId);
+    } else {
+      const result = await adapter.invoke(invokeOpts);
+      outputForMemory = result.output.slice(0, MAX_STORED_OUTPUT_CHARS);
+    }
+
     await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
     await this.config.lcmBridge.flush();
 
-    if (role.role === 'coder') {
+    if (role.role === 'coder' && !ranInProcess) {
+      // In-process coder runs the security gate at task_end via SecurityGateProcessor;
+      // CLI path (including adapter-capability fallback) runs it here.
       await this.runPostCoderGates(node, taskId);
     }
 
     return { output: { kind: 'string', value: outputForMemory } };
+  }
+
+  /**
+   * In-process execution: processor pipeline around every turn/tool call, policy
+   * gated per call. Processor bundle = harness.processorBundles, or the default
+   * bundle when the harness carries none (documented in HARNESSX_INTEGRATION_PLAN §4.3).
+   */
+  private async runInProcess(
+    node: DagNode,
+    role: ReturnType<RoleRegistry['getRole']>,
+    invokeOpts: AdapterInvokeOptions,
+    taskId: ReturnType<typeof makeTaskId>,
+  ): Promise<string> {
+    const adapter = this.config.adapter;
+    if (!isTurnAdapter(adapter)) throw new Error('unreachable: gated by caller');
+
+    const harness = this.config.harness;
+    const refs = harness && harness.processorBundles.length > 0
+      ? harness.processorBundles
+      : [...DEFAULT_BUNDLE_REFS];
+    const deps: ProcessorDeps = {
+      transcript: this.config.transcript,
+      securityRunner: () => this.runPostCoderGates(node, taskId),
+    };
+    const pipeline = ProcessorPipeline.build(refs, createDefaultProcessorRegistry(), deps);
+
+    const toolList = new RoleToolRegistry(this.config.baseTools, role.allowedTools).getAll();
+    const loop = new InProcessAgentLoop(
+      {
+        role:         role.role,
+        harnessSha:   harness?.sha ?? '0'.repeat(64),
+        systemPrompt: invokeOpts.systemPrompt ?? '',
+        userPrompt:   invokeOpts.prompt,
+        tools:        toolList,
+        maxTurns:     role.maxToolIterations ?? 10,
+        timeoutMs:    invokeOpts.timeoutMs,
+        workingDir:   invokeOpts.workingDir,
+        projectRoot:  this.config.cwd,
+        sessionId:    this.config.sessionId,
+        ...(invokeOpts.maxOutputBytes !== undefined ? { maxOutputBytes: invokeOpts.maxOutputBytes } : {}),
+        ...(invokeOpts.tokenBudget !== undefined ? { tokenBudget: invokeOpts.tokenBudget } : {}),
+        ...(invokeOpts.model !== undefined ? { model: invokeOpts.model } : {}),
+      },
+      {
+        adapter,
+        policy:    this.config.policy,
+        attestor:  this.config.attestor,
+        runId:     this.config.runId,
+        taskId,
+        pipeline,
+      },
+    );
+
+    const result = await loop.run();
+    if (result.outcome === 'failed') {
+      throw new Error(`in-process role "${role.role}" failed: ${result.error ?? 'unknown'}`);
+    }
+    return result.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
   }
 
   private async runPostCoderGates(node: DagNode, _taskId: ReturnType<typeof makeTaskId>): Promise<void> {

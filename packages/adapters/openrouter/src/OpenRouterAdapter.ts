@@ -4,7 +4,7 @@ import { BaseAdapter } from '@maf/adapter-base';
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
 interface OAIMessage  { role: 'system'|'user'|'assistant'; content: string }
-interface OAIRequest  { model: string; messages: OAIMessage[]; stream: boolean; max_tokens?: number | undefined }
+interface OAIRequest  { model: string; messages: OAIMessage[]; stream: boolean; max_tokens?: number | undefined; temperature?: number | undefined }
 interface OAIChoice   { message: OAIMessage; finish_reason: string }
 interface OAIResponse { choices: OAIChoice[]; usage?: { total_tokens?: number } }
 interface OAIStreamDelta { choices: Array<{ delta: { content?: string }; finish_reason?: string }> }
@@ -42,6 +42,7 @@ export class OpenRouterAdapter extends BaseAdapter {
       supportsStreaming:    true,
       supportsToolCalling: true,
       supportsWorktrees:   false,
+      inProcessLoop:       false,
       maxConcurrentTasks:  8,
       nativePlugins:       [],
     };
@@ -61,10 +62,11 @@ export class OpenRouterAdapter extends BaseAdapter {
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const start = Date.now();
     const body: OAIRequest = {
-      model:      options.model ?? this.defaultModel,
-      messages:   this.buildMessages(options),
-      stream:     false,
-      max_tokens: options.tokenBudget,
+      model:       options.model ?? this.defaultModel,
+      messages:    this.buildMessages(options),
+      stream:      false,
+      max_tokens:  options.tokenBudget,
+      temperature: options.temperature,   // honored (golden determinism when pinned to 0)
     };
 
     const controller = new AbortController();
@@ -98,9 +100,10 @@ export class OpenRouterAdapter extends BaseAdapter {
 
   override async *stream(options: AdapterInvokeOptions): AsyncGenerator<string> {
     const body: OAIRequest = {
-      model:    options.model ?? this.defaultModel,
-      messages: this.buildMessages(options),
-      stream:   true,
+      model:       options.model ?? this.defaultModel,
+      messages:    this.buildMessages(options),
+      stream:      true,
+      temperature: options.temperature,
     };
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method:  'POST',

@@ -1,12 +1,18 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord } from '@maf/types';
+import type {
+  AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord,
+  TurnAdapter, TurnMessage, AssistantTurn,
+} from '@maf/types';
 import { BaseAdapter } from '@maf/adapter-base';
-import { spawnAndCollect, spawnStreaming } from '@maf/adapter-base';
+import {
+  spawnAndCollect, spawnStreaming,
+  buildTurnSystemPrompt, serializeHistory, parseTurn,
+} from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
 
-export class ClaudeAdapter extends BaseAdapter {
+export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
   readonly name = 'claude' as const;
 
   capabilities(): AdapterCapabilities {
@@ -14,10 +20,30 @@ export class ClaudeAdapter extends BaseAdapter {
       supportsStreaming:    true,
       supportsToolCalling: true,
       supportsWorktrees:   true,
+      inProcessLoop:       true,
       maxConcurrentTasks:  4,
       nativePlugins:       ['mcp', 'superpowers'],
     };
   }
+
+  async sendTurn(history: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
+    // System block = role prompt + wire protocol + the allowlisted tool catalog
+    // (by id — the loop resolves calls by tool id). Without the catalog the model
+    // is blind to which tools exist.
+    const systemPrompt = buildTurnSystemPrompt(opts.systemPrompt, opts.tools);
+    const result = await spawnAndCollect('claude', this.buildArgs({
+      ...opts,
+      prompt: serializeHistory(history),
+      systemPrompt,
+    }), {
+      cwd: opts.workingDir,
+      timeoutMs: opts.timeoutMs,
+      env: { ...process.env },
+      ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
+    });
+    return parseTurn(result.stdout);
+  }
+
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -58,7 +84,10 @@ export class ClaudeAdapter extends BaseAdapter {
     if (options.systemPrompt) args.push('--system-prompt', options.systemPrompt);
     if (options.model)        args.push('--model', options.model);
     if (options.tokenBudget)  args.push('--max-tokens', String(options.tokenBudget));
-    // Prompt goes last via stdin; claude CLI reads from stdin when --print is used
+    // NOTE: the claude CLI has no temperature flag in --print mode, so
+    // opts.temperature is intentionally ignored here (contract: adapters that
+    // cannot pin temperature must ignore it, never error). Golden determinism on
+    // the CLI path relies on the model default, not a pinned temperature.
     args.push('-p', options.prompt);
     return args;
   }

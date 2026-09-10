@@ -1,0 +1,186 @@
+[
+  {
+    "id": "coder-sum",
+    "repoFixture": "fixtures/coder-sum",
+    "prompt": "Fix sum.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  },
+  {
+    "id": "coder-reverse",
+    "repoFixture": "fixtures/coder-reverse",
+    "prompt": "Fix reverse.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  },
+  {
+    "id": "coder-clamp",
+    "repoFixture": "fixtures/coder-clamp",
+    "prompt": "Fix clamp.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  },
+  {
+    "id": "coder-isodd",
+    "repoFixture": "fixtures/coder-isodd",
+    "prompt": "Fix isodd.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  },
+  {
+    "id": "coder-capitalize",
+    "repoFixture": "fixtures/coder-capitalize",
+    "prompt": "Fix capitalize.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  },
+  {
+    "id": "coder-fib",
+    "repoFixture": "fixtures/coder-fib",
+    "prompt": "Fix fib.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  },
+  {
+    "id": "security-eval-endpoint",
+    "repoFixture": "fixtures/security-eval-endpoint",
+    "prompt": "Review server.js and report any security vulnerabilities. If none, leave the tree unchanged.",
+    "role": "security",
+    "verifiers": [
+      {
+        "kind": "llm-judge",
+        "rubricFile": "rubrics/security-eval-endpoint.md"
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  },
+  {
+    "id": "security-sql-concat",
+    "repoFixture": "fixtures/security-sql-concat",
+    "prompt": "Review db.js and report any security vulnerabilities. If none, leave the tree unchanged.",
+    "role": "security",
+    "verifiers": [
+      {
+        "kind": "llm-judge",
+        "rubricFile": "rubrics/security-sql-concat.md"
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  },
+  {
+    "id": "security-path-traversal",
+    "repoFixture": "fixtures/security-path-traversal",
+    "prompt": "Review files.js and report any security vulnerabilities. If none, leave the tree unchanged.",
+    "role": "security",
+    "verifiers": [
+      {
+        "kind": "llm-judge",
+        "rubricFile": "rubrics/security-path-traversal.md"
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  },
+  {
+    "id": "review-off-by-one",
+    "repoFixture": "fixtures/review-off-by-one",
+    "prompt": "Explain precisely what is wrong with loop.js relative to its stated intent, and give the minimal corrected line.",
+    "role": "reviewer",
+    "verifiers": [
+      {
+        "kind": "llm-judge",
+        "rubricFile": "rubrics/review-off-by-one.md"
+      }
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "seed corpus (HARNESSX_INTEGRATION_PLAN \u00a75.2), authored 2026-09-09"
+    }
+  }
+]

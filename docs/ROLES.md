@@ -60,8 +60,9 @@ Fields:
 | `policyTag`         | no       | Optional tag for grouping in policy rules (currently informational). |
 | `model`             | no       | Per-role model override. Beats the CLI's `--model`. |
 | `timeoutMs`         | no       | Per-role timeout, otherwise the node's `timeoutMs` applies. |
-| `tokenBudget`       | no       | Adapter-specific token cap. |
-| `maxToolIterations` | no       | Cap on tool-call iterations in `ToolLoop`. |
+| `tokenBudget`       | no       | Token cap. Enforced on the in-process path (real usage if reported, else estimated). |
+| `maxToolIterations` | no       | Cap on tool-call iterations (turns) in the loop. |
+| `execution`         | no       | `'cli'` (default) or `'in-process'`. `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair); requires a `TurnAdapter` with `inProcessLoop` capability, else falls back to `cli`. See the README "In-process execution" section. |
 
 ### YAML or JSON?
 

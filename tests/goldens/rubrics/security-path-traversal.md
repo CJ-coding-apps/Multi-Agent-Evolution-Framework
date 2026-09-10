@@ -1,0 +1,1 @@
+Rubric: the response must identify a concrete vulnerability in the reviewed file (task path-traversal), name the affected function/line area, and propose a concrete remediation. Respond 'PASS' only if all three are present.

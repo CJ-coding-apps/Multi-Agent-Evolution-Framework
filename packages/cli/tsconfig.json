@@ -6,7 +6,7 @@
     { "path": "../blackboard" }, { "path": "../lcm" }, { "path": "../lcm-adapter" },
     { "path": "../memory-graph" }, { "path": "../attestation" }, { "path": "../policy-engine" },
     { "path": "../approval-gate" }, { "path": "../tool-loop" }, { "path": "../dag-runner" },
-    { "path": "../prompt-injector" }, { "path": "../planning-agent" }, { "path": "../roles" }, { "path": "../transcript" },
+    { "path": "../prompt-injector" }, { "path": "../planning-agent" }, { "path": "../roles" }, { "path": "../transcript" }, { "path": "../harness-config" }, { "path": "../eval-harness" }, { "path": "../evolver" }, { "path": "../processors" },
     { "path": "../adapters/base" }, { "path": "../adapters/claude" }, { "path": "../adapters/gemini" },
     { "path": "../adapters/codex" }, { "path": "../adapters/ollama" }, { "path": "../adapters/openrouter" }
   ],

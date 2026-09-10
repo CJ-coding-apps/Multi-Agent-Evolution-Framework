@@ -16,16 +16,18 @@
     "test": "node --test dist/__tests__/*.test.js"
   },
   "dependencies": {
-    "@maf/types": "workspace:*",
-    "@maf/tools": "workspace:*",
-    "@maf/policy-engine": "workspace:*",
-    "@maf/tool-loop": "workspace:*",
-    "@maf/prompt-injector": "workspace:*",
-    "@maf/git-ops": "workspace:*",
     "@maf/attestation": "workspace:*",
+    "@maf/git-ops": "workspace:*",
+    "@maf/harness-config": "workspace:*",
+    "@maf/lcm-adapter": "workspace:*",
     "@maf/memory-graph": "workspace:*",
+    "@maf/policy-engine": "workspace:*",
+    "@maf/processors": "workspace:*",
+    "@maf/prompt-injector": "workspace:*",
+    "@maf/tool-loop": "workspace:*",
+    "@maf/tools": "workspace:*",
     "@maf/transcript": "workspace:*",
-    "@maf/lcm-adapter": "workspace:*"
+    "@maf/types": "workspace:*"
   },
   "devDependencies": {
     "typescript": "*",

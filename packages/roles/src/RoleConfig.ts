@@ -8,6 +8,9 @@ export interface RoleConfig {
   allowedTools:       ToolId[];
   policyTag?:         string;
   model?:             string;
+  /** 'in-process' routes this role through the gated processor-pipeline loop
+   *  instead of a single opaque CLI invocation. Default: 'cli'. */
+  execution?:         'cli' | 'in-process';
   timeoutMs?:         number;
   maxToolIterations?: number;
   tokenBudget?:       number;
