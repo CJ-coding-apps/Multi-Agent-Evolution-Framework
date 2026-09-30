@@ -36,9 +36,12 @@ const CAPS: AdapterCapabilities = {
 
 class CliOnlyAdapter implements CliAdapter {
   readonly name = 'cli-only';
+  /** Stands in for whatever the CLI agent does to the tree while it runs. */
+  onInvoke: (() => Promise<void>) | undefined;
   capabilities(): AdapterCapabilities { return CAPS; }
   async isAvailable(): Promise<boolean> { return true; }
   async invoke(): Promise<AdapterInvokeResult> {
+    await this.onInvoke?.();
     return { success: true, output: 'CLI-PATH', toolCallLog: [], exitCode: 0, duration: 1 };
   }
   async *stream(): AsyncGenerator<string> { yield 'x'; }
@@ -57,16 +60,23 @@ interface Fixture {
   cleanup: () => Promise<void>;
 }
 
-async function makeFixture(opts: { workDir: string; securityGate?: SecurityReviewGate }): Promise<Fixture> {
+async function makeFixture(opts: {
+  workDir: string;
+  securityGate?: SecurityReviewGate;
+  /** What the CLI agent does to the working tree while it runs. */
+  onInvoke?: () => Promise<void>;
+}): Promise<Fixture> {
   const reviews: string[] = [];
   const roles = RoleRegistry.fromSet({
     version: 1,
     defaultRole: 'coder',
     roles: [{ role: 'coder', systemPrompt: 'code', allowedTools: [], execution: 'cli' }],
   }, opts.workDir);
+  const adapter = new CliOnlyAdapter();
+  if (opts.onInvoke) adapter.onInvoke = opts.onInvoke;
 
   const config = {
-    adapter: new CliOnlyAdapter(),
+    adapter,
     baseTools: createDefaultRegistry() as ToolRegistry,
     roles,
     injector: { assemble: async () => ({ systemPromptPrefix: '' }) } as unknown as GraphAwareInjector,
@@ -106,11 +116,68 @@ test('no repository in the working dir: the gate errors instead of reporting a c
   await writeFile(path.join(workDir, 'hello.txt'), 'hello', 'utf8');
   const fx = await makeFixture({ workDir });
   try {
+    // Both halves matter: that it refused, and that it says what to do about it.
     await assert.rejects(
       () => fx.dispatcher.runNode(CODER_NODE),
-      /cannot review the coder diff — no usable git repository/,
+      /cannot review the coder diff — no usable git repository[\s\S]*run "git init" in/,
     );
     assert.deepEqual(fx.reviews, [], 'no review happened, and none is claimed');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a coder that commits its own work is still reviewed', async () => {
+  const workDir = await makeRepoDir();
+  const seen: string[] = [];
+  const fx = await makeFixture({
+    workDir,
+    // Claude Code commonly commits what it changes. Diffing against HEAD would then see
+    // nothing at all — the same fail-open, reached by a different route.
+    onInvoke: async () => {
+      await writeFile(path.join(workDir, 'hello.txt'), 'hello, changed', 'utf8');
+      await execFileAsync('git', ['add', '-A'], { cwd: workDir });
+      await execFileAsync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'agent committed'], { cwd: workDir });
+    },
+    securityGate: {
+      reviewDiff: async (diff: string) => {
+        seen.push(diff);
+        return { findings: [], summary: 'clean', passed: true };
+      },
+    } as unknown as SecurityReviewGate,
+  });
+  try {
+    await fx.dispatcher.runNode(CODER_NODE);
+    assert.equal(seen.length, 1, 'the gate must still be reached after the agent commits');
+    assert.match(seen[0] ?? '', /changed/, 'and it must see what the agent committed');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a repository with no commits yet is reviewable, not an error', async () => {
+  // `git init` and nothing else is what the error message tells the user to run, so it
+  // must not lead straight back to the same error.
+  const workDir = await mkdtemp(path.join(tmpdir(), 'maf-gates-unborn-'));
+  await execFileAsync('git', ['init', '-q'], { cwd: workDir });
+  await writeFile(path.join(workDir, 'hello.txt'), 'hello', 'utf8');
+  await execFileAsync('git', ['add', 'hello.txt'], { cwd: workDir });
+
+  const seen: string[] = [];
+  const fx = await makeFixture({
+    workDir,
+    onInvoke: async () => { await writeFile(path.join(workDir, 'hello.txt'), 'hello, changed', 'utf8'); },
+    securityGate: {
+      reviewDiff: async (diff: string) => {
+        seen.push(diff);
+        return { findings: [], summary: 'clean', passed: true };
+      },
+    } as unknown as SecurityReviewGate,
+  });
+  try {
+    await fx.dispatcher.runNode(CODER_NODE);
+    assert.equal(seen.length, 1);
+    assert.match(seen[0] ?? '', /changed/);
   } finally {
     await fx.cleanup();
   }
