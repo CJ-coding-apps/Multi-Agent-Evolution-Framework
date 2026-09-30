@@ -35,6 +35,15 @@ jobs:
       - name: Build (tsc, leaf-first)
         run: pnpm build
 
+      # Guards the two ways a green build or a green test run can mean nothing:
+      # tsc reporting success without emitting (a stale tsBuildInfoFile outside dist),
+      # and `pnpm -r test` skipping a package that has tests but no test script.
+      - name: Guard build output
+        run: pnpm check:build-output
+
+      - name: Guard test scripts
+        run: pnpm check:test-scripts
+
       - name: Typecheck
         run: pnpm -r typecheck
 
