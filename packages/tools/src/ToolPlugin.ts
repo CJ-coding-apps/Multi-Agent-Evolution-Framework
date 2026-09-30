@@ -9,6 +9,13 @@ export abstract class BaseTool<I extends ToolInput = ToolInput> implements ToolP
   abstract readonly permissionLevel: PermissionLevel;
   abstract execute(input: I, ctx: ToolContext): Promise<ToolResult>;
 
+  /**
+   * Abstract on purpose: a tool must state its filesystem surface rather than inherit an
+   * empty one. A default of `[]` would look identical to `git.status` and would silently
+   * exempt the next tool that forgets — which is the defect this exists to close.
+   */
+  abstract declaredPaths(input: I): string[];
+
   protected ok(stdout: string, duration: number, metadata: Record<string, unknown> = {}): ToolResult {
     return { stdout, stderr: '', exitCode: 0, duration, metadata };
   }

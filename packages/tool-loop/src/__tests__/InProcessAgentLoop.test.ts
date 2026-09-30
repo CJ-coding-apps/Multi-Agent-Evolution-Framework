@@ -52,6 +52,7 @@ function echoTool(id: string, out: string): ToolPlugin {
     async execute(_i: Record<string, unknown>, _c: ToolContext): Promise<ToolResult> {
       return { stdout: out, stderr: '', exitCode: 0, duration: 0, metadata: {} };
     },
+    declaredPaths(): string[] { return []; },
   };
 }
 

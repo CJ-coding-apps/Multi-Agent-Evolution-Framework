@@ -21,6 +21,15 @@ export class GrepTool extends BaseTool<GrepInput> {
   readonly description = 'Search for a pattern in files using ripgrep. Returns matching lines with file paths and line numbers.';
   readonly permissionLevel = 'read' as const;
 
+  /**
+   * Searching the whole working directory is a real path surface, so it is declared as one
+   * (`.`) rather than as nothing. Before this, grep had no path at all: a rule could not
+   * allow it a subtree or deny it a file, because policy had nothing to match against.
+   */
+  declaredPaths(input: GrepInput): string[] {
+    return typeof input.path === 'string' && input.path ? [input.path] : ['.'];
+  }
+
   async execute(input: GrepInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
     const searchPath = input.path ? path.resolve(ctx.cwd, input.path) : ctx.cwd;

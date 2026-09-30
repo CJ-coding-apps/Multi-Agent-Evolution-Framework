@@ -34,7 +34,17 @@ export async function executeToolGated(
   ctx: ToolContext,
   deps: GatedExecDeps,
 ): Promise<ToolResult> {
-  const policyDecision = await deps.policy.evaluate(tool.id, input, ctx);
+  // Frozen so the input the policy read is the input the tool runs on. A tool that rewrote
+  // its own input inside `execute` decided its own paths after the gate had closed — writing
+  // to a frozen input now throws instead, and throws loudly.
+  deepFreeze(input);
+
+  // The tool's own declaration, computed before any rule is consulted. An error here (a tool
+  // that does not declare, a declaration that throws) propagates: failing to evaluate policy
+  // is not permission to skip it.
+  const declaredPaths = tool.declaredPaths(input);
+
+  const policyDecision = await deps.policy.evaluate(tool.id, input, ctx, declaredPaths);
   const invokedAt = new Date();
   const start = Date.now();
 
@@ -63,4 +73,11 @@ export async function executeToolGated(
   });
 
   return result;
+}
+
+/** Freezes `value` and every object or array reachable from it, in place. */
+function deepFreeze(value: unknown): void {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return;
+  Object.freeze(value);
+  for (const child of Object.values(value)) deepFreeze(child);
 }

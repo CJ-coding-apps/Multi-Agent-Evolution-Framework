@@ -71,6 +71,21 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
   description:     string;
   permissionLevel: PermissionLevel;
   execute(input: I, ctx: ToolContext): Promise<ToolResult>;
+
+  /**
+   * The filesystem paths this call will touch, as the tool itself declares them.
+   *
+   * MUST be a pure function of `input`: the policy layer calls it before any rule and
+   * before `execute`, so a tool that only reveals its paths while running (patch.apply
+   * derived them inside `execute` and wrote them back onto the input) is invisible to
+   * path rules — the shipped `protect-secrets` Deny matched `fs.write ".env"` and skipped
+   * `patch.apply` on the same file.
+   *
+   * MUST over-declare rather than under-declare: a path that is declared but never touched
+   * can only make a rule match sooner, while a path that is touched but not declared is a
+   * silent Allow. A tool with no filesystem surface returns `[]`.
+   */
+  declaredPaths(input: I): string[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -341,7 +356,17 @@ export interface PolicyRule {
 }
 
 export interface PolicyEngineHandle {
-  evaluate(toolId: ToolId, input: ToolInput, ctx: ToolContext): Promise<PolicyDecision>;
+  /**
+   * `declaredPaths` is the calling tool's own `ToolPlugin.declaredPaths(input)` for this
+   * input — required, not optional, so no call site can leave path rules with nothing to
+   * match against. See the note on `ToolPlugin.declaredPaths`.
+   */
+  evaluate(
+    toolId: ToolId,
+    input: ToolInput,
+    ctx: ToolContext,
+    declaredPaths: readonly string[],
+  ): Promise<PolicyDecision>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

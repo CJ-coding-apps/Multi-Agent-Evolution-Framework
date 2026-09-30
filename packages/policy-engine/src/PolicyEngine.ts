@@ -32,14 +32,21 @@ export class PolicyEngine implements PolicyEngineHandle {
     return engine;
   }
 
-  async evaluate(toolId: ToolId, input: ToolInput, ctx: ToolContext): Promise<PolicyDecision> {
+  async evaluate(
+    toolId: ToolId,
+    input: ToolInput,
+    ctx: ToolContext,
+    declaredPaths: readonly string[],
+  ): Promise<PolicyDecision> {
     for (const rule of this.rules) {
       if (!this.matchesToolId(rule, toolId)) continue;
       if (!this.matchesAgentRole(rule, ctx)) continue;
-      if (!this.matchesPath(rule, input)) continue;
-      if (!this.matchesAllowedPaths(rule, input)) continue;
+      if (!this.matchesPath(rule, declaredPaths)) continue;
+      if (!this.matchesAllowedPaths(rule, declaredPaths)) continue;
       if (rule.predicate.memoryPattern) {
-        const matches = await this.evaluateCypher(rule.predicate.memoryPattern.cypher, toolId, input, ctx);
+        const matches = await this.evaluateCypher(
+          rule.predicate.memoryPattern.cypher, toolId, declaredPaths, ctx,
+        );
         if (!matches) continue;
       }
       return this.buildDecision(rule.action, toolId, input, ctx, rule.id);
@@ -63,34 +70,35 @@ export class PolicyEngine implements PolicyEngineHandle {
     return pred === role;
   }
 
-  private matchesPath(rule: PolicyRule, input: ToolInput): boolean {
+  // Paths come from the calling tool's own declaration, never from a guess about which input
+  // keys look like paths. The guess was the defect: `patch.apply` derived its paths inside
+  // `execute`, so path rules saw nothing and matched nothing.
+  private matchesPath(rule: PolicyRule, declaredPaths: readonly string[]): boolean {
     const glob = rule.predicate.pathGlob;
     if (!glob) return true;
-    const paths = collectInputPaths(input);
-    if (paths.length === 0) return false;
-    return paths.some((p) => minimatch(p, glob));
+    if (declaredPaths.length === 0) return false;
+    return declaredPaths.some((p) => minimatch(p, glob));
   }
 
-  // Rule matches when at least one input path falls OUTSIDE every allowed glob.
+  // Rule matches when at least one declared path falls OUTSIDE every allowed glob.
   // Used to express "this role may only modify files matching these patterns" —
   // pair with a Deny action to block writes elsewhere.
-  private matchesAllowedPaths(rule: PolicyRule, input: ToolInput): boolean {
+  private matchesAllowedPaths(rule: PolicyRule, declaredPaths: readonly string[]): boolean {
     const allowed = rule.predicate.allowedPathGlobs;
     if (!allowed || allowed.length === 0) return true;
-    const paths = collectInputPaths(input);
-    if (paths.length === 0) return false;
-    return paths.some((p) => !allowed.some((g) => minimatch(p, g)));
+    if (declaredPaths.length === 0) return false;
+    return declaredPaths.some((p) => !allowed.some((g) => minimatch(p, g)));
   }
 
   private async evaluateCypher(
     cypherTemplate: string,
     toolId: ToolId,
-    input: ToolInput,
+    declaredPaths: readonly string[],
     ctx: ToolContext,
   ): Promise<boolean> {
     const cypher = cypherTemplate
       .replace(/\$tool/g,   `'${toolId}'`)
-      .replace(/\$path/g,   `'${String(input['path'] ?? '').replace(/'/g, "''")}'`)
+      .replace(/\$path/g,   `'${(declaredPaths[0] ?? '').replace(/'/g, "''")}'`)
       .replace(/\$runId/g,  `'${ctx.runId}'`)
       .replace(/\$taskId/g, `'${ctx.taskId}'`);
     try {
@@ -127,15 +135,6 @@ export class PolicyEngine implements PolicyEngineHandle {
       }
     }
   }
-}
-
-function collectInputPaths(input: ToolInput): string[] {
-  const raw = input['paths'];
-  if (Array.isArray(raw)) return raw.filter((p): p is string => typeof p === 'string');
-  const single = input['path'];
-  if (typeof single === 'string' && single) return [single];
-  if (typeof raw === 'string' && raw) return [raw];
-  return [];
 }
 
 // Minimal YAML → JS object parser (handles simple key: value and arrays)

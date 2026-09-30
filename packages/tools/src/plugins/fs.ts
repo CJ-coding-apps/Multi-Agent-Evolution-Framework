@@ -5,6 +5,14 @@ import type { ToolId, ToolContext, ToolResult } from '@maf/types';
 import { BaseTool } from '../ToolPlugin.js';
 import { makeToolId } from '@maf/types';
 
+/**
+ * The single path a one-path tool declares, or `[]` when the model omitted it — a call with
+ * no path touches nothing, and the tool fails on its own when it runs. Never invents a path.
+ */
+function onePath(input: { path?: unknown }): string[] {
+  return typeof input.path === 'string' && input.path ? [input.path] : [];
+}
+
 // ── fs.read ───────────────────────────────────────────────────────────────────
 
 interface ReadInput { path: string; offset?: number; limit?: number; [k: string]: unknown }
@@ -14,6 +22,8 @@ export class FsReadTool extends BaseTool<ReadInput> {
   readonly name = 'fs.read';
   readonly description = 'Read a file from disk. Returns its text content.';
   readonly permissionLevel = 'read' as const;
+
+  declaredPaths(input: ReadInput): string[] { return onePath(input); }
 
   async execute(input: ReadInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
@@ -35,6 +45,8 @@ export class FsWriteTool extends BaseTool<WriteInput> {
   readonly description = 'Write text content to a file, overwriting if it exists.';
   readonly permissionLevel = 'write' as const;
 
+  declaredPaths(input: WriteInput): string[] { return onePath(input); }
+
   async execute(input: WriteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
     const abs = path.resolve(ctx.cwd, input.path);
@@ -54,6 +66,8 @@ export class FsDeleteTool extends BaseTool<DeleteInput> {
   readonly description = 'Delete a file or directory.';
   readonly permissionLevel = 'dangerous' as const;
 
+  declaredPaths(input: DeleteInput): string[] { return onePath(input); }
+
   async execute(input: DeleteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
     const abs = path.resolve(ctx.cwd, input.path);
@@ -71,6 +85,8 @@ export class FsStatTool extends BaseTool<StatInput> {
   readonly name = 'fs.stat';
   readonly description = 'Stat a file or directory — returns size, type, mtime.';
   readonly permissionLevel = 'read' as const;
+
+  declaredPaths(input: StatInput): string[] { return onePath(input); }
 
   async execute(input: StatInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
@@ -92,6 +108,8 @@ export class FsListTool extends BaseTool<ListInput> {
   readonly name = 'fs.list';
   readonly description = 'List files in a directory.';
   readonly permissionLevel = 'read' as const;
+
+  declaredPaths(input: ListInput): string[] { return onePath(input); }
 
   async execute(input: ListInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();

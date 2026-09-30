@@ -40,6 +40,13 @@ export class TestRunnerTool extends BaseTool<TestInput> {
   readonly description = 'Run the project test suite. Auto-detects runner (bun/vitest/jest/pytest/cargo). Returns pass/fail summary.';
   readonly permissionLevel = 'execute' as const;
 
+  /**
+   * No path argument, so there is no path to declare. What test.run can reach is governed by
+   * its tool id and the `execute` permission level, not by a path rule — and inventing a path
+   * here would make a path rule deny a call that never named one.
+   */
+  declaredPaths(): string[] { return []; }
+
   async execute(input: TestInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
     const runner = input.runner === 'auto' || !input.runner

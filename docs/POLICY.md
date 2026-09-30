@@ -58,13 +58,20 @@ Match the role currently running the tool (`ToolContext.agentRole`). Omitted →
 "pathGlob": "**/.env*"
 ```
 
-A single minimatch pattern checked against each path in the tool input. Matches if **any** input path matches. Input paths are collected from:
+A single minimatch pattern checked against the paths the tool **declares** for this call. Matches if **any** declared path matches.
 
-1. `input.paths` if it's a string[].
-2. `input.path` if it's a string.
-3. `input.paths` if it's a string (single path).
+Declared paths come from the tool itself — `ToolPlugin.declaredPaths(input)`, a pure function of the input that the policy layer calls before any rule is consulted. It is not a guess made from which input keys look path-like:
 
-`patch.apply` populates `input.paths` from the diff headers automatically (`extractDiffPaths`), so path-glob rules apply to every file the patch touches, not just whatever the caller passed in.
+- `fs.*` declare `input.path`.
+- `grep` declares `input.path`, or `.` when it searches the whole working directory.
+- `git.diff` / `git.add` declare `input.path` / `input.paths`.
+- `patch.apply` declares every file in the diff headers (`extractDiffPaths`), so a path-glob rule applies to every file the patch touches, not just whatever the caller passed in.
+- `git.status` / `git.commit` / `git.log` / `git.reset` and `test.run` act on the repository or project as a whole and declare `[]`, so no path rule can match them.
+
+Two consequences worth stating:
+
+- A rule with a `pathGlob` **cannot match a call that declares no path** — matching on an empty set would make a Deny rule fire on calls that named no file.
+- A rule matches if **any** declared path matches. A multi-file call (a patch spanning `src/a.ts` and `.env`) is denied by a `**/.env*` rule, because one of its declared paths matches.
 
 ### `allowedPathGlobs`
 
@@ -93,7 +100,7 @@ The string is template-substituted before execution:
 | Placeholder | Replaced with                                       |
 |-------------|-----------------------------------------------------|
 | `$tool`     | `'<toolId>'`                                        |
-| `$path`     | `'<input.path>'` (single-quotes escaped)            |
+| `$path`     | `'<first declared path>'` (single-quotes escaped)   |
 | `$runId`    | `'<ctx.runId>'`                                     |
 | `$taskId`   | `'<ctx.taskId>'`                                    |
 
