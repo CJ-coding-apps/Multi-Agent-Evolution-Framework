@@ -186,12 +186,17 @@ export class RoleDispatcher {
   private async runPostCoderGates(node: DagNode, _taskId: ReturnType<typeof makeTaskId>): Promise<void> {
     // The CLI run path does not currently create per-task worktrees, so we read
     // the working-tree diff against HEAD via git instead of WorktreeManager.harvest.
-    let diff = '';
+    // A missing repository is an error, not an empty diff: skipping the gate here
+    // would attest an unreviewed coder diff as reviewed.
+    let diff: string;
     try {
       const { stdout } = await execFileAsync('git', ['diff', 'HEAD'], { cwd: this.config.cwd, maxBuffer: 8 * 1024 * 1024 });
       diff = stdout;
-    } catch {
-      return;
+    } catch (err: unknown) {
+      throw new Error(
+        `cannot review the coder diff — no usable git repository at ${this.config.cwd} ` +
+        `(git said: ${err instanceof Error ? err.message : String(err)})`,
+      );
     }
     if (!diff.trim()) return;
 
