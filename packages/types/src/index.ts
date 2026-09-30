@@ -119,6 +119,19 @@ export interface DagConfig {
   reviewGateNodeIds: NodeId[];
 }
 
+/** 'Unschedulable' is a real verdict: the DAG was valid but never ran to completion. */
+export type RunStatus = 'Succeeded' | 'Failed' | 'Unschedulable';
+
+export interface RunOutcome {
+  status:      RunStatus;
+  /** Per-node results — present when the run was a DAG. */
+  nodes?:      DagNodeExecution[];
+  /** Nodes that never ran: a dependency failed, was skipped, or was unreachable. */
+  unscheduled: NodeId[];
+  /** Nodes held back because another writer held the working tree at the time. */
+  deferredWriters?: NodeId[];
+}
+
 export interface RetryPolicy {
   maxAttempts:   number;
   backoffMs:     number;
@@ -439,6 +452,11 @@ export interface AttestationBundle {
   approvals:         ReviewAttestation[];
   diffHashes:        Record<string, string>;
   securityFindings?: SecurityFindingsRecord[];
+  /**
+   * Verdict for the run this bundle attests. Required — a bundle that cannot say
+   * whether its run succeeded is precisely the defect this field exists to stop.
+   */
+  outcome:           RunOutcome;
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;

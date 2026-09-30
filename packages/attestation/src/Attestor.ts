@@ -5,6 +5,7 @@ import type {
   AttestorHandle, ToolCallRecord, AttestationBundle, SlsaProvenance,
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
+  RunOutcome,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 
@@ -57,6 +58,7 @@ export class Attestor implements AttestorHandle {
     builder: SlsaBuilder,
     invocation: SlsaInvocation,
     materials: SlsaMaterial[],
+    outcome: RunOutcome,
     goldens?: GoldensSection,
   ): Promise<AttestationBundle> {
     const provenance: SlsaProvenance = {
@@ -78,6 +80,7 @@ export class Attestor implements AttestorHandle {
       approvals:        this.approvals,
       diffHashes:       this.diffHashes,
       securityFindings: this.securityFindings,
+      outcome,
       ...(goldens ? { goldens } : {}),
       bundledAt:        new Date(),
     };

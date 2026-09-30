@@ -166,13 +166,29 @@ export function registerRunCommand(program: Command): void {
       const dagRunner = new DagRunner();
       console.log(`[maf] running DAG with ${dag.nodes.size} node(s)...`);
 
-      await dagRunner.run({
+      const outcome = await dagRunner.run({
         dag,
         board,
         executor: (node) => dispatcher.runNode(node),
         onNodeStart: (id) => console.log(`[maf] → node ${id} started`),
         onNodeEnd:   (id, status) => console.log(`[maf] ← node ${id} ${status}`),
       });
+
+      // Every failed node leaves a Failure node behind. Until now only the security
+      // gate wrote one, so no other kind of failure left a trace in the graph.
+      for (const node of outcome.nodes ?? []) {
+        if (node.status !== 'Failed') continue;
+        await graph.addNode({
+          kind:       'Failure',
+          label:      node.nodeId,
+          properties: {
+            nodeId: node.nodeId,
+            role:   dag.nodes.get(node.nodeId)?.agentRole ?? 'unknown',
+            error:  node.error ?? 'unknown',
+          },
+          runId,
+        });
+      }
 
       // Bundle attestation — the harness IS the build's config source (signed):
       // configSource.uri points at the on-disk harness file, digest is its sha.
@@ -187,10 +203,23 @@ export function registerRunCommand(program: Command): void {
           environment: {},
         },
         [],
+        outcome,
       );
 
       console.log(`[maf] done. Attestation: ${path.join(mafDir, 'attestations', runId + '.bundle.json')}`);
       console.log(`[maf] signature: ${bundle.signature.slice(0, 16)}...`);
+
+      // The bundle is written first so the failed run is still attested; the exit
+      // code is what callers and CI actually branch on.
+      if (outcome.status !== 'Succeeded') {
+        const failed = (outcome.nodes ?? [])
+          .filter((n) => n.status === 'Failed')
+          .map((n) => n.nodeId);
+        throw new Error(
+          `run did not succeed (${outcome.status})` +
+          ` — failed: [${failed.join(', ')}], never ran: [${outcome.unscheduled.join(', ')}]`,
+        );
+      }
 
       graph.close();
       lcm.close();

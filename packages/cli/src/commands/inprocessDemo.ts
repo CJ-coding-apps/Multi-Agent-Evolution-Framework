@@ -7,7 +7,7 @@ import type { Command } from 'commander';
 import { makeRunId } from '@maf/types';
 import type {
   CliAdapter, TurnAdapter, TurnMessage, AssistantTurn,
-  AdapterInvokeOptions, AdapterInvokeResult, AdapterCapabilities, ToolCallRecord,
+  AdapterInvokeOptions, AdapterInvokeResult, AdapterCapabilities, ToolCallRecord, RunStatus,
 } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -157,14 +157,19 @@ export function registerInProcessDemoCommand(program: Command): void {
       const stack = await buildRunStack({ cwd: fixture, mafDir, policyPath, adapter, runId, harnessSha: harness.sha });
 
       let output: string;
+      let demoStatus: RunStatus = 'Succeeded';
       try {
         output = await stack.dispatchTask(harness, 'coder', CODER_PROMPT, fixture, 120_000, 0);
+      } catch (err) {
+        demoStatus = 'Failed';
+        throw err;
       } finally {
         // produce a signed attestation bundle for the run (records are already redacted at record-time)
         await stack.attestor.bundle(
           { id: '@maf/inprocess-demo@0.1.0', modelVersion: adapter.name },
           { configSource: { uri: 'inprocess-demo', digest: { sha256: harness.sha } }, parameters: { harnessId: harness.id }, environment: {} },
           [],
+          { status: demoStatus, unscheduled: [] },
         ).catch(() => undefined);
         stack.close();
       }

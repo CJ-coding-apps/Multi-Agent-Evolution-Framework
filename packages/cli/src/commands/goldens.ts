@@ -92,6 +92,12 @@ export function registerGoldensCommand(program: Command): void {
           environment: {},
         },
         [],
+        // The golden suite is not a DAG, so the verdict is its own: a harness that
+        // did not solve every task did not succeed.
+        {
+          status: result.solvedTaskIds.length === result.tasks.length ? 'Succeeded' : 'Failed',
+          unscheduled: [],
+        },
         {
           harnessSha: harness.sha, harnessId: harness.id,
           solvedTaskIds: result.solvedTaskIds, total: result.tasks.length, ranAt: result.ranAt,

@@ -51,6 +51,9 @@ export class DagParser {
 
     for (const n of spec.nodes) {
       const id = makeNodeId(n.id);
+      // A Map would silently keep only the last of two same-id nodes, so the
+      // duplicate has to be caught while the spec is still a list.
+      if (nodes.has(id)) throw new Error(`DagParser: duplicate node id "${n.id}"`);
       nodes.set(id, {
         id,
         label:        n.label,
