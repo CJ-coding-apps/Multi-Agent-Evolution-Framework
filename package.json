@@ -8,6 +8,7 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "check:test-scripts": "node scripts/check-test-scripts.mjs",
+    "check:build-output": "node scripts/check-build-output.mjs",
     "dev": "pnpm -r --parallel dev"
   },
   "devDependencies": {
