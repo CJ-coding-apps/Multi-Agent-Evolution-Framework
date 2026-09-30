@@ -102,12 +102,12 @@ export class GoldenRunner {
     const workDir = path.join(workRoot, 'repo');
     try {
       await cp(path.join(this.opts.corpusRoot, task.repoFixture), workDir, { recursive: true });
-      await initBaselineRepo(workDir);
+      const baseline = await initBaselineRepo(workDir);
       const output = await this.opts.dispatch(task, workDir, {
         temperature: this.opts.temperature ?? 0,
         timeoutMs: this.opts.timeoutMs ?? 120_000,
       });
-      const diff = await computeDiff(workDir);
+      const diff = await computeDiff(workDir, baseline);
       const outcomes = await runVerifiers(task.verifiers, {
         workDir, output, diff, corpusRoot: this.opts.corpusRoot,
         ...(this.opts.securityScore ? { securityScore: this.opts.securityScore } : {}),
@@ -136,11 +136,20 @@ const BASELINE_IDENTITY = {
   message: 'golden fixture baseline',
 };
 
-async function initBaselineRepo(workDir: string): Promise<void> {
-  const git = (...args: string[]) => execFileAsync('git', args, {
+/**
+ * Every git call the runner makes runs with the host's configuration switched off:
+ * global hooks (core.hooksPath), init.templateDir and any diff.external would otherwise
+ * run inside a golden repo, and the score would depend on whose machine it ran on.
+ * `-c` must precede the subcommand; the branch is pinned so a host
+ * init.defaultBranch cannot change the baseline either.
+ */
+function gitIn(workDir: string) {
+  return (args: string[]) => execFileAsync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
     cwd: workDir,
     env: {
       ...process.env,
+      GIT_CONFIG_GLOBAL:  '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
       GIT_AUTHOR_NAME:     BASELINE_IDENTITY.name,
       GIT_AUTHOR_EMAIL:    BASELINE_IDENTITY.email,
       GIT_COMMITTER_NAME:  BASELINE_IDENTITY.name,
@@ -149,25 +158,31 @@ async function initBaselineRepo(workDir: string): Promise<void> {
       GIT_COMMITTER_DATE:  BASELINE_IDENTITY.date,
     },
   });
-
-  // -c must precede the subcommand; the branch is pinned so a host git config
-  // (init.defaultBranch) cannot change the baseline.
-  await git('-c', 'init.defaultBranch=maf-baseline', 'init', '-q');
-  await git('add', '-A');
-  // --allow-empty: a copied fixture may already carry a repo with this tree committed.
-  await git('-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', BASELINE_IDENTITY.message);
 }
 
-// Working-tree diff vs the baseline commit. A git failure is an ERROR, not an empty
-// diff: "no repository" and "no changes" must not be indistinguishable, because an
-// empty diff silently scores every security verifier as clean.
-async function computeDiff(workDir: string): Promise<string> {
-  const { stdout } = await execFileAsync('git', ['status', '--porcelain'], { cwd: workDir })
-    .catch((err: unknown) => { throw notDiffable(workDir, err); });
-  if (!stdout.trim()) return '';
-  const diff = await execFileAsync('git', ['diff', 'HEAD'], { cwd: workDir, maxBuffer: 8 * 1024 * 1024 })
-    .catch((err: unknown) => { throw notDiffable(workDir, err); });
-  const untracked = stdout.split('\n').filter((l) => l.startsWith('?? ')).map((l) => `new file: ${l.slice(3)}`);
+/** Commits the fixture as it was copied, and returns that commit — the diff base. */
+async function initBaselineRepo(workDir: string): Promise<string> {
+  const git = gitIn(workDir);
+  await git(['-c', 'init.defaultBranch=maf-baseline', 'init', '-q']);
+  await git(['add', '-A']);
+  // --allow-empty: a copied fixture may already carry a repo with this tree committed.
+  await git(['-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', BASELINE_IDENTITY.message]);
+  const { stdout } = await git(['rev-parse', 'HEAD']);
+  return stdout.trim();
+}
+
+// Working-tree diff against the baseline commit. Two things here are load-bearing:
+//
+//  * the base is the RECORDED baseline, not HEAD. Diffing against HEAD would see nothing
+//    at all from an agent that commits its own work — an empty diff that scores every
+//    security verifier clean.
+//  * a git failure is an ERROR, not an empty diff: "no repository" and "no changes" must
+//    not be indistinguishable, because that indistinguishability IS the fail-open.
+async function computeDiff(workDir: string, baseline: string): Promise<string> {
+  const git = gitIn(workDir);
+  const status = await git(['status', '--porcelain']).catch((err: unknown) => { throw notDiffable(workDir, err); });
+  const diff = await git(['diff', baseline]).catch((err: unknown) => { throw notDiffable(workDir, err); });
+  const untracked = status.stdout.split('\n').filter((l) => l.startsWith('?? ')).map((l) => `new file: ${l.slice(3)}`);
   return [diff.stdout, ...untracked].filter(Boolean).join('\n');
 }
 
