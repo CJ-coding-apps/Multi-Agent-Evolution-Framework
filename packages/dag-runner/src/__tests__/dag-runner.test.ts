@@ -4,11 +4,13 @@ import { BlackboardStore } from '@maf/blackboard';
 import type { BlackboardValue, DagNode, NodeId } from '@maf/types';
 import { makeBlackboardKey, makeRunId } from '@maf/types';
 import { DagRunner, DagParser } from '../index.js';
+import { testRoleResolver } from './roleResolver.js';
 
 // ORACLE (implementation checklist A0): a 2-node DAG whose executor takes 20 ms
 // must run to completion, in dependency order.
 
 const RUN_ID = makeRunId('run-a0');
+const ROLES = testRoleResolver(['planner', 'coder'], 'coder');
 
 function twoNodeDag() {
   return DagParser.fromSpec(
@@ -28,7 +30,7 @@ function twoNodeDag() {
       config: { maxConcurrent: 4 },
     },
     RUN_ID,
-    'coder',
+    ROLES,
   );
 }
 

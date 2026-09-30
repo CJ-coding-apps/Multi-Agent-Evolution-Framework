@@ -104,7 +104,12 @@ export function registerRunCommand(program: Command): void {
       }
       const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), undefined, harness.sha);
 
-      const securityRole = roles.hasRole('security') ? roles.getRole('security') : undefined;
+      // `security` may or may not be one of this set's roles; `resolve` answers that without
+      // minting the name. The old `hasRole` + `getRole` pair asked twice, and `getRole` answered
+      // an unrecognised name with the *default* role — so a role set without `security` would
+      // have handed the writer's prompt to the security gate.
+      const securityResolved = roles.resolve('security');
+      const securityRole = securityResolved.ok ? securityResolved.value.config : undefined;
       const securityPrompt = securityRole
         ? (await roles.loadPrompt(securityRole))
         : SECURITY_REVIEW_FALLBACK_PROMPT;
@@ -116,12 +121,13 @@ export function registerRunCommand(program: Command): void {
       });
 
       const injector = new GraphAwareInjector({ graph, lcm, maxNodes: 40, tokenBudget: 4096 });
-      const validRoles = new Set(roles.list().map((r) => r.role));
       const planner  = new RetrievalAugmentedPlanner({
         graph, lcm, injector,
-        defaultRole: roles.getDefault().role,
+        // The registry is the role set in force: it supplies the default role AND the answer to
+        // "is this name real?". The planner used to carry `defaultRole` plus a `validRoles` set
+        // and *warn* before assigning the default, which was the writer.
+        roles,
         roleCatalog: roles.catalog(),
-        validRoles,
         generatePlan: async (systemPrompt, userPrompt) => {
           const result = await adapter.invoke({
             prompt: userPrompt, systemPrompt,

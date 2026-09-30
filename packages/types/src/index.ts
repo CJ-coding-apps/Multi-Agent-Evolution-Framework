@@ -12,6 +12,17 @@ export type BlackboardKey = string & { readonly _brand: 'BlackboardKey' };
 export type LcmMessageId  = string & { readonly _brand: 'LcmMessageId' };
 export type LcmSummaryId  = string & { readonly _brand: 'LcmSummaryId' };
 export type CommitHash    = string & { readonly _brand: 'CommitHash' };
+/**
+ * A role name that a role set defines.
+ *
+ * Deliberately NOT mintable here: there is no `makeRoleName`, because "this name exists"
+ * is a fact only a role set can establish, and the role registry is what holds one. A
+ * `RoleName` is obtained either from `RoleRegistry.resolve` (validated against the set in
+ * force) or from `RoleConfig.role` (already in a set) — so a hallucinated or misspelled
+ * name cannot reach a `DagNode` at all. D-07 was the opposite: an unknown name silently
+ * became the default `coder`, which widened privilege rather than refusing it.
+ */
+export type RoleName      = string & { readonly _brand: 'RoleName' };
 
 export function makeRunId(s: string): RunId         { return s as RunId; }
 export function makeTaskId(s: string): TaskId       { return s as TaskId; }
@@ -22,6 +33,38 @@ export function makeBlackboardKey(s: string): BlackboardKey { return s as Blackb
 export function makeLcmMessageId(s: string): LcmMessageId   { return s as LcmMessageId; }
 export function makeLcmSummaryId(s: string): LcmSummaryId   { return s as LcmSummaryId; }
 export function makeCommitHash(s: string): CommitHash       { return s as CommitHash; }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RESULT — a lookup that can fail, where the failure is the caller's to handle
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type Result<T, E> =
+  | { readonly ok: true;  readonly value: T }
+  | { readonly ok: false; readonly error: E };
+
+export function ok<T>(value: T): Result<T, never>  { return { ok: true, value }; }
+export function err<E>(error: E): Result<never, E>  { return { ok: false, error }; }
+
+/**
+ * A name no role set in force defines. Carries the names that *do* exist, because the
+ * caller's next move is usually to say so — "unknown role \"read-only-auditor\"; known
+ * roles are: coder, tester, …" — and a bare "unknown" makes the operator guess.
+ */
+export interface UnknownRole {
+  readonly requested: string;
+  readonly known:     readonly RoleName[];
+}
+
+/**
+ * The two questions a DAG builder must ask of whoever owns the roles: which name does a
+ * node without one get, and is this name real? Implemented by `RoleRegistry`; declared
+ * here so `@maf/dag-runner` and `@maf/planning-agent` can build nodes without depending
+ * on the registry package (or being able to invent a role name themselves).
+ */
+export interface RoleResolver {
+  readonly defaultRole: RoleName;
+  resolveRole(raw: string): Result<RoleName, UnknownRole>;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TOOL PLUGIN
@@ -103,7 +146,8 @@ export type DagNodeStatus =
 export interface DagNode {
   id:            NodeId;
   label:         string;
-  agentRole:     string;
+  /** A name a role set defines — see {@link RoleName}. */
+  agentRole:     RoleName;
   dependencies:  NodeId[];
   retryPolicy:   RetryPolicy;
   timeoutMs:     number;

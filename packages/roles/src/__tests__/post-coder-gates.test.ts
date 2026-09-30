@@ -21,6 +21,7 @@ import type { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import type { SecurityReviewGate } from '@maf/git-ops';
 import { RoleDispatcher } from '../RoleDispatcher.js';
 import { RoleRegistry } from '../RoleRegistry.js';
+import { defineRoleName } from '../RoleConfig.js';
 
 // ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A4 — the post-coder security gate reads the
 // working-tree diff. A missing repository is an ERROR, not an empty diff: the silent `return`
@@ -48,7 +49,7 @@ class CliOnlyAdapter implements CliAdapter {
 }
 
 const CODER_NODE: DagNode = {
-  id: makeNodeId('c1'), label: 'implement the change', agentRole: 'coder', dependencies: [],
+  id: makeNodeId('c1'), label: 'implement the change', agentRole: defineRoleName('coder'), dependencies: [],
   retryPolicy: { maxAttempts: 1, backoffMs: 0, backoffFactor: 1, jitterMs: 0 },
   timeoutMs: 30_000, inputs: {}, outputs: {},
   metadata: { taskDescription: 'implement the change' },
@@ -69,8 +70,8 @@ async function makeFixture(opts: {
   const reviews: string[] = [];
   const roles = RoleRegistry.fromSet({
     version: 1,
-    defaultRole: 'coder',
-    roles: [{ role: 'coder', systemPrompt: 'code', allowedTools: [], execution: 'cli' }],
+    defaultRole: defineRoleName('coder'),
+    roles: [{ role: defineRoleName('coder'), systemPrompt: 'code', allowedTools: [], execution: 'cli' }],
   }, opts.workDir);
   const adapter = new CliOnlyAdapter();
   if (opts.onInvoke) adapter.onInvoke = opts.onInvoke;

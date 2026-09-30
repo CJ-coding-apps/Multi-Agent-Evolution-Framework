@@ -4,12 +4,14 @@ import { BlackboardStore } from '@maf/blackboard';
 import type { BlackboardValue, DagNode } from '@maf/types';
 import { makeNodeId, makeRunId } from '@maf/types';
 import { DagRunner, DagParser, DagValidationError } from '../index.js';
+import { testRoleResolver } from './roleResolver.js';
 
 // ORACLE (implementation checklist A2): a DAG run must report
 // Succeeded / Failed / Unschedulable, and malformed input must be refused
 // before any node is dispatched.
 
 const RUN_ID = makeRunId('run-outcome');
+const ROLES = testRoleResolver(['planner', 'coder'], 'coder');
 
 const ok = async (): Promise<Record<string, BlackboardValue>> => ({});
 const boom = async (node: DagNode): Promise<Record<string, BlackboardValue>> => {
@@ -22,7 +24,7 @@ function dagOf(nodes: NodeSpec, maxConcurrent?: number) {
   return DagParser.fromSpec(
     { id: 'x', nodes, ...(maxConcurrent === undefined ? {} : { config: { maxConcurrent } }) },
     RUN_ID,
-    'coder',
+    ROLES,
   );
 }
 

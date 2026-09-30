@@ -62,10 +62,13 @@ export function registerGoldensCommand(program: Command): void {
         cwd, mafDir, policyPath: path.resolve(cwd, opts.policy), adapter, runId,
         harnessSha: harness.sha, ...(opts.model ? { model: opts.model } : {}),
       });
-      // Role-driven security prompt if the harness defines a security role
+      // Role-driven security prompt if the harness defines a security role. `resolve` answers
+      // that question directly; `hasRole` + `getRole` asked twice and `getRole` would have
+      // handed back the default role for a name the harness does not define.
       {
         const probe = stack.rolesFor(harness);
-        if (probe.hasRole('security')) stack.securityPrompt = await probe.loadPrompt(probe.getRole('security'));
+        const security = probe.resolve('security');
+        if (security.ok) stack.securityPrompt = await probe.loadPrompt(security.value.config);
       }
 
       const dispatch: TaskDispatcher = async (task, workDir, { timeoutMs, temperature }) =>

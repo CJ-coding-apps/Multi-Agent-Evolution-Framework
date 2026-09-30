@@ -6,20 +6,20 @@ Every DAG node in MAF runs as a *role*. A role bundles:
 2. An **allowed tool set** — the only tools the role is allowed to call.
 3. Optional **model**, **timeout**, **token budget**, and **policyTag** overrides.
 
-The planner emits `agentRole` on each node it produces. The `RoleDispatcher` resolves that string against the registry; unknown roles fall back to the default with a warning.
+The planner emits `agentRole` on each node it produces. That name is checked against the role set in force **where the DAG is built** — the planner, `DagParser` and `DagSynthesizer` each refuse a name the set does not define, and the refusal lists the roles that do exist. A node carries a `RoleName`, which only a role set can produce, so an unrecognised name cannot reach the dispatcher at all. (Before this it did, and silently: an unknown name resolved to the *default* role — `coder`, a writer — so a typo or a hallucinated role name widened privilege rather than being refused.)
 
 ## Default roles
 
-The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four roles. They are used when `.maf/roles.yaml` is absent or the named role isn't found.
+The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four roles. They are used when `.maf/roles.yaml` is absent or unparseable.
 
 | Role       | Writable? | Allowed tools                                                                                                                  | Use for                              |
 |------------|-----------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
 | `coder`    | yes       | `fs.read`, `fs.write`, `fs.delete`, `fs.stat`, `fs.list`, `grep`, `git.{status,diff,add,commit,log,reset}`, `patch.apply`, `test.run` | Writing & modifying production code  |
-| `tester`   | yes\*     | `fs.read`, `fs.list`, `fs.stat`, `grep`, `test.run`, `patch.apply`, `fs.write`                                                | Writing tests only                   |
+| `tester`   | yes\*     | `fs.read`, `fs.list`, `fs.stat`, `grep`, `test.run`, `patch.apply`                                                            | Writing tests only                   |
 | `security` | no        | `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.diff`, `git.log`                                                                 | CWE/OWASP audit, JSON-only output    |
 | `reviewer` | no        | `fs.read`, `grep`, `git.diff`, `git.log`                                                                                       | Code review, approve/reject diffs    |
 
-\* The tester role *can* be granted write tools, but policy enforces that any write target must match `**/*test*`, `**/*spec*`, `**/tests/**`, or `**/__tests__/**`. The tool allowlist and the policy work together — neither alone is sufficient.
+\* The tester role's only writing tool is `patch.apply` — it has no `fs.write`, so it cannot create or overwrite a file, only apply a diff. `patch.apply` is rated write, which is why the row reads "yes". Restricting *where* a diff may land is a `pathGlob` rule in `.maf/policy.yaml`, not a built-in: the tool allowlist and the policy work together, and neither alone is sufficient.
 
 ## `.maf/roles.yaml`
 
@@ -78,7 +78,7 @@ DagRunner.run({ executor: (node) => dispatcher.runNode(node) })
                      │
                      ▼
 RoleDispatcher.runNode(node):
-  1. role = roles.getRole(node.agentRole)            // unknown → default + warn
+  1. role = roles.getRole(node.agentRole)            // node.agentRole is a RoleName: a role set defined it
   2. roleTools = new RoleToolRegistry(baseTools, role.allowedTools)
   3. rolePrompt = await roles.loadPrompt(role)
   4. systemPromptPrefix = injector.assemble(node.label, sessionId, role.role)
@@ -99,13 +99,13 @@ The dispatcher never bypasses policy. `RoleToolRegistry.getAll()` only advertise
 
 ## Planning instructions
 
-`RetrievalAugmentedPlanner` is given a `roleCatalog` and a set of `validRoles`. The planner's system prompt enumerates the catalog and tells the LLM:
+`RetrievalAugmentedPlanner` is given the role set in force — which supplies both the default role and the answer to "is this name real?" — plus an optional `roleCatalog` for wording. The planner's system prompt enumerates the catalog and tells the LLM:
 
 > After any coder node that introduces new behavior, emit a tester node that depends on it.
 >
 > When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every coder diff.)
 
-If the LLM emits a node with `agentRole: "ghost"` and `ghost` isn't in `validRoles`, `parsePlan` substitutes the default role and prints a `[planner] unknown agentRole "ghost"` warning instead of throwing.
+If the LLM emits a node with `agentRole: "ghost"` and the role set does not define `ghost`, the plan is **rejected**: `plan()` throws `planner: node "n1" asks for unknown agentRole "ghost". Known roles: coder, tester, ...`. Substituting the default was the escalation — the default is `coder`, a writer — so a plan the model got wrong must not be quietly re-planned as a privileged one.
 
 ## Read-only roles
 

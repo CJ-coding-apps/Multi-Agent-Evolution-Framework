@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_ROLE_SET, DEFAULT_ROLE_CATALOG } from '../defaults.js';
 
 test('DEFAULT_ROLE_SET covers coder/tester/security/reviewer', () => {
-  const roles = new Set(DEFAULT_ROLE_SET.roles.map((r) => r.role));
+  const roles = new Set<string>(DEFAULT_ROLE_SET.roles.map((r) => r.role));
   for (const expected of ['coder', 'tester', 'security', 'reviewer']) {
     assert.ok(roles.has(expected), `missing role ${expected}`);
   }

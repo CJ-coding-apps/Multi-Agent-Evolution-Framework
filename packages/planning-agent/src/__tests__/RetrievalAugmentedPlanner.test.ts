@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeRunId } from '@maf/types';
 import { RetrievalAugmentedPlanner } from '../RetrievalAugmentedPlanner.js';
+import { rolesOf } from './roleResolver.js';
 
 // Stubs for graph/lcm/injector — none are invoked when generatePlan returns a
 // JSON DAG that already covers nodes/edges (no past-failure lookups in unit scope).
@@ -23,8 +24,7 @@ test('parsePlan preserves a valid agentRole from the LLM output', async () => {
     graph: noopGraph,
     lcm: noopLcm,
     injector: noopInjector,
-    defaultRole: 'coder',
-    validRoles: new Set(['coder', 'tester']),
+    roles: rolesOf(['coder', 'tester']),
     generatePlan: async () => PLAN_JSON('tester'),
   });
 
@@ -36,30 +36,29 @@ test('parsePlan preserves a valid agentRole from the LLM output', async () => {
   assert.equal(node.agentRole, 'tester');
 });
 
-test('parsePlan falls back to defaultRole when role is unknown', async () => {
-  const warnings: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = (msg: string) => warnings.push(msg);
-  try {
-    const planner = new RetrievalAugmentedPlanner({
-      graph: noopGraph,
-      lcm: noopLcm,
-      injector: noopInjector,
-      defaultRole: 'coder',
-      validRoles: new Set(['coder', 'tester']),
-      generatePlan: async () => PLAN_JSON('ninja'),
-    });
+test('an unknown agentRole rejects the plan instead of widening privilege', async () => {
+  // This test replaces one that locked the old behaviour ("falls back to defaultRole when role
+  // is unknown", asserting the node came out as `coder`). The fallback *was* the escalation:
+  // the default role is the writer, so a hallucinated name silently gained `fs.write`,
+  // `git.commit` and `patch.apply`. The guarantee now is refusal, with the real names listed.
+  const planner = new RetrievalAugmentedPlanner({
+    graph: noopGraph,
+    lcm: noopLcm,
+    injector: noopInjector,
+    roles: rolesOf(['coder', 'tester']),
+    generatePlan: async () => PLAN_JSON('ninja'),
+  });
 
-    const dag = await planner.plan({
-      title: 't', description: 'd',
-      runId: makeRunId('r1'), sessionId: 's1',
-    });
-    const node = [...dag.nodes.values()][0]!;
-    assert.equal(node.agentRole, 'coder');
-    assert.ok(warnings.some((w) => w.includes('ninja')), 'expected warning about unknown role');
-  } finally {
-    console.warn = originalWarn;
-  }
+  // Refused rather than re-planned: a spec that parsed and named a bad role must not be
+  // swallowed into the single-node default DAG, which would dispatch a `coder`.
+  await assert.rejects(
+    () => planner.plan({ title: 't', description: 'd', runId: makeRunId('r1'), sessionId: 's1' }),
+    (e: Error) => {
+      assert.match(e.message, /unknown agentRole "ninja"/);
+      assert.match(e.message, /coder, tester/);
+      return true;
+    },
+  );
 });
 
 test('parsePlan defaults agentRole when LLM omits it', async () => {
@@ -67,8 +66,7 @@ test('parsePlan defaults agentRole when LLM omits it', async () => {
     graph: noopGraph,
     lcm: noopLcm,
     injector: noopInjector,
-    defaultRole: 'coder',
-    validRoles: new Set(['coder']),
+    roles: rolesOf(['coder']),
     generatePlan: async () => `\`\`\`json
 { "nodes": [{ "id": "n1", "label": "x" }], "edges": [] }
 \`\`\``,
@@ -85,8 +83,7 @@ test('parsePlan falls back to single-node DAG when plan text is not JSON', async
     graph: noopGraph,
     lcm: noopLcm,
     injector: noopInjector,
-    defaultRole: 'coder',
-    validRoles: new Set(['coder']),
+    roles: rolesOf(['coder']),
     generatePlan: async () => 'no json here, just a plain answer',
   });
   const dag = await planner.plan({
@@ -103,12 +100,11 @@ test('roleCatalog flows into planning instructions', async () => {
     graph: noopGraph,
     lcm: noopLcm,
     injector: noopInjector,
-    defaultRole: 'coder',
+    roles: rolesOf(['coder', 'tester']),
     roleCatalog: [
       { role: 'coder', description: 'writes code' },
       { role: 'tester', description: 'writes tests' },
     ],
-    validRoles: new Set(['coder', 'tester']),
     generatePlan: async (sys) => {
       capturedSystemPrompt = sys;
       return PLAN_JSON('coder');

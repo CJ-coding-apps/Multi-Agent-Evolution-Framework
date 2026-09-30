@@ -4,12 +4,14 @@ import { BlackboardStore } from '@maf/blackboard';
 import type { BlackboardValue } from '@maf/types';
 import { makeRunId } from '@maf/types';
 import { DagRunner, DagParser } from '../index.js';
+import { testRoleResolver } from './roleResolver.js';
 
 // ORACLE (implementation checklist A3): nodes that write to the shared working tree
 // are serialized — two independent writers must never overlap — and the deferral is
 // recorded rather than silent.
 
 const RUN_ID = makeRunId('writer-lock');
+const ROLES = testRoleResolver(['coder'], 'coder');
 
 // Two nodes with no dependency path between them: the shape a model actually emits.
 const TWO_INDEPENDENT_NODES = [
@@ -18,7 +20,7 @@ const TWO_INDEPENDENT_NODES = [
 ];
 
 function twoIndependentNodes() {
-  return DagParser.fromSpec({ id: 'x', nodes: TWO_INDEPENDENT_NODES }, RUN_ID, 'coder');
+  return DagParser.fromSpec({ id: 'x', nodes: TWO_INDEPENDENT_NODES }, RUN_ID, ROLES);
 }
 
 /** Runs the DAG and reports the highest number of nodes ever executing at once. */

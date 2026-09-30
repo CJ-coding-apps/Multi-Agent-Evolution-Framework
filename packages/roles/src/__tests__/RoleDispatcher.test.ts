@@ -6,6 +6,7 @@ import path from 'node:path';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, PolicyDecision, ToolContext, ToolInput, ToolResult,
+  RoleName,
 } from '@maf/types';
 import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
@@ -18,6 +19,7 @@ import type { GraphAwareInjector } from '@maf/prompt-injector';
 import type { MemoryGraph } from '@maf/memory-graph';
 import type { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { RoleDispatcher } from '../RoleDispatcher.js';
+import { defineRoleName } from '../RoleConfig.js';
 import { RoleRegistry } from '../RoleRegistry.js';
 
 // ORACLE: HARNESSX_INTEGRATION_PLAN.md §4.x — in-process dispatch, fallback, gating parity.
@@ -90,7 +92,9 @@ function makeAttestor() {
   };
 }
 
-function makeNode(role: string, description = 'do the thing'): DagNode {
+const ANALYST = defineRoleName('analyst');
+
+function makeNode(role: RoleName, description = 'do the thing'): DagNode {
   return {
     id: makeNodeId('n1'), label: description, agentRole: role, dependencies: [],
     retryPolicy: { maxAttempts: 1, backoffMs: 0, backoffFactor: 1, jitterMs: 0 },
@@ -119,9 +123,9 @@ async function makeFixture(opts: {
   await writeFile(path.join(workDir, 'hello.txt'), 'hello-world', 'utf8');
   const roles = RoleRegistry.fromSet({
     version: 1,
-    defaultRole: 'analyst',
+    defaultRole: ANALYST,
     roles: [{
-      role: 'analyst',
+      role: ANALYST,
       systemPrompt: 'analyze',
       allowedTools: [makeToolId('fs.read')],
       execution: opts.roleExecution,
@@ -169,7 +173,7 @@ test('in-process role: model tool call executes through the gate and reaches his
   ];
   const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
   try {
-    const out = await f.dispatcher.runNode(makeNode('analyst'));
+    const out = await f.dispatcher.runNode(makeNode(ANALYST));
     const output = out['output'];
     if (!output || output.kind !== 'string') assert.fail('expected string output');
     assert.match(output.value, /done reading/);
@@ -201,7 +205,7 @@ test('in-process role: policy Deny prevents execution and feeds the model an err
     policyHandler: () => ({ verdict: 'Deny', reason: 'test denies all' }),
   });
   try {
-    await f.dispatcher.runNode(makeNode('analyst'));
+    await f.dispatcher.runNode(makeNode(ANALYST));
     const turn2 = adapter.histories[1] ?? [];
     const toolMsg = turn2.find((m) => m.kind === 'tool');
     assert.ok(toolMsg && toolMsg.kind === 'tool' && toolMsg.isError);
@@ -220,7 +224,7 @@ test('in-process role: tool outside the allowlist is rejected before policy', as
   ];
   const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
   try {
-    await f.dispatcher.runNode(makeNode('analyst'));
+    await f.dispatcher.runNode(makeNode(ANALYST));
     const turn2 = adapter.histories[1] ?? [];
     const toolMsg = turn2.find((m) => m.kind === 'tool');
     assert.ok(toolMsg && toolMsg.kind === 'tool' && toolMsg.isError);
@@ -235,7 +239,7 @@ test('fallback: in-process role on a CLI-only adapter uses legacy dispatch with 
   const adapter = new CliOnlyAdapter();
   const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
   try {
-    const out = await f.dispatcher.runNode(makeNode('analyst'));
+    const out = await f.dispatcher.runNode(makeNode(ANALYST));
     const output = out['output'];
     if (!output || output.kind !== 'string') assert.fail('expected string output');
     assert.equal(output.value, 'CLI-PATH');
@@ -251,7 +255,7 @@ test('cli role on a TurnAdapter still uses the legacy single-invocation path', a
   const adapter = new StubTurnAdapter();
   const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW });
   try {
-    await f.dispatcher.runNode(makeNode('analyst'));
+    await f.dispatcher.runNode(makeNode(ANALYST));
     assert.equal(adapter.invoked, 1);
     assert.equal(adapter.histories.length, 0);
   } finally {
@@ -267,7 +271,7 @@ test('in-process loop: maxToolIterations caps runaway tool chains', async () => 
   }));
   const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
   try {
-    const out = await f.dispatcher.runNode(makeNode('analyst'));
+    const out = await f.dispatcher.runNode(makeNode(ANALYST));
     assert.ok(out['output'] !== undefined, 'budget_exhausted returns without throwing');
     assert.equal(f.policy.calls.length, 4, 'maxToolIterations=4 from role config');
   } finally {

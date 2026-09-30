@@ -1,5 +1,6 @@
-import { makeToolId, type ToolId } from '@maf/types';
+import { makeToolId, type RoleName, type ToolId } from '@maf/types';
 import type { RoleConfig, RoleSet, RoleCatalogEntry } from './RoleConfig.js';
+import { defineRoleName } from './RoleConfig.js';
 
 const t = (id: string): ToolId => makeToolId(id);
 
@@ -86,10 +87,10 @@ const REVIEWER_TOOLS: ToolId[] = [
 
 export const DEFAULT_ROLE_SET: RoleSet = {
   version: 1,
-  defaultRole: 'coder',
+  defaultRole: defineRoleName('coder'),
   roles: [
     {
-      role:              'coder',
+      role:              defineRoleName('coder'),
       description:       'Writes and modifies production code.',
       systemPrompt:      CODER_PROMPT,
       allowedTools:      CODER_TOOLS,
@@ -97,7 +98,7 @@ export const DEFAULT_ROLE_SET: RoleSet = {
       maxToolIterations: 12,
     },
     {
-      role:              'tester',
+      role:              defineRoleName('tester'),
       description:       'Writes tests only; cannot modify production source.',
       systemPrompt:      TESTER_PROMPT,
       allowedTools:      TESTER_TOOLS,
@@ -105,7 +106,7 @@ export const DEFAULT_ROLE_SET: RoleSet = {
       maxToolIterations: 10,
     },
     {
-      role:              'security',
+      role:              defineRoleName('security'),
       description:       'Read-only security audit; flags CWE/OWASP issues as JSON.',
       systemPrompt:      SECURITY_PROMPT,
       allowedTools:      SECURITY_TOOLS,
@@ -113,7 +114,7 @@ export const DEFAULT_ROLE_SET: RoleSet = {
       maxToolIterations: 6,
     },
     {
-      role:              'reviewer',
+      role:              defineRoleName('reviewer'),
       description:       'Read-only diff review; approve or reject with suggestions.',
       systemPrompt:      REVIEWER_PROMPT,
       allowedTools:      REVIEWER_TOOLS,
@@ -128,6 +129,6 @@ export const DEFAULT_ROLE_CATALOG: RoleCatalogEntry[] = DEFAULT_ROLE_SET.roles.m
   description: r.description ?? '',
 }));
 
-export function getDefaultRoleConfig(role: string): RoleConfig | undefined {
+export function getDefaultRoleConfig(role: RoleName): RoleConfig | undefined {
   return DEFAULT_ROLE_SET.roles.find((r) => r.role === role);
 }

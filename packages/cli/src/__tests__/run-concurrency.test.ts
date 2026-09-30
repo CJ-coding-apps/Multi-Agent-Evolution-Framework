@@ -5,7 +5,7 @@ import { DagRunner, DagParser } from '@maf/dag-runner';
 import type { BlackboardValue, ToolId } from '@maf/types';
 import { makeRunId } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
-import { RoleRegistry } from '@maf/roles';
+import { RoleRegistry, defineRoleName } from '@maf/roles';
 
 // ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A3 / work order item 2 — the scheduler's
 // isWriter predicate is driven by the ROLE CONFIG, and the direction that matters for
@@ -18,20 +18,24 @@ const RUN_ID = makeRunId('cli-concurrency');
 
 const BASE_TOOLS = createDefaultRegistry();
 
+// This helper *defines* the set the run uses, so the name is minted here — the same act a
+// parsed roles.yaml performs. `twoIndependentNodes` is handed the registry, as `maf run` does.
+const READER = defineRoleName('reader');
+
 function rolesWith(execution: 'cli' | 'in-process', allowedTools: string[]): RoleRegistry {
   return RoleRegistry.fromSet({
     version: 1,
-    defaultRole: 'reader',
-    roles: [{ role: 'reader', systemPrompt: 'x', allowedTools: allowedTools as ToolId[], execution }],
+    defaultRole: READER,
+    roles: [{ role: READER, systemPrompt: 'x', allowedTools: allowedTools as ToolId[], execution }],
   }, '/tmp/maf-cli-concurrency');
 }
 
 /** Two nodes with no dependency path between them — the shape a model actually emits. */
-function twoIndependentNodes(role: string) {
+function twoIndependentNodes(roles: RoleRegistry) {
   return DagParser.fromSpec(
     { id: 'x', nodes: [{ id: 'n1', label: 'n1' }, { id: 'n2', label: 'n2' }] },
     RUN_ID,
-    role,
+    roles,
   );
 }
 
@@ -51,7 +55,7 @@ async function peakConcurrency(roles: RoleRegistry): Promise<number> {
   };
 
   const outcome = await new DagRunner().run({
-    dag: twoIndependentNodes('reader'),
+    dag: twoIndependentNodes(roles),
     board: new BlackboardStore(),
     executor,
     isWriter: (node) => roles.writesToWorkingTree(node.agentRole, BASE_TOOLS),
