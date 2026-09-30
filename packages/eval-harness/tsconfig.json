@@ -10,7 +10,8 @@
     { "path": "../types" },
     { "path": "../harness-config" },
     { "path": "../memory-graph" },
-    { "path": "../attestation" }
+    { "path": "../attestation" },
+    { "path": "../git-ops" }
   ],
   "include": ["src"]
 }

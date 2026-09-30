@@ -85,7 +85,7 @@ test('a run whose diff cannot be computed is an error, never an empty diff', asy
     const result = await runner.run();
 
     assert.deepEqual(result.solvedTaskIds, [], 'a run whose diff cannot be computed is not a pass');
-    assert.match(result.tasks[0]?.attempts[0]?.error ?? '', /cannot compute the golden diff/);
+    assert.match(result.tasks[0]?.attempts[0]?.error ?? '', /cannot compute the working-tree diff/);
   });
 });
 

@@ -183,6 +183,35 @@ test('a repository with no commits yet is reviewable, not an error', async () =>
   }
 });
 
+test('a new file the coder never stages is reviewed', async () => {
+  // The untracked gap: after a bare `git init` a coder that creates a file and leaves it
+  // unstaged is invisible to `git diff <base>` — an empty diff, so every security finding in
+  // that file went unreported. The diff must come from the throwaway staged snapshot.
+  const workDir = await mkdtemp(path.join(tmpdir(), 'maf-gates-untracked-'));
+  await execFileAsync('git', ['init', '-q'], { cwd: workDir });
+  await writeFile(path.join(workDir, 'base.txt'), 'base', 'utf8');
+  await execFileAsync('git', ['add', 'base.txt'], { cwd: workDir });
+
+  const seen: string[] = [];
+  const fx = await makeFixture({
+    workDir,
+    onInvoke: async () => { await writeFile(path.join(workDir, 'secret.txt'), 'AWS_SECRET_ACCESS_KEY=abc', 'utf8'); },
+    securityGate: {
+      reviewDiff: async (diff: string) => {
+        seen.push(diff);
+        return { findings: [], summary: 'clean', passed: true };
+      },
+    } as unknown as SecurityReviewGate,
+  });
+  try {
+    await fx.dispatcher.runNode(CODER_NODE);
+    assert.equal(seen.length, 1, 'the gate must be reached for an unstaged new file');
+    assert.match(seen[0] ?? '', /secret\.txt/, 'and it must see the file the coder left untracked');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 test('an unchanged working tree is a no-op, not an error, and not a review', async () => {
   const workDir = await makeRepoDir();
   const seen: string[] = [];

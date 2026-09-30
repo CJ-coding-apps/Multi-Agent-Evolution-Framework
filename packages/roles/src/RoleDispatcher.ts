@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
 } from '@maf/types';
@@ -12,6 +10,7 @@ import type { MemoryGraph } from '@maf/memory-graph';
 import type { TranscriptLogger } from '@maf/transcript';
 import type { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import type { ReviewGate, SecurityReviewGate } from '@maf/git-ops';
+import { snapshotDiff, runIsolatedGit, GIT_EMPTY_TREE } from '@maf/git-ops';
 import type { HarnessConfig } from '@maf/harness-config';
 import {
   ProcessorPipeline, createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS,
@@ -20,8 +19,6 @@ import type { ProcessorDeps } from '@maf/processors';
 import { InProcessAgentLoop } from '@maf/tool-loop';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
-
-const execFileAsync = promisify(execFile);
 
 export interface RoleDispatcherConfig {
   adapter:        CliAdapter;
@@ -51,9 +48,6 @@ export interface RoleNodeOutput {
 
 const MAX_OUTPUT_BYTES        = 2 * 1024 * 1024;  // 2MB per node response
 const MAX_STORED_OUTPUT_CHARS = 64_000;
-
-/** git's well-known empty tree — a valid diff base for a repository with no commits. */
-const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 function gitSaid(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -226,35 +220,26 @@ export class RoleDispatcher {
    */
   private async startCommit(): Promise<string> {
     try {
-      const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: this.config.cwd });
+      const { stdout } = await runIsolatedGit(this.config.cwd, ['rev-parse', 'HEAD']);
       return stdout.trim();
     } catch (err: unknown) {
       try {
-        await execFileAsync('git', ['rev-parse', '--git-dir'], { cwd: this.config.cwd });
+        await runIsolatedGit(this.config.cwd, ['rev-parse', '--git-dir']);
       } catch {
         throw notARepository(this.config.cwd, err);
       }
-      return EMPTY_TREE;
+      return GIT_EMPTY_TREE;
     }
   }
 
   private async runPostCoderGates(node: DagNode, startCommit: string): Promise<void> {
-    // The CLI run path does not currently create per-task worktrees, so we read the
-    // working-tree diff from the commit the node started at via git instead of
-    // WorktreeManager.harvest.
-    let diff: string;
-    try {
-      const { stdout } = await execFileAsync(
-        'git', ['diff', startCommit],
-        { cwd: this.config.cwd, maxBuffer: 8 * 1024 * 1024 },
-      );
-      diff = stdout;
-    } catch (err: unknown) {
-      throw new Error(
-        `cannot review the coder diff — git could not diff ${startCommit.slice(0, 12)} in ` +
-        `${this.config.cwd} (git said: ${gitSaid(err)})`,
-      );
-    }
+    // The CLI run path does not currently create per-task worktrees, so we read the diff
+    // from `git` instead of WorktreeManager.harvest. `snapshotDiff` stages the whole
+    // working tree into a throwaway index, so a file the coder created without staging it
+    // is reviewed like any other change — see packages/git-ops/src/SnapshotDiff.ts.
+    // A failure here is an error, never an empty diff: "we could not look" and "nothing
+    // changed" must not be the same verdict.
+    const diff = await snapshotDiff(this.config.cwd, startCommit);
     if (!diff.trim()) return;
 
     const securityGate = this.config.securityGate;

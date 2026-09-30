@@ -142,7 +142,7 @@ All configuration lives in a `.maf/` directory inside the target repo. None of t
 | `.maf/prompts/*.md` | Role-specific system prompts (referenced by `roles.yaml` via `promptFile`) |
 | `.maf/config.yaml`  | Adapter defaults, model overrides (read by adapter resolvers) |
 
-See [docs/ROLES.md](docs/ROLES.md) for the role system and [docs/POLICY.md](docs/POLICY.md) for the policy predicate reference.
+See [docs/ROLES.md](docs/ROLES.md) for the role system, [docs/POLICY.md](docs/POLICY.md) for the policy predicate reference, and [docs/SECURITY.md](docs/SECURITY.md) for what the security gate reads — including what it does not.
 
 ## Run output
 

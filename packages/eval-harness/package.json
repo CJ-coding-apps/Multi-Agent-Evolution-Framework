@@ -19,7 +19,8 @@
     "@maf/types": "workspace:*",
     "@maf/harness-config": "workspace:*",
     "@maf/memory-graph": "workspace:*",
-    "@maf/attestation": "workspace:*"
+    "@maf/attestation": "workspace:*",
+    "@maf/git-ops": "workspace:*"
   },
   "devDependencies": {
     "typescript": "*",

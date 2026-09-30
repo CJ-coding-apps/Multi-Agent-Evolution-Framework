@@ -1,14 +1,11 @@
 import { cp, mkdtemp, rm, readFile } from 'node:fs/promises';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { snapshotDiff, runIsolatedGit } from '@maf/git-ops';
 import type { GoldenTask } from './GoldenTask.js';
 import { assertGoldenCorpus } from './GoldenTask.js';
 import { runVerifiers } from './verifiers.js';
 import type { VerifierContext, VerifierOutcome } from './verifiers.js';
-
-const execFileAsync = promisify(execFile);
 
 export interface AttemptResult {
   attempt: number;
@@ -107,7 +104,9 @@ export class GoldenRunner {
         temperature: this.opts.temperature ?? 0,
         timeoutMs: this.opts.timeoutMs ?? 120_000,
       });
-      const diff = await computeDiff(workDir, baseline);
+      // The base is the RECORDED baseline, not HEAD: an agent that commits its own work would
+      // diff clean against HEAD, and an empty diff scores every security verifier clean.
+      const diff = await snapshotDiff(workDir, baseline);
       const outcomes = await runVerifiers(task.verifiers, {
         workDir, output, diff, corpusRoot: this.opts.corpusRoot,
         ...(this.opts.securityScore ? { securityScore: this.opts.securityScore } : {}),
@@ -137,19 +136,15 @@ const BASELINE_IDENTITY = {
 };
 
 /**
- * Every git call the runner makes runs with the host's configuration switched off:
- * global hooks (core.hooksPath), init.templateDir and any diff.external would otherwise
- * run inside a golden repo, and the score would depend on whose machine it ran on.
- * `-c` must precede the subcommand; the branch is pinned so a host
- * init.defaultBranch cannot change the baseline either.
+ * Every git call the runner makes adds the fixed identity on top of `runIsolatedGit`, which
+ * already switches the host's configuration off — a global `core.hooksPath`, `init.templateDir`
+ * or `diff.external` would otherwise run inside a golden repo, and the score would depend on
+ * whose machine it ran on. The branch is pinned so a host `init.defaultBranch` cannot change
+ * the baseline either.
  */
 function gitIn(workDir: string) {
-  return (args: string[]) => execFileAsync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-    cwd: workDir,
+  return (args: string[]) => runIsolatedGit(workDir, args, {
     env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL:  '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
       GIT_AUTHOR_NAME:     BASELINE_IDENTITY.name,
       GIT_AUTHOR_EMAIL:    BASELINE_IDENTITY.email,
       GIT_COMMITTER_NAME:  BASELINE_IDENTITY.name,
@@ -169,28 +164,6 @@ async function initBaselineRepo(workDir: string): Promise<string> {
   await git(['-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', BASELINE_IDENTITY.message]);
   const { stdout } = await git(['rev-parse', 'HEAD']);
   return stdout.trim();
-}
-
-// Working-tree diff against the baseline commit. Two things here are load-bearing:
-//
-//  * the base is the RECORDED baseline, not HEAD. Diffing against HEAD would see nothing
-//    at all from an agent that commits its own work — an empty diff that scores every
-//    security verifier clean.
-//  * a git failure is an ERROR, not an empty diff: "no repository" and "no changes" must
-//    not be indistinguishable, because that indistinguishability IS the fail-open.
-async function computeDiff(workDir: string, baseline: string): Promise<string> {
-  const git = gitIn(workDir);
-  const status = await git(['status', '--porcelain']).catch((err: unknown) => { throw notDiffable(workDir, err); });
-  const diff = await git(['diff', baseline]).catch((err: unknown) => { throw notDiffable(workDir, err); });
-  const untracked = status.stdout.split('\n').filter((l) => l.startsWith('?? ')).map((l) => `new file: ${l.slice(3)}`);
-  return [diff.stdout, ...untracked].filter(Boolean).join('\n');
-}
-
-function notDiffable(workDir: string, err: unknown): Error {
-  return new Error(
-    `cannot compute the golden diff: no usable git repository at ${workDir} ` +
-    `(git said: ${err instanceof Error ? err.message : String(err)})`,
-  );
 }
 
 // ─── Seesaw comparator (pure core: decide, don't perform — plan §10.6) ───────

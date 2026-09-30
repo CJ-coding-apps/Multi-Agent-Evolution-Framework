@@ -280,6 +280,9 @@ importers:
       '@maf/attestation':
         specifier: workspace:*
         version: link:../attestation
+      '@maf/git-ops':
+        specifier: workspace:*
+        version: link:../git-ops
       '@maf/harness-config':
         specifier: workspace:*
         version: link:../harness-config
