@@ -66,6 +66,29 @@ export class RoleRegistry {
     return this.byName.has(name);
   }
 
+  /**
+   * Whether dispatching `roleName` can change the shared working tree, i.e. whether the
+   * scheduler has to serialize it against every other writer.
+   *
+   * Every CLI-tier role is a writer: the CLI agent has its own file tools whatever the
+   * allowlist says (the same insight as the CLI-tier MCP rule), so a read-only allowlist
+   * proves nothing there. An in-process role is different — every tool call goes through
+   * the policy gate and the registry — so a role whose every allowed tool is read-level
+   * genuinely cannot write, and two of them can safely run at once.
+   *
+   * An unknown role is a writer: getRole falls back to the default, and serializing
+   * something that turns out to be read-only costs concurrency, never correctness.
+   */
+  writesToWorkingTree(roleName: string, tools: ToolRegistry): boolean {
+    const role = this.byName.get(roleName);
+    if (!role) return true;
+    if ((role.execution ?? 'cli') !== 'in-process') return true;
+    return role.allowedTools.some((id) => {
+      const tool = tools.get(id as ToolId);
+      return tool === undefined || tool.permissionLevel !== 'read';
+    });
+  }
+
   getDefault(): RoleConfig {
     const role = this.byName.get(this.defaultRole);
     if (!role) throw new RoleConfigError(`Default role "${this.defaultRole}" missing`);

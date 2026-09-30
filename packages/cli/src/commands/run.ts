@@ -170,6 +170,11 @@ export function registerRunCommand(program: Command): void {
         dag,
         board,
         executor: (node) => dispatcher.runNode(node),
+        // The scheduler serializes writers against each other because two agents editing one
+        // tree corrupt it. Deciding that from the role config — rather than treating every
+        // node as a writer — is what lets two readers overlap; treating a reader as a writer
+        // only costs concurrency, but treating a writer as a reader costs the tree.
+        isWriter: (node) => roles.writesToWorkingTree(node.agentRole, baseTools),
         onNodeStart: (id) => console.log(`[maf] → node ${id} started`),
         onNodeEnd:   (id, status) => console.log(`[maf] ← node ${id} ${status}`),
       });

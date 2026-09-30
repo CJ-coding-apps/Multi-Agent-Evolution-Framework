@@ -1,0 +1,81 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { BlackboardStore } from '@maf/blackboard';
+import { DagRunner, DagParser } from '@maf/dag-runner';
+import type { BlackboardValue, ToolId } from '@maf/types';
+import { makeRunId } from '@maf/types';
+import { createDefaultRegistry } from '@maf/tools';
+import { RoleRegistry } from '@maf/roles';
+
+// ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A3 / work order item 2 — the scheduler's
+// isWriter predicate is driven by the ROLE CONFIG, and the direction that matters for
+// throughput is the permissive one: two in-process roles whose every tool is read-level
+// genuinely cannot touch the tree, so serializing them is concurrency thrown away.
+// (The restrictive direction — a writer never runs beside another writer — is covered in
+// @maf/dag-runner and @maf/roles.)
+
+const RUN_ID = makeRunId('cli-concurrency');
+
+const BASE_TOOLS = createDefaultRegistry();
+
+function rolesWith(execution: 'cli' | 'in-process', allowedTools: string[]): RoleRegistry {
+  return RoleRegistry.fromSet({
+    version: 1,
+    defaultRole: 'reader',
+    roles: [{ role: 'reader', systemPrompt: 'x', allowedTools: allowedTools as ToolId[], execution }],
+  }, '/tmp/maf-cli-concurrency');
+}
+
+/** Two nodes with no dependency path between them — the shape a model actually emits. */
+function twoIndependentNodes(role: string) {
+  return DagParser.fromSpec(
+    { id: 'x', nodes: [{ id: 'n1', label: 'n1' }, { id: 'n2', label: 'n2' }] },
+    RUN_ID,
+    role,
+  );
+}
+
+/**
+ * Runs the DAG exactly as `maf run` does — the predicate comes from the registry, not
+ * from the test — and reports the highest number of nodes ever executing at once.
+ */
+async function peakConcurrency(roles: RoleRegistry): Promise<number> {
+  let active = 0;
+  let peak = 0;
+  const executor = async (): Promise<Record<string, BlackboardValue>> => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    active -= 1;
+    return {};
+  };
+
+  const outcome = await new DagRunner().run({
+    dag: twoIndependentNodes('reader'),
+    board: new BlackboardStore(),
+    executor,
+    isWriter: (node) => roles.writesToWorkingTree(node.agentRole, BASE_TOOLS),
+  });
+
+  assert.equal(outcome.status, 'Succeeded');
+  return peak;
+}
+
+test('two in-process reader nodes run concurrently', async () => {
+  const roles = rolesWith('in-process', ['fs.read', 'fs.list', 'grep', 'git.diff']);
+  assert.equal(await peakConcurrency(roles), 2,
+    'a read-only in-process role cannot touch the tree, so nothing needs serializing');
+});
+
+test('the same two nodes are serialized the moment a write tool is allowed', async () => {
+  // The contrast that keeps the test above from passing vacuously: same DAG, same
+  // scheduler, one tool added to the allowlist.
+  const roles = rolesWith('in-process', ['fs.read', 'fs.write']);
+  assert.equal(await peakConcurrency(roles), 1);
+});
+
+test('a CLI-tier role is serialized even with a read-only allowlist', async () => {
+  // The CLI agent brings its own file tools, so the allowlist is not the boundary.
+  const roles = rolesWith('cli', ['fs.read', 'grep']);
+  assert.equal(await peakConcurrency(roles), 1);
+});
