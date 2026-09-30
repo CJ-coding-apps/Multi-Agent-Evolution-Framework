@@ -30,9 +30,11 @@ What the diff therefore contains:
 **`.gitignore`d files are outside the diff.** `git add -A` respects `.gitignore`, so a `.env`, a
 `secrets/` directory, or a build artifact is not staged and not reviewed. This is deliberate — those files
 are excluded precisely because they are not the deliverable — but it does mean **the gate's silence about
-a file is not evidence that the file was not written.** A `.gitignore`d write is caught by the tool path
-check (a policy rule on the path), not by this diff; when the write comes from a CLI-tier agent's own
-file tools, it is not visible to maf at all. See the tier boundary below.
+a file is not evidence that the file was not written.** A `.gitignore`d write is caught on the tool path
+instead: not by this diff, and no longer by a policy rule alone — every path a tool declares is confined
+to the project root before any rule is read, so a write outside the root is refused whatever the rule set
+says (see *Path confinement* below). When the write comes from a CLI-tier agent's own file tools, it is
+not visible to maf at all. See the tier boundary below.
 
 **An oversized diff is an error, never a truncated review.** Past 8 MB the runner fails the node rather
 than reviewing the part it managed to read. Reviewing a truncated diff would report the cut portion as
@@ -65,6 +67,39 @@ trusting a run.
 The tier is *not* yet recorded in the attestation bundle: today it is a local in `RoleDispatcher`, so a
 bundle says what a run produced but not how each node was executed. Until it is recorded per role, the
 only way to know a run's posture is to read the role set it was dispatched with.
+
+## Path confinement
+
+Every path a tool declares for a call is resolved against the project root and proven to lie inside it
+before anything acts on it — `resolveInside` (`packages/types/src/paths.ts`), whose result is the value
+both the policy engine checks and the tool executes with.
+
+What this refuses:
+
+| Attempt | Refused? |
+|---|---|
+| `../outside.txt` — a relative traversal | yes |
+| `/etc/passwd` — an absolute path | yes |
+| A symlink whose *name* is inside the root and whose *target* is outside | yes |
+| A symlink pointing *outside* that does not exist yet (dangling) | yes |
+| A directory entry that resolves outside, then a path below it | yes |
+| A symlink that stays inside the root | **no** — resolved and allowed |
+| A path in the root, however it is spelled (`./a`, `sub/../a`, `a//b`) | **no** — served normally |
+
+The check happens in two places, and neither is redundant. In the **policy engine** it runs before the
+rule list, so a path outside the root is refused with a `Deny` even when no rule is loaded — confinement
+is not a rule and an empty policy file does not turn it off. In each **fs tool's `execute`** the same
+function runs again, so a tool called directly, without passing through the policy engine, is confined
+identically. The checked path and the executed path are the same value because both come from that one
+call, which is what stops a spelling from being confined in one place and not the other.
+
+Two things this does **not** cover, so neither is mistaken for it:
+
+- It confines paths to the project root (the directory of `ctx.projectRoot`), not to the files a role is
+  *allowed* to touch. Which files inside the root are fair game is a policy question — `pathGlob` and
+  `allowedPathGlobs`.
+- It applies to the paths a tool **declares** — `ToolPlugin.declaredPaths(input)`, a pure function of the
+  input. For a `cli`-tier role, whose tool calls maf never sees, no path is declared and none is checked.
 
 ## Reporting
 

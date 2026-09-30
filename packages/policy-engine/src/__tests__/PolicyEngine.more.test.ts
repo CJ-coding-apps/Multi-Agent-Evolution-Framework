@@ -135,7 +135,7 @@ test('memoryPattern: rule fires when graph query returns rows', async () => {
   assert.equal(res.verdict, 'Deny');
 });
 
-test('memoryPattern: the rule binds the declared path, it does not write it in', async () => {
+test('memoryPattern: the rule binds the confined path, it does not write it in', async () => {
   const seen: GraphQuery[] = [];
   const engine = new PolicyEngine({
     run: async (q) => { seen.push(q); return []; },
@@ -145,9 +145,23 @@ test('memoryPattern: the rule binds the declared path, it does not write it in',
     predicate: { toolId: FS_WRITE, memoryPattern: { cypher: 'MATCH (f {path: $path}) RETURN f' } },
     action: { kind: 'Deny', reason: 'nope' },
   })]);
-  await engine.evaluate(FS_WRITE, { path: "x'}) DETACH DELETE n //" }, baseCtx(), ["x'}) DETACH DELETE n //"]);
-  assert.equal(seen[0]!.params['path'], "x'}) DETACH DELETE n //");
+
+  // A payload built to close the surrounding string literal and comment out the rest of the query.
+  const payload = "x'}) DETACH DELETE n //";
+  await engine.evaluate(FS_WRITE, { path: payload }, baseCtx(), [payload]);
+
+  // The template is what runs. Nothing from the payload is spliced into the query, so there is no
+  // literal for the payload to close.
   assert.equal(seen[0]!.cypher, 'MATCH (f {path: $path}) RETURN f');
+  assert.doesNotMatch(seen[0]!.cypher, /DETACH|x'/);
+
+  // The payload travels as data, and it is the **confined** path that travels — the same value the
+  // `pathGlob` predicate matched, so a rule's glob and its Cypher cannot disagree about which file
+  // they are asking about. Confinement is what the expectation below derives from: path resolution
+  // reads a trailing `//` as a separator and drops it (`a//` and `a` name one file), and touches
+  // nothing else — the quote, the brace and the `DETACH DELETE` all arrive intact, as data.
+  const confined = payload.slice(0, -'//'.length);
+  assert.equal(seen[0]!.params['path'], confined);
 });
 
 test('memoryPattern: rule falls through when graph returns no rows', async () => {

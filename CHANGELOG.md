@@ -91,11 +91,43 @@ is entitled to know which of their own code stops compiling.
   only `Escalate` as escalatable and gained `isIndeterminate`, and `executeToolGated` refuses on
   it.
 
+- **Paths are confined to the project root, and one file has one spelling.** Fixes D-11, D-22. All
+  five `fs` tools resolved `path.resolve(ctx.cwd, input.path)` and nothing else — `ctx.projectRoot`
+  was in the type and read nowhere in `packages/tools/src` — so `../outside.txt`, an absolute path
+  and a symlink pointing out were each read *and written* outside the root. `resolveInside(root, p)`
+  (`@maf/types`, `packages/types/src/paths.ts`) returns a `ConfinedPath` whose `absolute` is the
+  realpath of the target with every symlink followed, checked with a separator-aware prefix against
+  the realpath of the root; a dangling symlink is caught by resolving component by component rather
+  than only the final path. A path that leaves the root is refused; a symlink that stays inside is
+  resolved and allowed.
+
+  The same function is what the **policy engine** now checks, so the checked path and the executed
+  path are one value instead of two that could disagree. That disagreement was the defect: minimatch
+  was handed the raw string the caller typed, so the shipped `protect-secrets` rule
+  (`pathGlob: "**/.env*"`) denied `.env` and *allowed* `./.env`, `a/../.env` and `../.env` — the
+  spelling decided whether the rule fired. Confinement runs **before** the rule list and does not
+  depend on a rule existing, so an empty policy file does not turn it off; the verdict is `Deny`
+  (not `Indeterminate`) and is not escalatable.
+
+  Migration: a `pathGlob`/`allowedPathGlobs` pattern is matched against the resolved root-relative
+  path, so a rule that relied on a spelling must rely on the path instead. `allowedPathGlobs`
+  behaves the other way round from before in one case worth naming — `./tests/util.ts` used to
+  match no allowed glob and be read as "outside the allowed tree", and is now simply `tests/util.ts`.
+  `ToolPlugin.declaredPaths` is unchanged; `resolveInside`, `PathEscapeError` and `ConfinedPath` are
+  new exports of `@maf/types`. See [docs/POLICY.md](docs/POLICY.md) and
+  [docs/SECURITY.md](docs/SECURITY.md).
+
 ### Fixed
 
 - Tool inputs are deep-frozen by `executeToolGated` before policy evaluation, so the input the
   policy judged is the input the tool runs on. A tool that rewrote its own input inside `execute`
   threw a `TypeError` instead of choosing its paths after the gate had closed.
+
+- `@maf/types` has tests and a `test` script: the confinement primitive is asserted directly —
+  relative traversals, absolute paths, a symlink out, a **dangling** symlink out and a symlink
+  cycle are each refused, a link that stays inside resolves, and every spelling of one in-root file
+  collapses to that file. The two consumers assert their own halves: the fs tools that a direct
+  `execute` cannot escape, and the policy engine that the refusal arrives with no rules loaded.
 
 - `@maf/memory-graph` has tests and a `test` script. The binding guarantee is asserted against a
   **real** Kùzu database (a crafted value round-trips byte-for-byte and the graph is untouched,

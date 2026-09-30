@@ -5,7 +5,26 @@ import type {
   PolicyEngineHandle, PolicyRule, PolicyDecision, PolicyAction,
   ToolId, ToolInput, ToolContext, ApprovalRequest, GraphQueryRunner,
 } from '@maf/types';
+import { resolveInside, PathEscapeError } from '@maf/types';
 import { bindPolicyTemplate } from './policyTemplate.js';
+
+/**
+ * Every declared path, resolved against `root` and proven to lie inside it.
+ *
+ * One escape fails the whole call: a multi-path call is a unit — the tool was asked to act on
+ * all of them — and a path that could not be confined is not a path whose rules may be skipped.
+ */
+async function confineAll(root: string, declaredPaths: readonly string[]): Promise<string[]> {
+  const confined: string[] = [];
+  for (const declared of declaredPaths) {
+    confined.push((await resolveInside(root, declared)).relative);
+  }
+  return confined;
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 /** A decision that refuses: everything but Allow, and `Indeterminate` refuses the same way. */
 export type Refusal = PolicyDecision & { verdict: 'Deny' | 'Escalate' | 'Indeterminate' };
@@ -51,14 +70,35 @@ export class PolicyEngine implements PolicyEngineHandle {
     ctx: ToolContext,
     declaredPaths: readonly string[],
   ): Promise<PolicyDecision> {
+    // Confinement comes before the first rule, and it does not depend on a rule existing. A glob
+    // is written against a path relative to the project root, so matching it against the raw
+    // input string matched only the spellings a caller happened to use: `.env` was denied while
+    // `./.env`, `a/../.env` and — the sweep's repro — `../.env` were not, and that last one also
+    // left the root entirely. Resolving first makes every spelling of one file one string, and
+    // makes a path that leaves the root a refusal rather than a string no rule recognises.
+    let confined: string[];
+    try {
+      confined = await confineAll(ctx.projectRoot, declaredPaths);
+    } catch (err) {
+      // `Deny`, not `Indeterminate`: a path outside the root — or one that cannot be shown to be
+      // inside it — is a decision about this call, not a failure to reach one. `Deny` is not
+      // escalatable, so there is nothing here for a human to approve either way.
+      return {
+        verdict: 'Deny',
+        reason: err instanceof PathEscapeError
+          ? err.message
+          : `policy could not resolve the declared paths against the project root: ${messageOf(err)}`,
+      };
+    }
+
     for (const rule of this.rules) {
       if (!this.matchesToolId(rule, toolId)) continue;
       if (!this.matchesAgentRole(rule, ctx)) continue;
-      if (!this.matchesPath(rule, declaredPaths)) continue;
-      if (!this.matchesAllowedPaths(rule, declaredPaths)) continue;
+      if (!this.matchesPath(rule, confined)) continue;
+      if (!this.matchesAllowedPaths(rule, confined)) continue;
       if (rule.predicate.memoryPattern) {
         const pattern = await this.evaluateCypher(
-          rule.predicate.memoryPattern.cypher, toolId, declaredPaths, ctx,
+          rule.predicate.memoryPattern.cypher, toolId, confined, ctx,
         );
         // Three-valued on purpose. The rule's graph half can answer "yes", "no", or nothing at
         // all, and the third case must not be read as "no": skipping the rule there is what made
@@ -96,6 +136,10 @@ export class PolicyEngine implements PolicyEngineHandle {
   // Paths come from the calling tool's own declaration, never from a guess about which input
   // keys look like paths. The guess was the defect: `patch.apply` derived its paths inside
   // `execute`, so path rules saw nothing and matched nothing.
+  //
+  // They arrive here already confined and root-relative (see `evaluate`), so a glob means what
+  // its author meant by it: `.env`, `./.env` and `a/../.env` are one path, and none of them is
+  // matched by accident or missed by spelling.
   private matchesPath(rule: PolicyRule, declaredPaths: readonly string[]): boolean {
     const glob = rule.predicate.pathGlob;
     if (!glob) return true;

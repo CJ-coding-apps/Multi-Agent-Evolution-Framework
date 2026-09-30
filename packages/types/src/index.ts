@@ -145,6 +145,12 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
    * MUST over-declare rather than under-declare: a path that is declared but never touched
    * can only make a rule match sooner, while a path that is touched but not declared is a
    * silent Allow. A tool with no filesystem surface returns `[]`.
+   *
+   * Declared paths are relative to the project root, and must stay inside it. The policy engine
+   * resolves each one with `resolveInside(ctx.projectRoot, …)` before any rule sees it, so a
+   * glob is matched against the real file rather than against whatever spelling the caller used,
+   * and a path that leaves the root is refused. A tool that takes a path from `input` should
+   * resolve it the same way — see `resolveInside`.
    */
   declaredPaths(input: I): string[];
 }
@@ -475,6 +481,13 @@ export interface PolicyEngineHandle {
    * `declaredPaths` is the calling tool's own `ToolPlugin.declaredPaths(input)` for this
    * input — required, not optional, so no call site can leave path rules with nothing to
    * match against. See the note on `ToolPlugin.declaredPaths`.
+   *
+   * The paths are interpreted relative to `ctx.projectRoot` and are resolved with
+   * `resolveInside` before any rule is consulted. Two consequences a caller can rely on:
+   * a rule's globs are matched against the *real* file (so every spelling of one path is one
+   * string), and a declared path that resolves outside `ctx.projectRoot` is **refused** with a
+   * `Deny` — before the rule list is read, and whether or not any rule is loaded. Confinement
+   * is therefore not something a policy file can turn off by being empty.
    */
   evaluate(
     toolId: ToolId,
@@ -768,3 +781,17 @@ export function estimateTokens(text: string): number {
   if (!text) return 0;
   return Math.ceil(text.length / 4);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATHS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Path confinement lives here, beside `ToolContext`, for the same reason `PolicyEngineHandle`
+ * does: both the tools and the policy engine need it, and the tools must not depend on the
+ * policy engine (or the reverse) to get it. `scripts/check-workspace-deps.mjs` holds the
+ * package graph acyclic, so a shared primitive between two packages goes in the package they
+ * both already depend on — this one.
+ */
+export { resolveInside, PathEscapeError } from './paths.js';
+export type { ConfinedPath } from './paths.js';

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
 import { BaseTool } from '../ToolPlugin.js';
-import { makeToolId } from '@maf/types';
+import { makeToolId, resolveInside } from '@maf/types';
 
 /**
  * The single path a one-path tool declares, or `[]` when the model omitted it — a call with
@@ -11,6 +11,28 @@ import { makeToolId } from '@maf/types';
  */
 function onePath(input: { path?: unknown }): string[] {
   return typeof input.path === 'string' && input.path ? [input.path] : [];
+}
+
+/**
+ * The one place these tools turn model-supplied input into a path a syscall will take.
+ *
+ * `path.resolve(ctx.cwd, input.path)` — what this replaces — accepts a traversal, an absolute
+ * path, or a symlink pointing anywhere, so all five tools could read and write outside the
+ * project: `../.env` left the root and no rule stopped it, because the policy layer matched the
+ * raw string against a glob written for paths relative to the root. `resolveInside` resolves the
+ * real path and refuses anything that leaves `ctx.projectRoot`, so the value handed to the
+ * syscall is a value that was checked, and the string a path rule matched is a description of
+ * that same file.
+ *
+ * It throws rather than returning a failed `ToolResult`. `fs.read` on a missing file already
+ * throws, and a path outside the root is the same kind of thing: the tool has no answer to give,
+ * and a result saying otherwise would be a result it did not obtain. Through the gate the policy
+ * engine's own confinement has already refused with a `Deny`, so the model sees a policy refusal
+ * and the run continues; this is the second line, and it is what keeps a direct
+ * `tool.execute(...)` — one that never went past the gate — no less confined.
+ */
+async function confinedPath(ctx: ToolContext, p: string): Promise<string> {
+  return (await resolveInside(ctx.projectRoot, p)).absolute;
 }
 
 // ── fs.read ───────────────────────────────────────────────────────────────────
@@ -27,7 +49,7 @@ export class FsReadTool extends BaseTool<ReadInput> {
 
   async execute(input: ReadInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const abs = path.resolve(ctx.cwd, input.path);
+    const abs = await confinedPath(ctx, input.path);
     const content = await fs.readFile(abs, 'utf8');
     const lines = content.split('\n');
     const slice = lines.slice(input.offset ?? 0, input.limit ? (input.offset ?? 0) + input.limit : undefined);
@@ -49,7 +71,7 @@ export class FsWriteTool extends BaseTool<WriteInput> {
 
   async execute(input: WriteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const abs = path.resolve(ctx.cwd, input.path);
+    const abs = await confinedPath(ctx, input.path);
     if (input.createDirs) await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, input.content, 'utf8');
     return this.ok(`Wrote ${input.content.length} bytes to ${input.path}`, performance.now() - t);
@@ -70,7 +92,7 @@ export class FsDeleteTool extends BaseTool<DeleteInput> {
 
   async execute(input: DeleteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const abs = path.resolve(ctx.cwd, input.path);
+    const abs = await confinedPath(ctx, input.path);
     await fs.rm(abs, { recursive: input.recursive ?? false });
     return this.ok(`Deleted ${input.path}`, performance.now() - t);
   }
@@ -90,7 +112,7 @@ export class FsStatTool extends BaseTool<StatInput> {
 
   async execute(input: StatInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const abs = path.resolve(ctx.cwd, input.path);
+    const abs = await confinedPath(ctx, input.path);
     const st = await fs.stat(abs);
     return this.ok(JSON.stringify({
       isFile: st.isFile(), isDirectory: st.isDirectory(),
@@ -113,7 +135,7 @@ export class FsListTool extends BaseTool<ListInput> {
 
   async execute(input: ListInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const abs = path.resolve(ctx.cwd, input.path);
+    const abs = await confinedPath(ctx, input.path);
     const entries = await fs.readdir(abs, { withFileTypes: true, recursive: input.recursive });
     const names = entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
     return this.ok(names.join('\n'), performance.now() - t, { count: names.length });
