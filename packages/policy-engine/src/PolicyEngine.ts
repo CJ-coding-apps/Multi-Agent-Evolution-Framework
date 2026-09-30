@@ -3,12 +3,25 @@ import { minimatch } from 'minimatch';
 import crypto from 'node:crypto';
 import type {
   PolicyEngineHandle, PolicyRule, PolicyDecision, PolicyAction,
-  ToolId, ToolInput, ToolContext, ApprovalRequest,
+  ToolId, ToolInput, ToolContext, ApprovalRequest, GraphQueryRunner,
 } from '@maf/types';
-import type { MemoryGraph } from '@maf/memory-graph';
+import { bindPolicyTemplate } from './policyTemplate.js';
+
+/** A decision that refuses: everything but Allow, and `Indeterminate` refuses the same way. */
+export type Refusal = PolicyDecision & { verdict: 'Deny' | 'Escalate' | 'Indeterminate' };
+
+/**
+ * What a rule's graph half answered. Three-valued because the graph has three outcomes, and the
+ * third one — it could not be asked — has to survive to the caller rather than being flattened
+ * into "no match".
+ */
+type PatternResult =
+  | { kind: 'match' }
+  | { kind: 'nomatch' }
+  | { kind: 'error'; detail: string };
 
 export class PolicyViolationError extends Error {
-  constructor(public readonly decision: PolicyDecision & { verdict: 'Deny' | 'Escalate' }) {
+  constructor(public readonly decision: Refusal) {
     super(`Policy violation: ${decision.verdict}`);
   }
 }
@@ -16,13 +29,13 @@ export class PolicyViolationError extends Error {
 export class PolicyEngine implements PolicyEngineHandle {
   private rules: PolicyRule[] = [];
 
-  constructor(private readonly graph: MemoryGraph) {}
+  constructor(private readonly graph: GraphQueryRunner) {}
 
   loadRules(rules: PolicyRule[]): void {
     this.rules = [...rules].sort((a, b) => b.priority - a.priority);
   }
 
-  static async fromYaml(yamlPath: string, graph: MemoryGraph): Promise<PolicyEngine> {
+  static async fromYaml(yamlPath: string, graph: GraphQueryRunner): Promise<PolicyEngine> {
     const engine = new PolicyEngine(graph);
     try {
       const text = await readFile(yamlPath, 'utf8');
@@ -44,10 +57,20 @@ export class PolicyEngine implements PolicyEngineHandle {
       if (!this.matchesPath(rule, declaredPaths)) continue;
       if (!this.matchesAllowedPaths(rule, declaredPaths)) continue;
       if (rule.predicate.memoryPattern) {
-        const matches = await this.evaluateCypher(
+        const pattern = await this.evaluateCypher(
           rule.predicate.memoryPattern.cypher, toolId, declaredPaths, ctx,
         );
-        if (!matches) continue;
+        // Three-valued on purpose. The rule's graph half can answer "yes", "no", or nothing at
+        // all, and the third case must not be read as "no": skipping the rule there is what made
+        // a `Deny` rule stop firing the moment the graph could be broken.
+        if (pattern.kind === 'error') {
+          return {
+            verdict: 'Indeterminate',
+            reason: `policy rule "${rule.id}" could not be evaluated: ${pattern.detail}`,
+            ruleId: rule.id,
+          };
+        }
+        if (pattern.kind === 'nomatch') continue;
       }
       return this.buildDecision(rule.action, toolId, input, ctx, rule.id);
     }
@@ -90,21 +113,30 @@ export class PolicyEngine implements PolicyEngineHandle {
     return declaredPaths.some((p) => !allowed.some((g) => minimatch(p, g)));
   }
 
+  /**
+   * Asks the rule's graph half. "Could not ask" is its own answer, with the reason kept: a
+   * `Deny` rule that cannot be evaluated must refuse the call, and an operator needs to know
+   * whether that was the graph being down or their own template naming something unbindable.
+   */
   private async evaluateCypher(
     cypherTemplate: string,
     toolId: ToolId,
     declaredPaths: readonly string[],
     ctx: ToolContext,
-  ): Promise<boolean> {
-    const cypher = cypherTemplate
-      .replace(/\$tool/g,   `'${toolId}'`)
-      .replace(/\$path/g,   `'${(declaredPaths[0] ?? '').replace(/'/g, "''")}'`)
-      .replace(/\$runId/g,  `'${ctx.runId}'`)
-      .replace(/\$taskId/g, `'${ctx.taskId}'`);
+  ): Promise<PatternResult> {
     try {
-      const rows = await this.graph.query(cypher, {});
-      return (rows as unknown[]).length > 0;
-    } catch { return false; }
+      const rows = await this.graph.run(
+        bindPolicyTemplate(cypherTemplate, {
+          tool:   toolId,
+          path:   declaredPaths[0] ?? '',
+          runId:  ctx.runId,
+          taskId: ctx.taskId,
+        }),
+      );
+      return rows.length > 0 ? { kind: 'match' } : { kind: 'nomatch' };
+    } catch (err) {
+      return { kind: 'error', detail: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   private buildDecision(

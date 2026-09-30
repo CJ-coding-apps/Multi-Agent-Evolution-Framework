@@ -6,7 +6,7 @@ import { rolesOf } from './roleResolver.js';
 
 // Stubs for graph/lcm/injector — none are invoked when generatePlan returns a
 // JSON DAG that already covers nodes/edges (no past-failure lookups in unit scope).
-const noopGraph = { query: async () => [] } as never;
+const noopGraph = { run: async () => [] } as never;
 const noopLcm = { lcm_grep: async () => [] } as never;
 const noopInjector = { assemble: async () => ({ systemPromptPrefix: '' }) } as never;
 

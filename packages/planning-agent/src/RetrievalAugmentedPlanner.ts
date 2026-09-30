@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
 import type {
   Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
+  GraphQueryRunner, GraphRow,
 } from '@maf/types';
 import { makeNodeId } from '@maf/types';
-import type { MemoryGraph } from '@maf/memory-graph';
 import type { LcmEngine } from '@maf/lcm';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
 
@@ -13,7 +13,9 @@ export interface RoleCatalogEntry {
 }
 
 export interface PlannerConfig {
-  graph:        MemoryGraph;
+  // The backend-neutral query seam, not the Kùzu package: the planner reads recall context and
+  // never writes. A different backend is then a new `GraphQueryRunner`, not an edit here.
+  graph:        GraphQueryRunner;
   lcm:          LcmEngine;
   injector:     GraphAwareInjector;
   /**
@@ -72,16 +74,22 @@ export class RetrievalAugmentedPlanner {
 
   private async getFailureContext(title: string): Promise<string> {
     const keywords = title.split(' ').slice(0, 3).join(' ');
-    const rows = await this.config.graph.query(
-      `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
+    // Recall is a bonus, never a precondition. The tolerance is written here rather than implied
+    // by a query method that answered every failure with `[]` — that made "the graph is down" and
+    // "we have no history" the same input to the prompt.
+    let rows: GraphRow[] = [];
+    try {
+      rows = await this.config.graph.run({
+        cypher: `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
        WHERE t.label CONTAINS $kw
        RETURN t.label AS task, f.properties AS failure LIMIT 5`,
-      { kw: keywords },
-    ) as Array<{ task: string; failure: string }>;
+        params: { kw: keywords },
+      });
+    } catch { return ''; }
 
     if (rows.length === 0) return '';
 
-    const items = rows.map((r) => `- Task "${r.task}" → ${r.failure}`).join('\n');
+    const items = rows.map((r) => `- Task "${String(r['task'] ?? '')}" → ${String(r['failure'] ?? '')}`).join('\n');
     return `<past-failures>\nThese similar tasks failed previously — avoid repeating these patterns:\n${items}\n</past-failures>`;
   }
 

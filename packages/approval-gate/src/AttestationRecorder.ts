@@ -22,10 +22,10 @@ export class AttestationRecorder {
     });
 
     // Link approval → run
-    const runRows = await this.graph.query(
-      `MATCH (n:MemoryNode {kind: 'Run', run_id: '${request.runId}'}) RETURN n.id LIMIT 1`,
-      {},
-    ) as Array<Record<string, unknown>>;
+    const runRows = await this.graph.run({
+      cypher: `MATCH (n:MemoryNode {kind: 'Run', run_id: $runId}) RETURN n.id LIMIT 1`,
+      params: { runId: request.runId },
+    });
 
     if (runRows[0]) {
       const runNodeId = String(runRows[0]['n.id'] ?? '');
@@ -36,9 +36,9 @@ export class AttestationRecorder {
   }
 
   async getApprovals(runId: string): Promise<Array<Record<string, unknown>>> {
-    return this.graph.query(
-      `MATCH (n:MemoryNode {kind: 'Approval', run_id: '${runId}'}) RETURN n LIMIT 100`,
-      {},
-    ) as Promise<Array<Record<string, unknown>>>;
+    return this.graph.run({
+      cypher: `MATCH (n:MemoryNode {kind: 'Approval', run_id: $runId}) RETURN n LIMIT 100`,
+      params: { runId },
+    });
   }
 }

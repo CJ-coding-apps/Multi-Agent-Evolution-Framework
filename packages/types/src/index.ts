@@ -24,11 +24,29 @@ export type CommitHash    = string & { readonly _brand: 'CommitHash' };
  */
 export type RoleName      = string & { readonly _brand: 'RoleName' };
 
+/**
+ * What a graph node id may be. Validated at construction, not trusted from the source.
+ *
+ * The cast this replaces was applied straight to planner JSON, so a model-authored id of any
+ * shape reached every place a node id is used. D-08's repro was an id that ended the surrounding
+ * Cypher string literal and dropped the whole graph. Real parameter binding (see `GraphQuery`)
+ * is what removes the injection; this is the second half — a node id is now a value with a
+ * known shape, so it is also safe as a map key, a transcript label or a filename stem.
+ */
+export const NODE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
 export function makeRunId(s: string): RunId         { return s as RunId; }
 export function makeTaskId(s: string): TaskId       { return s as TaskId; }
 export function makeAgentId(s: string): AgentId     { return s as AgentId; }
 export function makeToolId(s: string): ToolId       { return s as ToolId; }
-export function makeNodeId(s: string): NodeId       { return s as NodeId; }
+export function makeNodeId(s: string): NodeId {
+  if (!NODE_ID_PATTERN.test(s)) {
+    throw new Error(
+      `Invalid NodeId ${JSON.stringify(s)}: a node id is 1-128 characters of A-Z a-z 0-9 _ or -`,
+    );
+  }
+  return s as NodeId;
+}
 export function makeBlackboardKey(s: string): BlackboardKey { return s as BlackboardKey; }
 export function makeLcmMessageId(s: string): LcmMessageId   { return s as LcmMessageId; }
 export function makeLcmSummaryId(s: string): LcmSummaryId   { return s as LcmSummaryId; }
@@ -356,10 +374,49 @@ export interface MergeReport {
   mergedAt:       Date;
 }
 
-export interface MemoryGraphApi {
+// ─────────────────────────────────────────────────────────────────────────────
+// GRAPH QUERIES — one value object, and its values are bound, never written in
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What a graph query may bind. Deliberately narrow, because it is exactly what both backends
+ * accept as a parameter: Kùzu 0.7.x takes boolean/number/string/Date/BigInt and nothing else —
+ * no arrays, no `null`, no objects. An array is bound as one parameter per element under
+ * generated names (`$id0, $id1, …`); `LIMIT` and a variable-length path's hop count cannot be
+ * parameters in either query language and stay validated integer literals.
+ */
+export type QueryParamValue = string | number | boolean | Date;
+export type QueryParams     = Readonly<Record<string, QueryParamValue>>;
+
+/**
+ * A query and the values it binds. This is the only way a value enters a query: there is no
+ * escaper, because there is nothing to escape. The type exists so that "what is the query?" and
+ * "what did it bind?" cannot be answered separately — the escaper that D-08 found lived, in
+ * three identical copies, in the gap between those two answers.
+ */
+export interface GraphQuery {
+  readonly cypher: string;
+  readonly params: QueryParams;
+}
+
+export type GraphRow = Record<string, unknown>;
+
+/**
+ * What graph *consumers* depend on — the policy engine, the injector, the digester. Narrow on
+ * purpose: a consumer that can only run a `GraphQuery` cannot build one by concatenation, and a
+ * different backend is a new implementation of this rather than an edit to every call site.
+ *
+ * An error is thrown, never answered with an empty result: "the graph could not answer" and
+ * "the graph answered nothing" are different facts, and a rule that is skipped on the first is
+ * a rule that stops firing whenever an attacker can break the graph.
+ */
+export interface GraphQueryRunner {
+  run(query: GraphQuery): Promise<GraphRow[]>;
+}
+
+export interface MemoryGraphApi extends GraphQueryRunner {
   addNode(n: Omit<MemoryNode, 'id' | 'createdAt' | 'updatedAt'>): Promise<string>;
   addEdge(e: Omit<MemoryEdge, 'id' | 'createdAt'>): Promise<string>;
-  query(cypher: string, params: Record<string, unknown>): Promise<unknown[]>;
   querySubgraph(taskContext: string, maxNodes: number): Promise<MemorySubgraph>;
   mergeRuns(sourceRunIds: RunId[], targetRunId: RunId): Promise<MergeReport>;
 }
@@ -371,9 +428,23 @@ export interface MemoryGraphApi {
 export type PolicyDecision =
   | { verdict: 'Allow' }
   | { verdict: 'Deny';     reason: string; alternative?: ToolId }
-  | { verdict: 'Escalate'; reason: string; approvalRequest: ApprovalRequest };
+  | { verdict: 'Escalate'; reason: string; approvalRequest: ApprovalRequest }
+  /**
+   * The policy could not be evaluated, so no verdict about the call is available — and the call
+   * does not proceed. Today this is one thing: a rule's `memoryPattern` query failed, so a
+   * `Deny` rule that might have matched did not get to say so. Answering `Allow` there is the
+   * fail-open D-08 names, and it is the easiest state for an attacker to induce (break the
+   * graph, then act). Distinct from `Escalate`: nothing is being asked of a human, because
+   * there is no decision to approve.
+   */
+  | { verdict: 'Indeterminate'; reason: string; ruleId?: string };
 
 export interface MemoryGraphQuery {
+  /**
+   * A Cypher template for the rule's graph half. It may name any of `$tool`, `$path`, `$runId`
+   * and `$taskId`; those are bound as real parameters, so the template stays a template and the
+   * values never become part of the query text.
+   */
   cypher: string;
 }
 

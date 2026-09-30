@@ -53,8 +53,57 @@ is entitled to know which of their own code stops compiling.
   RoleName` appears anywhere but `RoleConfig.ts`, or if `defineRoleName` is called by a file that
   does not define a role set. See [docs/ROLES.md](docs/ROLES.md).
 
+- **Graph access is one interface that binds its parameters; there is no escaper.** Fixes D-08,
+  D-20, D-19. `esc()` — `.replace(/'/g, "''")`, SQL quote doubling applied to Cypher, where `''`
+  is an empty string and escapes nothing — existed in three identical copies and was used at 17
+  interpolating call sites. The sweep's repro was a model-authored node id that ended the
+  surrounding string literal and dropped the graph. The fix is the shape, not the call sites:
+
+  - `MemoryGraphApi.query(cypher, params)` is **replaced by `run(query: GraphQuery)`**, where
+    `GraphQuery` is `{cypher, params}` and `GraphQueryRunner` is the one-method interface
+    (`@maf/types`). The driver prepares `cypher` and passes `params` to the binder, so a value is
+    compared as data. That also silently repaired six packages that were already *calling* the old
+    method with `$name` parameters — the parameters were being dropped (the real
+    `Connection.query` takes one argument), so each of those call sites was interpolating.
+  - `MemoryGraphApi` extends `GraphQueryRunner`; `SubgraphQuery`, `RunMerger`,
+    `FailurePatternDetector`, `RetrievalAugmentedPlanner`, `CypherEvaluator`, `PolicyEngine` and
+    the CLI's lesson graph now take the interface rather than the concrete class.
+  - `KuzuDriver` exposes only `run(query)`. There is deliberately no method taking a statement on
+    its own, so a caller cannot reintroduce the substitution.
+  - The two positions Cypher cannot bind — `LIMIT` (Kùzu rejects `LIMIT $n`) and a
+    variable-length path's hop count — go through `intLiteral(value, what)`, exported from
+    `@maf/memory-graph`, which **throws** rather than coercing. An id list becomes one generated
+    parameter per element (`$nid0, $nid1, …`) because Kùzu rejects an array parameter.
+
+- **`NodeId` is validated at construction** (`makeNodeId`). It was a bare cast applied straight to
+  planner JSON; it is now 1–128 characters of `A-Za-z0-9_-`. Real binding is what makes a crafted
+  id harmless in a query; this is the second half — an id is also safe as a map key, a transcript
+  label or a filename stem.
+
+- **`PolicyDecision` is three-valued: `Indeterminate` joins `Allow`/`Deny`/`Escalate`**, and a
+  policy rule whose graph query fails now **refuses** the call instead of being skipped.
+  `evaluateCypher` did `catch { return false }`, so any graph error silently stopped every
+  `memoryPattern` Deny rule from firing — and breaking the graph is the easiest thing for the
+  party the rule is aimed against to arrange. The refusal names the rule and the underlying
+  error. A rule whose template names a parameter that cannot be bound (a typo like `$filePath`)
+  is likewise `Indeterminate`, not a rule that never matches. `Refusal` is the narrowed
+  `Deny | Escalate | Indeterminate`; `PolicyViolationError` carries it, `ViolationHandler` treats
+  only `Escalate` as escalatable and gained `isIndeterminate`, and `executeToolGated` refuses on
+  it.
+
 ### Fixed
 
 - Tool inputs are deep-frozen by `executeToolGated` before policy evaluation, so the input the
   policy judged is the input the tool runs on. A tool that rewrote its own input inside `execute`
   threw a `TypeError` instead of choosing its paths after the gate had closed.
+
+- `@maf/memory-graph` has tests and a `test` script. The binding guarantee is asserted against a
+  **real** Kùzu database (a crafted value round-trips byte-for-byte and the graph is untouched,
+  while the same text spliced into the query deletes a row — the anti-vacuity half), and a source
+  guard fails if the quote-doubling escaper or a `$name`-substituting `replace` reappears anywhere
+  under a package's `src`. Both halves were verified to fail when the defect is put back.
+
+- `run()` **propagates** a query error rather than returning an empty result. The best-effort
+  readers that legitimately tolerate a graph failure (`ScoreRecorder`, the planner's lesson
+  recall, `maf knowledge sync`, `querySubgraph`'s edge lookup) now say so in an explicit
+  `try`/`catch` at the point where the tolerance is intended.

@@ -32,11 +32,17 @@ export class ScoreRecorder {
       runId: this.runId,
     });
 
-    const runs = await this.graph.query(
-      "MATCH (n:MemoryNode) WHERE n.run_id = $runId AND n.kind = 'Run' RETURN n.id LIMIT 1",
-      { runId: this.runId },
-    );
-    const runNodeId = (runs[0] as Record<string, unknown> | undefined)?.['n.id'];
+    // Best-effort: the score node is already written, so a graph that cannot answer this lookup
+    // must not fail the golden suite. The tolerance is stated here rather than implied by a
+    // query method that quietly returned `[]`.
+    let runs: Array<Record<string, unknown>> = [];
+    try {
+      runs = await this.graph.run({
+        cypher: "MATCH (n:MemoryNode) WHERE n.run_id = $runId AND n.kind = 'Run' RETURN n.id LIMIT 1",
+        params: { runId: this.runId },
+      });
+    } catch { /* no run node to link */ }
+    const runNodeId = runs[0]?.['n.id'];
     if (typeof runNodeId === 'string') {
       await this.graph.addEdge({
         fromId: runNodeId,

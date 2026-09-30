@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { GraphQuery } from '@maf/types';
 import { makeRunId } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -28,13 +29,13 @@ const CURRENT: HarnessConfig = mintHarnessConfig({
 const KNOWN_TOOLS = new Set(['fs.read', 'fs.write', 'grep']);
 const KNOWN_PROCESSORS = new Set(['policy-audit', 'secret-redact', 'transcript', 'security-gate']);
 
-/** Graph stub: query returns canned golden history; addNode records. */
+/** Graph stub: run returns canned golden history; addNode records. */
 function makeGraph(goldenRows: unknown[] = []) {
   const nodes: unknown[] = [];
   return {
     nodes,
     graph: {
-      query: async (cypher: string) => (cypher.includes('GoldenResult') ? goldenRows : []),
+      run: async (query: GraphQuery) => (query.cypher.includes('GoldenResult') ? goldenRows : []),
       addNode: async (n: unknown) => { nodes.push(n); return 'id'; },
       addEdge: async () => 'e',
     } as unknown as MemoryGraph,
@@ -271,7 +272,7 @@ test('loop (L5): a critic revision is smoke-tested on the REVISED manifest, then
 
 test('loop (L4): a graph recordRound failure does not abort the loop', async () => {
   const badGraph = {
-    query: async () => [],
+    run: async () => [],
     addNode: async () => { throw new Error('graph down'); },
     addEdge: async () => 'e',
   } as unknown as import('@maf/memory-graph').MemoryGraph;

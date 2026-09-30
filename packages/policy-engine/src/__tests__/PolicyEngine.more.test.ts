@@ -3,9 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { ToolContext, PolicyRule } from '@maf/types';
+import type { ToolContext, PolicyRule, GraphQuery, GraphQueryRunner, GraphRow } from '@maf/types';
 import { makeRunId, makeTaskId, makeAgentId, makeToolId } from '@maf/types';
-import type { MemoryGraph } from '@maf/memory-graph';
 import { PolicyEngine } from '../PolicyEngine.js';
 
 const stubGraph = {} as never;
@@ -123,9 +122,10 @@ test('Escalate decision produces a well-formed ApprovalRequest', async () => {
   assert.ok(ttl > 23 * 60 * 60 * 1000 && ttl <= 25 * 60 * 60 * 1000, `ttl=${ttl}`);
 });
 
+const runnerReturning = (rows: GraphRow[]): GraphQueryRunner => ({ run: async () => rows });
+
 test('memoryPattern: rule fires when graph query returns rows', async () => {
-  const graph = { query: async () => [{ hit: 1 }] } as unknown as MemoryGraph;
-  const engine = new PolicyEngine(graph);
+  const engine = new PolicyEngine(runnerReturning([{ hit: 1 }]));
   engine.loadRules([rule({
     id: 'past-failure',
     predicate: { toolId: FS_WRITE, memoryPattern: { cypher: 'MATCH (f {path: $path}) RETURN f' } },
@@ -135,9 +135,23 @@ test('memoryPattern: rule fires when graph query returns rows', async () => {
   assert.equal(res.verdict, 'Deny');
 });
 
+test('memoryPattern: the rule binds the declared path, it does not write it in', async () => {
+  const seen: GraphQuery[] = [];
+  const engine = new PolicyEngine({
+    run: async (q) => { seen.push(q); return []; },
+  });
+  engine.loadRules([rule({
+    id: 'past-failure',
+    predicate: { toolId: FS_WRITE, memoryPattern: { cypher: 'MATCH (f {path: $path}) RETURN f' } },
+    action: { kind: 'Deny', reason: 'nope' },
+  })]);
+  await engine.evaluate(FS_WRITE, { path: "x'}) DETACH DELETE n //" }, baseCtx(), ["x'}) DETACH DELETE n //"]);
+  assert.equal(seen[0]!.params['path'], "x'}) DETACH DELETE n //");
+  assert.equal(seen[0]!.cypher, 'MATCH (f {path: $path}) RETURN f');
+});
+
 test('memoryPattern: rule falls through when graph returns no rows', async () => {
-  const graph = { query: async () => [] } as unknown as MemoryGraph;
-  const engine = new PolicyEngine(graph);
+  const engine = new PolicyEngine(runnerReturning([]));
   engine.loadRules([rule({
     id: 'past-failure',
     predicate: { toolId: FS_WRITE, memoryPattern: { cypher: 'MATCH (f) RETURN f' } },
@@ -147,16 +161,37 @@ test('memoryPattern: rule falls through when graph returns no rows', async () =>
   assert.equal(res.verdict, 'Allow');
 });
 
-test('memoryPattern: graph failure fails open for the rule (falls through)', async () => {
-  const graph = { query: async () => { throw new Error('kuzu down'); } } as unknown as MemoryGraph;
-  const engine = new PolicyEngine(graph);
+test('memoryPattern: a graph failure refuses the call instead of skipping the rule', async () => {
+  // This replaces "graph failure fails open for the rule (falls through)", which asserted the
+  // verdict was Allow. That was the defect stated as a test: a Deny rule stopped firing the
+  // moment the graph could be broken, and breaking the graph is the easiest thing for the party
+  // the rule is aimed at to arrange. The guarantee now is that an unevaluatable policy refuses.
+  const engine = new PolicyEngine({
+    run: async () => { throw new Error('kuzu down'); },
+  });
   engine.loadRules([rule({
     id: 'graph-gated',
     predicate: { toolId: FS_WRITE, memoryPattern: { cypher: 'MATCH (f) RETURN f' } },
     action: { kind: 'Deny', reason: 'nope' },
   })]);
   const res = await engine.evaluate(FS_WRITE, { path: 'x.ts' }, baseCtx(), ['x.ts']);
-  assert.equal(res.verdict, 'Allow');
+  assert.equal(res.verdict, 'Indeterminate');
+  const indeterminate = res as { reason?: string; ruleId?: string };
+  assert.equal(indeterminate.ruleId, 'graph-gated');
+  assert.match(String(indeterminate.reason), /graph-gated/);
+  assert.match(String(indeterminate.reason), /kuzu down/, 'the operator is told why, not just that');
+});
+
+test('memoryPattern: a rule whose template is malformed refuses rather than never matching', async () => {
+  const engine = new PolicyEngine(runnerReturning([{ hit: 1 }]));
+  engine.loadRules([rule({
+    id: 'typo',
+    predicate: { toolId: FS_WRITE, memoryPattern: { cypher: 'MATCH (f {path: $filePath}) RETURN f' } },
+    action: { kind: 'Deny', reason: 'nope' },
+  })]);
+  const res = await engine.evaluate(FS_WRITE, { path: 'x.ts' }, baseCtx(), ['x.ts']);
+  assert.equal(res.verdict, 'Indeterminate');
+  assert.match(String((res as { reason?: string }).reason), /\$filePath/);
 });
 
 test('fromYaml() loads rules from a JSON policy file with comments', async () => {

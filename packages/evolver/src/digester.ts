@@ -1,4 +1,5 @@
 import type { MemoryGraph } from '@maf/memory-graph';
+import { intLiteral } from '@maf/memory-graph';
 
 /**
  * Digester (plan §6.2 step 1) — deterministic evidence assembly. No LLM in v1:
@@ -36,13 +37,15 @@ function parseProps(row: Record<string, unknown>): Record<string, unknown> {
 }
 
 export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Promise<Digest> {
-  const goldenRows = await graph.query(
-    "MATCH (n:MemoryNode) WHERE n.kind = 'GoldenResult' RETURN n.label, n.properties ORDER BY n.created_at DESC LIMIT 50",
-    {},
-  );
+  // `LIMIT` is one of the two positions Cypher cannot bind, so the limit is a validated literal.
+  const limit = intLiteral(failureLimit, 'failureLimit');
+
+  const goldenRows = await graph.run({
+    cypher: "MATCH (n:MemoryNode) WHERE n.kind = 'GoldenResult' RETURN n.label, n.properties ORDER BY n.created_at DESC LIMIT 50",
+    params: {},
+  });
   const goldenHistory: GoldenHistoryRow[] = goldenRows.map((raw) => {
-    const r = raw as Record<string, unknown>;
-    const props = parseProps(r);
+    const props = parseProps(raw);
     return {
       harnessId: String(props['harnessId'] ?? ''),
       harnessSha: String(props['harness_sha'] ?? ''),
@@ -52,23 +55,21 @@ export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Pro
     };
   });
 
-  const failureRows = await graph.query(
-    "MATCH (n:MemoryNode) WHERE n.kind = 'Failure' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT $lim",
-    { lim: failureLimit },
-  );
-  const currentFailures: FailureRow[] = failureRows.map((raw) => {
-    const r = raw as Record<string, unknown>;
-    return { label: String(r['n.label'] ?? ''), properties: parseProps(r), runId: String(r['n.run_id'] ?? '') };
+  const failureRows = await graph.run({
+    cypher: `MATCH (n:MemoryNode) WHERE n.kind = 'Failure' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
+    params: {},
   });
+  const currentFailures: FailureRow[] = failureRows.map((raw) => ({
+    label: String(raw['n.label'] ?? ''), properties: parseProps(raw), runId: String(raw['n.run_id'] ?? ''),
+  }));
 
-  const policyRows = await graph.query(
-    "MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT $lim",
-    { lim: failureLimit },
-  );
-  const policyEvents: FailureRow[] = policyRows.map((raw) => {
-    const r = raw as Record<string, unknown>;
-    return { label: String(r['n.label'] ?? ''), properties: parseProps(r), runId: String(r['n.run_id'] ?? '') };
+  const policyRows = await graph.run({
+    cypher: `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
+    params: {},
   });
+  const policyEvents: FailureRow[] = policyRows.map((raw) => ({
+    label: String(raw['n.label'] ?? ''), properties: parseProps(raw), runId: String(raw['n.run_id'] ?? ''),
+  }));
 
   return { goldenHistory, currentFailures, policyEvents, generatedAt: new Date().toISOString() };
 }

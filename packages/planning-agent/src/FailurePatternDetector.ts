@@ -1,5 +1,4 @@
-import type { RunId } from '@maf/types';
-import type { MemoryGraph } from '@maf/memory-graph';
+import type { GraphQueryRunner } from '@maf/types';
 
 export interface FailurePattern {
   taskLabel:    string;
@@ -10,28 +9,28 @@ export interface FailurePattern {
 }
 
 export class FailurePatternDetector {
-  constructor(private readonly graph: MemoryGraph) {}
+  constructor(private readonly graph: GraphQueryRunner) {}
 
   // Find tasks that caused failures on files overlapping with the given paths
   async detectForPaths(filePaths: string[]): Promise<FailurePattern[]> {
     const patterns: FailurePattern[] = [];
 
     for (const filePath of filePaths) {
-      const rows = await this.graph.query(
-        `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
+      const rows = await this.graph.run({
+        cypher: `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
          MATCH (t)-[:MODIFIED]->(file:MemoryNode {kind: 'File', label: $path})
          RETURN t.label AS task, f.properties AS failure, file.label AS file, t.created_at AS ts LIMIT 10`,
-        { path: filePath },
-      ) as Array<{ task: string; failure: string; file: string; ts: string }>;
+        params: { path: filePath },
+      });
 
       for (const r of rows) {
-        const props = tryParse(r.failure);
+        const props = tryParse(r['failure']);
         patterns.push({
-          taskLabel:   r.task,
-          filePaths:   [r.file],
+          taskLabel:   String(r['task'] ?? ''),
+          filePaths:   [String(r['file'] ?? '')],
           failureType: String(props['type'] ?? 'unknown'),
           occurrences: 1,
-          lastSeen:    r.ts,
+          lastSeen:    String(r['ts'] ?? ''),
         });
       }
     }
@@ -42,21 +41,21 @@ export class FailurePatternDetector {
   // Detect failure patterns from similar task descriptions
   async detectForTitle(title: string): Promise<FailurePattern[]> {
     const keywords = title.split(/\s+/).slice(0, 3).join(' ');
-    const rows = await this.graph.query(
-      `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
+    const rows = await this.graph.run({
+      cypher: `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
        WHERE t.label CONTAINS $kw
        RETURN t.label AS task, f.properties AS failure, t.created_at AS ts LIMIT 10`,
-      { kw: keywords },
-    ) as Array<{ task: string; failure: string; ts: string }>;
+      params: { kw: keywords },
+    });
 
     return rows.map((r) => {
-      const props = tryParse(r.failure);
+      const props = tryParse(r['failure']);
       return {
-        taskLabel:   r.task,
+        taskLabel:   String(r['task'] ?? ''),
         filePaths:   [],
         failureType: String(props['type'] ?? 'unknown'),
         occurrences: 1,
-        lastSeen:    r.ts,
+        lastSeen:    String(r['ts'] ?? ''),
       };
     });
   }

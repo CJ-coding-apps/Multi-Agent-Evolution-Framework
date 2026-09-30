@@ -48,7 +48,13 @@ export async function executeToolGated(
   const invokedAt = new Date();
   const start = Date.now();
 
-  if (policyDecision.verdict === 'Deny' || policyDecision.verdict === 'Escalate') {
+  // `Indeterminate` refuses alongside Deny and Escalate. The tool does not run when the policy
+  // could not be evaluated: a rule that was never consulted is not a rule that permitted this.
+  if (
+    policyDecision.verdict === 'Deny' ||
+    policyDecision.verdict === 'Escalate' ||
+    policyDecision.verdict === 'Indeterminate'
+  ) {
     throw new PolicyViolationError(policyDecision);
   }
 
