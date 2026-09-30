@@ -86,7 +86,7 @@ maf run "task" ─────────────────│  Retrieval
 
 | Package | Purpose |
 |---|---|
-| `@maf/types`            | Branded IDs, shared interfaces (DagNode, ToolContext, PolicyPredicate, AttestationBundle, etc.) |
+| `@maf/types`            | Branded IDs, shared interfaces (DagNode, ToolContext, PolicyPredicate, AttestationBundle, etc.), and `resolveInside` path confinement. The one package that is not types-only: `paths.ts` reads the filesystem at run time, deliberately, because the tools and the policy engine both need the primitive and neither may depend on the other |
 | `@maf/blackboard`       | In-process key/value store wired into LCM via `BlackboardToLcmAdapter` |
 | `@maf/lcm` / `@maf/lcm-adapter` | Conversational memory: chunking, summarization, semantic recall |
 | `@maf/memory-graph`     | KuzuDB-backed graph (Run / Task / Failure / ToolInvocation nodes) |

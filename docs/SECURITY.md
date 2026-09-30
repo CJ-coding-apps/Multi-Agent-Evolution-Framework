@@ -93,8 +93,15 @@ function runs again, so a tool called directly, without passing through the poli
 identically. The checked path and the executed path are the same value because both come from that one
 call, which is what stops a spelling from being confined in one place and not the other.
 
-Two things this does **not** cover, so neither is mistaken for it:
+Three things this does **not** cover, so none is mistaken for it:
 
+- **The check and the open are two steps.** `resolveInside` returns a name it has shown to be inside the
+  root; the tool then opens that name. A symlink put in place *between* those two steps — one component
+  swapped after the path was resolved and before the write or read follows it — is not seen by the check,
+  and the operation lands wherever the new link points. Closing it means opening each component with
+  symlink-following disabled and assembling the result from file descriptors, which is out of proportion
+  to what maf needs today: it is a race that requires already running code inside the project, and
+  confinement still holds for every path not modified mid-call.
 - It confines paths to the project root (the directory of `ctx.projectRoot`), not to the files a role is
   *allowed* to touch. Which files inside the root are fair game is a policy question — `pathGlob` and
   `allowedPathGlobs`.

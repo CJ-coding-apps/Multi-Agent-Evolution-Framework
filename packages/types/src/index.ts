@@ -792,6 +792,13 @@ export function estimateTokens(text: string): number {
  * policy engine (or the reverse) to get it. `scripts/check-workspace-deps.mjs` holds the
  * package graph acyclic, so a shared primitive between two packages goes in the package they
  * both already depend on — this one.
+ *
+ * `paths.ts` imports `node:fs`, so this package is no longer types-only: it holds runtime code
+ * that touches the filesystem. That is a deliberate choice, not drift. The alternative was to
+ * put the check in `@maf/tools` (the policy engine would then depend on the tools, which is
+ * backwards) or in `@maf/policy-engine` (the tools would depend on it, inverting the layering
+ * the same way). Both consumers already depend on this package, so the primitive costs no new
+ * edge and no cycle; the price is one runtime module here, and it is accepted.
  */
 export { resolveInside, PathEscapeError } from './paths.js';
 export type { ConfinedPath } from './paths.js';

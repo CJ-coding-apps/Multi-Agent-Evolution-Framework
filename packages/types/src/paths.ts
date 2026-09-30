@@ -77,6 +77,16 @@ const MAX_SYMLINK_HOPS = 40;
  * this.config.cwd` and `projectRoot: this.config.cwd`; the CLI builds it with one `workDir`), so
  * a relative path means what it always meant; the difference would only appear for a caller that
  * put its working directory somewhere other than the boundary it wants enforced.
+ *
+ * **Known limit — the check and the open are two steps.** This returns a *name* that has been
+ * shown to be inside the root; the caller then opens that name. A symlink swapped into the path
+ * between the two — a component replaced after `realpathThrough` read it and before the syscall
+ * that follows it — is not seen here, and the open lands wherever the new link points. Closing it
+ * means opening each component with symlink-following disabled and building the result from
+ * descriptors (`openat`/`O_NOFOLLOW`, or `fs.open` per component), which is out of proportion to
+ * what maf needs today. It is a race an attacker must already be running code in the project to
+ * win, and the confinement still holds against every path that is not changed mid-call. Stated
+ * here rather than implied, and repeated in `docs/SECURITY.md` beside the `.gitignore` note.
  */
 export async function resolveInside(root: string, p: string): Promise<ConfinedPath> {
   const realRoot = await realpath(path.resolve(root));
