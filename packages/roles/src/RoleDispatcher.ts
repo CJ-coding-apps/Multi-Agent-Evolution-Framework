@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
 } from '@maf/types';
@@ -12,6 +10,7 @@ import type { MemoryGraph } from '@maf/memory-graph';
 import type { TranscriptLogger } from '@maf/transcript';
 import type { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import type { ReviewGate, SecurityReviewGate } from '@maf/git-ops';
+import { snapshotDiff, runIsolatedGit, GIT_EMPTY_TREE } from '@maf/git-ops';
 import type { HarnessConfig } from '@maf/harness-config';
 import {
   ProcessorPipeline, createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS,
@@ -20,8 +19,6 @@ import type { ProcessorDeps } from '@maf/processors';
 import { InProcessAgentLoop } from '@maf/tool-loop';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
-
-const execFileAsync = promisify(execFile);
 
 export interface RoleDispatcherConfig {
   adapter:        CliAdapter;
@@ -52,12 +49,34 @@ export interface RoleNodeOutput {
 const MAX_OUTPUT_BYTES        = 2 * 1024 * 1024;  // 2MB per node response
 const MAX_STORED_OUTPUT_CHARS = 64_000;
 
+function gitSaid(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The gate cannot read a diff without a repository, and skipping it would attest an
+ * unreviewed coder diff as reviewed. The message has to say what to do about it, because
+ * the fix is one command the user can run.
+ */
+function notARepository(cwd: string, err: unknown): Error {
+  return new Error(
+    `cannot review the coder diff — no usable git repository at ${cwd} (git said: ${gitSaid(err)}). ` +
+    `The security gate reads the working-tree diff, so it needs a repository to see what the ` +
+    `coder changed; run "git init" in ${cwd} (or run maf inside an existing repository).`,
+  );
+}
+
 export class RoleDispatcher {
   constructor(private readonly config: RoleDispatcherConfig) {}
 
   async runNode(node: DagNode): Promise<Record<string, BlackboardValue>> {
     const role = this.config.roles.getRole(node.agentRole);
     const taskId = makeTaskId(node.id);
+
+    // Captured BEFORE the node does anything, and before any model call is spent. A
+    // coder that commits its own work would otherwise diff clean against HEAD, so the
+    // security gate would be handed an empty diff and call the change reviewed.
+    const startCommit = role.role === 'coder' ? await this.startCommit() : undefined;
 
     await this.config.transcript.append(
       'user',
@@ -107,7 +126,7 @@ export class RoleDispatcher {
     let outputForMemory: string;
     const ranInProcess = wantsInProcess && canInProcess;
     if (ranInProcess) {
-      outputForMemory = await this.runInProcess(node, role, invokeOpts, taskId);
+      outputForMemory = await this.runInProcess(node, role, invokeOpts, taskId, startCommit);
     } else {
       const result = await adapter.invoke(invokeOpts);
       outputForMemory = result.output.slice(0, MAX_STORED_OUTPUT_CHARS);
@@ -116,10 +135,11 @@ export class RoleDispatcher {
     await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
     await this.config.lcmBridge.flush();
 
-    if (role.role === 'coder' && !ranInProcess) {
+    if (startCommit !== undefined && !ranInProcess) {
       // In-process coder runs the security gate at task_end via SecurityGateProcessor;
-      // CLI path (including adapter-capability fallback) runs it here.
-      await this.runPostCoderGates(node, taskId);
+      // CLI path (including adapter-capability fallback) runs it here. `startCommit !==
+      // undefined` and `role.role === 'coder'` are the same condition by construction.
+      await this.runPostCoderGates(node, startCommit);
     }
 
     return { output: { kind: 'string', value: outputForMemory } };
@@ -135,6 +155,7 @@ export class RoleDispatcher {
     role: ReturnType<RoleRegistry['getRole']>,
     invokeOpts: AdapterInvokeOptions,
     taskId: ReturnType<typeof makeTaskId>,
+    startCommit: string | undefined,
   ): Promise<string> {
     const adapter = this.config.adapter;
     if (!isTurnAdapter(adapter)) throw new Error('unreachable: gated by caller');
@@ -145,7 +166,11 @@ export class RoleDispatcher {
       : [...DEFAULT_BUNDLE_REFS];
     const deps: ProcessorDeps = {
       transcript: this.config.transcript,
-      securityRunner: () => this.runPostCoderGates(node, taskId),
+      // The processor invokes this only for coder events, which are exactly the events
+      // that have a start commit; a node without one gets no runner at all.
+      ...(startCommit !== undefined
+        ? { securityRunner: () => this.runPostCoderGates(node, startCommit) }
+        : {}),
     };
     const pipeline = ProcessorPipeline.build(refs, createDefaultProcessorRegistry(), deps);
 
@@ -183,16 +208,38 @@ export class RoleDispatcher {
     return result.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
   }
 
-  private async runPostCoderGates(node: DagNode, _taskId: ReturnType<typeof makeTaskId>): Promise<void> {
-    // The CLI run path does not currently create per-task worktrees, so we read
-    // the working-tree diff against HEAD via git instead of WorktreeManager.harvest.
-    let diff = '';
+  /**
+   * The commit the node is about to start from. Diffing against HEAD instead would miss
+   * everything an agent that commits its own work changed — the gate would be handed an
+   * empty diff and would call the change reviewed, which is the same fail-open reached by
+   * another route.
+   *
+   * A repository with no commits yet is fine: the empty tree is a valid diff base, so the
+   * first `git init` + first coder change still produces a reviewable diff. Only an
+   * actual absence of a repository is an error.
+   */
+  private async startCommit(): Promise<string> {
     try {
-      const { stdout } = await execFileAsync('git', ['diff', 'HEAD'], { cwd: this.config.cwd, maxBuffer: 8 * 1024 * 1024 });
-      diff = stdout;
-    } catch {
-      return;
+      const { stdout } = await runIsolatedGit(this.config.cwd, ['rev-parse', 'HEAD']);
+      return stdout.trim();
+    } catch (err: unknown) {
+      try {
+        await runIsolatedGit(this.config.cwd, ['rev-parse', '--git-dir']);
+      } catch {
+        throw notARepository(this.config.cwd, err);
+      }
+      return GIT_EMPTY_TREE;
     }
+  }
+
+  private async runPostCoderGates(node: DagNode, startCommit: string): Promise<void> {
+    // The CLI run path does not currently create per-task worktrees, so we read the diff
+    // from `git` instead of WorktreeManager.harvest. `snapshotDiff` stages the whole
+    // working tree into a throwaway index, so a file the coder created without staging it
+    // is reviewed like any other change — see packages/git-ops/src/SnapshotDiff.ts.
+    // A failure here is an error, never an empty diff: "we could not look" and "nothing
+    // changed" must not be the same verdict.
+    const diff = await snapshotDiff(this.config.cwd, startCommit);
     if (!diff.trim()) return;
 
     const securityGate = this.config.securityGate;

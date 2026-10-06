@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
 import type {
-  Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy,
+  Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
+  GraphQueryRunner, GraphRow,
 } from '@maf/types';
 import { makeNodeId } from '@maf/types';
-import type { MemoryGraph } from '@maf/memory-graph';
 import type { LcmEngine } from '@maf/lcm';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
 
@@ -13,12 +13,18 @@ export interface RoleCatalogEntry {
 }
 
 export interface PlannerConfig {
-  graph:        MemoryGraph;
+  // The backend-neutral query seam, not the Kùzu package: the planner reads recall context and
+  // never writes. A different backend is then a new `GraphQueryRunner`, not an edit here.
+  graph:        GraphQueryRunner;
   lcm:          LcmEngine;
   injector:     GraphAwareInjector;
-  defaultRole?: string;
+  /**
+   * The role set in force. Required: it supplies both the default role and the answer to
+   * "is this name real?", and the planner has no business inventing either. A role the
+   * model names that the set does not define rejects the plan (see `resolveNodeRole`).
+   */
+  roles:        RoleResolver;
   roleCatalog?: RoleCatalogEntry[];
-  validRoles?:  ReadonlySet<string>;
   // Injected: calls the underlying adapter to generate plan text
   generatePlan(systemPrompt: string, userPrompt: string): Promise<string>;
 }
@@ -59,7 +65,7 @@ export class RetrievalAugmentedPlanner {
   }
 
   private buildPlanningInstructions(): string {
-    const defaultRole = this.config.defaultRole ?? 'coder';
+    const defaultRole = this.config.roles.defaultRole;
     const catalog = this.config.roleCatalog ?? [];
     if (catalog.length === 0) return PLANNING_INSTRUCTIONS_BASE(defaultRole);
     const rolesBlock = catalog.map((r) => `- ${r.role}${r.role === defaultRole ? ' (default)' : ''}: ${r.description}`).join('\n');
@@ -68,16 +74,22 @@ export class RetrievalAugmentedPlanner {
 
   private async getFailureContext(title: string): Promise<string> {
     const keywords = title.split(' ').slice(0, 3).join(' ');
-    const rows = await this.config.graph.query(
-      `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
+    // Recall is a bonus, never a precondition. The tolerance is written here rather than implied
+    // by a query method that answered every failure with `[]` — that made "the graph is down" and
+    // "we have no history" the same input to the prompt.
+    let rows: GraphRow[] = [];
+    try {
+      rows = await this.config.graph.run({
+        cypher: `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
        WHERE t.label CONTAINS $kw
        RETURN t.label AS task, f.properties AS failure LIMIT 5`,
-      { kw: keywords },
-    ) as Array<{ task: string; failure: string }>;
+        params: { kw: keywords },
+      });
+    } catch { return ''; }
 
     if (rows.length === 0) return '';
 
-    const items = rows.map((r) => `- Task "${r.task}" → ${r.failure}`).join('\n');
+    const items = rows.map((r) => `- Task "${String(r['task'] ?? '')}" → ${String(r['failure'] ?? '')}`).join('\n');
     return `<past-failures>\nThese similar tasks failed previously — avoid repeating these patterns:\n${items}\n</past-failures>`;
   }
 
@@ -91,14 +103,23 @@ export class RetrievalAugmentedPlanner {
   }
 
   private parsePlan(planText: string, runId: RunId, task?: TaskDescription): Dag {
-    const defaultRole = this.config.defaultRole ?? 'coder';
+    const defaultRole = this.config.roles.defaultRole;
     // Parse JSON plan block if present, otherwise create single-node DAG
     const jsonMatch = /```json\n([\s\S]+?)\n```/.exec(planText);
     if (jsonMatch?.[1]) {
+      let spec: DagSpec;
       try {
-        const spec = JSON.parse(jsonMatch[1]) as DagSpec;
-        return specToDag(spec, runId, task, defaultRole, this.config.validRoles);
-      } catch { /* fall through to default */ }
+        spec = JSON.parse(jsonMatch[1]) as DagSpec;
+      } catch {
+        // Not JSON: nothing was planned, so the single-node fallback below is the plan.
+        spec = { nodes: [] };
+      }
+      if (spec.nodes?.length) {
+        // Deliberately OUTSIDE the try: a spec that parsed but names an undefined role is
+        // a plan the model got wrong, and it is rejected rather than re-planned as a
+        // one-node default. Swallowing it here was how the old fallback reached `coder`.
+        return specToDag(spec, runId, task, this.config.roles);
+      }
     }
 
     // Default: single "execute" node — pass task description so executor has context
@@ -137,14 +158,12 @@ function specToDag(
   spec: DagSpec,
   runId: RunId,
   task: TaskDescription | undefined,
-  defaultRole: string,
-  validRoles?: ReadonlySet<string>,
+  roles: RoleResolver,
 ): Dag {
   const nodes = new Map<NodeId, DagNode>();
   for (const n of spec.nodes) {
     const id = makeNodeId(n.id);
-    const requested = n.agentRole;
-    const role = resolveRoleOrWarn(requested, defaultRole, validRoles);
+    const role = resolveRole(n.agentRole, roles, n.id);
     nodes.set(id, {
       id,
       label:        n.label,
@@ -166,16 +185,29 @@ function specToDag(
   return { id: crypto.randomUUID(), runId, nodes, edges, config: DEFAULT_DAG_CONFIG };
 }
 
-function resolveRoleOrWarn(
+/**
+ * The role a planned node runs as.
+ *
+ * The warning this replaces read `[planner] unknown agentRole "X" — falling back to
+ * "coder"`, and the fallback was the same object `RoleRegistry.getRole` handed out for an
+ * unrecognised name: the default **writer**. So the warning path and the privilege path
+ * were the same path. A plan that names a role the set does not define is refused, and the
+ * rejection lists the roles that do exist so the next attempt can be right.
+ */
+function resolveRole(
   requested: string | undefined,
-  defaultRole: string,
-  validRoles: ReadonlySet<string> | undefined,
-): string {
-  if (!requested) return defaultRole;
-  if (!validRoles) return requested;
-  if (validRoles.has(requested)) return requested;
-  console.warn(`[planner] unknown agentRole "${requested}" — falling back to "${defaultRole}"`);
-  return defaultRole;
+  roles: RoleResolver,
+  nodeId: string,
+): RoleName {
+  if (requested === undefined || requested === '') return roles.defaultRole;
+  const resolved = roles.resolveRole(requested);
+  if (!resolved.ok) {
+    throw new Error(
+      `planner: node "${nodeId}" asks for unknown agentRole "${requested}". ` +
+      `Known roles: ${resolved.error.known.join(', ')}.`,
+    );
+  }
+  return resolved.value;
 }
 
 const DEFAULT_RETRY: RetryPolicy = { maxAttempts: 3, backoffMs: 1000, backoffFactor: 2, jitterMs: 500 };

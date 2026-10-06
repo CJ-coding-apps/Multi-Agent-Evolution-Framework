@@ -104,7 +104,12 @@ export function registerRunCommand(program: Command): void {
       }
       const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), undefined, harness.sha);
 
-      const securityRole = roles.hasRole('security') ? roles.getRole('security') : undefined;
+      // `security` may or may not be one of this set's roles; `resolve` answers that without
+      // minting the name. The old `hasRole` + `getRole` pair asked twice, and `getRole` answered
+      // an unrecognised name with the *default* role — so a role set without `security` would
+      // have handed the writer's prompt to the security gate.
+      const securityResolved = roles.resolve('security');
+      const securityRole = securityResolved.ok ? securityResolved.value.config : undefined;
       const securityPrompt = securityRole
         ? (await roles.loadPrompt(securityRole))
         : SECURITY_REVIEW_FALLBACK_PROMPT;
@@ -116,12 +121,13 @@ export function registerRunCommand(program: Command): void {
       });
 
       const injector = new GraphAwareInjector({ graph, lcm, maxNodes: 40, tokenBudget: 4096 });
-      const validRoles = new Set(roles.list().map((r) => r.role));
       const planner  = new RetrievalAugmentedPlanner({
         graph, lcm, injector,
-        defaultRole: roles.getDefault().role,
+        // The registry is the role set in force: it supplies the default role AND the answer to
+        // "is this name real?". The planner used to carry `defaultRole` plus a `validRoles` set
+        // and *warn* before assigning the default, which was the writer.
+        roles,
         roleCatalog: roles.catalog(),
-        validRoles,
         generatePlan: async (systemPrompt, userPrompt) => {
           const result = await adapter.invoke({
             prompt: userPrompt, systemPrompt,
@@ -166,13 +172,34 @@ export function registerRunCommand(program: Command): void {
       const dagRunner = new DagRunner();
       console.log(`[maf] running DAG with ${dag.nodes.size} node(s)...`);
 
-      await dagRunner.run({
+      const outcome = await dagRunner.run({
         dag,
         board,
         executor: (node) => dispatcher.runNode(node),
+        // The scheduler serializes writers against each other because two agents editing one
+        // tree corrupt it. Deciding that from the role config — rather than treating every
+        // node as a writer — is what lets two readers overlap; treating a reader as a writer
+        // only costs concurrency, but treating a writer as a reader costs the tree.
+        isWriter: (node) => roles.writesToWorkingTree(node.agentRole, baseTools),
         onNodeStart: (id) => console.log(`[maf] → node ${id} started`),
         onNodeEnd:   (id, status) => console.log(`[maf] ← node ${id} ${status}`),
       });
+
+      // Every failed node leaves a Failure node behind. Until now only the security
+      // gate wrote one, so no other kind of failure left a trace in the graph.
+      for (const node of outcome.nodes ?? []) {
+        if (node.status !== 'Failed') continue;
+        await graph.addNode({
+          kind:       'Failure',
+          label:      node.nodeId,
+          properties: {
+            nodeId: node.nodeId,
+            role:   dag.nodes.get(node.nodeId)?.agentRole ?? 'unknown',
+            error:  node.error ?? 'unknown',
+          },
+          runId,
+        });
+      }
 
       // Bundle attestation — the harness IS the build's config source (signed):
       // configSource.uri points at the on-disk harness file, digest is its sha.
@@ -187,10 +214,23 @@ export function registerRunCommand(program: Command): void {
           environment: {},
         },
         [],
+        outcome,
       );
 
       console.log(`[maf] done. Attestation: ${path.join(mafDir, 'attestations', runId + '.bundle.json')}`);
       console.log(`[maf] signature: ${bundle.signature.slice(0, 16)}...`);
+
+      // The bundle is written first so the failed run is still attested; the exit
+      // code is what callers and CI actually branch on.
+      if (outcome.status !== 'Succeeded') {
+        const failed = (outcome.nodes ?? [])
+          .filter((n) => n.status === 'Failed')
+          .map((n) => n.nodeId);
+        throw new Error(
+          `run did not succeed (${outcome.status})` +
+          ` — failed: [${failed.join(', ')}], never ran: [${outcome.unscheduled.join(', ')}]`,
+        );
+      }
 
       graph.close();
       lcm.close();

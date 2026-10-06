@@ -12,6 +12,7 @@ function fakeTool(id: string, name: string, description: string): ToolPlugin {
     async execute(_i: Record<string, unknown>, _c: ToolContext): Promise<ToolResult> {
       return { stdout: '', stderr: '', exitCode: 0, duration: 0, metadata: {} };
     },
+    declaredPaths(): string[] { return []; },
   };
 }
 

@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { Command } from 'commander';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { makeRunId } from '@maf/types';
+import type { RunStatus } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import {
   GoldenRunner, ScoreRecorder, seesawDecision,
@@ -11,6 +12,22 @@ import {
 import type { GoldenSuiteResult, TaskDispatcher } from '@maf/eval-harness';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
+
+/**
+ * The golden suite's execution verdict: did every attempt run to its verifiers?
+ *
+ * It is deliberately NOT the score. A harness that ran 10 tasks and solved 9 is a
+ * successful measurement of a 9/10 harness, and recording it as "Failed" would tell the
+ * evolver nothing about which of the two facts happened — nearly every real run would be
+ * a recorded failure, so the outcome would carry no information at all. "Did it run" and
+ * "what did it score" are separate questions; the score is the `goldens` payload, which
+ * carries `solvedTaskIds` and `total`.
+ */
+export function goldenRunStatus(result: GoldenSuiteResult): RunStatus {
+  return result.tasks.some((t) => t.attempts.some((a) => a.error !== undefined))
+    ? 'Failed'
+    : 'Succeeded';
+}
 
 interface GoldenOpts {
   adapter: string; model?: string; dir: string; corpus: string; harness?: string;
@@ -45,10 +62,13 @@ export function registerGoldensCommand(program: Command): void {
         cwd, mafDir, policyPath: path.resolve(cwd, opts.policy), adapter, runId,
         harnessSha: harness.sha, ...(opts.model ? { model: opts.model } : {}),
       });
-      // Role-driven security prompt if the harness defines a security role
+      // Role-driven security prompt if the harness defines a security role. `resolve` answers
+      // that question directly; `hasRole` + `getRole` asked twice and `getRole` would have
+      // handed back the default role for a name the harness does not define.
       {
         const probe = stack.rolesFor(harness);
-        if (probe.hasRole('security')) stack.securityPrompt = await probe.loadPrompt(probe.getRole('security'));
+        const security = probe.resolve('security');
+        if (security.ok) stack.securityPrompt = await probe.loadPrompt(security.value.config);
       }
 
       const dispatch: TaskDispatcher = async (task, workDir, { timeoutMs, temperature }) =>
@@ -92,6 +112,12 @@ export function registerGoldensCommand(program: Command): void {
           environment: {},
         },
         [],
+        // The golden suite is not a DAG, so the verdict is its own — see goldenRunStatus.
+        // The score travels in the payload below, not in the outcome above it.
+        {
+          status: goldenRunStatus(result),
+          unscheduled: [],
+        },
         {
           harnessSha: harness.sha, harnessId: harness.id,
           solvedTaskIds: result.solvedTaskIds, total: result.tasks.length, ranAt: result.ranAt,

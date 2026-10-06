@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
-import type { RunId, MergeReport, MemoryNodeKind } from '@maf/types';
+import type { RunId, MergeReport, MemoryNodeKind, GraphRow } from '@maf/types';
 import type { KuzuDriver } from './KuzuDriver.js';
+import { intLiteral } from './cypherText.js';
 
-function esc(s: string): string { return s.replace(/'/g, "''"); }
 function tryParse(s: string): Record<string, unknown> {
   try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; }
 }
@@ -17,48 +17,60 @@ export class RunMerger {
     for (const sourceRunId of sourceRunIds) {
       let sourceNodes: Array<{ kind: MemoryNodeKind; label: string; properties: Record<string, unknown> }> = [];
       try {
-        const r = await this.driver.query(
-          `MATCH (n:MemoryNode {run_id: '${esc(sourceRunId)}'}) RETURN n LIMIT 1000`
-        );
-        sourceNodes = (await r.getAll() as Array<Record<string, unknown>>).map(rowToNode);
+        const rows = await this.driver.run({
+          cypher: `MATCH (n:MemoryNode {run_id: $runId}) RETURN n LIMIT ${intLiteral(1000, 'limit')}`,
+          params: { runId: sourceRunId },
+        });
+        sourceNodes = rows.map(rowToNode);
       } catch { continue; }
 
       for (const node of sourceNodes) {
         try {
-          const ex = await this.driver.query(
-            `MATCH (n:MemoryNode {kind: '${esc(node.kind)}', label: '${esc(node.label)}', run_id: '${esc(targetRunId)}'}) RETURN n.id LIMIT 1`
-          );
-          if ((await ex.getAll()).length > 0) { conflicts.push(`${node.kind}:${node.label}`); continue; }
+          const ex = await this.driver.run({
+            cypher: `MATCH (n:MemoryNode {kind: $kind, label: $label, run_id: $runId}) RETURN n.id LIMIT 1`,
+            params: { kind: node.kind, label: node.label, runId: targetRunId },
+          });
+          if (ex.length > 0) { conflicts.push(`${node.kind}:${node.label}`); continue; }
         } catch { /* no conflict */ }
 
         const id  = crypto.randomUUID();
         const now = new Date().toISOString();
-        await this.driver.execute(
-          `CREATE (:MemoryNode {id: '${esc(id)}', kind: '${esc(node.kind)}', label: '${esc(node.label)}', properties: '${esc(JSON.stringify(node.properties))}', run_id: '${esc(targetRunId)}', created_at: '${now}', updated_at: '${now}'})`
-        );
+        await this.driver.run({
+          cypher: `CREATE (:MemoryNode {id: $id, kind: $kind, label: $label, properties: $properties, run_id: $runId, created_at: $now, updated_at: $now})`,
+          params: {
+            id, kind: node.kind, label: node.label,
+            properties: JSON.stringify(node.properties), runId: targetRunId, now,
+          },
+        });
         nodesCreated++;
       }
 
       // Provenance node
       const mergeNodeId = crypto.randomUUID();
       const now = new Date().toISOString();
-      await this.driver.execute(
-        `CREATE (:MemoryNode {id: '${esc(mergeNodeId)}', kind: 'Run', label: '${esc(sourceRunId)}', properties: '${esc(JSON.stringify({ mergedFrom: sourceRunId, mergedAt: now }))}', run_id: '${esc(targetRunId)}', created_at: '${now}', updated_at: '${now}'})`
-      );
+      await this.driver.run({
+        cypher: `CREATE (:MemoryNode {id: $id, kind: 'Run', label: $label, properties: $properties, run_id: $runId, created_at: $now, updated_at: $now})`,
+        params: {
+          id: mergeNodeId, label: sourceRunId,
+          properties: JSON.stringify({ mergedFrom: sourceRunId, mergedAt: now }),
+          runId: targetRunId, now,
+        },
+      });
       nodesCreated++;
 
       try {
-        const tr = await this.driver.query(
-          `MATCH (n:MemoryNode {kind: 'Run', run_id: '${esc(targetRunId)}'}) RETURN n.id LIMIT 1`
-        );
-        const rows = await tr.getAll() as Array<Record<string, unknown>>;
+        const rows = await this.driver.run({
+          cypher: `MATCH (n:MemoryNode {kind: 'Run', run_id: $runId}) RETURN n.id LIMIT 1`,
+          params: { runId: targetRunId },
+        });
         if (rows[0]) {
           const targetNodeId = String(rows[0]['n.id'] ?? '');
           const edgeId = crypto.randomUUID();
-          await this.driver.execute(
-            `MATCH (a:MemoryNode {id: '${esc(mergeNodeId)}'}), (b:MemoryNode {id: '${esc(targetNodeId)}'})`
-            + ` CREATE (a)-[:MemoryEdge {id: '${esc(edgeId)}', relation: 'MERGED_FROM', weight: 1, metadata: '{}', created_at: '${now}'}]->(b)`
-          );
+          await this.driver.run({
+            cypher: `MATCH (a:MemoryNode {id: $fromId}), (b:MemoryNode {id: $toId})`
+              + ` CREATE (a)-[:MemoryEdge {id: $id, relation: 'MERGED_FROM', weight: 1, metadata: '{}', created_at: $now}]->(b)`,
+            params: { fromId: mergeNodeId, toId: targetNodeId, id: edgeId, now },
+          });
           edgesCreated++;
         }
       } catch { /* skip edge */ }
@@ -68,8 +80,8 @@ export class RunMerger {
   }
 }
 
-function rowToNode(r: Record<string, unknown>): { kind: MemoryNodeKind; label: string; properties: Record<string, unknown> } {
-  const n = (r['n'] ?? r) as Record<string, unknown>;
+function rowToNode(r: GraphRow): { kind: MemoryNodeKind; label: string; properties: Record<string, unknown> } {
+  const n = (r['n'] ?? r) as GraphRow;
   return {
     kind:       String(n['kind'] ?? '') as MemoryNodeKind,
     label:      String(n['label'] ?? ''),

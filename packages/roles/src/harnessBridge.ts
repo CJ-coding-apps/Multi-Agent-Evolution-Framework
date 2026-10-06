@@ -2,6 +2,7 @@ import type { HarnessRoleConfig, HarnessRoleSet } from '@maf/harness-config';
 import { HarnessConfigError } from '@maf/harness-config';
 import { makeToolId } from '@maf/types';
 import type { RoleConfig, RoleSet } from './RoleConfig.js';
+import { defineRoleName } from './RoleConfig.js';
 
 /**
  * Harness → roles boundary (parse at the boundary, §1 of the constitution):
@@ -11,7 +12,7 @@ import type { RoleConfig, RoleSet } from './RoleConfig.js';
 export function roleSetFromHarness(roleSet: HarnessRoleSet): RoleSet {
   return {
     version: 1,
-    defaultRole: roleSet.defaultRole,
+    defaultRole: defineRoleName(roleSet.defaultRole),
     roles: roleSet.roles.map(roleConfigFromHarness),
   };
 }
@@ -27,7 +28,7 @@ function roleConfigFromHarness(r: HarnessRoleConfig): RoleConfig {
   if (r.maxToolIterations !== undefined && r.maxToolIterations <= 0)
     throw new HarnessConfigError(`role "${r.role}": maxToolIterations must be positive`);
   return {
-    role: r.role,
+    role: defineRoleName(r.role),
     allowedTools: r.allowedTools.map(makeToolId),
     ...(r.description !== undefined ? { description: r.description } : {}),
     ...(r.systemPrompt !== undefined ? { systemPrompt: r.systemPrompt } : {}),

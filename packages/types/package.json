@@ -12,9 +12,11 @@
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test dist/__tests__/*.test.js"
   },
   "devDependencies": {
-    "typescript": "*"
+    "typescript": "*",
+    "@types/node": "*"
   }
 }

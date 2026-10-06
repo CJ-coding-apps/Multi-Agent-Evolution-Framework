@@ -1,7 +1,7 @@
-import type { MemoryNode, MemoryEdge, MemorySubgraph, MemoryNodeKind } from '@maf/types';
+import type { MemoryNode, MemoryEdge, MemorySubgraph, MemoryNodeKind, GraphRow } from '@maf/types';
 import type { KuzuDriver } from './KuzuDriver.js';
+import { intLiteral, idListParams } from './cypherText.js';
 
-function esc(s: string): string { return s.replace(/'/g, "''"); }
 function tryParse(s: string): Record<string, unknown> {
   try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; }
 }
@@ -15,8 +15,11 @@ export class SubgraphQuery {
 
     let allNodes: MemoryNode[] = [];
     try {
-      const result = await this.driver.query(`MATCH (n:MemoryNode) RETURN n LIMIT ${maxNodes * 3}`);
-      allNodes = (await result.getAll() as Array<Record<string, unknown>>).map(rowToNode);
+      const rows = await this.driver.run({
+        cypher: `MATCH (n:MemoryNode) RETURN n LIMIT ${intLiteral(maxNodes * 3, 'maxNodes')}`,
+        params: {},
+      });
+      allNodes = rows.map(rowToNode);
     } catch { return empty(taskContext); }
 
     const scored: Array<[MemoryNode, number]> = allNodes
@@ -29,17 +32,18 @@ export class SubgraphQuery {
 
     const nodes = scored.map(([n]) => n);
     const relevanceScores = new Map(scored.map(([n, s]) => [n.id, s]));
-    const nodeIds = nodes.map((n) => `'${esc(n.id)}'`).join(',');
+    const ids = idListParams('nid', nodes.map((n) => n.id));
 
     let edges: MemoryEdge[] = [];
     try {
-      const edgeResult = await this.driver.query(
-        `MATCH (a:MemoryNode)-[e:MemoryEdge]->(b:MemoryNode)
-         WHERE a.id IN [${nodeIds}] AND b.id IN [${nodeIds}]
+      const edgeRows = await this.driver.run({
+        cypher: `MATCH (a:MemoryNode)-[e:MemoryEdge]->(b:MemoryNode)
+         WHERE a.id IN [${ids.placeholders}] AND b.id IN [${ids.placeholders}]
          RETURN e.id AS eid, e.relation AS rel, e.weight AS w, e.metadata AS meta, e.created_at AS cat, a.id AS from_id, b.id AS to_id
-         LIMIT ${maxNodes * 2}`,
-      );
-      edges = (await edgeResult.getAll() as Array<Record<string, unknown>>).map(rowToEdge);
+         LIMIT ${intLiteral(maxNodes * 2, 'maxNodes')}`,
+        params: ids.params,
+      });
+      edges = edgeRows.map(rowToEdge);
     } catch { /* edges are best-effort */ }
 
     return { nodes, edges, queryContext: taskContext, relevanceScores };
@@ -47,14 +51,17 @@ export class SubgraphQuery {
 
   async expand(seedIds: string[], hops: number, maxNodes: number): Promise<MemorySubgraph> {
     if (seedIds.length === 0) return empty('');
-    const ids = seedIds.map((id) => `'${esc(id)}'`).join(',');
+    const ids = idListParams('seed', seedIds);
     try {
-      const result = await this.driver.query(
-        `MATCH (seed:MemoryNode)-[*1..${hops}]-(n:MemoryNode)
-         WHERE seed.id IN [${ids}]
-         RETURN DISTINCT n LIMIT ${maxNodes}`,
-      );
-      const nodes = (await result.getAll() as Array<Record<string, unknown>>).map(rowToNode);
+      const rows = await this.driver.run({
+        // A variable-length path's bounds cannot be parameters in any Cypher dialect, so the hop
+        // count is a validated literal, not an interpolated value.
+        cypher: `MATCH (seed:MemoryNode)-[*1..${intLiteral(hops, 'hops')}]-(n:MemoryNode)
+         WHERE seed.id IN [${ids.placeholders}]
+         RETURN DISTINCT n LIMIT ${intLiteral(maxNodes, 'maxNodes')}`,
+        params: ids.params,
+      });
+      const nodes = rows.map(rowToNode);
       const relevanceScores = new Map(nodes.map((n, i) => [n.id, 1 - i / nodes.length]));
       return { nodes, edges: [], queryContext: '', relevanceScores };
     } catch { return empty(''); }
@@ -70,8 +77,8 @@ function empty(ctx: string): MemorySubgraph {
   return { nodes: [], edges: [], queryContext: ctx, relevanceScores: new Map() };
 }
 
-function rowToNode(r: Record<string, unknown>): MemoryNode {
-  const n = (r['n'] ?? r) as Record<string, unknown>;
+function rowToNode(r: GraphRow): MemoryNode {
+  const n = (r['n'] ?? r) as GraphRow;
   return {
     id:         String(n['id'] ?? ''),
     kind:       String(n['kind'] ?? '') as MemoryNodeKind,
@@ -83,7 +90,7 @@ function rowToNode(r: Record<string, unknown>): MemoryNode {
   };
 }
 
-function rowToEdge(r: Record<string, unknown>): MemoryEdge {
+function rowToEdge(r: GraphRow): MemoryEdge {
   return {
     id:        String(r['eid'] ?? ''),
     fromId:    String(r['from_id'] ?? ''),

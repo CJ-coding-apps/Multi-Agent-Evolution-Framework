@@ -3,13 +3,15 @@
   "compilerOptions": {
     "composite": true,
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
   },
   "references": [
     { "path": "../types" },
     { "path": "../harness-config" },
     { "path": "../memory-graph" },
-    { "path": "../attestation" }
+    { "path": "../attestation" },
+    { "path": "../git-ops" }
   ],
   "include": ["src"]
 }

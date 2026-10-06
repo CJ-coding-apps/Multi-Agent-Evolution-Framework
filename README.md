@@ -86,7 +86,7 @@ maf run "task" ─────────────────│  Retrieval
 
 | Package | Purpose |
 |---|---|
-| `@maf/types`            | Branded IDs, shared interfaces (DagNode, ToolContext, PolicyPredicate, AttestationBundle, etc.) |
+| `@maf/types`            | Branded IDs, shared interfaces (DagNode, ToolContext, PolicyPredicate, AttestationBundle, etc.), and `resolveInside` path confinement. The one package that is not types-only: `paths.ts` reads the filesystem at run time, deliberately, because the tools and the policy engine both need the primitive and neither may depend on the other |
 | `@maf/blackboard`       | In-process key/value store wired into LCM via `BlackboardToLcmAdapter` |
 | `@maf/lcm` / `@maf/lcm-adapter` | Conversational memory: chunking, summarization, semantic recall |
 | `@maf/memory-graph`     | KuzuDB-backed graph (Run / Task / Failure / ToolInvocation nodes) |
@@ -142,7 +142,7 @@ All configuration lives in a `.maf/` directory inside the target repo. None of t
 | `.maf/prompts/*.md` | Role-specific system prompts (referenced by `roles.yaml` via `promptFile`) |
 | `.maf/config.yaml`  | Adapter defaults, model overrides (read by adapter resolvers) |
 
-See [docs/ROLES.md](docs/ROLES.md) for the role system and [docs/POLICY.md](docs/POLICY.md) for the policy predicate reference.
+See [docs/ROLES.md](docs/ROLES.md) for the role system, [docs/POLICY.md](docs/POLICY.md) for the policy predicate reference, and [docs/SECURITY.md](docs/SECURITY.md) for what the security gate reads — including what it does not.
 
 ## Run output
 

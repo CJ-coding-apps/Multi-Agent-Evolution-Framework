@@ -1,14 +1,11 @@
 import { cp, mkdtemp, rm, readFile } from 'node:fs/promises';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { snapshotDiff, runIsolatedGit } from '@maf/git-ops';
 import type { GoldenTask } from './GoldenTask.js';
 import { assertGoldenCorpus } from './GoldenTask.js';
 import { runVerifiers } from './verifiers.js';
 import type { VerifierContext, VerifierOutcome } from './verifiers.js';
-
-const execFileAsync = promisify(execFile);
 
 export interface AttemptResult {
   attempt: number;
@@ -102,11 +99,14 @@ export class GoldenRunner {
     const workDir = path.join(workRoot, 'repo');
     try {
       await cp(path.join(this.opts.corpusRoot, task.repoFixture), workDir, { recursive: true });
+      const baseline = await initBaselineRepo(workDir);
       const output = await this.opts.dispatch(task, workDir, {
         temperature: this.opts.temperature ?? 0,
         timeoutMs: this.opts.timeoutMs ?? 120_000,
       });
-      const diff = await computeDiff(workDir);
+      // The base is the RECORDED baseline, not HEAD: an agent that commits its own work would
+      // diff clean against HEAD, and an empty diff scores every security verifier clean.
+      const diff = await snapshotDiff(workDir, baseline);
       const outcomes = await runVerifiers(task.verifiers, {
         workDir, output, diff, corpusRoot: this.opts.corpusRoot,
         ...(this.opts.securityScore ? { securityScore: this.opts.securityScore } : {}),
@@ -124,17 +124,46 @@ export class GoldenRunner {
   }
 }
 
-/** Working-tree diff vs fixture initial state; empty when not a git repo (tasks may self-init). */
-async function computeDiff(workDir: string): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], { cwd: workDir });
-    if (!stdout.trim()) return '';
-    const diff = await execFileAsync('git', ['diff', 'HEAD'], { cwd: workDir, maxBuffer: 8 * 1024 * 1024 });
-    const untracked = stdout.split('\n').filter((l) => l.startsWith('?? ')).map((l) => `new file: ${l.slice(3)}`);
-    return [diff.stdout, ...untracked].filter(Boolean).join('\n');
-  } catch {
-    return '';
-  }
+// A baseline the runner creates itself, with a fixed identity and timestamp so the
+// same fixture produces the same commit on every machine. Fixtures therefore need no
+// .git of their own — which they cannot have anyway: git refuses to track files inside
+// a directory that contains one.
+const BASELINE_IDENTITY = {
+  name:  'maf golden baseline',
+  email: 'goldens@maf.invalid',
+  date:  '1970-01-01T00:00:00Z',
+  message: 'golden fixture baseline',
+};
+
+/**
+ * Every git call the runner makes adds the fixed identity on top of `runIsolatedGit`, which
+ * already switches the host's configuration off — a global `core.hooksPath`, `init.templateDir`
+ * or `diff.external` would otherwise run inside a golden repo, and the score would depend on
+ * whose machine it ran on. The branch is pinned so a host `init.defaultBranch` cannot change
+ * the baseline either.
+ */
+function gitIn(workDir: string) {
+  return (args: string[]) => runIsolatedGit(workDir, args, {
+    env: {
+      GIT_AUTHOR_NAME:     BASELINE_IDENTITY.name,
+      GIT_AUTHOR_EMAIL:    BASELINE_IDENTITY.email,
+      GIT_COMMITTER_NAME:  BASELINE_IDENTITY.name,
+      GIT_COMMITTER_EMAIL: BASELINE_IDENTITY.email,
+      GIT_AUTHOR_DATE:     BASELINE_IDENTITY.date,
+      GIT_COMMITTER_DATE:  BASELINE_IDENTITY.date,
+    },
+  });
+}
+
+/** Commits the fixture as it was copied, and returns that commit — the diff base. */
+async function initBaselineRepo(workDir: string): Promise<string> {
+  const git = gitIn(workDir);
+  await git(['-c', 'init.defaultBranch=maf-baseline', 'init', '-q']);
+  await git(['add', '-A']);
+  // --allow-empty: a copied fixture may already carry a repo with this tree committed.
+  await git(['-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', BASELINE_IDENTITY.message]);
+  const { stdout } = await git(['rev-parse', 'HEAD']);
+  return stdout.trim();
 }
 
 // ─── Seesaw comparator (pure core: decide, don't perform — plan §10.6) ───────

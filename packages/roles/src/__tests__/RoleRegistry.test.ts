@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDefaultRegistry } from '@maf/tools';
 import { RoleRegistry, RoleConfigError } from '../RoleRegistry.js';
+import { defineRoleName } from '../RoleConfig.js';
 import { DEFAULT_ROLE_SET } from '../defaults.js';
 
 const VALID_YAML = JSON.stringify({
@@ -54,10 +55,10 @@ test('fromSet throws on duplicate role', () => {
     () => RoleRegistry.fromSet(
       {
         version: 1,
-        defaultRole: 'coder',
+        defaultRole: defineRoleName('coder'),
         roles: [
-          { role: 'coder', systemPrompt: 'a', allowedTools: [] },
-          { role: 'coder', systemPrompt: 'b', allowedTools: [] },
+          { role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [] },
+          { role: defineRoleName('coder'), systemPrompt: 'b', allowedTools: [] },
         ],
       },
       '/tmp',
@@ -73,8 +74,8 @@ test('fromSet throws when allowedTools references unknown tool id', () => {
     () => RoleRegistry.fromSet(
       {
         version: 1,
-        defaultRole: 'coder',
-        roles: [{ role: 'coder', systemPrompt: 'a', allowedTools: ['nope.bogus' as never] }],
+        defaultRole: defineRoleName('coder'),
+        roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: ['nope.bogus' as never] }],
       },
       '/tmp',
       tools,
@@ -89,8 +90,8 @@ test('fromSet throws when defaultRole missing from roles', () => {
     () => RoleRegistry.fromSet(
       {
         version: 1,
-        defaultRole: 'ghost',
-        roles: [{ role: 'coder', systemPrompt: 'a', allowedTools: [] }],
+        defaultRole: defineRoleName('ghost'),
+        roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [] }],
       },
       '/tmp',
       tools,
@@ -99,10 +100,24 @@ test('fromSet throws when defaultRole missing from roles', () => {
   );
 });
 
-test('getRole falls back to default on unknown name', () => {
+test('resolveRole refuses an unknown name and lists the roles that exist', () => {
+  // This replaces "getRole falls back to default on unknown name", which locked the behaviour
+  // D-07 reports: `getRole('nonexistent')` answered with the set's default — `coder`, a writer —
+  // so a hallucinated role name widened privilege and nothing said so.
   const reg = RoleRegistry.fromSet(DEFAULT_ROLE_SET, '/tmp');
-  const role = reg.getRole('nonexistent');
-  assert.equal(role.role, DEFAULT_ROLE_SET.defaultRole);
+
+  const resolved = reg.resolveRole('nonexistent');
+  assert.equal(resolved.ok, false);
+  if (!resolved.ok) {
+    assert.equal(resolved.error.requested, 'nonexistent');
+    assert.deepEqual(resolved.error.known, reg.names());
+    assert.ok(resolved.error.known.length > 0, 'the refusal must name the roles that do exist');
+  }
+
+  // A defined name still resolves, and `getRole` hands back that role's config.
+  const coder = reg.resolveRole(DEFAULT_ROLE_SET.defaultRole);
+  assert.ok(coder.ok);
+  if (coder.ok) assert.equal(reg.getRole(coder.value), reg.getDefault());
 });
 
 test('catalog returns role + description pairs', () => {
@@ -127,8 +142,8 @@ test('loadPrompt reads promptFile relative to mafDir', async () => {
     await writeFile(path.join(dir, 'p.md'), 'role prompt content', 'utf8');
     const reg = RoleRegistry.fromSet({
       version: 1,
-      defaultRole: 'r',
-      roles: [{ role: 'r', promptFile: 'p.md', allowedTools: [] }],
+      defaultRole: defineRoleName('r'),
+      roles: [{ role: defineRoleName('r'), promptFile: 'p.md', allowedTools: [] }],
     }, dir);
     const text = await reg.loadPrompt(reg.getDefault());
     assert.equal(text, 'role prompt content');

@@ -30,7 +30,7 @@ test('recordSecurityFindings flows into bundle output and signature payload', as
       parameters: {},
       environment: {},
     };
-    const bundle = await attestor.bundle(builder, invocation, []);
+    const bundle = await attestor.bundle(builder, invocation, [], { status: 'Succeeded', unscheduled: [] });
 
     assert.equal(bundle.securityFindings?.length, 1);
     assert.equal(bundle.securityFindings?.[0]?.nodeId, 'node-1');
@@ -51,6 +51,7 @@ test('bundle without recordSecurityFindings has empty securityFindings list', as
       { id: 'b@1', modelVersion: 'v' },
       { configSource: { uri: '', digest: { sha256: '' } }, parameters: {}, environment: {} },
       [],
+      { status: 'Succeeded', unscheduled: [] },
     );
     assert.ok(Array.isArray(bundle.securityFindings));
     assert.equal(bundle.securityFindings?.length, 0);

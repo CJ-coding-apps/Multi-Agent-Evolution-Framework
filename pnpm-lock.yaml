@@ -280,6 +280,9 @@ importers:
       '@maf/attestation':
         specifier: workspace:*
         version: link:../attestation
+      '@maf/git-ops':
+        specifier: workspace:*
+        version: link:../git-ops
       '@maf/harness-config':
         specifier: workspace:*
         version: link:../harness-config
@@ -583,6 +586,9 @@ importers:
 
   packages/types:
     devDependencies:
+      '@types/node':
+        specifier: '*'
+        version: 20.19.39
       typescript:
         specifier: '*'
         version: 5.9.3

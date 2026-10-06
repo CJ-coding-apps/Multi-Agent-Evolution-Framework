@@ -1,11 +1,12 @@
 import type {
   Dag, DagNode, NodeId, RunId, AgentId, CliAdapter,
-  AdapterInvokeOptions, BlackboardKey, BlackboardValue,
+  AdapterInvokeOptions, BlackboardKey, BlackboardValue, RunOutcome, RunStatus,
 } from '@maf/types';
 import { makeAgentId } from '@maf/types';
 import type { BlackboardStore } from '@maf/blackboard';
 import { NodeStateMachine } from './NodeStateMachine.js';
 import { withRetry } from './RetryOrchestrator.js';
+import { validateDag } from './validateDag.js';
 
 export type NodeExecutor = (
   node: DagNode,
@@ -17,6 +18,12 @@ export interface DagRunnerOptions {
   dag:      Dag;
   board:    BlackboardStore;
   executor: NodeExecutor;
+  /**
+   * Which nodes write to the shared working tree. Writers are serialized: at most
+   * one runs at a time. Defaults to *every* node, because a CLI-tier agent has its
+   * own file tools whatever its allowlist says.
+   */
+  isWriter?:     (node: DagNode) => boolean;
   onNodeStart?:  (nodeId: NodeId) => void;
   onNodeEnd?:    (nodeId: NodeId, status: 'Succeeded' | 'Failed') => void;
 }
@@ -24,8 +31,9 @@ export interface DagRunnerOptions {
 export class DagRunner {
   private sm = new NodeStateMachine();
 
-  async run(opts: DagRunnerOptions): Promise<void> {
+  async run(opts: DagRunnerOptions): Promise<RunOutcome> {
     const { dag, board, executor } = opts;
+    validateDag(dag);
 
     // Initialize all nodes
     for (const nodeId of dag.nodes.keys()) {
@@ -34,14 +42,22 @@ export class DagRunner {
     }
 
     const maxConcurrent = dag.config.maxConcurrent;
-    const running       = new Set<Promise<void>>();
+
+    // The waiting set. Each promise evicts itself the instant it settles, so a
+    // finished promise can never be a member to spin on: racing this map only
+    // ever resolves on work that is genuinely still in flight.
+    const running = new Map<NodeId, Promise<void>>();
+
+    // Writer serialization. Two coder nodes with no dependency path between them are
+    // a normal plan, so the scheduler serializes them rather than refusing the plan —
+    // global serialization is exactly equivalent to pairwise serialization over nodes
+    // with no dependency path, and it is the form that stays correct as the plan grows.
+    const isWriter = opts.isWriter ?? (() => true);
+    const runningWriters = new Set<NodeId>();
+    const deferredWriters = new Set<NodeId>();
 
     const dispatch = async (): Promise<void> => {
       while (true) {
-        // Drain completed promises
-        const done = [...running].filter((p) => isSettled(p));
-        for (const p of done) running.delete(p);
-
         // Find ready nodes: Unclaimed + all dependencies Succeeded
         const ready = [...dag.nodes.values()].filter((node) => {
           if (this.sm.getStatus(node.id) !== 'Unclaimed') return false;
@@ -53,27 +69,60 @@ export class DagRunner {
           const allTerminal = [...dag.nodes.keys()].every((id) => this.sm.isTerminal(id));
           if (allTerminal || running.size === 0) break;
           // Wait for any running to complete
-          await Promise.race([...running]);
+          await Promise.race([...running.values()]);
           continue;
         }
 
-        // Dispatch up to maxConcurrent
+        // Dispatch up to maxConcurrent. A writer may not start while another writer
+        // is running, so scan past a blocked writer instead of stopping at it.
         while (ready.length > 0 && running.size < maxConcurrent) {
-          const node = ready.shift()!;
+          const index = ready.findIndex((node) => !isWriter(node) || runningWriters.size === 0);
+          if (index === -1) {
+            for (const node of ready) deferredWriters.add(node.id);
+            break;
+          }
+
+          const node = ready.splice(index, 1)[0]!;
           this.sm.transition(node.id, 'Claimed');
           this.sm.transition(node.id, 'Running', makeAgentId(`runner-${node.id}`));
           board.setDagState(node.id, 'Running');
           opts.onNodeStart?.(node.id);
+          if (isWriter(node)) runningWriters.add(node.id);
 
-          const p = this.executeNode(node, dag.runId, board, executor, opts);
-          running.add(p);
+          const promise = this.executeNode(node, dag.runId, board, executor, opts);
+          running.set(node.id, promise);
+          // Self-evict on settle. Both arms are handled so a rejection can neither
+          // leak an entry nor surface as an unhandled rejection.
+          const release = (): void => {
+            running.delete(node.id);
+            runningWriters.delete(node.id);
+          };
+          void promise.then(release, release);
         }
 
-        if (running.size > 0) await Promise.race([...running]);
+        if (running.size > 0) await Promise.race([...running.values()]);
       }
     };
 
     await dispatch();
+    return this.outcome(dag, deferredWriters);
+  }
+
+  // The verdict the caller (and the signed bundle) needs: "ran nothing", "half
+  // unreachable" and "a node failed" were all indistinguishable from success when
+  // this method returned void.
+  private outcome(dag: Dag, deferredWriters: ReadonlySet<NodeId>): RunOutcome {
+    const nodes = this.sm.getAll();
+    const unscheduled = [...dag.nodes.keys()].filter((id) => {
+      const status = this.sm.getStatus(id);
+      return status !== 'Succeeded' && status !== 'Failed' && status !== 'Skipped';
+    });
+
+    let status: RunStatus = 'Succeeded';
+    if (nodes.some((n) => n.status === 'Failed')) status = 'Failed';
+    else if (unscheduled.length > 0) status = 'Unschedulable';
+
+    return { status, nodes, unscheduled, deferredWriters: [...deferredWriters] };
   }
 
   private async executeNode(
@@ -118,11 +167,3 @@ export class DagRunner {
     return this.sm.getAll();
   }
 }
-
-// Trick: track settled promises via a WeakSet
-const settled = new WeakSet<Promise<void>>();
-function isSettled(p: Promise<void>): boolean {
-  return settled.has(p);
-}
-// Patch promises to mark themselves settled (used only for detection above)
-// In practice Promise.allSettled is cleaner; this is a lightweight alternative

@@ -12,16 +12,77 @@ export type BlackboardKey = string & { readonly _brand: 'BlackboardKey' };
 export type LcmMessageId  = string & { readonly _brand: 'LcmMessageId' };
 export type LcmSummaryId  = string & { readonly _brand: 'LcmSummaryId' };
 export type CommitHash    = string & { readonly _brand: 'CommitHash' };
+/**
+ * A role name that a role set defines.
+ *
+ * Deliberately NOT mintable here: there is no `makeRoleName`, because "this name exists"
+ * is a fact only a role set can establish, and the role registry is what holds one. A
+ * `RoleName` is obtained either from `RoleRegistry.resolve` (validated against the set in
+ * force) or from `RoleConfig.role` (already in a set) — so a hallucinated or misspelled
+ * name cannot reach a `DagNode` at all. D-07 was the opposite: an unknown name silently
+ * became the default `coder`, which widened privilege rather than refusing it.
+ */
+export type RoleName      = string & { readonly _brand: 'RoleName' };
+
+/**
+ * What a graph node id may be. Validated at construction, not trusted from the source.
+ *
+ * The cast this replaces was applied straight to planner JSON, so a model-authored id of any
+ * shape reached every place a node id is used. D-08's repro was an id that ended the surrounding
+ * Cypher string literal and dropped the whole graph. Real parameter binding (see `GraphQuery`)
+ * is what removes the injection; this is the second half — a node id is now a value with a
+ * known shape, so it is also safe as a map key, a transcript label or a filename stem.
+ */
+export const NODE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 export function makeRunId(s: string): RunId         { return s as RunId; }
 export function makeTaskId(s: string): TaskId       { return s as TaskId; }
 export function makeAgentId(s: string): AgentId     { return s as AgentId; }
 export function makeToolId(s: string): ToolId       { return s as ToolId; }
-export function makeNodeId(s: string): NodeId       { return s as NodeId; }
+export function makeNodeId(s: string): NodeId {
+  if (!NODE_ID_PATTERN.test(s)) {
+    throw new Error(
+      `Invalid NodeId ${JSON.stringify(s)}: a node id is 1-128 characters of A-Z a-z 0-9 _ or -`,
+    );
+  }
+  return s as NodeId;
+}
 export function makeBlackboardKey(s: string): BlackboardKey { return s as BlackboardKey; }
 export function makeLcmMessageId(s: string): LcmMessageId   { return s as LcmMessageId; }
 export function makeLcmSummaryId(s: string): LcmSummaryId   { return s as LcmSummaryId; }
 export function makeCommitHash(s: string): CommitHash       { return s as CommitHash; }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RESULT — a lookup that can fail, where the failure is the caller's to handle
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type Result<T, E> =
+  | { readonly ok: true;  readonly value: T }
+  | { readonly ok: false; readonly error: E };
+
+export function ok<T>(value: T): Result<T, never>  { return { ok: true, value }; }
+export function err<E>(error: E): Result<never, E>  { return { ok: false, error }; }
+
+/**
+ * A name no role set in force defines. Carries the names that *do* exist, because the
+ * caller's next move is usually to say so — "unknown role \"read-only-auditor\"; known
+ * roles are: coder, tester, …" — and a bare "unknown" makes the operator guess.
+ */
+export interface UnknownRole {
+  readonly requested: string;
+  readonly known:     readonly RoleName[];
+}
+
+/**
+ * The two questions a DAG builder must ask of whoever owns the roles: which name does a
+ * node without one get, and is this name real? Implemented by `RoleRegistry`; declared
+ * here so `@maf/dag-runner` and `@maf/planning-agent` can build nodes without depending
+ * on the registry package (or being able to invent a role name themselves).
+ */
+export interface RoleResolver {
+  readonly defaultRole: RoleName;
+  resolveRole(raw: string): Result<RoleName, UnknownRole>;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TOOL PLUGIN
@@ -71,6 +132,27 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
   description:     string;
   permissionLevel: PermissionLevel;
   execute(input: I, ctx: ToolContext): Promise<ToolResult>;
+
+  /**
+   * The filesystem paths this call will touch, as the tool itself declares them.
+   *
+   * MUST be a pure function of `input`: the policy layer calls it before any rule and
+   * before `execute`, so a tool that only reveals its paths while running (patch.apply
+   * derived them inside `execute` and wrote them back onto the input) is invisible to
+   * path rules — the shipped `protect-secrets` Deny matched `fs.write ".env"` and skipped
+   * `patch.apply` on the same file.
+   *
+   * MUST over-declare rather than under-declare: a path that is declared but never touched
+   * can only make a rule match sooner, while a path that is touched but not declared is a
+   * silent Allow. A tool with no filesystem surface returns `[]`.
+   *
+   * Declared paths are relative to the project root, and must stay inside it. The policy engine
+   * resolves each one with `resolveInside(ctx.projectRoot, …)` before any rule sees it, so a
+   * glob is matched against the real file rather than against whatever spelling the caller used,
+   * and a path that leaves the root is refused. A tool that takes a path from `input` should
+   * resolve it the same way — see `resolveInside`.
+   */
+  declaredPaths(input: I): string[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -88,7 +170,8 @@ export type DagNodeStatus =
 export interface DagNode {
   id:            NodeId;
   label:         string;
-  agentRole:     string;
+  /** A name a role set defines — see {@link RoleName}. */
+  agentRole:     RoleName;
   dependencies:  NodeId[];
   retryPolicy:   RetryPolicy;
   timeoutMs:     number;
@@ -117,6 +200,19 @@ export interface DagConfig {
   retryPolicy:       RetryPolicy;
   timeoutMs:         number;
   reviewGateNodeIds: NodeId[];
+}
+
+/** 'Unschedulable' is a real verdict: the DAG was valid but never ran to completion. */
+export type RunStatus = 'Succeeded' | 'Failed' | 'Unschedulable';
+
+export interface RunOutcome {
+  status:      RunStatus;
+  /** Per-node results — present when the run was a DAG. */
+  nodes?:      DagNodeExecution[];
+  /** Nodes that never ran: a dependency failed, was skipped, or was unreachable. */
+  unscheduled: NodeId[];
+  /** Nodes held back because another writer held the working tree at the time. */
+  deferredWriters?: NodeId[];
 }
 
 export interface RetryPolicy {
@@ -284,10 +380,49 @@ export interface MergeReport {
   mergedAt:       Date;
 }
 
-export interface MemoryGraphApi {
+// ─────────────────────────────────────────────────────────────────────────────
+// GRAPH QUERIES — one value object, and its values are bound, never written in
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What a graph query may bind. Deliberately narrow, because it is exactly what both backends
+ * accept as a parameter: Kùzu 0.7.x takes boolean/number/string/Date/BigInt and nothing else —
+ * no arrays, no `null`, no objects. An array is bound as one parameter per element under
+ * generated names (`$id0, $id1, …`); `LIMIT` and a variable-length path's hop count cannot be
+ * parameters in either query language and stay validated integer literals.
+ */
+export type QueryParamValue = string | number | boolean | Date;
+export type QueryParams     = Readonly<Record<string, QueryParamValue>>;
+
+/**
+ * A query and the values it binds. This is the only way a value enters a query: there is no
+ * escaper, because there is nothing to escape. The type exists so that "what is the query?" and
+ * "what did it bind?" cannot be answered separately — the escaper that D-08 found lived, in
+ * three identical copies, in the gap between those two answers.
+ */
+export interface GraphQuery {
+  readonly cypher: string;
+  readonly params: QueryParams;
+}
+
+export type GraphRow = Record<string, unknown>;
+
+/**
+ * What graph *consumers* depend on — the policy engine, the injector, the digester. Narrow on
+ * purpose: a consumer that can only run a `GraphQuery` cannot build one by concatenation, and a
+ * different backend is a new implementation of this rather than an edit to every call site.
+ *
+ * An error is thrown, never answered with an empty result: "the graph could not answer" and
+ * "the graph answered nothing" are different facts, and a rule that is skipped on the first is
+ * a rule that stops firing whenever an attacker can break the graph.
+ */
+export interface GraphQueryRunner {
+  run(query: GraphQuery): Promise<GraphRow[]>;
+}
+
+export interface MemoryGraphApi extends GraphQueryRunner {
   addNode(n: Omit<MemoryNode, 'id' | 'createdAt' | 'updatedAt'>): Promise<string>;
   addEdge(e: Omit<MemoryEdge, 'id' | 'createdAt'>): Promise<string>;
-  query(cypher: string, params: Record<string, unknown>): Promise<unknown[]>;
   querySubgraph(taskContext: string, maxNodes: number): Promise<MemorySubgraph>;
   mergeRuns(sourceRunIds: RunId[], targetRunId: RunId): Promise<MergeReport>;
 }
@@ -299,9 +434,23 @@ export interface MemoryGraphApi {
 export type PolicyDecision =
   | { verdict: 'Allow' }
   | { verdict: 'Deny';     reason: string; alternative?: ToolId }
-  | { verdict: 'Escalate'; reason: string; approvalRequest: ApprovalRequest };
+  | { verdict: 'Escalate'; reason: string; approvalRequest: ApprovalRequest }
+  /**
+   * The policy could not be evaluated, so no verdict about the call is available — and the call
+   * does not proceed. Today this is one thing: a rule's `memoryPattern` query failed, so a
+   * `Deny` rule that might have matched did not get to say so. Answering `Allow` there is the
+   * fail-open D-08 names, and it is the easiest state for an attacker to induce (break the
+   * graph, then act). Distinct from `Escalate`: nothing is being asked of a human, because
+   * there is no decision to approve.
+   */
+  | { verdict: 'Indeterminate'; reason: string; ruleId?: string };
 
 export interface MemoryGraphQuery {
+  /**
+   * A Cypher template for the rule's graph half. It may name any of `$tool`, `$path`, `$runId`
+   * and `$taskId`; those are bound as real parameters, so the template stays a template and the
+   * values never become part of the query text.
+   */
   cypher: string;
 }
 
@@ -328,7 +477,24 @@ export interface PolicyRule {
 }
 
 export interface PolicyEngineHandle {
-  evaluate(toolId: ToolId, input: ToolInput, ctx: ToolContext): Promise<PolicyDecision>;
+  /**
+   * `declaredPaths` is the calling tool's own `ToolPlugin.declaredPaths(input)` for this
+   * input — required, not optional, so no call site can leave path rules with nothing to
+   * match against. See the note on `ToolPlugin.declaredPaths`.
+   *
+   * The paths are interpreted relative to `ctx.projectRoot` and are resolved with
+   * `resolveInside` before any rule is consulted. Two consequences a caller can rely on:
+   * a rule's globs are matched against the *real* file (so every spelling of one path is one
+   * string), and a declared path that resolves outside `ctx.projectRoot` is **refused** with a
+   * `Deny` — before the rule list is read, and whether or not any rule is loaded. Confinement
+   * is therefore not something a policy file can turn off by being empty.
+   */
+  evaluate(
+    toolId: ToolId,
+    input: ToolInput,
+    ctx: ToolContext,
+    declaredPaths: readonly string[],
+  ): Promise<PolicyDecision>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -439,6 +605,11 @@ export interface AttestationBundle {
   approvals:         ReviewAttestation[];
   diffHashes:        Record<string, string>;
   securityFindings?: SecurityFindingsRecord[];
+  /**
+   * Verdict for the run this bundle attests. Required — a bundle that cannot say
+   * whether its run succeeded is precisely the defect this field exists to stop.
+   */
+  outcome:           RunOutcome;
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;
@@ -610,3 +781,24 @@ export function estimateTokens(text: string): number {
   if (!text) return 0;
   return Math.ceil(text.length / 4);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATHS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Path confinement lives here, beside `ToolContext`, for the same reason `PolicyEngineHandle`
+ * does: both the tools and the policy engine need it, and the tools must not depend on the
+ * policy engine (or the reverse) to get it. `scripts/check-workspace-deps.mjs` holds the
+ * package graph acyclic, so a shared primitive between two packages goes in the package they
+ * both already depend on — this one.
+ *
+ * `paths.ts` imports `node:fs`, so this package is no longer types-only: it holds runtime code
+ * that touches the filesystem. That is a deliberate choice, not drift. The alternative was to
+ * put the check in `@maf/tools` (the policy engine would then depend on the tools, which is
+ * backwards) or in `@maf/policy-engine` (the tools would depend on it, inverting the layering
+ * the same way). Both consumers already depend on this package, so the primitive costs no new
+ * edge and no cycle; the price is one runtime module here, and it is accepted.
+ */
+export { resolveInside, PathEscapeError } from './paths.js';
+export type { ConfinedPath } from './paths.js';

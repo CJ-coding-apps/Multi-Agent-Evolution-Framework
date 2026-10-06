@@ -15,25 +15,28 @@ interface PatchInput {
   diff:    string;
   strip?:  number;
   dryRun?: boolean;
-  paths?:  string[];
   [k: string]: unknown;
 }
 
+/**
+ * The files a unified diff touches, from its own headers.
+ *
+ * Both header forms are read. `+++`/`---` is the authoritative pair, but a path visible only
+ * in `diff --git` is still a path `patch` will touch, and a path the policy layer cannot see
+ * is a path no rule can refuse — so this over-declares rather than miss one.
+ */
 export function extractDiffPaths(diff: string): string[] {
   const paths = new Set<string>();
+  const add = (raw: string): void => {
+    const bare = raw.startsWith('"') && raw.endsWith('"') && raw.length > 1 ? raw.slice(1, -1) : raw;
+    const stripped = bare.replace(/^[ab]\//, '');
+    if (stripped && stripped !== '/dev/null') paths.add(stripped);
+  };
   for (const line of diff.split('\n')) {
-    if (line.startsWith('+++ ')) {
-      const raw = line.slice(4).trim();
-      if (raw && raw !== '/dev/null') {
-        const stripped = raw.replace(/^[ab]\//, '');
-        if (stripped) paths.add(stripped);
-      }
-    } else if (line.startsWith('--- ')) {
-      const raw = line.slice(4).trim();
-      if (raw && raw !== '/dev/null') {
-        const stripped = raw.replace(/^[ab]\//, '');
-        if (stripped) paths.add(stripped);
-      }
+    if (line.startsWith('+++ ') || line.startsWith('--- ')) {
+      add(line.slice(4).trim());
+    } else if (line.startsWith('diff --git ')) {
+      for (const token of line.slice('diff --git '.length).match(/"[^"]*"|\S+/g) ?? []) add(token);
     }
   }
   return [...paths];
@@ -45,13 +48,17 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
   readonly description = 'Apply a unified diff patch to the working tree. Use dryRun to verify before applying.';
   readonly permissionLevel = 'write' as const;
 
-  async execute(input: PatchInput, ctx: ToolContext): Promise<ToolResult> {
-    // Populate input.paths from the diff so policy.evaluate can match path globs
-    // across every file the patch touches, not just whatever the caller passed in.
-    if (!input.paths || input.paths.length === 0) {
-      input.paths = extractDiffPaths(input.diff);
-    }
+  /**
+   * A pure function of the diff — the same value the policy layer is handed, computed the
+   * same way every time. Deriving this inside `execute` (and writing it back onto the input)
+   * meant the gate had already run: `protect-secrets` denied `fs.write ".env"` and allowed a
+   * patch writing the same file.
+   */
+  declaredPaths(input: PatchInput): string[] {
+    return typeof input.diff === 'string' ? extractDiffPaths(input.diff) : [];
+  }
 
+  async execute(input: PatchInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
     const tmpFile = path.join(tmpdir(), `maf-patch-${crypto.randomUUID()}.diff`);
 

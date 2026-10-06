@@ -35,6 +35,19 @@ jobs:
       - name: Build (tsc, leaf-first)
         run: pnpm build
 
+      # Guards the three ways a green build or a green test run can mean nothing:
+      # tsc reporting success without emitting (a stale tsBuildInfoFile outside dist),
+      # `pnpm -r test` skipping a package that has tests but no test script, and a
+      # workspace dependency cycle (which pnpm tolerates and `tsc -b` does not).
+      - name: Guard build output
+        run: pnpm check:build-output
+
+      - name: Guard test scripts
+        run: pnpm check:test-scripts
+
+      - name: Guard workspace dependencies
+        run: pnpm check:workspace-deps
+
       - name: Typecheck
         run: pnpm -r typecheck
 

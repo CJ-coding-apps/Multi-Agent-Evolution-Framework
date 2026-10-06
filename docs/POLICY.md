@@ -52,19 +52,51 @@ Match a single tool or any of a list. Omitted → matches every tool.
 
 Match the role currently running the tool (`ToolContext.agentRole`). Omitted → matches every role *including* unspecified. Note the asymmetry with `toolId`: an omitted role predicate is a wildcard, but a role-predicate that *can't* match (because the context has no `agentRole`) returns false. That keeps role-targeted rules from accidentally firing on legacy code that doesn't set `agentRole`.
 
+### Paths are confined before any rule
+
+Before the rule list is read, every path the tool declared is resolved against `ctx.projectRoot` and
+proven to lie inside it, by `resolveInside` (`@maf/types`, `packages/types/src/paths.ts`). The rules
+below then see the **resolved, root-relative** path — not the string the caller typed.
+
+Two things follow, and both are the point:
+
+- **A path that leaves the root is refused**, with a `Deny`, whether or not any rule is loaded. A path
+  outside the project root — `/etc/.env`, `../.env`, or a symlink whose name is inside and whose target
+  is not — is a decision about the call, not a failure to reach one, so it is `Deny` rather than
+  `Indeterminate`, and it is not escalatable. Because it does not depend on a rule, an empty policy file
+  — maf's default posture — does not switch confinement off.
+- **One file has one spelling.** `.env`, `./.env`, `a/../.env` and `sub/../.env` all resolve to `.env`
+  before a glob is matched. A glob is written against a path, so before this it matched only the
+  spellings a caller happened to use: `**/.env*` denied `.env` and allowed `./.env` and `../.env`.
+
+The fs tools apply the same check in `execute` (`packages/tools/src/plugins/fs.ts`), so a direct tool
+call that never went through the policy engine is no less confined. The checked path and the executed
+path are the same value because both come from the same call.
+
 ### `pathGlob`
 
 ```json
 "pathGlob": "**/.env*"
 ```
 
-A single minimatch pattern checked against each path in the tool input. Matches if **any** input path matches. Input paths are collected from:
+A single minimatch pattern checked against the paths the tool **declares** for this call, after they have
+been resolved and confined as described above. Matches if **any** declared path matches.
 
-1. `input.paths` if it's a string[].
-2. `input.path` if it's a string.
-3. `input.paths` if it's a string (single path).
+Declared paths come from the tool itself — `ToolPlugin.declaredPaths(input)`, a pure function of the input that the policy layer calls before any rule is consulted. It is not a guess made from which input keys look path-like:
 
-`patch.apply` populates `input.paths` from the diff headers automatically (`extractDiffPaths`), so path-glob rules apply to every file the patch touches, not just whatever the caller passed in.
+- `fs.*` declare `input.path`.
+- `grep` declares `input.path`, or `.` when it searches the whole working directory.
+- `git.diff` / `git.add` declare `input.path` / `input.paths`.
+- `patch.apply` declares every file in the diff headers (`extractDiffPaths`), so a path-glob rule applies to every file the patch touches, not just whatever the caller passed in.
+- `git.status` / `git.commit` / `git.log` / `git.reset` and `test.run` act on the repository or project as a whole and declare `[]`, so no path rule can match them.
+
+Three consequences worth stating:
+
+- A path that cannot be confined refuses the whole call, so one escaping path in a multi-path declaration is enough to deny it.
+- A declaration of `[]` has nothing to confine, so confinement has no path to refuse either.
+
+- A rule with a `pathGlob` **cannot match a call that declares no path** — matching on an empty set would make a Deny rule fire on calls that named no file.
+- A rule matches if **any** declared path matches. A multi-file call (a patch spanning `src/a.ts` and `.env`) is denied by a `**/.env*` rule, because one of its declared paths matches.
 
 ### `allowedPathGlobs`
 
@@ -72,13 +104,13 @@ A single minimatch pattern checked against each path in the tool input. Matches 
 "allowedPathGlobs": ["**/*test*", "**/tests/**"]
 ```
 
-Inverted semantics. The rule matches when **any** input path falls *outside* every allowed pattern. Pair with a `Deny` action to express:
+Inverted semantics. The rule matches when **any** declared path falls *outside* every allowed pattern. The paths are the resolved ones (see above), so `./tests/util.ts` and `tests/util.ts` are the same path here — before, the `./` spelling matched neither allowed glob and the rule read it as outside the tree it was inside.
 
 > This role may only modify files matching one of these patterns; deny anything else.
 
 Without inverted semantics, the alternative is a brittle negated minimatch glob (`!`). The asymmetry is intentional — see the migration notes in [ROLES.md](ROLES.md).
 
-When `pathGlob` and `allowedPathGlobs` are both set, **both** must hold for the rule to match. (Both are positive checks against the same input paths.)
+When `pathGlob` and `allowedPathGlobs` are both set, **both** must hold for the rule to match. (Both are positive checks against the same confined paths.)
 
 ### `memoryPattern`
 
@@ -93,7 +125,7 @@ The string is template-substituted before execution:
 | Placeholder | Replaced with                                       |
 |-------------|-----------------------------------------------------|
 | `$tool`     | `'<toolId>'`                                        |
-| `$path`     | `'<input.path>'` (single-quotes escaped)            |
+| `$path`     | `'<first declared path>'` (single-quotes escaped)   |
 | `$runId`    | `'<ctx.runId>'`                                     |
 | `$taskId`   | `'<ctx.taskId>'`                                    |
 
@@ -178,7 +210,9 @@ A rule with no `agentRole` matches every role and every legacy code path. Pre-ro
 ```
 ToolLoop.executeTool(toolId, input, ctx)
   ↓
-PolicyEngine.evaluate(toolId, input, ctx)
+PolicyEngine.evaluate(toolId, input, ctx, declaredPaths)
+  → confine every declared path against ctx.projectRoot
+      → any path escapes or cannot be resolved: { verdict: 'Deny' }   ← no rule needed
   → for each rule in priority order:
       if !matchesToolId        : skip
       if !matchesAgentRole     : skip

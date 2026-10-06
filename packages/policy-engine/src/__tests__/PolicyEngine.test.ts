@@ -36,10 +36,10 @@ test('rule with agentRole matches only when context role matches', async () => {
   engine.loadRules([rule]);
   const input: ToolInput = { path: 'src/foo.ts' };
 
-  const allowResult = await engine.evaluate(FS_WRITE, input, baseCtx({ agentRole: 'coder' }));
+  const allowResult = await engine.evaluate(FS_WRITE, input, baseCtx({ agentRole: 'coder' }), ['src/foo.ts']);
   assert.equal(allowResult.verdict, 'Allow');
 
-  const denyResult = await engine.evaluate(FS_WRITE, input, baseCtx({ agentRole: 'tester' }));
+  const denyResult = await engine.evaluate(FS_WRITE, input, baseCtx({ agentRole: 'tester' }), ['src/foo.ts']);
   assert.equal(denyResult.verdict, 'Deny');
 });
 
@@ -53,13 +53,13 @@ test('rule with agentRole array matches when context role is in array', async ()
     action: { kind: 'Deny', reason: 'read-only' },
   }]);
 
-  const res1 = await engine.evaluate(FS_WRITE, { path: 'x' }, baseCtx({ agentRole: 'security' }));
+  const res1 = await engine.evaluate(FS_WRITE, { path: 'x' }, baseCtx({ agentRole: 'security' }), ['x']);
   assert.equal(res1.verdict, 'Deny');
 
-  const res2 = await engine.evaluate(FS_WRITE, { path: 'x' }, baseCtx({ agentRole: 'reviewer' }));
+  const res2 = await engine.evaluate(FS_WRITE, { path: 'x' }, baseCtx({ agentRole: 'reviewer' }), ['x']);
   assert.equal(res2.verdict, 'Deny');
 
-  const res3 = await engine.evaluate(FS_WRITE, { path: 'x' }, baseCtx({ agentRole: 'coder' }));
+  const res3 = await engine.evaluate(FS_WRITE, { path: 'x' }, baseCtx({ agentRole: 'coder' }), ['x']);
   assert.equal(res3.verdict, 'Allow');
 });
 
@@ -75,7 +75,7 @@ test('rule omitting agentRole matches every role (backward compat)', async () =>
 
   for (const role of ['coder', 'tester', 'security', 'reviewer', undefined]) {
     const ctx = role ? baseCtx({ agentRole: role }) : baseCtx();
-    const res = await engine.evaluate(FS_WRITE, { path: '.env' }, ctx);
+    const res = await engine.evaluate(FS_WRITE, { path: '.env' }, ctx, ['.env']);
     assert.equal(res.verdict, 'Deny', `role=${role}`);
   }
 });
@@ -96,18 +96,18 @@ test('allowedPathGlobs Deny: blocks writes outside the allowed patterns', async 
 
   const ctx = baseCtx({ agentRole: 'tester' });
   // Inside allowed → no match → fall through → Allow
-  const inside = await engine.evaluate(FS_WRITE, { path: 'src/foo.test.ts' }, ctx);
+  const inside = await engine.evaluate(FS_WRITE, { path: 'src/foo.test.ts' }, ctx, ['src/foo.test.ts']);
   assert.equal(inside.verdict, 'Allow');
 
-  const insideDir = await engine.evaluate(FS_WRITE, { path: 'src/tests/util.ts' }, ctx);
+  const insideDir = await engine.evaluate(FS_WRITE, { path: 'src/tests/util.ts' }, ctx, ['src/tests/util.ts']);
   assert.equal(insideDir.verdict, 'Allow');
 
   // Outside allowed → matches → Deny
-  const outside = await engine.evaluate(FS_WRITE, { path: 'src/foo.ts' }, ctx);
+  const outside = await engine.evaluate(FS_WRITE, { path: 'src/foo.ts' }, ctx, ['src/foo.ts']);
   assert.equal(outside.verdict, 'Deny');
 });
 
-test('allowedPathGlobs with multi-file paths input', async () => {
+test('a multi-file call is judged on every path it declares, not on a single input field', async () => {
   const engine = new PolicyEngine(stubGraph);
   engine.loadRules([{
     id: 'tester-multi',
@@ -122,20 +122,16 @@ test('allowedPathGlobs with multi-file paths input', async () => {
   }]);
 
   const ctx = baseCtx({ agentRole: 'tester' });
-  // All inside → Allow
-  const allInside = await engine.evaluate(
-    PATCH_APPLY,
-    { paths: ['a.test.ts', '__tests__/b.ts'] },
-    ctx,
-  );
+  // A patch, as patch.apply really receives one: the paths live in the diff, and the
+  // declaration the tool derives from it is what the rule is matched against.
+  const oneFile = { diff: '--- a/a.test.ts\n+++ b/a.test.ts\n' };
+
+  // Every declared path inside → Allow
+  const allInside = await engine.evaluate(PATCH_APPLY, oneFile, ctx, ['a.test.ts', '__tests__/b.ts']);
   assert.equal(allInside.verdict, 'Allow');
 
-  // Mixed: one outside → Deny
-  const mixed = await engine.evaluate(
-    PATCH_APPLY,
-    { paths: ['a.test.ts', 'src/bad.ts'] },
-    ctx,
-  );
+  // One declared path outside → Deny
+  const mixed = await engine.evaluate(PATCH_APPLY, oneFile, ctx, ['a.test.ts', 'src/bad.ts']);
   assert.equal(mixed.verdict, 'Deny');
 });
 
@@ -157,6 +153,6 @@ test('higher priority rule wins', async () => {
       action: { kind: 'Deny', reason: 'high wins' },
     },
   ]);
-  const res = await engine.evaluate(FS_READ, { path: 'x' }, baseCtx());
+  const res = await engine.evaluate(FS_READ, { path: 'x' }, baseCtx(), ['x']);
   assert.equal(res.verdict, 'Deny');
 });

@@ -92,6 +92,20 @@ export async function buildRunStack(cfg: {
     rolesFor: (harness) => RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), cfg.mafDir, baseTools),
     async dispatchTask(harness, role, prompt, workDir, timeoutMs, temperature) {
       const taskId = makeTaskId(crypto.randomUUID());
+      const roles = stack.rolesFor(harness);
+      // `role` arrives as a corpus string, and this is the only place it can be checked against
+      // the harness. A task naming a role the harness does not define is refused; it previously
+      // reached the dispatcher as a bare string and came back out as the *default* role — `coder`,
+      // a writer — so a corpus file and a harness that disagree produced a silently privileged run
+      // instead of an error. `TaskDispatcher` keeps its `role: string` signature because that is
+      // what the corpus carries; the conversion happens here, where the role set is in hand.
+      const resolvedRole = roles.resolveRole(role);
+      if (!resolvedRole.ok) {
+        throw new Error(
+          `goldens: task asks for unknown role "${role}". ` +
+          `Known roles: ${resolvedRole.error.known.join(', ')}.`,
+        );
+      }
       const transcript = new TranscriptLogger(cfg.runId, makeAgentId(taskId), {
         logDir: path.join(cfg.mafDir, 'transcripts'), softThreshold: 20_000, chunkSize: 20, lcm,
       });
@@ -101,14 +115,14 @@ export async function buildRunStack(cfg: {
         ...(cfg.model ? { model: cfg.model } : {}),
       });
       const dispatcher = new RoleDispatcher({
-        adapter: cfg.adapter, baseTools, roles: stack.rolesFor(harness), injector, policy,
+        adapter: cfg.adapter, baseTools, roles, injector, policy,
         attestor, graph, transcript, lcmBridge, securityGate: gate,
         cwd: workDir, sessionId: cfg.runId, runId: cfg.runId, harness,
         ...(cfg.model ? { modelOverride: cfg.model } : {}),
         ...(temperature !== undefined ? { temperature } : {}),
       });
       const node: DagNode = {
-        id: makeNodeId(`evolve-${taskId}`), label: prompt, agentRole: role,
+        id: makeNodeId(`evolve-${taskId}`), label: prompt, agentRole: resolvedRole.value,
         dependencies: [], retryPolicy: { maxAttempts: 1, backoffMs: 0, backoffFactor: 1, jitterMs: 0 },
         timeoutMs, inputs: {}, outputs: {}, metadata: { taskDescription: prompt },
       };

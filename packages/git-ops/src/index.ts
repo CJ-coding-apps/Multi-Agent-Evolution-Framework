@@ -7,3 +7,5 @@ export { ReviewGate } from './ReviewGate.js';
 export type { ReviewGateConfig, ReviewResult } from './ReviewGate.js';
 export { SecurityReviewGate, parseSecurityOutput } from './SecurityReviewGate.js';
 export type { SecurityReviewGateConfig } from './SecurityReviewGate.js';
+export { snapshotDiff, runIsolatedGit, GIT_EMPTY_TREE } from './SnapshotDiff.js';
+export type { IsolatedGitOptions } from './SnapshotDiff.js';

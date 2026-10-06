@@ -1,0 +1,83 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { snapshotDiff, GIT_EMPTY_TREE } from '../index.js';
+import { git, makeRepo } from './gitTestUtils.js';
+
+// ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A4 — the working-tree diff is computed by
+// staging the whole tree into a THROWAWAY index. The two claims that need measuring rather
+// than asserting in prose: it sees what a plain `git diff` does not, and it does not touch
+// the index the user actually staged their own work in.
+
+/** The repository's real index, as bytes — the thing an in-place `git add -A` would rewrite. */
+function realIndex(repo: string): Promise<Buffer> {
+  return readFile(path.join(repo, '.git', 'index'));
+}
+
+test('a file the agent never staged is in the diff', async () => {
+  const repo = await makeRepo('maf-snapshot-');
+  try {
+    const base = await git(['rev-parse', 'HEAD'], repo);
+    await writeFile(path.join(repo, 'created.txt'), 'the agent made this', 'utf8');
+
+    // The shape the fix exists for: `git diff <base>` reports nothing at all here, because
+    // an untracked file is not part of any diff against a commit.
+    assert.equal(await git(['diff', base], repo), '', 'plain git diff cannot see it — that is the gap');
+
+    const diff = await snapshotDiff(repo, base);
+    assert.match(diff, /created\.txt/, 'the snapshot diff must see the unstaged new file');
+    assert.match(diff, /the agent made this/);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test('the diff is complete — an agent that commits its own work is still visible', async () => {
+  const repo = await makeRepo('maf-snapshot-');
+  try {
+    const base = await git(['rev-parse', 'HEAD'], repo);
+    await writeFile(path.join(repo, 'committed.txt'), 'committed by the agent', 'utf8');
+    await git(['add', '-A'], repo);
+    await git(['-c', 'commit.gpgsign=false', 'commit', '-qm', 'agent commit'], repo);
+
+    const diff = await snapshotDiff(repo, base);
+    assert.match(diff, /committed\.txt/, 'a commit after the base is still part of the change');
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test('a repository with no commits at all is diffable against the empty tree', async () => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'maf-snapshot-unborn-'));
+  try {
+    await git(['init', '-q'], repo);
+    await writeFile(path.join(repo, 'first.txt'), 'the very first change', 'utf8');
+
+    const diff = await snapshotDiff(repo, GIT_EMPTY_TREE);
+    assert.match(diff, /first\.txt/, 'the first `git init` + first change is still reviewable');
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("the repository's own index is byte-identical before and after", async () => {
+  const repo = await makeRepo('maf-snapshot-');
+  try {
+    // Deliberately not empty: the user has work staged and not committed. If snapshotDiff
+    // staged into the real index, this is what would be silently absorbed.
+    await writeFile(path.join(repo, 'staged.txt'), 'work the user staged', 'utf8');
+    await git(['add', 'staged.txt'], repo);
+    await writeFile(path.join(repo, 'untracked.txt'), 'work the user has not staged', 'utf8');
+
+    const before = await realIndex(repo);
+    const diff = await snapshotDiff(repo, await git(['rev-parse', 'HEAD'], repo));
+    const after = await realIndex(repo);
+
+    assert.deepEqual(after, before, "running maf must not alter the user's staged index");
+    assert.match(diff, /untracked\.txt/, 'and the untracked file was still reviewed');
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
