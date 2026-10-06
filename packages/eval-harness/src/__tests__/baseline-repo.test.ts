@@ -92,23 +92,47 @@ test('a run whose diff cannot be computed is an error, never an empty diff', asy
 test('a coder that commits its own work is still diffed against the baseline', async () => {
   await withPlainCorpus(async (root) => {
     const scored: string[] = [];
+    let headBefore = '';
+    let headAfter = '';
     const runner = new GoldenRunner({
       corpusRoot: root, harnessSha: 'c'.repeat(64), harnessId: 'h-commits',
       attempts: 1,
       dispatch: async (_t, workDir) => {
         // Claude Code commonly commits what it changes. Diffing against HEAD would see
         // nothing at all, and the security verifier would be handed an empty diff.
+        headBefore = (await git(workDir, 'rev-parse', 'HEAD')).stdout.trim();
         await writeFile(path.join(workDir, 'done.txt'), 'done', 'utf8');
         await git(workDir, 'add', '-A');
-        await git(workDir, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'agent committed');
+        // The identity is passed explicitly, the way the runner passes its own on the
+        // baseline commit. It is not decoration: `git commit` fails wherever the host has
+        // no user.email, which is the case on a CI runner, and this test would then be
+        // asserting about a commit that never happened.
+        await git(
+          workDir,
+          '-c', 'user.name=golden coder',
+          '-c', 'user.email=coder@maf.invalid',
+          '-c', 'commit.gpgsign=false',
+          'commit', '-qm', 'agent committed',
+        );
+        headAfter = (await git(workDir, 'rev-parse', 'HEAD')).stdout.trim();
         return 'wrote and committed done';
       },
       securityScore: async (diff) => { scored.push(diff); return 'none'; },
     });
 
     const result = await runner.run();
+    const attemptError = result.tasks[0]?.attempts[0]?.error ?? 'none';
 
-    assert.match(scored[0] ?? '', /done/, 'the committed change must still be visible to the scorer');
+    // Without this the test also passes for a coder that never committed — the case the
+    // test above already covers — and so says nothing about committing at all. It passed
+    // that way until a runner without a git identity ran it and the diff came back empty.
+    assert.match(headAfter, /^[0-9a-f]{40}$/,
+      `the coder's commit did not land, so nothing here is about committing; attempt error: ${attemptError}`);
+    assert.notEqual(headAfter, headBefore,
+      `the coder did not create a new commit; attempt error: ${attemptError}`);
+
+    assert.match(scored[0] ?? '', /done/,
+      `the committed change must still be visible to the scorer; attempt error: ${attemptError}`);
   });
 });
 
