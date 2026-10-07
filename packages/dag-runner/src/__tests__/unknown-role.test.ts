@@ -4,7 +4,7 @@ import { makeRunId } from '@maf/types';
 import { DagParser } from '../index.js';
 import { testRoleResolver } from './roleResolver.js';
 
-// ORACLE (DEFECT_SWEEP_2026-09-25.md D-07): a node that names an agentRole the role set does
+// ORACLE (D-07): a node that names an agentRole the role set does
 // not define must refuse to parse. The old parser wrote the name into a `string` field and the
 // dispatcher answered an unrecognised name with the default role — `coder`, which holds
 // `fs.write`, `git.commit` and `patch.apply` — so a typo in a WORKFLOW.md became an escalation.

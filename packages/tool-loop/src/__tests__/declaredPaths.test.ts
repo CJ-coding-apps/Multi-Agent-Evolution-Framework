@@ -12,7 +12,7 @@ import { PolicyEngine } from '@maf/policy-engine';
 import { PatchApplyTool, GrepTool, GitAddTool, GitStatusTool, FsWriteTool } from '@maf/tools';
 import { executeToolGated } from '../index.js';
 
-// ORACLE: DEFECT_SWEEP_2026-09-25.md D-05 + docs/POLICY.md's documented path-rule guarantee.
+// ORACLE: D-05 + docs/POLICY.md's documented path-rule guarantee.
 
 const ALLOW: PolicyEngineHandle = { async evaluate(): Promise<PolicyDecision> { return { verdict: 'Allow' }; } };
 

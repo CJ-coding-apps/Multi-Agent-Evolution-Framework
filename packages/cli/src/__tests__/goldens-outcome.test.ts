@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import { goldenRunStatus } from '../commands/goldens.js';
 
-// ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A4 (work order item 1) — the golden
+// ORACLE: A4 (work order item 1) — the golden
 // suite's outcome says whether the run EXECUTED, and the solve rate lives in its own
 // field. Conflating them recorded every real run as "Failed" (an unsolved task is normal)
 // and left the evolver unable to tell "the score was 9/10" from "the run broke".

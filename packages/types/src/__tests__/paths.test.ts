@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { resolveInside, PathEscapeError } from '../paths.js';
 
-// ORACLE (DEFECT_SWEEP_2026-09-25.md D-11/D-22; IMPLEMENTATION_CHECKLIST A2-4 "`../` traversal,
+// ORACLE (D-11/D-22; A2-4 "`../` traversal,
 // absolute escape and symlink escape are all refused").
 //
 // These are the primitive's own tests. The tools that use it and the policy engine that uses it
