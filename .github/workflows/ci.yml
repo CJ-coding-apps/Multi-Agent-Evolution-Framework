@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # Deliberately no branch filter. With `branches: [main]` here, a pull request
+  # whose base is any other branch -- which is how a change is stacked on
+  # another unmerged change -- got no CI at all, and "no checks reported" in the
+  # pull request then reads much like "checks passed". Every pull request runs CI.
   pull_request:
-    branches: [main]
 
 # Cancel in-progress runs for the same ref when new commits arrive.
 concurrency:
