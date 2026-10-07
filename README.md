@@ -164,3 +164,21 @@ pnpm -r test            # node:test on dist/__tests__/
 TypeScript settings (see `tsconfig.base.json`): `strict`, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `noImplicitOverride`. Branded ID types (RunId, TaskId, ToolId, NodeId, AgentId, EdgeId) — construct via the `make*` helpers in `@maf/types`.
 
 Tests live in `src/__tests__/` and run from `dist/__tests__/`. Each package that has tests declares `"test": "node --test dist/__tests__/*.test.js"` in its `package.json`.
+
+## Acknowledgements
+
+Three of MAF's designs are taken from **HarnessX** — *HarnessX: A Composable,
+Adaptive, and Evolvable Agent Harness Foundry* ([arXiv:2606.14249](https://arxiv.org/abs/2606.14249)):
+
+- the typed, hook-indexed **processor pipeline** with contract-enforced event
+  mutation (`@maf/processors`);
+- the **seesaw acceptance rule** — a candidate ships only if it improves
+  something and regresses nothing (`seesawDecision` in `@maf/eval-harness`);
+- the trace-driven **evolution loop** behind `maf evolve` (`@maf/evolver`).
+  HarnessX names its evolution engine AEGIS, which is why `maf evolve` is
+  described as an "AEGIS-lite" loop: it keeps the design and narrows it, mutating
+  configuration only — role prompts, tool allowlists, model bindings, budgets,
+  which known processors a bundle composes — and never processor source.
+
+What MAF borrows is the design, not the code: this is an independent TypeScript
+implementation, and no HarnessX source is used or adapted.
