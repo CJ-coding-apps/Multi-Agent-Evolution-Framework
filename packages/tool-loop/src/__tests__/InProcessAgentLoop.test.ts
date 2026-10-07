@@ -14,7 +14,7 @@ import {
 import type { HarnessEvent, ToolResultEvent } from '@maf/processors';
 import { InProcessAgentLoop, executeToolGated } from '../index.js';
 
-// ORACLE: HARNESSX_INTEGRATION_PLAN.md §4.1 + audit fixes M1/L1/L3.
+// ORACLE: README.md, "In-process execution & the tool-call protocol" + audit fixes M1/L1/L3.
 
 const CAPS: AdapterCapabilities = {
   supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: false,

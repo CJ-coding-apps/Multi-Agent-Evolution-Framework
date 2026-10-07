@@ -50,9 +50,10 @@ const errorResult = (content: string): ToolResult => ({
 /**
  * InProcessAgentLoop — a real multi-turn agent loop where every tool call
  * passes through the processor pipeline and the policy gate before executing
- * (HARNESSX_INTEGRATION_PLAN.md §4.1). Total with respect to the run: it
- * returns a result for every path and only lets ContractViolation /
- * security-gate failures propagate (both are deliberate, loud failures).
+ * (README.md, "In-process execution & the tool-call protocol"). Total with
+ * respect to the run: it returns a result for every path and only lets
+ * ContractViolation / security-gate failures propagate (both deliberate,
+ * loud failures).
  */
 export class InProcessAgentLoop {
   constructor(

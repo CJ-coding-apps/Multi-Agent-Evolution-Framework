@@ -11,8 +11,7 @@ import {
   HarnessIntegrityError,
 } from '../index.js';
 
-// ORACLE (harness-config plan §3.1): canonicalization/round-trip/tamper behavior
-// is specified in HARNESSX_INTEGRATION_PLAN.md Phase 0 tests.
+// ORACLE: canonicalization/round-trip/tamper behavior of computeHarnessSha and HarnessStore.
 
 const ROLE_SET: HarnessRoleSet = {
   version: 1,

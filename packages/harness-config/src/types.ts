@@ -2,8 +2,7 @@
  * HarnessConfig — how agents behave, independent of which adapter executes them.
  * First-class: serializable, comparable, content-hashed, substitutable.
  * Immutable by convention: "changing" a harness means minting a new sha.
- *
- * See HARNESSX_INTEGRATION_PLAN.md §3.
+ * See README.md, "Run output".
  *
  * NOTE (DAG §10.3): harness-config does NOT import @maf/roles (cycle). Role data
  * is carried structurally; @maf/roles owns validation + branded types via

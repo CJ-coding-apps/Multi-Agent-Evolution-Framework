@@ -1,6 +1,6 @@
 /**
  * Secret redaction. Two tiers, because the two consumers have different fidelity
- * requirements (HARNESSX_INTEGRATION_PLAN.md §7.4):
+ * requirements:
  *
  *  - CREDENTIAL_PATTERNS — unambiguous API/LLM/cloud key & token & private-key
  *    FORMATS. These are redacted from the signed attestation bundle, the memory

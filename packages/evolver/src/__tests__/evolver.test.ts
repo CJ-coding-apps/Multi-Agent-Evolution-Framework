@@ -13,7 +13,7 @@ import {
 } from '../index.js';
 import type { EvolveOptions } from '../index.js';
 
-// ORACLE: HARNESSX_INTEGRATION_PLAN.md §6.5 (Phase 3 tests).
+// ORACLE: the evolver's manifest screening and deterministic acceptance gate.
 
 // ─── fixtures ──────────────────────────────────────────────────────────────
 

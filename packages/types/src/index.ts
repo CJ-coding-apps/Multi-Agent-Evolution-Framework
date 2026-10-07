@@ -760,7 +760,7 @@ export interface AssistantTurn {
  * processor pipeline intercept EVERY tool call (the legacy CliAdapter.invoke
  * path dispatches one opaque invocation where tools are advisory).
  *
- * Pre-approved cross-package interface decision per HARNESSX_INTEGRATION_PLAN.md §10.5.
+ * See README.md, "In-process execution & the tool-call protocol".
  */
 export interface TurnAdapter extends CliAdapter {
   sendTurn(history: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn>;

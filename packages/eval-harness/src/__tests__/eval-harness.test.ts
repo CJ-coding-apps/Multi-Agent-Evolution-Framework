@@ -10,7 +10,7 @@ import {
 } from '../index.js';
 import type { GoldenTask, GoldenSuiteResult, VerifierContext } from '../index.js';
 
-// ORACLE: HARNESSX_INTEGRATION_PLAN.md §5.3 (Phase 2 tests) and §10.4 (provenance required).
+// ORACLE: golden-run outcome reporting, and GoldenTask's required provenance.
 
 const execFileAsync = promisify(execFile);
 

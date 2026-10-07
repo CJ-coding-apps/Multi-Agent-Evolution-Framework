@@ -22,7 +22,7 @@ import { RoleDispatcher } from '../RoleDispatcher.js';
 import { defineRoleName } from '../RoleConfig.js';
 import { RoleRegistry } from '../RoleRegistry.js';
 
-// ORACLE: HARNESSX_INTEGRATION_PLAN.md §4.x — in-process dispatch, fallback, gating parity.
+// ORACLE: RoleDispatcher — in-process dispatch, fallback, gating parity.
 
 // ─── stubs (shell-seam doubles; core under test is RoleDispatcher) ───────────
 
