@@ -6,7 +6,7 @@ import path from 'node:path';
 import { snapshotDiff, GIT_EMPTY_TREE } from '../index.js';
 import { git, makeRepo } from './gitTestUtils.js';
 
-// ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A4 — the working-tree diff is computed by
+// ORACLE: A4 — the working-tree diff is computed by
 // staging the whole tree into a THROWAWAY index. The two claims that need measuring rather
 // than asserting in prose: it sees what a plain `git diff` does not, and it does not touch
 // the index the user actually staged their own work in.

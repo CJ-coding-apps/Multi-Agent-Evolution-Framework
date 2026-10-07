@@ -9,7 +9,7 @@ import {
 } from '@maf/types';
 import { FsReadTool, FsWriteTool, FsDeleteTool, FsStatTool, FsListTool } from '../plugins/fs.js';
 
-// ORACLE (DEFECT_SWEEP_2026-09-25.md D-11/D-22; IMPLEMENTATION_CHECKLIST A2-4 exit criterion
+// ORACLE (D-11/D-22; A2-4 exit criterion
 // "`../` traversal, absolute escape and symlink escape are all refused for read *and* write").
 //
 // These call `execute` directly, with no gate and no policy, because that is the claim: a tool

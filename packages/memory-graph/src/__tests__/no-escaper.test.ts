@@ -4,7 +4,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { intLiteral } from '../cypherText.js';
 
-// ORACLE (DEFECT_SWEEP_2026-09-25.md D-08/D-20/D-19; IMPLEMENTATION_CHECKLIST A2-3).
+// ORACLE (D-08/D-20/D-19; A2-3).
 //
 // The defect was a *concept*, held in three identical copies and used at 17 call sites: a value
 // was made safe by rewriting it on its way into a query. `.replace(/'/g, "''")` — SQL quote

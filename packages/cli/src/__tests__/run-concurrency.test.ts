@@ -7,7 +7,7 @@ import { makeRunId } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { RoleRegistry, defineRoleName } from '@maf/roles';
 
-// ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A3 / work order item 2 — the scheduler's
+// ORACLE: A3 / work order item 2 — the scheduler's
 // isWriter predicate is driven by the ROLE CONFIG, and the direction that matters for
 // throughput is the permissive one: two in-process roles whose every tool is read-level
 // genuinely cannot touch the tree, so serializing them is concurrency thrown away.

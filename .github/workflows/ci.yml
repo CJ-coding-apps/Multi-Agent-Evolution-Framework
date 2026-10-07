@@ -48,6 +48,11 @@ jobs:
       - name: Guard workspace dependencies
         run: pnpm check:workspace-deps
 
+      # A comment citing a document this repo does not ship reads as provenance and
+      # resolves to nothing. 39 of them accumulated before anyone noticed.
+      - name: Guard doc references
+        run: pnpm check:doc-refs
+
       - name: Typecheck
         run: pnpm -r typecheck
 

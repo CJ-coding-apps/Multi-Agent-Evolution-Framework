@@ -148,7 +148,7 @@ export class RoleDispatcher {
   /**
    * In-process execution: processor pipeline around every turn/tool call, policy
    * gated per call. Processor bundle = harness.processorBundles, or the default
-   * bundle when the harness carries none (documented in HARNESSX_INTEGRATION_PLAN §4.3).
+   * bundle when the harness carries none (see DEFAULT_BUNDLE_REFS in @maf/processors).
    */
   private async runInProcess(
     node: DagNode,

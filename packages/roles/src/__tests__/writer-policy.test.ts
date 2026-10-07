@@ -6,7 +6,7 @@ import { RoleRegistry, RoleConfigError } from '../RoleRegistry.js';
 import { defineRoleName } from '../RoleConfig.js';
 import { DEFAULT_ROLE_SET } from '../defaults.js';
 
-// ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A3 — the writer lock is only worth
+// ORACLE: A3 — the writer lock is only worth
 // anything if the predicate that feeds it is right in both directions. Serializing a
 // reader costs concurrency; leaving a writer unserialized corrupts the tree.
 

@@ -12,7 +12,8 @@ export interface GatedExecDeps {
 
 /**
  * executeToolGated — the single gated execution path shared by ToolLoop and
- * InProcessAgentLoop (HARNESSX_INTEGRATION_PLAN.md §4.1: no behavior duplication).
+ * InProcessAgentLoop: no behavior duplication between them (README.md,
+ * "In-process execution & the tool-call protocol").
  *
  * Order is load-bearing: policy FIRST (Deny/Escalate throw PolicyViolationError,
  * nothing executes), then tool.execute, then attestation. Processor-mediated

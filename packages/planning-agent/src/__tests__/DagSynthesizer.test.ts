@@ -4,7 +4,7 @@ import { makeRunId } from '@maf/types';
 import { DagSynthesizer } from '../DagSynthesizer.js';
 import { rolesOf } from './roleResolver.js';
 
-// ORACLE (DEFECT_SWEEP_2026-09-25.md D-07): the synthesizer is the second place a role name
+// ORACLE (D-07): the synthesizer is the second place a role name
 // enters a DAG, and it did no checking at all — it wrote `n.agentRole ?? defaultRole` into a
 // `string` field. A name the role set does not define is refused here too, for the same
 // reason: the dispatcher's answer to an unrecognised name was the default *writer*.

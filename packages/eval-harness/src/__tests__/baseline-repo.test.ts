@@ -15,7 +15,7 @@ function git(cwd: string, ...args: string[]) {
   return execFileAsync('git', args, { cwd });
 }
 
-// ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A4 — a fixture is plain tracked files and
+// ORACLE: A4 — a fixture is plain tracked files and
 // carries no repository of its own (git cannot track files inside a directory containing
 // .git), so the runner synthesizes the baseline commit in the work dir. "No repository" and
 // "no changes" must therefore stop being indistinguishable: an empty diff silently scores

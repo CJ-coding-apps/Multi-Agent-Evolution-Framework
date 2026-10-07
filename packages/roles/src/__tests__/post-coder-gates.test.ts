@@ -23,7 +23,7 @@ import { RoleDispatcher } from '../RoleDispatcher.js';
 import { RoleRegistry } from '../RoleRegistry.js';
 import { defineRoleName } from '../RoleConfig.js';
 
-// ORACLE: IMPLEMENTATION_CHECKLIST_2026-09-25.md A4 — the post-coder security gate reads the
+// ORACLE: A4 — the post-coder security gate reads the
 // working-tree diff. A missing repository is an ERROR, not an empty diff: the silent `return`
 // it replaces made "the coder changed nothing" and "we could not look" the same verdict, so
 // a run that was never reviewed attested as reviewed.

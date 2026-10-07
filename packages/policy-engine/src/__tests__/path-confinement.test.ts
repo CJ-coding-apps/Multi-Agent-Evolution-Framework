@@ -8,8 +8,8 @@ import { makeRunId, makeTaskId, makeAgentId, makeToolId } from '@maf/types';
 import { PolicyEngine } from '../PolicyEngine.js';
 import { ViolationHandler } from '../ViolationHandler.js';
 
-// ORACLE (DEFECT_SWEEP_2026-09-25.md D-11: "`**/.env*` denies `.env` but allows `../.env`";
-// IMPLEMENTATION_CHECKLIST A2-4 "used by both the tools and the policy glob matcher, so the
+// ORACLE (D-11: "`**/.env*` denies `.env` but allows `../.env`";
+// A2-4 "used by both the tools and the policy glob matcher, so the
 // checked path and the executed path are the same value").
 //
 // The tool half of that guarantee is asserted in `@maf/tools`. This is the half a model actually

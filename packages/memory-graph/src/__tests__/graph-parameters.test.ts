@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { RunId } from '@maf/types';
 import { MemoryGraph } from '../MemoryGraph.js';
 
-// ORACLE (DEFECT_SWEEP_2026-09-25.md D-08/D-20/D-19; IMPLEMENTATION_CHECKLIST A2-3 exit
+// ORACLE (D-08/D-20/D-19; A2-3 exit
 // criterion "a crafted node id does not damage the graph").
 //
 // These tests load the real kuzu native module and write a real database, because the claim is

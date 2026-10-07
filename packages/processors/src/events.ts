@@ -5,7 +5,7 @@ import type {
 /**
  * Hook-indexed typed events for the processor pipeline.
  * Permitted-modification contracts are enforced by ProcessorPipeline after
- * EVERY processor invocation (HARNESSX_INTEGRATION_PLAN.md §4.2).
+ * EVERY processor invocation.
  */
 
 export type HookPoint =

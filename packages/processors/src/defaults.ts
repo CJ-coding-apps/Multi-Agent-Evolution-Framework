@@ -5,7 +5,7 @@ import type { ProcessorDeps } from './Processor.js';
 import { redactText, redactRecord } from './redaction.js';
 
 /**
- * The default bundle (HARNESSX_INTEGRATION_PLAN.md §4.3). Each processor's
+ * The default bundle. Each processor's
  * behavior is specified in its class doc — these are the only processors
  * registered by default, and each fixes or owns a real pipeline behavior:
  *

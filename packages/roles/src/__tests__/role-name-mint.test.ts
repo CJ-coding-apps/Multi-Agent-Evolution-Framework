@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-// ORACLE (DEFECT_SWEEP_2026-09-25.md D-07): a `RoleName` means "a role set defines this
+// ORACLE (D-07): a `RoleName` means "a role set defines this
 // name". That is the whole guarantee — it is why an unknown role cannot reach the
 // dispatcher, and it holds only while the mint stays where it is. A stray `as RoleName` in
 // some later package would re-open the hole silently, with no compile error anywhere.

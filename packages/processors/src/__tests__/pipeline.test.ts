@@ -18,7 +18,7 @@ import type {
   HarnessEvent, StepEndEvent, BeforeModelEvent, ToolResultEvent, ToolCallEvent,
 } from '../index.js';
 
-// ORACLE: HARNESSX_INTEGRATION_PLAN.md §4.2 (hook contracts) and §4.4 (Phase 1 tests).
+// ORACLE: the hook contracts in processors/src/events.ts, enforced by ProcessorPipeline.
 
 const ctx = { runId: makeRunId('r1'), taskId: makeTaskId('t1'), role: 'coder', harnessSha: 'a'.repeat(64) };
 
