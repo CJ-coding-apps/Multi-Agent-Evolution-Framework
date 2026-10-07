@@ -167,11 +167,16 @@ Tests live in `src/__tests__/` and run from `dist/__tests__/`. Each package that
 
 ## Acknowledgements
 
-Three of MAF's designs are taken from **HarnessX** — *HarnessX: A Composable,
-Adaptive, and Evolvable Agent Harness Foundry* ([arXiv:2606.14249](https://arxiv.org/abs/2606.14249)):
+The processor pipeline, and three of MAF's designs, follow **HarnessX**
+(Darwin Agent Team) — *HarnessX: A Composable, Adaptive, and Evolvable Agent
+Harness Foundry* ([arXiv:2606.14249](https://arxiv.org/abs/2606.14249)) and its
+MIT-licensed codebase
+([Darwin-Agent/HarnessX](https://github.com/Darwin-Agent/HarnessX)):
 
 - the typed, hook-indexed **processor pipeline** with contract-enforced event
-  mutation (`@maf/processors`);
+  mutation (`@maf/processors`) — its hooks, event types and mutation contract
+  correspond to HarnessX's core, and the implementation is an independent
+  TypeScript one;
 - the **seesaw acceptance rule** — a candidate ships only if it improves
   something and regresses nothing (`seesawDecision` in `@maf/eval-harness`);
 - the trace-driven **evolution loop** behind `maf evolve` (`@maf/evolver`).
@@ -180,5 +185,7 @@ Adaptive, and Evolvable Agent Harness Foundry* ([arXiv:2606.14249](https://arxiv
   configuration only — role prompts, tool allowlists, model bindings, budgets,
   which known processors a bundle composes — and never processor source.
 
-What MAF borrows is the design, not the code: this is an independent TypeScript
-implementation, and no HarnessX source is used or adapted.
+The second and third are paper-level designs: neither those names nor those
+mechanisms appear in the HarnessX codebase. What MAF borrows throughout is the
+design, not the code. See [`NOTICE`](NOTICE) for what corresponds to what, and
+for HarnessX's MIT license.
