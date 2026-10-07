@@ -12,6 +12,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The workflow files are the one thing here with no other gate. A job that
+  # quietly stops running, or an expression that never resolves, looks exactly
+  # like a green build — and this repository's whole claim is that its gates
+  # mean something. actionlint reads the files directly: expression syntax,
+  # job-graph references, and the shell inside each `run:` block, through
+  # shellcheck, which the pinned image ships.
+  actionlint:
+    name: lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+
   build-test:
     name: build · typecheck · test
     runs-on: ubuntu-latest
