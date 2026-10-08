@@ -1,6 +1,6 @@
 import type {
   ToolPlugin, ToolInput, ToolResult, ToolContext,
-  PolicyEngineHandle, AttestorHandle, PolicyDecision,
+  PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalGateHandle, ApprovalOutcome,
 } from '@maf/types';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
@@ -8,6 +8,11 @@ import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
 export interface GatedExecDeps {
   policy:   PolicyEngineHandle;
   attestor: AttestorHandle;
+  /**
+   * Asked when the policy answers `Escalate` (D-02). Absent, `Escalate` is refused as `Deny` is.
+   * `| undefined` so a caller can pass an optional gate through as it is.
+   */
+  approvalGate?: ApprovalGateHandle | undefined;
 }
 
 /**
@@ -15,10 +20,11 @@ export interface GatedExecDeps {
  * InProcessAgentLoop: no behavior duplication between them (README.md,
  * "In-process execution & the tool-call protocol").
  *
- * Order is load-bearing: policy FIRST — anything but Allow is attested as a
- * refusal and then thrown as PolicyViolationError, and nothing executes — then
- * tool.execute, then attestation. Processor-mediated input edits happen upstream
- * of this function — policy always sees the final input.
+ * Order is load-bearing: policy FIRST — anything but Allow (or an Escalate the
+ * approval gate approves) is attested as a refusal and then thrown as
+ * PolicyViolationError, and nothing executes — then tool.execute, then
+ * attestation. Processor-mediated input edits happen upstream of this function —
+ * policy always sees the final input.
  *
  * Secret redaction (L1): policy evaluation and execution use the REAL input, but
  * the values persisted (attestation bundle on disk + memory graph) and the result
@@ -49,25 +55,34 @@ export async function executeToolGated(
   const invokedAt = new Date();
   const start = Date.now();
 
-  // An allow-list: only `Allow` runs the tool. Naming the three refusals let any other verdict —
-  // a kind added later, or a policy answering outside the union — fall through to execute.
-  // `Indeterminate` refuses with the rest: a rule that was never consulted is not a rule that
-  // permitted this.
+  // An allow-list: only `Allow` runs the tool, or an `Escalate` the gate approved. Naming the
+  // three refusals let any other verdict — a kind added later, or a policy answering outside the
+  // union — fall through to execute. `Indeterminate` refuses with the rest: a rule that was never
+  // consulted is not a rule that permitted this.
   if (policyDecision.verdict !== 'Allow') {
-    // Attested before the throw: a bundle that lists only the calls that ran cannot show that the
-    // gate ever refused one.
-    await deps.attestor.record({
-      toolId:         tool.id,
-      agentId:        ctx.agentId,
-      runId:          ctx.runId,
-      taskId:         ctx.taskId,
-      input:          redactCredentialsRecord(input),
-      result:         refusedResult(policyDecision),
-      invokedAt,
-      durationMs:     Date.now() - start,
-      policyDecision,
-    });
-    throw new PolicyViolationError(policyDecision);
+    // Escalate is the one refusal a human may lift, for this call only: the gate binds its decision
+    // to this tool, this frozen input and these declared paths, and records it either way.
+    const approval = policyDecision.verdict === 'Escalate' && deps.approvalGate
+      ? await deps.approvalGate.decide({
+          request: policyDecision.approvalRequest, toolId: tool.id, input, declaredPaths,
+        })
+      : undefined;
+    if (!approves(policyDecision, approval)) {
+      // Attested before the throw: a bundle that lists only the calls that ran cannot show that the
+      // gate ever refused one.
+      await deps.attestor.record({
+        toolId:         tool.id,
+        agentId:        ctx.agentId,
+        runId:          ctx.runId,
+        taskId:         ctx.taskId,
+        input:          redactCredentialsRecord(input),
+        result:         refusedResult(policyDecision, approval),
+        invokedAt,
+        durationMs:     Date.now() - start,
+        policyDecision,
+      });
+      throw new PolicyViolationError(policyDecision);
+    }
   }
 
   const rawResult = await tool.execute(input, ctx);
@@ -96,18 +111,33 @@ export async function executeToolGated(
 type Refusal = Exclude<PolicyDecision, { verdict: 'Allow' }>;
 
 /**
+ * Strictly `true`, and for the request this verdict carries: an outcome for another request, or a
+ * gate answering something truthy, has approved nothing here.
+ */
+function approves(decision: Refusal, approval: ApprovalOutcome | undefined): boolean {
+  return decision.verdict === 'Escalate' && approval !== undefined && approval.approved === true
+    && approval.requestId === decision.approvalRequest?.id;
+}
+
+/**
  * What a refused call leaves in the bundle where an executed call leaves its output. Exit code 1
  * and an empty stdout, as the loop reports a refusal to the model; `metadata.refused` is what
- * tells it apart from a call that ran and failed.
+ * tells it apart from a call that ran and failed. An Escalate the gate refused also says what the
+ * gate decided; the decision itself is in the bundle's `approvals`.
  */
-function refusedResult(decision: Refusal): ToolResult {
+function refusedResult(decision: Refusal, approval: ApprovalOutcome | undefined): ToolResult {
   const ruleId = refusingRuleId(decision);
+  const gate = approval ? ` — approval ${approval.status}: ${approval.reason}` : '';
   return {
     stdout:   '',
-    stderr:   redactSecrets(`policy ${decision.verdict}: ${decision.reason}`),
+    stderr:   redactSecrets(`policy ${decision.verdict}: ${decision.reason}${gate}`),
     exitCode: 1,
     duration: 0,
-    metadata: { refused: true, ...(ruleId !== undefined ? { ruleId } : {}) },
+    metadata: {
+      refused: true,
+      ...(ruleId !== undefined ? { ruleId } : {}),
+      ...(approval ? { approval: approval.status } : {}),
+    },
   };
 }
 
