@@ -1,174 +1,234 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import crypto from 'node:crypto';
+import path from 'node:path';
+import tty from 'node:tty';
 import type {
-  ApprovalRequest, ApprovalDecision, ApprovalStatus,
-  ReviewAttestation, CommitHash,
+  ApprovalAsk, ApprovalGateHandle, ApprovalOutcome, ApprovalRequest, ApprovalStatus,
 } from '@maf/types';
-import { makeCommitHash } from '@maf/types';
-import { buildInTotoStatement } from '@maf/attestation';
-import type { MemoryGraph } from '@maf/memory-graph';
+import { AttestationRecorder } from './AttestationRecorder.js';
+import type { ApprovalSink } from './AttestationRecorder.js';
+import { approvalRequestHash } from './requestHash.js';
+import { TtyApprovalProvider } from './providers/tty.js';
+import { HeadlessApprovalProvider } from './providers/headless.js';
 
-const execFileAsync = promisify(execFile);
+export const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
+// setTimeout fires at once for anything longer, which would turn a generous timeout into a denial.
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const GATE = 'maf-approval-gate';
 
-export class ApprovalTimeoutError extends Error {
-  constructor(public readonly requestId: string) {
-    super(`Approval request timed out: ${requestId}`);
-  }
+// Ids name the pending record's file, so they are a file-name-safe token and nothing else.
+const USABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** A request a provider is asked to decide, with the hash its answer must carry back. */
+export interface PendingApproval {
+  readonly requestId:     string;
+  readonly requestHash:   string;
+  readonly request:       ApprovalRequest;
+  readonly toolId:        string;
+  readonly declaredPaths: readonly string[];
+  readonly timeoutMs:     number;
 }
 
-export class ApprovalRejectedError extends Error {
-  constructor(public readonly requestId: string, public readonly reason?: string) {
-    super(`Approval request rejected: ${requestId}`);
-  }
+export interface ProviderAnswer {
+  requestId:   string;
+  requestHash: string;
+  approved:    boolean;
+  reviewer:    string;
+  reason:      string;
+}
+
+/** A way of asking a human. `signal` aborts when the gate stops waiting (timeout). */
+export interface ApprovalProvider {
+  ask(pending: PendingApproval, signal: AbortSignal): Promise<ProviderAnswer>;
 }
 
 export interface ApprovalGateConfig {
-  graph:              MemoryGraph;
-  defaultTimeoutMs?:  number;   // default 24 hours
-  pollIntervalMs?:    number;   // default 60 seconds
-  reviewers?:         string[]; // GitHub logins
+  provider:   ApprovalProvider;
+  recorder:   ApprovalSink;
+  timeoutMs?: number;
 }
 
-export class ApprovalGate {
-  private pending = new Map<string, ApprovalRequest>();
+interface Settlement {
+  status:   ApprovalStatus;
+  reviewer: string;
+  reason:   string;
+}
 
-  constructor(private readonly config: ApprovalGateConfig) {}
+const TIMED_OUT = Symbol('timed out');
 
-  async requestApproval(request: ApprovalRequest): Promise<ReviewAttestation> {
-    this.pending.set(request.id, request);
+/**
+ * The approval gate for `Escalate` verdicts (D-02). Every request it is given is settled exactly
+ * once and recorded in the attestation, approved or not; an approval is good for the request it
+ * names, bound to that request's hash, and for nothing else.
+ */
+export class ApprovalGate implements ApprovalGateHandle {
+  private readonly pending = new Map<string, PendingApproval>();
+  // Every id ever seen, pending or settled: an id is good for one decision.
+  private readonly seen = new Set<string>();
+  private readonly recorder: AttestationRecorder;
+  private readonly timeoutMs: number;
 
-    // Try GitHub PR if gh CLI is available
-    let prUrl: string | undefined;
+  constructor(private readonly config: ApprovalGateConfig) {
+    const timeoutMs = config.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
+      throw new RangeError(
+        `The approval timeout must be a whole number of milliseconds from 1 to ${MAX_TIMEOUT_MS}; found ${String(timeoutMs)}.`,
+      );
+    }
+    this.timeoutMs = timeoutMs;
+    this.recorder = new AttestationRecorder(config.recorder);
+  }
+
+  /** Ids waiting on an answer now. A settled request — whatever settled it — is not among them. */
+  pendingIds(): string[] {
+    return [...this.pending.keys()];
+  }
+
+  async decide(ask: ApprovalAsk): Promise<ApprovalOutcome> {
+    // `?.` throughout: the ask is built from whatever implements the policy handle.
+    const requestId: unknown = ask.request?.id;
+    const id = typeof requestId === 'string' ? requestId : '';
+    let requestHash = '';
     try {
-      prUrl = await this.createGithubPr(request);
-      request.prUrl = prUrl;
-    } catch { /* gh CLI not available */ }
-
-    // Poll for approval
-    const timeoutMs   = this.config.defaultTimeoutMs ?? 24 * 60 * 60 * 1000;
-    const pollInterval = this.config.pollIntervalMs ?? 60 * 1000;
-    const deadline = Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      const decision = await this.checkPrStatus(request, prUrl);
-      if (decision) {
-        return this.finalizeDecision(request, decision);
-      }
-      await sleep(pollInterval);
+      requestHash = approvalRequestHash(ask);
+    } catch (err) {
+      return this.settle(ask, id, '', refused(`the request cannot be bound to a hash: ${messageOf(err)}`));
+    }
+    if (!USABLE_ID.test(id)) {
+      return this.settle(ask, id, requestHash, refused(
+        `request id ${JSON.stringify(requestId)} is not usable; expected 1-128 letters, digits, ".", "_" or "-", starting with a letter or digit`,
+      ));
+    }
+    if (this.seen.has(id)) {
+      return this.settle(ask, id, requestHash, refused(`request id "${id}" was already used; an id is good for one decision`));
+    }
+    this.seen.add(id);
+    if (ask.request.toolId !== undefined && ask.request.toolId !== ask.toolId) {
+      return this.settle(ask, id, requestHash, refused(
+        `the request names tool "${ask.request.toolId}" but the call is to "${ask.toolId}"`,
+      ));
     }
 
-    this.pending.delete(request.id);
-    throw new ApprovalTimeoutError(request.id);
-  }
-
-  // Called by human reviewer or CI system directly (non-GitHub flow)
-  async submitDecision(requestId: string, reviewer: string, approved: boolean, comment?: string): Promise<void> {
-    const request = this.pending.get(requestId);
-    if (!request) throw new Error(`Unknown approval request: ${requestId}`);
-
-    const decision: ApprovalDecision = {
-      requestId,
-      status:    approved ? 'Approved' : 'Rejected',
-      reviewer,
-      decidedAt: new Date(),
-      ...(comment ? { comment } : {}),
+    const pending: PendingApproval = {
+      requestId: id, requestHash, request: ask.request, toolId: ask.toolId,
+      declaredPaths: [...ask.declaredPaths], timeoutMs: this.timeoutMs,
     };
-
-    // Store side-channel decision for the polling loop to pick up
-    this.decisions.set(requestId, decision);
-  }
-
-  private decisions = new Map<string, ApprovalDecision>();
-
-  private async checkPrStatus(request: ApprovalRequest, prUrl?: string): Promise<ApprovalDecision | undefined> {
-    // Check side-channel first
-    const direct = this.decisions.get(request.id);
-    if (direct) { this.decisions.delete(request.id); return direct; }
-
-    if (!prUrl) return undefined;
-
+    this.pending.set(id, pending);
+    let answer: ProviderAnswer | typeof TIMED_OUT | Error;
     try {
-      // Extract PR number from URL
-      const prNumber = prUrl.match(/\/pull\/(\d+)/)?.[1];
-      if (!prNumber) return undefined;
-
-      const { stdout } = await execFileAsync('gh', ['pr', 'view', prNumber, '--json', 'state,reviews']);
-      const data = JSON.parse(stdout) as { state: string; reviews: Array<{ state: string; author: { login: string }; body: string }> };
-
-      if (data.state === 'MERGED') {
-        const approver = data.reviews.find((r) => r.state === 'APPROVED');
-        return {
-          requestId:  request.id,
-          status:     'Approved',
-          reviewer:   approver?.author.login ?? 'github',
-          decidedAt:  new Date(),
-        };
-      }
-      if (data.state === 'CLOSED') {
-        return { requestId: request.id, status: 'Rejected', reviewer: 'github', decidedAt: new Date() };
-      }
-    } catch { /* gh unavailable or PR not found */ }
-
-    return undefined;
+      answer = await this.waitForAnswer(pending);
+    } finally {
+      this.pending.delete(id);
+    }
+    return this.settle(ask, id, requestHash, this.judge(ask, pending, answer));
   }
 
-  private async finalizeDecision(
-    request: ApprovalRequest,
-    decision: ApprovalDecision,
-  ): Promise<ReviewAttestation> {
-    this.pending.delete(request.id);
-
-    if (decision.status === 'Rejected') {
-      throw new ApprovalRejectedError(request.id, decision.comment);
-    }
-
-    const currentHead = await this.getCurrentHead(request.runId);
-    const diffHash = crypto.createHash('sha256').update(request.diff ?? '').digest('hex');
-
-    const attestation: ReviewAttestation = {
-      requestId:  request.id,
-      decision,
-      commitHash: currentHead,
-      diffHash,
-      intotoStmt: buildInTotoStatement(
-        { [request.taskId]: diffHash },
-        { id: `maf-approval-gate@0.1.0`, modelVersion: 'human' },
-        { configSource: { uri: request.prUrl ?? '', digest: { sha256: diffHash } }, parameters: {}, environment: {} },
-      ),
-    };
-
-    await this.config.graph.addNode({
-      kind:       'Approval',
-      label:      `approval:${request.id}`,
-      properties: { requestId: request.id, reviewer: decision.reviewer, status: decision.status, diffHash },
-      runId:      request.runId,
+  private async waitForAnswer(pending: PendingApproval): Promise<ProviderAnswer | typeof TIMED_OUT | Error> {
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), this.timeoutMs);
     });
-
-    return attestation;
-  }
-
-  private async createGithubPr(request: ApprovalRequest): Promise<string> {
-    const reviewerArgs = this.config.reviewers?.flatMap((r) => ['--reviewer', r]) ?? [];
-    const { stdout } = await execFileAsync('gh', [
-      'pr', 'create',
-      '--title', `[MAF Approval] ${request.description.slice(0, 60)}`,
-      '--body',  `## MAF Approval Request\n\n**Run:** ${request.runId}\n**Task:** ${request.taskId}\n**Policy:** ${request.policyRuleId}\n\n${request.diff ? '```diff\n' + request.diff + '\n```' : ''}`,
-      ...reviewerArgs,
-    ]);
-    return stdout.trim();
-  }
-
-  private async getCurrentHead(_runId: string): Promise<CommitHash> {
     try {
-      const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD']);
-      return makeCommitHash(stdout.trim());
-    } catch {
-      return makeCommitHash('0000000000000000000000000000000000000000');
+      // `then` so a provider that throws synchronously is a refusal like one that rejects.
+      const asked = Promise.resolve().then(() => this.config.provider.ask(pending, controller.signal));
+      return await Promise.race([asked, timedOut]);
+    } catch (err) {
+      return err instanceof Error ? err : new Error(String(err));
+    } finally {
+      clearTimeout(timer);
+      // Tells the provider to stop listening; a late answer then has nowhere to land.
+      controller.abort();
     }
+  }
+
+  private judge(ask: ApprovalAsk, pending: PendingApproval, answer: ProviderAnswer | typeof TIMED_OUT | Error): Settlement {
+    if (answer === TIMED_OUT) {
+      return { status: 'TimedOut', reviewer: GATE, reason: `no decision within ${this.timeoutMs} ms, so the call is refused` };
+    }
+    if (answer instanceof Error) return refused(`the approval provider failed: ${answer.message}`);
+    if (answer.requestId !== pending.requestId) {
+      const used = this.seen.has(answer.requestId) ? ', an id already used' : '';
+      return refused(`the decision is for request "${answer.requestId}"${used}, not "${pending.requestId}"`);
+    }
+    // Hashed again rather than trusted from before the wait: an input that changed while a human
+    // was reading the prompt is not the input they decided on.
+    let now: string;
+    try {
+      now = approvalRequestHash(ask);
+    } catch (err) {
+      return refused(`the request can no longer be hashed: ${messageOf(err)}`);
+    }
+    if (answer.requestHash !== pending.requestHash || now !== pending.requestHash) {
+      return refused(
+        `the decision is bound to hash ${answer.requestHash} but the request hashes to ${now}`,
+      );
+    }
+    const reviewer = typeof answer.reviewer === 'string' && answer.reviewer !== '' ? answer.reviewer : 'unknown';
+    const reason = typeof answer.reason === 'string' ? answer.reason : '';
+    // Strictly `true`: a provider answering anything else has not approved.
+    return answer.approved === true
+      ? { status: 'Approved', reviewer, reason }
+      : { status: 'Rejected', reviewer, reason };
+  }
+
+  private settle(ask: ApprovalAsk, requestId: string, requestHash: string, settlement: Settlement): ApprovalOutcome {
+    const policyRuleId: unknown = ask.request?.policyRuleId;
+    this.recorder.record({
+      requestId, requestHash, ...settlement,
+      toolId:        String(ask.toolId),
+      policyRuleId:  typeof policyRuleId === 'string' ? policyRuleId : '',
+      declaredPaths: Array.isArray(ask.declaredPaths) ? ask.declaredPaths : [],
+      decidedAt:     new Date(),
+    });
+    return {
+      approved: settlement.status === 'Approved',
+      status: settlement.status, requestId, requestHash, reason: settlement.reason,
+    };
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+function refused(reason: string): Settlement {
+  return { status: 'Rejected', reviewer: GATE, reason };
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+export interface TerminalStreams {
+  input:  NodeJS.ReadableStream;
+  output: NodeJS.WritableStream;
+  isTTY:  boolean;
+}
+
+/** Why no one can be asked, or `undefined` when someone can (D-02: headless runs deny). */
+export function headlessReason(terminal: { isTTY: boolean }, env: NodeJS.ProcessEnv): string | undefined {
+  if (env['MAF_HEADLESS'] === '1') return 'MAF_HEADLESS=1 is set, so no one is asked';
+  if (!terminal.isTTY) return 'stdin is not a terminal, so no one is asked';
+  return undefined;
+}
+
+export interface CreateApprovalGateOptions {
+  /** The run's `Attestor`, or anything with its `addApproval`. */
+  recorder:   ApprovalSink;
+  /** The project's `.maf` directory; headless requests are written under `approvals/pending/`. */
+  mafDir:     string;
+  /** Defaults to stdin (prompted on stderr). Tests pass streams. */
+  terminal?:  TerminalStreams;
+  env?:       NodeJS.ProcessEnv;
+  timeoutMs?: number;
+}
+
+/** The gate `maf run` uses: the terminal when there is one, the headless refusal when not. */
+export function createApprovalGate(options: CreateApprovalGateOptions): ApprovalGate {
+  // `isatty(0)` rather than `process.stdin.isTTY`: a headless run never touches stdin at all.
+  const isTTY = options.terminal ? options.terminal.isTTY : tty.isatty(0);
+  const why = headlessReason({ isTTY }, options.env ?? process.env);
+  const provider = why !== undefined
+    ? new HeadlessApprovalProvider({ pendingDir: path.join(options.mafDir, 'approvals', 'pending'), reason: why })
+    : new TtyApprovalProvider(options.terminal ?? { input: process.stdin, output: process.stderr, isTTY });
+  return new ApprovalGate({
+    provider,
+    recorder: options.recorder,
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+  });
 }
