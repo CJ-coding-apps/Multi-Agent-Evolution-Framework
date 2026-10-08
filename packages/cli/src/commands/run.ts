@@ -19,6 +19,7 @@ import { roleSetFromHarness } from '@maf/roles';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
+import { ensureMafDir } from '../ensureMafDir.js';
 
 const SECURITY_REVIEW_FALLBACK_PROMPT = `You are a security auditor. Review the supplied diff for vulnerabilities. Respond with a strict JSON block:
 {
@@ -44,6 +45,8 @@ export function registerRunCommand(program: Command): void {
     .action(async (taskDescription: string, opts: { adapter: string; model?: string; dir: string; worktree: boolean; policy: string; roles: string; harness?: string }) => {
       const cwd         = path.resolve(opts.dir);
       const mafDir      = path.join(cwd, '.maf');
+      // The stores below open files inside .maf/ and do not create it; a repo maf never ran in has none.
+      await ensureMafDir(mafDir);
       const runId       = makeRunId(crypto.randomUUID());
       const taskId      = makeTaskId(crypto.randomUUID());
       const sessionId   = runId;
