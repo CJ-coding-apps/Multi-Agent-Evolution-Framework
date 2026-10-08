@@ -15,7 +15,7 @@ import {
   redactRecord,
 } from '../index.js';
 import type {
-  HarnessEvent, StepEndEvent, BeforeModelEvent, ToolResultEvent, ToolCallEvent,
+  HarnessEvent, StepEndEvent, BeforeModelEvent, ToolResultEvent, ToolCallEvent, TaskStartEvent,
 } from '../index.js';
 
 // ORACLE: the hook contracts in processors/src/events.ts, enforced by ProcessorPipeline.
@@ -281,4 +281,121 @@ test('ProcessorInterrupt propagates out of the pipeline', async () => {
     result: { stdout: '', stderr: '', exitCode: 0, duration: 0, metadata: {} },
   };
   await assert.rejects(() => pipe.run(input), ProcessorInterrupt);
+});
+
+// WP-1.10 (audit P0 #11): the contract is checked against a snapshot taken before
+// the processor runs, so edits made to the input object itself are visible.
+
+const violation = (detail: RegExp) => (err: unknown): boolean =>
+  err instanceof ContractViolation && detail.test(err.message);
+
+test('WP-1.10: swapping call.toolName in place and yielding the same object is a ContractViolation naming the field', async () => {
+  const reg = new StaticProcessorRegistry().register('swapper', () => new Stub('swapper', ['before_tool'],
+    (e) => {
+      const ev = e as ToolCallEvent;
+      ev.call.toolName = 'shell.exec';
+      return [ev];
+    }));
+  const pipe = ProcessorPipeline.build([{ name: 'swapper' }], reg, {});
+  const input: ToolCallEvent = {
+    ...ctx, hook: 'before_tool', stepIndex: 0,
+    call: { toolUseId: 'u1', toolName: 'fs.read', input: { path: 'a' } },
+  };
+  await assert.rejects(() => pipe.run(input), violation(/mutated read-only field "call\.toolName"/));
+});
+
+test('WP-1.10: before_model rewriting an earlier history message in place is a ContractViolation', async () => {
+  const reg = new StaticProcessorRegistry().register('rewrite-in-place', () => new Stub('rewrite-in-place', ['before_model'],
+    (e) => {
+      const ev = e as BeforeModelEvent;
+      const first = ev.history[0];
+      if (first?.kind === 'user') first.text = 'TAMPERED';
+      return [ev];
+    }));
+  const pipe = ProcessorPipeline.build([{ name: 'rewrite-in-place' }], reg, {});
+  const input: BeforeModelEvent = {
+    ...ctx, hook: 'before_model', stepIndex: 0,
+    history: [{ kind: 'user', text: 'a' }, { kind: 'user', text: 'b' }],
+  };
+  await assert.rejects(() => pipe.run(input), violation(/rewrote prior history message at index 0/));
+});
+
+test('WP-1.10: an in-place edit is caught even when the processor then intercepts', async () => {
+  // The loop passes a shallow copy of its history, so the message objects are its
+  // own: an edit followed by an intercept would otherwise land in the loop unseen.
+  const reg = new StaticProcessorRegistry().register('tamper-and-drop', () => new Stub('tamper-and-drop', ['before_model'],
+    (e) => {
+      const first = (e as BeforeModelEvent).history[0];
+      if (first?.kind === 'user') first.text = 'TAMPERED';
+      return [];
+    }));
+  const pipe = ProcessorPipeline.build([{ name: 'tamper-and-drop' }], reg, {});
+  const loopHistory: BeforeModelEvent['history'] = [{ kind: 'user', text: 'a' }, { kind: 'user', text: 'b' }];
+  const input: BeforeModelEvent = { ...ctx, hook: 'before_model', stepIndex: 0, history: [...loopHistory] };
+  await assert.rejects(() => pipe.run(input), violation(/rewrote prior history message at index 0/));
+});
+
+test('WP-1.10: in-place edits of permitted fields stay legal (call.input, call.approvalRequired, systemPrompt)', async () => {
+  const reg = new StaticProcessorRegistry()
+    .register('edit-call', () => new Stub('edit-call', ['before_tool'], (e) => {
+      const ev = e as ToolCallEvent;
+      ev.call.input['path'] = 'b';
+      ev.call.approvalRequired = true;
+      return [ev];
+    }))
+    .register('edit-prompt', () => new Stub('edit-prompt', ['task_start'], (e) => {
+      const ev = e as TaskStartEvent;
+      ev.systemPrompt = 'edited';
+      return [ev];
+    }));
+  const pipe = ProcessorPipeline.build([{ name: 'edit-call' }, { name: 'edit-prompt' }], reg, {});
+
+  const call: ToolCallEvent = {
+    ...ctx, hook: 'before_tool', stepIndex: 0,
+    call: { toolUseId: 'u1', toolName: 'fs.read', input: { path: 'a' } },
+  };
+  const [outCall] = await pipe.run(call);
+  assert.deepEqual((outCall as ToolCallEvent).call,
+    { toolUseId: 'u1', toolName: 'fs.read', input: { path: 'b' }, approvalRequired: true });
+
+  const [outStart] = await pipe.run({ ...ctx, hook: 'task_start', systemPrompt: 'orig', userPrompt: 'u' });
+  assert.equal((outStart as TaskStartEvent).systemPrompt, 'edited');
+});
+
+test('WP-1.10: before_model editing the last user text and appending one message in place stays legal', async () => {
+  const reg = new StaticProcessorRegistry().register('edit-in-place', () => new Stub('edit-in-place', ['before_model'],
+    (e) => {
+      const ev = e as BeforeModelEvent;
+      const last = ev.history[ev.history.length - 1];
+      if (last?.kind === 'user') last.text = 'edited';
+      ev.history.push({ kind: 'user', text: 'extra' });
+      return [ev];
+    }));
+  const pipe = ProcessorPipeline.build([{ name: 'edit-in-place' }], reg, {});
+  const input: BeforeModelEvent = {
+    ...ctx, hook: 'before_model', stepIndex: 0,
+    history: [{ kind: 'assistant', text: 'a', toolCalls: [] }, { kind: 'user', text: 'hi' }],
+  };
+  const [out] = await pipe.run(input);
+  assert.deepEqual((out as BeforeModelEvent).history, [
+    { kind: 'assistant', text: 'a', toolCalls: [] },
+    { kind: 'user', text: 'edited' },
+    { kind: 'user', text: 'extra' },
+  ]);
+});
+
+test('WP-1.10: pass-through of read-only fields holding undefined, a Date or a function is not a violation', async () => {
+  // ToolInput is `unknown`-valued: a JSON round-trip snapshot would drop `hash` and
+  // stringify the Date, and structuredClone would throw on the function.
+  const reg = new StaticProcessorRegistry()
+    .register('observer', () => new Stub('observer', ['after_tool'], (e) => [e]));
+  const pipe = ProcessorPipeline.build([{ name: 'observer' }], reg, {});
+  const input: ToolResultEvent = {
+    ...ctx, hook: 'after_tool', stepIndex: 0,
+    call: { toolUseId: 'u', toolName: 'git.commit', input: { hash: undefined, at: new Date(0), cb: () => 'x' } },
+    result: { stdout: '', stderr: '', exitCode: 0, duration: 0, metadata: { hash: undefined } },
+  };
+  const out = await pipe.run(input);
+  assert.equal(out.length, 1);
+  assert.equal(out[0], input);
 });
