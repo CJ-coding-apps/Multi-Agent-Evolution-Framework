@@ -10,7 +10,7 @@ The planner emits `agentRole` on each node it produces. That name is checked aga
 
 ## Default roles
 
-The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four roles. They apply when the roles file cannot be read — normally because the target has no `.maf/roles.yaml`. A roles file that exists but is not JSON, does not match the role-set shape, or names a tool that does not exist stops the run with a `RoleConfigError`.
+The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four roles. They apply only when there is no roles file — the target has no `.maf/roles.yaml`, or nothing exists at the `--roles` path. A roles file that exists but cannot be read (a directory, no permission, a symlink whose target has gone), is not valid YAML, does not match the role-set shape, or names a tool that does not exist stops the run with a `RoleConfigError` naming the file — and, for a YAML error, the line. It is never replaced by the built-in set, whose default role is a writer ([D-08](DECISIONS.md)).
 
 | Role       | Writer? | Allowed tools                                                                                                                  | Use for                              |
 |------------|---------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
@@ -22,6 +22,8 @@ The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four ro
 \* **The two tester definitions in this repository differ.** The built-in tester above (`TESTER_TOOLS` in `defaults.ts`) holds `patch.apply` and no `fs.write`: it can apply a diff but cannot create or overwrite a file. The `.maf/roles.yaml` this repository ships grants the tester `fs.write` as well. `maf run` reads `.maf/roles.yaml` from the *target* directory, so which tester a run gets depends on that directory: one with no roles file gets the built-in tester, one with a copy of this repository's file gets `fs.write`. Either way the tester is a writer (see [Writer roles](#writer-roles)), so its changes are security-reviewed. On the in-process tier the shipped policy also limits *where* it may write — `tester-write-only-tests` and `tester-no-ci-config` in `.maf/policy.yaml` — because the tool allowlist and the policy work together, and neither alone is sufficient. On the `cli` tier neither the allowlist nor the policy reaches the backend's own tools.
 
 ## `.maf/roles.yaml`
+
+The file is YAML, read by the same parser as `.maf/policy.yaml`. JSON is YAML, so the JSON form below — with `#` comment lines, as roles files have always been written — loads unchanged; block-style YAML loads too. One JSON file that loaded before no longer does: one that repeats a key within a mapping, where the last value used to win silently.
 
 ```json
 {
