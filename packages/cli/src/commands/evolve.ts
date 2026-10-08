@@ -5,7 +5,7 @@ import type { Command } from 'commander';
 import { makeRunId } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
-import { GoldenRunner } from '@maf/eval-harness';
+import { GoldenRunner, describeJudge, makeLlmJudge } from '@maf/eval-harness';
 import type { GoldenTask } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
 import { evolve } from '@maf/evolver';
@@ -75,13 +75,18 @@ export function registerEvolveCommand(program: Command): void {
         return (['none', 'low', 'medium', 'high', 'critical'] as const)[worst] ?? 'critical';
       };
 
+      const agent = { adapter: adapter.name, ...(opts.model ? { model: opts.model } : {}) };
       const runnerFor = (harness: HarnessConfig, attempts: number) =>
         new GoldenRunner({
           corpusRoot, harnessSha: harness.sha, harnessId: harness.id,
           attempts, temperature: 0,
           dispatch: (task, workDir, { timeoutMs, temperature }) =>
             stack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature),
-          llmJudge: (rubric, subject) => stack.judge(rubric, subject),
+          ...agent,
+          llmJudge: {
+            verdict: makeLlmJudge({ adapter, ...(opts.model ? { model: opts.model } : {}) }, cwd),
+            disclosure: describeJudge(agent, agent),
+          },
           securityScore,
         });
 
