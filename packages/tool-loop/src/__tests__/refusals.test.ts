@@ -169,7 +169,7 @@ test('a refused call reaches the signed bundle of a real Attestor, which still v
 
     assert.deepEqual(bundle.toolCalls.map((c) => c.policyDecision.verdict), ['Deny', 'Allow'],
       'the refusal and the executed call are both in the bundle, in order');
-    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }).valid, true);
+    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
