@@ -149,7 +149,9 @@ export class RoleRegistry implements RoleResolver {
   }
 
   async loadPrompt(role: RoleConfig): Promise<string> {
-    if (role.systemPrompt) return role.systemPrompt;
+    // `!== undefined`, not truthiness: a harness inlines an empty prompt file as '' beside its
+    // path, and re-reading the file would dispatch text the harness sha does not cover.
+    if (role.systemPrompt !== undefined) return role.systemPrompt;
     if (!role.promptFile) {
       throw new RoleConfigError(`Role "${role.role}" has neither systemPrompt nor promptFile`);
     }

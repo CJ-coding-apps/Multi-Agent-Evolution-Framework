@@ -7,4 +7,4 @@ export { isWriterRole } from './isWriterRole.js';
 export { RoleDispatcher } from './RoleDispatcher.js';
 export type { RoleDispatcherConfig, RoleNodeOutput } from './RoleDispatcher.js';
 export { DEFAULT_ROLE_SET, DEFAULT_ROLE_CATALOG } from './defaults.js';
-export { roleSetFromHarness } from "./harnessBridge.js";
+export { roleSetFromHarness, harnessRoleSetFromRegistry } from "./harnessBridge.js";
