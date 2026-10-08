@@ -140,8 +140,9 @@ earlier sweep.
 Behaviour you may notice:
 
 - **What `Succeeded` means on the `cli` tier is written down.** The README's "Before `maf run`" list now says
-  that the backend keeps its own permissions — `claude --print` refuses file edits unless your Claude Code settings
-  allow them — so a run on a fresh machine can report `Succeeded` (the CLI exited 0 with an answer) having changed
+  that the backend keeps its own permissions, MCP servers and hooks — `claude --print` refuses file edits unless
+  your Claude Code settings allow them, and starts whatever MCP servers your user-level config names — so a run on a
+  fresh machine can report `Succeeded` (the CLI exited 0 with an answer) having changed
   nothing; the attestation's empty diff hashes are the record of that. Making the verdict say it is planned for
   0.3.0 (Status table).
 - **Retries:** two attempts by default (was three), everywhere a default was minted — `DagParser`,
