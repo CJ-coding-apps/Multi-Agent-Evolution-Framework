@@ -14,7 +14,7 @@ test('recordSecurityFindings flows into bundle output and signature payload', as
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
   try {
     const runId = makeRunId('r-1');
-    const attestor = new Attestor(runId, stubGraph, dir, 'test-secret');
+    const attestor = new Attestor(runId, stubGraph, dir, { secret: 'test-secret' });
 
     attestor.recordSecurityFindings('node-1', {
       findings: [{
@@ -36,7 +36,7 @@ test('recordSecurityFindings flows into bundle output and signature payload', as
     assert.equal(bundle.securityFindings?.[0]?.nodeId, 'node-1');
     assert.equal(bundle.securityFindings?.[0]?.result.passed, false);
     assert.ok(bundle.signature, 'bundle must be signed');
-    assert.ok(Attestor.verify(bundle, 'test-secret'), 'signature verifies against same secret');
+    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }).valid, true, 'signature verifies against same secret');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -46,7 +46,7 @@ test('bundle without recordSecurityFindings has empty securityFindings list', as
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
   try {
     const runId = makeRunId('r-2');
-    const attestor = new Attestor(runId, stubGraph, dir, 'test-secret');
+    const attestor = new Attestor(runId, stubGraph, dir, { secret: 'test-secret' });
     const bundle = await attestor.bundle(
       { id: 'b@1', modelVersion: 'v' },
       { configSource: { uri: '', digest: { sha256: '' } }, parameters: {}, environment: {} },
