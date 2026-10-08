@@ -590,6 +590,21 @@ export interface SecurityFindingsRecord {
   result: SecurityReviewResult;
 }
 
+/**
+ * The security gate refused a writer node's change: blocking findings, an unreadable review,
+ * or a diff over the gate's size cap (then `findings` is empty, because nothing was reviewed).
+ *
+ * A class rather than a message, because the scheduler has to tell a verdict from a transport
+ * failure: retrying a refused node would diff a tree the first attempt may already have
+ * committed, and an empty diff passes (D-06).
+ */
+export class GateRefused extends Error {
+  constructor(message: string, readonly findings: SecurityFinding[]) {
+    super(message);
+    this.name = 'GateRefused';
+  }
+}
+
 export interface GoldensSection {
   harnessSha:      string;
   harnessId:       string;
