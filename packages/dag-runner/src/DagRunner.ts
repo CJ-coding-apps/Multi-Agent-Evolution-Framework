@@ -1,8 +1,9 @@
 import type {
   Dag, DagNode, NodeId, RunId, AgentId, CliAdapter,
   AdapterInvokeOptions, BlackboardKey, BlackboardValue, RunOutcome, RunStatus,
+  FailureRecorder, NodeFailureRecord,
 } from '@maf/types';
-import { makeAgentId } from '@maf/types';
+import { makeAgentId, NodeFailure } from '@maf/types';
 import type { BlackboardStore } from '@maf/blackboard';
 import { NodeStateMachine } from './NodeStateMachine.js';
 import { withRetry } from './RetryOrchestrator.js';
@@ -26,6 +27,11 @@ export interface DagRunnerOptions {
   isWriter?:     (node: DagNode) => boolean;
   onNodeStart?:  (nodeId: NodeId) => void;
   onNodeEnd?:    (nodeId: NodeId, status: 'Succeeded' | 'Failed') => void;
+  /**
+   * Told about each node judged failed, once its retries are spent, so the planner can recall it
+   * (D-16). A seam rather than the graph, so the scheduler stays free of the graph backend.
+   */
+  failureRecorder?: FailureRecorder;
 }
 
 export class DagRunner {
@@ -159,6 +165,7 @@ export class DagRunner {
       const error = err instanceof Error ? err.message : String(err);
       this.sm.transition(node.id, 'Failed', undefined, error);
       board.setDagState(node.id, 'Failed');
+      await recordFailure(opts.failureRecorder, node, runId, err, error);
       opts.onNodeEnd?.(node.id, 'Failed');
     }
   }
@@ -166,4 +173,45 @@ export class DagRunner {
   getState(): ReturnType<NodeStateMachine['getAll']> {
     return this.sm.getAll();
   }
+}
+
+/**
+ * Hands a final failure to the recorder. Here, after `withRetry`, the verdict is settled, so an
+ * attempt that a retry recovers is never written down. The recorder is memory, not judgment: if
+ * it fails, the node is still Failed for its own reason and the run goes on.
+ */
+async function recordFailure(
+  recorder: FailureRecorder | undefined,
+  node: DagNode,
+  runId: RunId,
+  err: unknown,
+  message: string,
+): Promise<void> {
+  if (!recorder) return;
+  try {
+    await recorder.recordFailure(failureRecord(node, runId, err, message));
+  } catch (recordErr: unknown) {
+    console.error(`[dag] node ${node.id} failed, and recording that failure failed too:`, recordErr);
+  }
+}
+
+function failureRecord(node: DagNode, runId: RunId, err: unknown, message: string): NodeFailureRecord {
+  const description = node.metadata['taskDescription'];
+  return {
+    runId,
+    nodeId:  node.id,
+    label:   node.label,
+    task:    typeof description === 'string' && description.trim() !== '' ? description : node.label,
+    role:    node.agentRole,
+    reason:  failureReason(err),
+    message,
+    ...(err instanceof NodeFailure && err.exitCode !== undefined ? { exitCode: err.exitCode } : {}),
+  };
+}
+
+/** `NodeFailure.reason` when there is one; otherwise the error's class, which is what a planner can learn from. */
+function failureReason(err: unknown): string {
+  if (err instanceof NodeFailure) return err.reason;
+  if (err instanceof Error) return err.constructor.name || err.name;
+  return 'non_error';
 }
