@@ -210,7 +210,8 @@ test('in-process role: policy Deny prevents execution and feeds the model an err
     const toolMsg = turn2.find((m) => m.kind === 'tool');
     assert.ok(toolMsg && toolMsg.kind === 'tool' && toolMsg.isError);
     assert.match(toolMsg.content, /policy Deny/);
-    assert.equal(f.attestor.records.length, 0, 'nothing executes against Deny');
+    assert.equal(f.attestor.records.length, 1, 'the refusal is attested (D-13)');
+    assert.equal(f.attestor.records[0]?.result.metadata['refused'], true, 'nothing executes against Deny');
   } finally {
     await f.cleanup();
   }

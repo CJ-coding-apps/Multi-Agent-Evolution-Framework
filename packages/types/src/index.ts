@@ -598,8 +598,16 @@ export interface GoldensSection {
   ranAt:           string;
 }
 
+/**
+ * Which key signed a bundle. `'dev'` is the public development key: anyone can produce a bundle
+ * that verifies under it, so such a bundle is no evidence of who ran what.
+ */
+export type KeySource = 'env' | 'dev';
+
 export interface AttestationBundle {
   runId:             RunId;
+  /** Part of the signed payload, so it cannot be stripped or flipped without breaking the signature. */
+  keySource:         KeySource;
   provenance:        SlsaProvenance;
   toolCalls:         ToolCallRecord[];
   approvals:         ReviewAttestation[];

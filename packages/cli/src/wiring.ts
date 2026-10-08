@@ -71,7 +71,7 @@ export async function buildRunStack(cfg: {
   harnessSha: string;
 }): Promise<RunStack> {
   const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
-  const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), undefined, cfg.harnessSha);
+  const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
   const policy = await PolicyLoader.loadEngine(cfg.policyPath, graph);
   const baseTools = createDefaultRegistry();
   const board = new BlackboardStore();

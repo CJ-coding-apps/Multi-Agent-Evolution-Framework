@@ -105,7 +105,7 @@ export function registerRunCommand(program: Command): void {
         harness = await harnessStore.adoptLegacy(legacyRoleSet);
         roles = legacyRegistry;
       }
-      const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), undefined, harness.sha);
+      const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), harness.sha);
 
       // `security` may or may not be one of this set's roles; `resolve` answers that without
       // minting the name. The old `hasRole` + `getRole` pair asked twice, and `getRole` answered

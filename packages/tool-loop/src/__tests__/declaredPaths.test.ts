@@ -89,7 +89,9 @@ test('D-05: patch.apply writing .env is DENIED, and the file is untouched', asyn
 
     assert.equal(await readFile(path.join(dir, '.env'), 'utf8'), 'SAFE=1\n',
       'the guarded path never reaches the filesystem');
-    assert.equal(attestor.records.length, 0, 'nothing is attested as having run');
+    assert.equal(attestor.records.length, 1, 'the refusal is attested');
+    assert.equal(attestor.records[0]?.policyDecision.verdict, 'Deny');
+    assert.equal(attestor.records[0]?.result.metadata['refused'], true, 'and not as having run');
   });
 });
 
