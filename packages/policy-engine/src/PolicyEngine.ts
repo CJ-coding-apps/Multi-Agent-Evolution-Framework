@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { minimatch } from 'minimatch';
 import crypto from 'node:crypto';
 import type {
@@ -50,18 +49,9 @@ export class PolicyEngine implements PolicyEngineHandle {
 
   constructor(private readonly graph: GraphQueryRunner) {}
 
+  // Rules from a file arrive through `PolicyLoader`, which validates them; this takes them as given.
   loadRules(rules: PolicyRule[]): void {
     this.rules = [...rules].sort((a, b) => b.priority - a.priority);
-  }
-
-  static async fromYaml(yamlPath: string, graph: GraphQueryRunner): Promise<PolicyEngine> {
-    const engine = new PolicyEngine(graph);
-    try {
-      const text = await readFile(yamlPath, 'utf8');
-      const parsed = parseSimpleYaml(text) as { rules?: PolicyRule[] };
-      engine.loadRules(parsed.rules ?? []);
-    } catch { /* no policy file → no rules */ }
-    return engine;
   }
 
   async evaluate(
@@ -144,7 +134,7 @@ export class PolicyEngine implements PolicyEngineHandle {
     const glob = rule.predicate.pathGlob;
     if (!glob) return true;
     if (declaredPaths.length === 0) return false;
-    return declaredPaths.some((p) => minimatch(p, glob));
+    return declaredPaths.some((p) => matchesGlob(p, glob));
   }
 
   // Rule matches when at least one declared path falls OUTSIDE every allowed glob.
@@ -154,7 +144,7 @@ export class PolicyEngine implements PolicyEngineHandle {
     const allowed = rule.predicate.allowedPathGlobs;
     if (!allowed || allowed.length === 0) return true;
     if (declaredPaths.length === 0) return false;
-    return declaredPaths.some((p) => !allowed.some((g) => minimatch(p, g)));
+    return declaredPaths.some((p) => !allowed.some((g) => matchesGlob(p, g)));
   }
 
   /**
@@ -209,18 +199,23 @@ export class PolicyEngine implements PolicyEngineHandle {
         };
         return { verdict: 'Escalate', reason: 'Policy requires approval', approvalRequest: request };
       }
+      default: {
+        // Unreachable for a rule that came through `PolicyLoader`, which refuses an unknown kind;
+        // `loadRules` takes rules as given, though. Falling off the switch returned `undefined`,
+        // which a caller checking only for the refusing verdicts would have read as permission.
+        const kind: unknown = (action as { kind: unknown }).kind;
+        throw new Error(
+          `Policy rule "${ruleId}" has action kind ${JSON.stringify(kind)}; expected one of ` +
+          '"Allow", "Deny" or "Escalate", so the call is refused rather than decided.',
+        );
+      }
     }
   }
 }
 
-// Minimal YAML → JS object parser (handles simple key: value and arrays)
-function parseSimpleYaml(text: string): unknown {
-  try {
-    // Use the YAML spec subset via JSON5-like fallback
-    // In real usage, install 'yaml' package: import { parse } from 'yaml'
-    return JSON.parse(text.replace(/^\s*#.*$/gm, ''));
-  } catch {
-    // Very minimal YAML parser for { rules: [...] } structure
-    return { rules: [] };
-  }
+// `dot: true` because a glob here is a statement about every file it names. Without it `**` and
+// `*` skip any path segment starting with `.`, so `**/secrets/**` did not cover
+// `secrets/.hidden` and a Deny rule had a hole exactly where configuration and credentials live.
+function matchesGlob(relativePath: string, glob: string): boolean {
+  return minimatch(relativePath, glob, { dot: true });
 }
