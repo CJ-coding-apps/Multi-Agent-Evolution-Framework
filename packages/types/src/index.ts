@@ -285,6 +285,10 @@ export interface DagNodeExecution {
  *  - `adapter_failed`   — CLI tier: the adapter reported `success: false` (a timeout's exit 124,
  *                         an expired login, an HTTP error body).
  *  - `empty_output`     — CLI tier: a role holding a write tool returned no output.
+ *  - `no_change`        — CLI tier: a role that expects to change the tree (`expectsChange`)
+ *                         answered and exited 0, but its diff against the node's start commit is
+ *                         empty — what a backend that refused the edit under its own permission
+ *                         settings looks like (D-32).
  *  - `budget_exhausted` — in-process: the role's own `maxToolIterations` or `tokenBudget` ran
  *                         out, or a processor stopped the loop before a step.
  *  - `loop_failed`      — in-process: the loop itself reported failure.
@@ -292,6 +296,7 @@ export interface DagNodeExecution {
 export type NodeFailureReason =
   | 'adapter_failed'
   | 'empty_output'
+  | 'no_change'
   | 'budget_exhausted'
   | 'loop_failed';
 

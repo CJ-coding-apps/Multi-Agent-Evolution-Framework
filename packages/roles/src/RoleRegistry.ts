@@ -7,6 +7,7 @@ import type { ToolRegistry } from '@maf/tools';
 import type { RoleConfig, RoleSet, RoleCatalogEntry } from './RoleConfig.js';
 import { defineRoleName } from './RoleConfig.js';
 import { DEFAULT_ROLE_SET } from './defaults.js';
+import { isWriterRole } from './isWriterRole.js';
 
 export class RoleConfigError extends Error {
   constructor(message: string) {
@@ -32,6 +33,14 @@ export class RoleRegistry implements RoleResolver {
     for (const role of set.roles) {
       if (this.byName.has(role.role)) {
         throw new RoleConfigError(`Duplicate role "${role.role}" in role set`);
+      }
+      // A role with no write tool could change the tree only through a cli-tier backend's own
+      // tools, outside every gate — so it may not be told that changing the tree is its job.
+      if (role.expectsChange === true && !isWriterRole(role)) {
+        throw new RoleConfigError(
+          `Role "${role.role}" sets expectsChange: true, which needs a role that holds a write tool ` +
+          '(fs.write, fs.delete, patch.apply, git.add, git.commit or git.reset), but it holds none.',
+        );
       }
       this.byName.set(role.role, role);
     }
@@ -210,6 +219,7 @@ function isRoleSet(x: unknown): x is RawRoleSet {
     if (!Array.isArray(rr['allowedTools'])) return false;
     if (rr['systemPrompt'] !== undefined && typeof rr['systemPrompt'] !== 'string') return false;
     if (rr['promptFile']   !== undefined && typeof rr['promptFile']   !== 'string') return false;
+    if (rr['expectsChange'] !== undefined && typeof rr['expectsChange'] !== 'boolean') return false;
   }
   return true;
 }
