@@ -1,25 +1,10 @@
 import crypto from 'node:crypto';
+import { canonicalJson } from '@maf/types';
 import type { HarnessConfig } from './types.js';
 
-/**
- * Deterministic serialization: recursively sort object keys, keep array order.
- * Two configs differing only in key insertion order must produce the same sha.
- */
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      out[key] = sortKeys((value as Record<string, unknown>)[key]);
-    }
-    return out;
-  }
-  return value;
-}
-
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(sortKeys(value));
-}
+// Moved to @maf/types, which the attestation signs with too; re-exported so this package's
+// surface — and every harness sha — is unchanged.
+export { canonicalJson };
 
 /** The hashed payload excludes `sha` itself. */
 function shaPayload(config: HarnessConfig): object {
