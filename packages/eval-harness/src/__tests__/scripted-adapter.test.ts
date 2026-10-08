@@ -7,8 +7,9 @@ import type { AdapterInvokeOptions, TurnMessage } from '@maf/types';
 import { parseSecurityOutput } from '@maf/git-ops';
 import {
   ScriptedAdapter, SCRIPTED_JUDGE_RATIONALE, JUDGE_SYSTEM_PROMPT, judgePrompt, parseJudgeVerdict,
+  loadScriptedTasks,
 } from '../index.js';
-import type { ScriptedTask } from '../index.js';
+import type { GoldenTask, ScriptedTask } from '../index.js';
 
 // ORACLE: D-14 — `goldens run --adapter scripted` needs a model that answers the same way on
 // every machine. The demo's adapter drew tool-use ids from crypto.randomUUID(); this one may not
@@ -86,4 +87,25 @@ test('it answers the security gate with a clean review and the judge with a fail
   assert.deepEqual(parseJudgeVerdict(judged.output), { passed: false, rationale: SCRIPTED_JUDGE_RATIONALE },
     'the judge answer must parse — an unparseable one would also fail, but for the wrong reason');
   assert.deepEqual(adapter.exchanges.map((e) => e.kind), ['security-review', 'judge']);
+});
+
+test('scripts are written per corpus task id and served by the prompt the model sees', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-scripts-'));
+  const task = (id: string, prompt: string): GoldenTask => ({
+    id, prompt, repoFixture: `fixtures/${id}`, role: 'coder',
+    verifiers: [{ kind: 'diff-match', mustContain: [], mustNotContain: [] }],
+    provenance: { source: 'human-decision', ref: 'test' },
+  });
+  try {
+    const corpus = [task('a', 'Do A.'), task('b', 'Do B.')];
+    await writeFile(path.join(root, 'scripted.json'), JSON.stringify({ version: 1, tasks: { b: { steps: [], final: 'did B' } } }), 'utf8');
+    assert.deepEqual(await loadScriptedTasks(root, corpus), [{ prompt: 'Do B.', steps: [], final: 'did B' }]);
+
+    await writeFile(path.join(root, 'scripted.json'), JSON.stringify({ version: 1, tasks: { zzz: { steps: [], final: 'x' } } }), 'utf8');
+    await assert.rejects(() => loadScriptedTasks(root, corpus), /script "zzz" names no task in the corpus/);
+    await writeFile(path.join(root, 'scripted.json'), JSON.stringify({ version: 1, tasks: { a: { steps: [{ tool: 1 }], final: 'x' } } }), 'utf8');
+    await assert.rejects(() => loadScriptedTasks(root, corpus), /step 0 needs a string "tool"/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
