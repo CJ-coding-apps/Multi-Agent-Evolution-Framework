@@ -1,71 +1,108 @@
-{
-  "rules": [
-    {
-      "id": "tester-write-only-tests",
-      "description": "Tester role may only write/patch files matching test path globs",
-      "priority": 80,
-      "predicate": {
-        "agentRole": "tester",
-        "toolId": ["fs.write", "patch.apply", "fs.delete"],
-        "allowedPathGlobs": [
-          "**/*test*",
-          "**/*spec*",
-          "**/tests/**",
-          "**/__tests__/**"
-        ]
-      },
-      "action": { "kind": "Deny", "reason": "Tester role may only modify test files" }
-    },
-    {
-      "id": "coder-no-secrets-dir",
-      "description": "Coder must not write into a secrets directory",
-      "priority": 90,
-      "predicate": {
-        "agentRole": "coder",
-        "toolId": ["fs.write", "patch.apply", "fs.delete"],
-        "pathGlob": "**/secrets/**"
-      },
-      "action": { "kind": "Deny", "reason": "secrets/** is off-limits to the coder role" }
-    },
-    {
-      "id": "deny-readonly-roles",
-      "description": "Reviewer and security roles are read-only",
-      "priority": 85,
-      "predicate": {
-        "agentRole": ["reviewer", "security"],
-        "toolId": ["fs.write", "patch.apply", "fs.delete", "git.add", "git.commit", "git.reset"]
-      },
-      "action": { "kind": "Deny", "reason": "Read-only role cannot mutate state" }
-    },
-    {
-      "id": "protect-lock-files",
-      "description": "Prevent writing to lock files without approval",
-      "priority": 95,
-      "predicate": {
-        "toolId": ["fs.write", "patch.apply"],
-        "pathGlob": "**/*.lock"
-      },
-      "action": { "kind": "Escalate", "requiresApproval": true }
-    },
-    {
-      "id": "protect-migrations",
-      "description": "Prevent editing migration files without approval",
-      "priority": 90,
-      "predicate": {
-        "toolId": ["fs.write", "patch.apply"],
-        "pathGlob": "**/migrations/**"
-      },
-      "action": { "kind": "Escalate", "requiresApproval": true }
-    },
-    {
-      "id": "deny-env-files",
-      "description": "Never write .env files",
-      "priority": 100,
-      "predicate": {
-        "toolId": ["fs.write"],
-        "pathGlob": "**/.env*"
-      },
-      "action": { "kind": "Deny", "reason": ".env files must be managed manually" }
-    }
-  ]
-}
+# MAF policy: consulted before every tool call on the in-process tier.
+#
+# Rules are tried in descending priority and the first whose predicate matches decides; a call no
+# rule matches is allowed. The file is YAML (JSON is valid YAML too) and is validated when a run
+# starts: a file that does not parse, or a rule with an unknown action kind, an unknown field or a
+# missing one, stops the run instead of loading without that rule.
+#
+# Globs are quoted because YAML reads a bare value starting with `*` as an alias and one starting
+# with `{` as a mapping. They match dotfiles: `**/secrets/**` covers `secrets/.hidden`.
+
+rules:
+  # The repository's own machinery, denied to every role (no agentRole) at a priority above every
+  # other rule, so no Escalate a human might approve and no Allow can outrank it.
+  #
+  # .git: anything written there runs outside every gate. A hook runs on the next git command, and
+  # `core.hooksPath` or `core.fsmonitor` in .git/config does the same through configuration. A `.git`
+  # file (a worktree or submodule pointer) can redirect git to a directory that holds both, and a
+  # nested repository's .git/ works the same way when git runs inside it, hence every depth. A coder
+  # never needs to write there: it commits through the gated git.commit tool. .gitignore,
+  # .gitattributes and a .githooks/ directory live outside .git/ and stay writable.
+  - id: deny-git-dir
+    description: No tool writes into a .git directory, or to a .git file, at any depth
+    priority: 1000
+    predicate:
+      toolId: [fs.write, fs.delete, patch.apply, git.add]
+      pathGlob: "{**/.git,**/.git/**}"
+    action:
+      kind: Deny
+      reason: "Writes under .git/ are refused: a hook or config written there runs outside every gate. Commit with git.commit."
+
+  # .maf: MAF's own state (this policy, roles, prompts, transcripts, attestations). MAF writes it
+  # through its own code, not the tool layer, so denying the tools costs an agent nothing and stops
+  # one from rewriting the policy or the record of its own run.
+  - id: deny-maf-dir
+    description: No tool writes into the project's .maf directory
+    priority: 1000
+    predicate:
+      toolId: [fs.write, fs.delete, patch.apply, git.add]
+      pathGlob: "{.maf,.maf/**}"
+    action:
+      kind: Deny
+      reason: "Writes under .maf/ are refused: it holds MAF's own policy, roles and run records."
+
+  - id: tester-write-only-tests
+    description: Tester role may only write/patch files matching test path globs
+    priority: 80
+    predicate:
+      agentRole: tester
+      toolId: [fs.write, patch.apply, fs.delete]
+      allowedPathGlobs:
+        - "**/*test*"
+        - "**/*spec*"
+        - "**/tests/**"
+        - "**/__tests__/**"
+    action:
+      kind: Deny
+      reason: Tester role may only modify test files
+
+  - id: coder-no-secrets-dir
+    description: Coder must not write into a secrets directory
+    priority: 90
+    predicate:
+      agentRole: coder
+      toolId: [fs.write, patch.apply, fs.delete]
+      pathGlob: "**/secrets/**"
+    action:
+      kind: Deny
+      reason: "secrets/** is off-limits to the coder role"
+
+  - id: deny-readonly-roles
+    description: Reviewer and security roles are read-only
+    priority: 85
+    predicate:
+      agentRole: [reviewer, security]
+      toolId: [fs.write, patch.apply, fs.delete, git.add, git.commit, git.reset]
+    action:
+      kind: Deny
+      reason: Read-only role cannot mutate state
+
+  - id: protect-lock-files
+    description: Prevent writing to lock files without approval
+    priority: 95
+    predicate:
+      toolId: [fs.write, patch.apply]
+      pathGlob: "**/*.lock"
+    action:
+      kind: Escalate
+      requiresApproval: true
+
+  - id: protect-migrations
+    description: Prevent editing migration files without approval
+    priority: 90
+    predicate:
+      toolId: [fs.write, patch.apply]
+      pathGlob: "**/migrations/**"
+    action:
+      kind: Escalate
+      requiresApproval: true
+
+  - id: deny-env-files
+    description: Never write .env files
+    priority: 100
+    predicate:
+      toolId: [fs.write]
+      pathGlob: "**/.env*"
+    action:
+      kind: Deny
+      reason: ".env files must be managed manually"
