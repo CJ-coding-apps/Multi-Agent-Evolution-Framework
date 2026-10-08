@@ -1,8 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import type { ToolContext, PolicyRule, GraphQuery, GraphQueryRunner, GraphRow } from '@maf/types';
 import { makeRunId, makeTaskId, makeAgentId, makeToolId } from '@maf/types';
 import { PolicyEngine } from '../PolicyEngine.js';
@@ -208,31 +205,5 @@ test('memoryPattern: a rule whose template is malformed refuses rather than neve
   assert.match(String((res as { reason?: string }).reason), /\$filePath/);
 });
 
-test('fromYaml() loads rules from a JSON policy file with comments', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'maf-engine-'));
-  const file = path.join(dir, 'policy.yaml');
-  const doc = [
-    '# generated policy',
-    JSON.stringify({
-      rules: [{
-        id: 'from-file', description: '', priority: 10,
-        predicate: { toolId: 'fs.write' },
-        action: { kind: 'Deny', reason: 'from file' },
-      }],
-    }),
-  ].join('\n');
-  await writeFile(file, doc, 'utf8');
-  try {
-    const engine = await PolicyEngine.fromYaml(file, stubGraph);
-    const res = await engine.evaluate(FS_WRITE, { path: 'x' }, baseCtx(), ['x']);
-    assert.equal(res.verdict, 'Deny');
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('fromYaml() tolerates a missing policy file (no rules)', async () => {
-  const engine = await PolicyEngine.fromYaml('/no/such/policy.yaml', stubGraph);
-  const res = await engine.evaluate(FS_WRITE, { path: 'x' }, baseCtx(), ['x']);
-  assert.equal(res.verdict, 'Allow');
-});
+// Loading a policy file is `PolicyLoader`'s job now; its tests, including the two `fromYaml()`
+// cases that lived here, are in PolicyLoader.test.ts.

@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { minimatch } from 'minimatch';
 import crypto from 'node:crypto';
 import type {
@@ -50,18 +49,9 @@ export class PolicyEngine implements PolicyEngineHandle {
 
   constructor(private readonly graph: GraphQueryRunner) {}
 
+  // Rules from a file arrive through `PolicyLoader`, which validates them; this takes them as given.
   loadRules(rules: PolicyRule[]): void {
     this.rules = [...rules].sort((a, b) => b.priority - a.priority);
-  }
-
-  static async fromYaml(yamlPath: string, graph: GraphQueryRunner): Promise<PolicyEngine> {
-    const engine = new PolicyEngine(graph);
-    try {
-      const text = await readFile(yamlPath, 'utf8');
-      const parsed = parseSimpleYaml(text) as { rules?: PolicyRule[] };
-      engine.loadRules(parsed.rules ?? []);
-    } catch { /* no policy file → no rules */ }
-    return engine;
   }
 
   async evaluate(
@@ -210,17 +200,5 @@ export class PolicyEngine implements PolicyEngineHandle {
         return { verdict: 'Escalate', reason: 'Policy requires approval', approvalRequest: request };
       }
     }
-  }
-}
-
-// Minimal YAML → JS object parser (handles simple key: value and arrays)
-function parseSimpleYaml(text: string): unknown {
-  try {
-    // Use the YAML spec subset via JSON5-like fallback
-    // In real usage, install 'yaml' package: import { parse } from 'yaml'
-    return JSON.parse(text.replace(/^\s*#.*$/gm, ''));
-  } catch {
-    // Very minimal YAML parser for { rules: [...] } structure
-    return { rules: [] };
   }
 }

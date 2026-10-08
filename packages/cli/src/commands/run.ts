@@ -7,7 +7,7 @@ import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor } from '@maf/attestation';
-import { PolicyEngine } from '@maf/policy-engine';
+import { PolicyLoader } from '@maf/policy-engine';
 import { RollbackManager, SecurityReviewGate } from '@maf/git-ops';
 import { DagRunner } from '@maf/dag-runner';
 import { GraphAwareInjector } from '@maf/prompt-injector';
@@ -62,7 +62,7 @@ export function registerRunCommand(program: Command): void {
       const graph     = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
       // Attestor constructed after harness resolution (harnessSha stamps ToolInvocation
       // nodes); created in two steps below.
-      const policy    = await PolicyEngine.fromYaml(path.resolve(cwd, opts.policy), graph);
+      const policy    = await PolicyLoader.loadEngine(path.resolve(cwd, opts.policy), graph);
       const rollback  = new RollbackManager(cwd);
       const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
         logDir: path.join(mafDir, 'transcripts'),
