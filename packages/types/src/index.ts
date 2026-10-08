@@ -178,6 +178,12 @@ export interface DagNode {
   inputs:        Record<string, BlackboardKey>;
   outputs:       Record<string, BlackboardKey>;
   metadata:      Record<string, unknown>;
+  /**
+   * Accept this node as succeeded when its role stops on its own budget (`budget_exhausted`),
+   * with the reason returned beside its output as a {@link PartialNodeOutcome}. Off unless a
+   * node says so, because a node that did not finish did not succeed (D-04).
+   */
+  allowPartial?: boolean;
 }
 
 export interface DagEdge {
@@ -232,6 +238,52 @@ export interface DagNodeExecution {
   finishedAt?: Date;
   error?:      string;
   agentId?:    AgentId;
+}
+
+/**
+ * Why a node that ran did not finish its work.
+ *
+ *  - `adapter_failed`   — CLI tier: the adapter reported `success: false` (a timeout's exit 124,
+ *                         an expired login, an HTTP error body).
+ *  - `empty_output`     — CLI tier: a role holding a write tool returned no output.
+ *  - `budget_exhausted` — in-process: the role's own `maxToolIterations` or `tokenBudget` ran
+ *                         out, or a processor stopped the loop before a step.
+ *  - `loop_failed`      — in-process: the loop itself reported failure.
+ */
+export type NodeFailureReason =
+  | 'adapter_failed'
+  | 'empty_output'
+  | 'budget_exhausted'
+  | 'loop_failed';
+
+/**
+ * A node that ran but did not finish (D-04). Before this existed, a failed adapter call and an
+ * exhausted budget both came back as ordinary output, and the scheduler recorded the node as
+ * succeeded. The `reason` is a field rather than a phrase in the message so that whoever
+ * decides what happens next — retry, fail the run, accept partial work — branches on a value.
+ */
+export class NodeFailure extends Error {
+  readonly reason:   NodeFailureReason;
+  /** The adapter's exit code, when the failure came from a CLI-tier invocation. */
+  readonly exitCode: number | undefined;
+
+  constructor(reason: NodeFailureReason, message: string, exitCode?: number) {
+    super(message);
+    this.name = 'NodeFailure';
+    this.reason = reason;
+    this.exitCode = exitCode;
+  }
+}
+
+/**
+ * What a node that opted in to `allowPartial` returns beside its output, under the `outcome`
+ * key, when it stopped early: the node still succeeds, and this is how a run summary can say
+ * the work was partial rather than finished.
+ */
+export interface PartialNodeOutcome {
+  status: 'partial';
+  reason: NodeFailureReason;
+  detail: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
