@@ -13,7 +13,7 @@ reproduction is worth more than a description.
 
 ## Supported versions
 
-MAF is pre-1.0 (currently 0.1.0). Only the most recent release is supported; fixes land there and are not
+MAF is pre-1.0 (currently 0.2.0). Only the most recent release is supported; fixes land there and are not
 backported. Please reproduce against the latest version before reporting.
 
 ## What this project does with your data

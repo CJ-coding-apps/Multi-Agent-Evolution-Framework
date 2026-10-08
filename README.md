@@ -29,7 +29,7 @@ pnpm install
 # 3. build all packages (tsc project references, leaf-first)
 pnpm build
 
-# 4. (optional) run the suite — 181 tests across policy, git-ops, roles, planning,
+# 4. (optional) run the suite — tests across policy, git-ops, roles, planning,
 #    attestation, tools, processors, tool-loop, harness-config, eval-harness, evolver, adapters
 pnpm -r test
 
