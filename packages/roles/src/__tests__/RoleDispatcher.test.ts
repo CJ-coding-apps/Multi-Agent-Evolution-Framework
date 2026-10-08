@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, PolicyDecision, ToolContext, ToolInput, ToolResult,
@@ -115,6 +117,8 @@ interface Fixture {
   cleanup: () => Promise<void>;
 }
 
+const execFileAsync = promisify(execFile);
+
 async function makeFixture(opts: {
   roleExecution: 'cli' | 'in-process';
   adapter: StubTurnAdapter | CliOnlyAdapter;
@@ -128,6 +132,14 @@ async function makeFixture(opts: {
   await writeFile(path.join(workDir, 'hello.txt'), 'hello-world', 'utf8');
   const roleName = opts.role ?? ANALYST;
   const allowedTools = opts.allowedTools ?? ['fs.read'];
+  // A role holding a write tool is a writer (D-07), and the dispatcher captures its baseline
+  // commit before it runs, so a writer fixture has to be a repository with one commit —
+  // what the CLI-tier `run` hands it. A read-only fixture is a bare directory, as before.
+  if (allowedTools.some((t) => ['fs.write', 'fs.delete', 'patch.apply', 'git.commit', 'git.reset', 'git.add'].includes(t))) {
+    await execFileAsync('git', ['init', '-q'], { cwd: workDir });
+    await execFileAsync('git', ['add', '-A'], { cwd: workDir });
+    await execFileAsync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'base'], { cwd: workDir });
+  }
   const roles = RoleRegistry.fromSet({
     version: 1,
     defaultRole: roleName,
