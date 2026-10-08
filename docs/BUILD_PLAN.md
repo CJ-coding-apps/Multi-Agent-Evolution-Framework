@@ -220,7 +220,7 @@ Wires WP-2.1, 2.2, 2.3, 2.4, 2.5, 2.9 into the two entry points. One PR, after t
 **Acceptance:** the job fails if the demo's attestation is missing or the goldens result differs from the baseline; it is in the branch-protection required set.
 
 ### WP-2.13 Documentation pass and release 0.3.0 — `todo` [mech, maintainer merges]
-Status table rows flipped to *shipped* only for behaviour landed in this phase, each row naming its regression check; POLICY.md/ROLES.md/SECURITY.md updated for approval, review, worktrees, config; CHANGELOG `[0.3.0]`; `docs/DECISIONS.md` statuses. Fresh-clone proof (WP-1.1 script plus `goldens run --adapter scripted`). Maintainer creates the Release.
+Status table rows flipped to *shipped* only for behaviour landed in this phase, each row naming its regression check; POLICY.md, ROLES.md and SECURITY.md updated for approval, review, worktrees, config; CHANGELOG `[0.3.0]`; `docs/DECISIONS.md` statuses. Fresh-clone proof (WP-1.1 script plus `goldens run --adapter scripted`). Maintainer creates the Release.
 
 ---
 
