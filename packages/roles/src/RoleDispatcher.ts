@@ -395,6 +395,7 @@ export class RoleDispatcher {
     // changed" must not be the same verdict.
     const diff = await snapshotDiff(this.config.cwd, startCommit);
     if (!diff.trim()) return;
+    this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff); // a subject of the run's statement (D-13)
 
     const securityGate = this.config.securityGate;
     if (!securityGate) return;
