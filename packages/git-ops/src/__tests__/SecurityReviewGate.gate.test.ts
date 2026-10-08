@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CliAdapter, AdapterInvokeOptions, AdapterInvokeResult } from '@maf/types';
+import { GateRefused } from '@maf/types';
 import { SecurityReviewGate } from '../SecurityReviewGate.js';
 
 const CLEAN_RESULT = JSON.stringify({ findings: [], summary: 'clean', passed: true });
@@ -53,12 +54,61 @@ test('reviewDiff() sends the diff and the configured security system prompt', as
   assert.equal(capture.opts?.timeoutMs, 120_000);
 });
 
-test('reviewDiff() truncates oversized diffs to keep the prompt bounded', async () => {
-  const capture: { opts?: AdapterInvokeOptions } = {};
+// ORACLE: D-07 — the gate used to send `diff.slice(0, 16000)` and attest the whole change as
+// reviewed. A diff over the cap is now a refusal, never a slice: no model call, and an error
+// that names the size and the cap so the user knows what to change.
+
+/** Asserts a `GateRefused` for an oversized diff, with nothing reviewed. */
+function oversizedRefusal(size: number, cap: number) {
+  return (err: unknown): boolean => {
+    if (!(err instanceof GateRefused)) assert.fail(`expected GateRefused, got ${String(err)}`);
+    assert.match(err.message, new RegExp(`refuses a ${size}-character diff`));
+    assert.match(err.message, new RegExp(`review cap is ${cap} characters`));
+    assert.deepEqual(err.findings, [], 'nothing was reviewed, so nothing was found');
+    return true;
+  };
+}
+
+test('reviewDiff() refuses a diff over the default 60,000-character cap without invoking the model', async () => {
+  const capture: { opts?: AdapterInvokeOptions; calls?: number } = {};
   const g = gate(fakeAdapter(CLEAN_RESULT, capture));
-  await g.reviewDiff('y'.repeat(100_000));
-  const prompt = capture.opts?.prompt ?? '';
-  assert.ok(prompt.length < 17_000, `prompt length ${prompt.length} should be bounded to ~16k`);
+  await assert.rejects(() => g.reviewDiff('y'.repeat(60_001)), oversizedRefusal(60_001, 60_000));
+  assert.equal(capture.calls ?? 0, 0, 'an oversized diff must never reach the model, sliced or whole');
+});
+
+test('reviewDiff() sends a diff exactly at the default cap whole', async () => {
+  const capture: { opts?: AdapterInvokeOptions; calls?: number } = {};
+  const g = gate(fakeAdapter(CLEAN_RESULT, capture));
+  // Distinct head and tail markers, so a slice from either end would be caught.
+  const diff = `HEAD-MARKER${'y'.repeat(60_000 - 'HEAD-MARKER'.length - 'TAIL-MARKER'.length)}TAIL-MARKER`;
+  assert.equal(diff.length, 60_000);
+  const res = await g.reviewDiff(diff);
+  assert.equal(res.passed, true);
+  assert.equal(capture.calls, 1);
+  assert.ok((capture.opts?.prompt ?? '').includes(diff), 'the prompt must carry the diff unsliced');
+});
+
+test('reviewDiff() honours a configured cap in both directions', async () => {
+  const capture: { opts?: AdapterInvokeOptions; calls?: number } = {};
+  const g = gate(fakeAdapter(CLEAN_RESULT, capture), { maxDiffChars: 100 });
+  await assert.rejects(() => g.reviewDiff('z'.repeat(101)), oversizedRefusal(101, 100));
+  assert.equal(capture.calls ?? 0, 0);
+
+  const atCap = 'z'.repeat(100);
+  await g.reviewDiff(atCap);
+  assert.equal(capture.calls, 1);
+  assert.ok((capture.opts?.prompt ?? '').includes(atCap));
+});
+
+test('a cap that is not a positive safe integer is refused at construction', () => {
+  // NaN is the dangerous one: `length > NaN` is always false, so the gate would send anything.
+  for (const bad of [Number.NaN, 0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => gate(fakeAdapter(CLEAN_RESULT), { maxDiffChars: bad }),
+      /maxDiffChars must be a positive safe integer/,
+      `maxDiffChars ${String(bad)} must be refused`,
+    );
+  }
 });
 
 test('reviewDiff() surfaces blocking findings from the adapter output', async () => {

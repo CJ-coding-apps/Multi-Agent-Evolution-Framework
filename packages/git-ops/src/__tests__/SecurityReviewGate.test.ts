@@ -81,6 +81,81 @@ test('parseSecurityOutput drops malformed findings entries', () => {
   assert.equal(res.findings[0]?.category, 'good');
 });
 
+// ORACLE: D-07 — `passed` comes from the severities alone. The model's boolean used to win, so a
+// review that reported its own critical finding and said `passed: true` let the diff through.
+
+test('a critical finding blocks even when the model says passed: true', () => {
+  const raw = JSON.stringify({
+    findings: [
+      { severity: 'critical', category: 'cmdi', file: 'a.ts', rationale: 'exec(input)', remediation: 'execFile' },
+    ],
+    summary: 'one critical, but I think it is fine',
+    passed: true,
+  });
+  const res = parseSecurityOutput(raw);
+  assert.equal(res.passed, false);
+  assert.equal(res.findings.length, 1);
+});
+
+test('a high finding blocks even when the model says passed: true', () => {
+  const raw = JSON.stringify({
+    findings: [{ severity: 'high', category: 'sqli', file: 'db.ts', rationale: '', remediation: '' }],
+    summary: '',
+    passed: true,
+  });
+  assert.equal(parseSecurityOutput(raw).passed, false);
+});
+
+test('a critical finding with no category or file still blocks, and is kept', () => {
+  // Dropping a malformed entry used to be harmless because the boolean backstopped it; now that
+  // the boolean is ignored, dropping a blocking entry would pass the diff.
+  const raw = JSON.stringify({ findings: [{ severity: 'critical' }], summary: 'rce', passed: true });
+  const res = parseSecurityOutput(raw);
+  assert.equal(res.passed, false);
+  assert.equal(res.findings.length, 1, 'the finding is recorded, not silently discarded');
+  assert.equal(res.findings[0]?.severity, 'critical');
+});
+
+test('no findings is a pass even when the model says passed: false', () => {
+  const raw = JSON.stringify({ findings: [], summary: 'nothing found, but failing anyway', passed: false });
+  const res = parseSecurityOutput(raw);
+  assert.equal(res.passed, true);
+  assert.equal(res.findings.length, 0);
+});
+
+test('only non-blocking findings is a pass even when the model says passed: false', () => {
+  const raw = JSON.stringify({
+    findings: [
+      { severity: 'medium', category: 'x', file: 'a.ts', rationale: '', remediation: '' },
+      { severity: 'info',   category: 'y', file: 'b.ts', rationale: '', remediation: '' },
+    ],
+    summary: '',
+    passed: false,
+  });
+  assert.equal(parseSecurityOutput(raw).passed, true);
+});
+
+test('a finding whose severity cannot be read fails closed', () => {
+  // It may have been critical; there is no severity to derive a pass from.
+  const raw = JSON.stringify({
+    findings: [{ severity: 'severe', category: 'x', file: 'a.ts', rationale: '', remediation: '' }],
+    summary: 'looks bad',
+    passed: true,
+  });
+  const res = parseSecurityOutput(raw);
+  assert.equal(res.passed, false);
+  assert.match(res.summary, /looks bad/, 'the model summary is kept');
+  assert.match(res.summary, /no recognisable severity/, 'and the reason for the refusal is added');
+});
+
+test('output with no findings array fails closed, whatever the boolean says', () => {
+  for (const body of [{ summary: 'clean', passed: true }, { findings: 'none', passed: true }]) {
+    const res = parseSecurityOutput(JSON.stringify(body));
+    assert.equal(res.passed, false, `${JSON.stringify(body)} must not pass`);
+    assert.match(res.summary, /no findings array/);
+  }
+});
+
 test('parseSecurityOutput handles severity case-insensitively', () => {
   const raw = JSON.stringify({
     findings: [
