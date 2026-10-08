@@ -229,6 +229,19 @@ export interface RetryPolicy {
 }
 
 /**
+ * Two attempts: one retry rides out a dropped connection or a stalled process, and every
+ * further attempt re-runs an agent that may already have changed the tree (D-06). Every
+ * place that mints a node's retry policy starts from this one value, so the default cannot
+ * drift between the planner, the parser and the dispatcher.
+ */
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  maxAttempts:   2,
+  backoffMs:     1000,
+  backoffFactor: 2,
+  jitterMs:      500,
+};
+
+/**
  * The channel failed, not the work: the backend timed out, exited non-zero without writing
  * anything, could not be started, or the network dropped. Nothing about the request was
  * judged, so asking again can succeed. This is the only kind of error a DAG node is retried
@@ -511,7 +524,7 @@ export interface MemoryGraphApi extends GraphQueryRunner {
 
 export type PolicyDecision =
   | { verdict: 'Allow' }
-  | { verdict: 'Deny';     reason: string; alternative?: ToolId }
+  | { verdict: 'Deny';     reason: string; alternative?: ToolId; ruleId?: string }
   | { verdict: 'Escalate'; reason: string; approvalRequest: ApprovalRequest }
   /**
    * The policy could not be evaluated, so no verdict about the call is available — and the call
@@ -676,7 +689,7 @@ export interface SecurityFindingsRecord {
  * failure: retrying a refused node would diff a tree the first attempt may already have
  * committed, and an empty diff passes (D-06).
  */
-export class GateRefused extends Error {
+export class GateRefused extends VerdictError {
   constructor(message: string, readonly findings: SecurityFinding[]) {
     super(message);
     this.name = 'GateRefused';
@@ -758,6 +771,13 @@ export interface AdapterInvokeResult {
   toolCallLog: ToolCallRecord[];
   exitCode:    number;
   duration:    number;
+  /**
+   * Set when the backend gave no answer for a reason that says nothing about the request —
+   * a timeout, a silent non-zero exit, a process that could not start. The dispatcher turns it
+   * into a retryable failure (D-06); without it, `success: false` is a judgement and is not
+   * retried.
+   */
+  transportError?: TransportError;
 }
 
 export interface CliAdapter {

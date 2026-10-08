@@ -116,6 +116,7 @@ function refusingRuleId(decision: Refusal): string | undefined {
   switch (decision.verdict) {
     // `?.` because the decision comes from whatever implements the policy handle, and a malformed
     // one must still be recorded and refused rather than turn the refusal into a TypeError.
+    case 'Deny':          return decision.ruleId;
     case 'Escalate':      return decision.approvalRequest?.policyRuleId;
     case 'Indeterminate': return decision.ruleId;
     default:              return undefined;

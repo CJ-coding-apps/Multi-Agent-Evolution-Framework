@@ -185,7 +185,12 @@ export function registerRunCommand(program: Command): void {
         // only costs concurrency, but treating a writer as a reader costs the tree.
         isWriter: (node) => roles.writesToWorkingTree(node.agentRole, baseTools),
         onNodeStart: (id) => console.log(`[maf] → node ${id} started`),
-        onNodeEnd:   (id, status) => console.log(`[maf] ← node ${id} ${status}`),
+        onNodeEnd:   (id, status) => {
+          // The baseline commit captured for a writer node is held until the node ends, so a
+          // retry reviews against the same base (D-06); release it here.
+          dispatcher.endNode(id);
+          console.log(`[maf] ← node ${id} ${status}`);
+        },
       });
 
       // Every failed node leaves a Failure node behind. Until now only the security

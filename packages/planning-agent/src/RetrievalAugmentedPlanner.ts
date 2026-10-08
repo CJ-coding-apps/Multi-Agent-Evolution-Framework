@@ -3,7 +3,7 @@ import type {
   Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
   GraphQueryRunner, GraphRow,
 } from '@maf/types';
-import { makeNodeId } from '@maf/types';
+import { makeNodeId, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { LcmEngine } from '@maf/lcm';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
 
@@ -210,7 +210,7 @@ function resolveRole(
   return resolved.value;
 }
 
-const DEFAULT_RETRY: RetryPolicy = { maxAttempts: 3, backoffMs: 1000, backoffFactor: 2, jitterMs: 500 };
+const DEFAULT_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;
 const DEFAULT_DAG_CONFIG: DagConfig = { maxConcurrent: 4, retryPolicy: DEFAULT_RETRY, timeoutMs: 600_000, reviewGateNodeIds: [] };
 
 const PLANNING_INSTRUCTIONS_BASE = (defaultRole: string): string => `

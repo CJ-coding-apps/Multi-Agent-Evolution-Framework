@@ -113,11 +113,13 @@ export class SecurityGateProcessor extends Processor {
 
   override async *process(event: HarnessEvent): AsyncGenerator<HarnessEvent> {
     const e = event as TaskEndEvent;
-    // Gate on ANY outcome, not just 'completed' (M2): a coder that hit its turn
+    // Gate on ANY outcome, not just 'completed' (M2): a writer that hit its turn
     // budget ('budget_exhausted') or errored out can still have left a diff on
     // disk. runPostCoderGates no-ops on an empty diff, so this matches the
-    // always-review CLI path exactly instead of leaving a hole.
-    if (e.role === 'coder' && this.deps.securityRunner) {
+    // always-review CLI path exactly instead of leaving a hole. Which roles get a
+    // runner is decided by the tools they hold, never by the name 'coder' (D-07):
+    // the dispatcher hands one to every writer, so a runner's presence is the test.
+    if (this.deps.securityRunner) {
       await this.deps.securityRunner(); // throws on critical/high findings (fail-closed)
     }
     yield event;

@@ -71,7 +71,7 @@ test('the shipped policy loads through PolicyLoader with every rule it ships', a
   const ids = (await PolicyLoader.load(SHIPPED_POLICY)).map((r) => r.id).sort();
   assert.deepEqual(ids, [
     'coder-no-secrets-dir', 'deny-env-files', 'deny-git-dir', 'deny-maf-dir', 'deny-readonly-roles',
-    'protect-lock-files', 'protect-migrations', 'tester-write-only-tests',
+    'protect-lock-files', 'protect-migrations', 'tester-no-ci-config', 'tester-write-only-tests',
   ]);
 });
 
@@ -129,4 +129,18 @@ test('what D-09 leaves writable stays writable, and reading .git is unaffected',
   }
   assert.equal((await evaluate(FS_READ, '.git/HEAD')).verdict, 'Allow');
   assert.equal((await evaluate(FS_READ, '.maf/policy.yaml')).verdict, 'Allow');
+});
+
+test('a tester may write tests but not CI configuration, now that globs reach dotfiles', async () => {
+  // `**/*test*` matches `.github/workflows/test.yml` under dot:true (D-08); the CI rule denies it
+  // by name, at a priority above the tester allow-list, so the allow-list cannot reach it.
+  for (const file of ['.github/workflows/test.yml', '.github/workflows/ci.yml', '.github/dependabot.yml', '.github']) {
+    const decision = await evaluate(FS_WRITE, file, 'tester');
+    assert.equal(decision.verdict, 'Deny', file);
+    assert.match(reasonOf(decision), /CI configuration/, file);
+  }
+  assert.equal((await evaluate(FS_WRITE, 'src/__tests__/sum.test.ts', 'tester')).verdict, 'Allow');
+  assert.equal((await evaluate(FS_WRITE, 'tests/integration/api.spec.ts', 'tester')).verdict, 'Allow');
+  // Other roles are not affected by the tester's rule.
+  assert.equal((await evaluate(FS_WRITE, '.github/workflows/ci.yml', 'coder')).verdict, 'Allow');
 });

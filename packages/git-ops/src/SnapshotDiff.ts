@@ -59,8 +59,14 @@ export function runIsolatedGit(
  * into a throwaway index and diff that:
  *
  *   GIT_INDEX_FILE=<tmp> git read-tree <startCommit>   # start from the base
- *   GIT_INDEX_FILE=<tmp> git add -A                    # stage everything, .gitignore respected
- *   GIT_INDEX_FILE=<tmp> git diff --cached <startCommit>
+ *   GIT_INDEX_FILE=<tmp> git add -A -- . ':(exclude).maf'       # stage everything, .gitignore respected
+ *   GIT_INDEX_FILE=<tmp> git diff --cached <startCommit> -- . ':(exclude).maf'
+ *
+ * `.maf/` is excluded by name: it is maf's own state — transcripts that grow during the run,
+ * the memory graph, the attestation bundles — written by maf, not by the agent, and it is
+ * not ignored by the user's `.gitignore` in a repository maf has only just started working in.
+ * Left in, it would be reviewed as the agent's change and would push an honest diff past the
+ * gate's size cap (D-07).
  *
  * `GIT_INDEX_FILE` is what makes this safe to run against a user's own repository: their
  * real index is never opened, so running maf cannot leave their staged work altered.
@@ -81,9 +87,12 @@ export async function snapshotDiff(cwd: string, startCommit: string): Promise<st
       startCommit === GIT_EMPTY_TREE ? ['read-tree', '--empty'] : ['read-tree', startCommit],
       { env },
     );
-    await runIsolatedGit(cwd, ['add', '-A'], { env });
-    const { stdout } = await runIsolatedGit(cwd, ['diff', '--cached', startCommit], {
-      env,
+    // GIT_LITERAL_PATHSPECS=0 so the `:(exclude)` magic works even when the parent process
+    // runs with literal pathspecs on — the tools' git helper sets it for its own children.
+    const pathspec = ['--', '.', ':(exclude).maf'];
+    await runIsolatedGit(cwd, ['add', '-A', ...pathspec], { env: { ...env, GIT_LITERAL_PATHSPECS: '0' } });
+    const { stdout } = await runIsolatedGit(cwd, ['diff', '--cached', startCommit, ...pathspec], {
+      env: { ...env, GIT_LITERAL_PATHSPECS: '0' },
       maxBuffer: MAX_DIFF_BYTES,
     });
     return stdout;

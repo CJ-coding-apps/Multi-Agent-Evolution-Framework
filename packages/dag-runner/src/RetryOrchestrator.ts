@@ -41,11 +41,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Two attempts: one retry is enough to ride out a dropped connection or a stalled process,
-// and every further attempt re-runs an agent that may already have changed the tree.
-export const DEFAULT_RETRY_POLICY: RetryPolicy = {
-  maxAttempts:  2,
-  backoffMs:    1000,
-  backoffFactor: 2,
-  jitterMs:     500,
-};
+// The default lives in @maf/types so the planner, the parser and the dispatcher — which do
+// not all depend on this package — start from the same value. Re-exported for callers here.
+export { DEFAULT_RETRY_POLICY } from '@maf/types';

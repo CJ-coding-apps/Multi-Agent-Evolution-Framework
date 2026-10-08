@@ -41,6 +41,20 @@ rules:
       kind: Deny
       reason: "Writes under .maf/ are refused: it holds MAF's own policy, roles and run records."
 
+  # Globs match dotfiles (D-08), so the tester's "**/*test*" would reach
+  # .github/workflows/test.yml: a workflow file is CI configuration, not a test, and a
+  # tester has no business writing one. Denied at a priority above the tester allow-list.
+  - id: tester-no-ci-config
+    description: Tester role may not write CI configuration under .github/
+    priority: 81
+    predicate:
+      agentRole: tester
+      toolId: [fs.write, patch.apply, fs.delete]
+      pathGlob: "{.github,.github/**}"
+    action:
+      kind: Deny
+      reason: "The tester role may not write CI configuration under .github/."
+
   - id: tester-write-only-tests
     description: Tester role may only write/patch files matching test path globs
     priority: 80

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { snapshotDiff, GIT_EMPTY_TREE } from '../index.js';
@@ -77,6 +77,39 @@ test("the repository's own index is byte-identical before and after", async () =
 
     assert.deepEqual(after, before, "running maf must not alter the user's staged index");
     assert.match(diff, /untracked\.txt/, 'and the untracked file was still reviewed');
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("maf's own state under .maf/ is not part of the agent's diff", async () => {
+  const repo = await makeRepo('maf-snapshot-');
+  try {
+    const base = await git(['rev-parse', 'HEAD'], repo);
+    // What a run leaves behind in a repository that has no .gitignore entry for it.
+    await mkdir(path.join(repo, '.maf', 'transcripts'), { recursive: true });
+    await writeFile(path.join(repo, '.maf', 'transcripts', 'run.jsonl'), '{"role":"coder"}\n'.repeat(2000), 'utf8');
+    await writeFile(path.join(repo, '.maf', 'policy.yaml'), 'rules: []\n', 'utf8');
+    // And one real change by the agent.
+    await writeFile(path.join(repo, 'created.txt'), 'the agent made this', 'utf8');
+
+    const diff = await snapshotDiff(repo, base);
+    assert.match(diff, /created\.txt/, 'the agent change is reviewed');
+    assert.doesNotMatch(diff, /\.maf\//, "maf's own files are not");
+    assert.doesNotMatch(diff, /run\.jsonl|policy\.yaml/);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test('the .maf exclusion is by name at the root, not a glob on every directory', async () => {
+  const repo = await makeRepo('maf-snapshot-');
+  try {
+    const base = await git(['rev-parse', 'HEAD'], repo);
+    await mkdir(path.join(repo, 'src', '.maf'), { recursive: true });
+    await writeFile(path.join(repo, 'src', '.maf', 'note.txt'), 'an agent-made file that merely shares the name', 'utf8');
+    const diff = await snapshotDiff(repo, base);
+    assert.match(diff, /src\/\.maf\/note\.txt/, 'a nested directory called .maf is ordinary content');
   } finally {
     await rm(repo, { recursive: true, force: true });
   }

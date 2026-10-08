@@ -8,7 +8,7 @@ import type {
   TurnMessage, AssistantTurn, DagNode, PolicyDecision, ToolContext, ToolInput, ToolResult,
   RoleName, PartialNodeOutcome,
 } from '@maf/types';
-import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, NodeFailure } from '@maf/types';
+import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -359,6 +359,25 @@ test('cli tier: success:false with exit 124 fails the node with the exit code an
     assert.ok(failure.message.includes('claude: request timed out after 120000ms'), 'the end of the output is in the error');
     assert.ok(!failure.message.includes('HEAD-OF-OUTPUT'), 'only the tail, not the whole output');
     assert.ok(failure.message.length < 1_000, `the error stays short (${failure.message.length} chars)`);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cli tier: a transport failure is thrown as a TransportError so the scheduler may retry it', async () => {
+  const adapter = new CliOnlyAdapter();
+  // What ProcessSpawner reports for a timeout: exit 124 and a TransportError on the result.
+  const transport = new TransportError('claude timed out after 120000ms');
+  adapter.reply = { success: false, output: '', toolCallLog: [], exitCode: 124, duration: 120_000, transportError: transport };
+  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW });
+  try {
+    let thrown: unknown;
+    try { await f.dispatcher.runNode(makeNode(ANALYST)); } catch (err) { thrown = err; }
+    assert.ok(thrown instanceof TransportError, 'a transport failure keeps its class (D-06)');
+    assert.ok(!(thrown instanceof NodeFailure), 'and is not a judged failure');
+    assert.equal(thrown.cause, transport);
+    assert.match(thrown.message, /exit code 124/);
+    assert.match(thrown.message, /timed out/);
   } finally {
     await f.cleanup();
   }

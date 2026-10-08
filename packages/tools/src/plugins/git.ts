@@ -209,9 +209,11 @@ export class GitResetTool extends GitTool<ResetInput> {
         `that does not start with "-", but got ${asWritten(input.to)}.`,
       );
     }
-    // `--end-of-options` as well as the pattern, so that `to` is a revision to git by position
-    // even if the pattern is ever widened.
-    const args = ['reset', input.hard ? '--hard' : '--soft', '--end-of-options', to];
+    // A trailing `--` as well as the pattern: git then reads `to` as a revision by position
+    // even if the pattern is ever widened to something a file could be named. (`--end-of-options`
+    // would say the same thing, but `git reset` only accepts it from 2.44; the separator works
+    // on every git maf supports.)
+    const args = ['reset', input.hard ? '--hard' : '--soft', to, '--'];
     const r = await git(args, ctx.cwd, this.exec);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }

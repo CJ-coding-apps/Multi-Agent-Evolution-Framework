@@ -4,7 +4,7 @@ import type {
   PolicyEngineHandle, PolicyRule, PolicyDecision, PolicyAction,
   ToolId, ToolInput, ToolContext, ApprovalRequest, GraphQueryRunner,
 } from '@maf/types';
-import { resolveInside, PathEscapeError } from '@maf/types';
+import { resolveInside, PathEscapeError, VerdictError } from '@maf/types';
 import { bindPolicyTemplate } from './policyTemplate.js';
 
 /**
@@ -38,7 +38,7 @@ type PatternResult =
   | { kind: 'nomatch' }
   | { kind: 'error'; detail: string };
 
-export class PolicyViolationError extends Error {
+export class PolicyViolationError extends VerdictError {
   constructor(public readonly decision: Refusal) {
     super(`Policy violation: ${decision.verdict}`);
   }
@@ -184,7 +184,9 @@ export class PolicyEngine implements PolicyEngineHandle {
       case 'Allow':
         return { verdict: 'Allow' };
       case 'Deny':
-        return { verdict: 'Deny', reason: action.reason ?? 'Policy denied', ...(action.alternative ? { alternative: action.alternative } : {}) };
+        // The rule id travels with the verdict so a refusal can be attested by name, the way
+        // Escalate and Indeterminate already are.
+        return { verdict: 'Deny', reason: action.reason ?? 'Policy denied', ruleId, ...(action.alternative ? { alternative: action.alternative } : {}) };
       case 'Escalate': {
         const request: ApprovalRequest = {
           id:           crypto.randomUUID(),

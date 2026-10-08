@@ -40,6 +40,9 @@ export class GeminiAdapter extends BaseAdapter {
       toolCallLog: [] as ToolCallRecord[],
       exitCode:    result.exitCode,
       duration:    this.elapsed(start),
+      // Forwarded so the dispatcher can tell a timeout or a silent exit — retryable (D-06) —
+      // from an answer that happens to be a failure.
+      ...(result.transportError !== undefined ? { transportError: result.transportError } : {}),
     };
   }
 

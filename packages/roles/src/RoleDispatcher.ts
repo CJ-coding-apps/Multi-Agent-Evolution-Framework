@@ -2,7 +2,7 @@ import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
   AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult,
 } from '@maf/types';
-import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused } from '@maf/types';
+import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -75,7 +75,18 @@ function cliShortfall(
   role: RoleConfig,
   adapterName: string,
   result: AdapterInvokeResult,
-): NodeFailure | undefined {
+): NodeFailure | TransportError | undefined {
+  // A transport failure is not a judgement on the work: the backend timed out, exited without
+  // a word, or never started. It is the one kind of shortfall a retry can fix, so it keeps its
+  // class (D-06) and carries the exit code and tail the same way a judged failure does.
+  if (result.transportError) {
+    return new TransportError(
+      `adapter "${adapterName}" gave no answer for role "${role.role}": ` +
+      `${result.transportError.message} (exit code ${result.exitCode}). ` +
+      `Output tail: ${outputTail(result.output)}`,
+      { cause: result.transportError },
+    );
+  }
   if (!result.success) {
     return new NodeFailure(
       'adapter_failed',
@@ -221,7 +232,7 @@ export class RoleDispatcher {
     // the security gate has seen its diff: an agent can change the tree before it fails, and
     // a diff left behind is reviewed whatever the outcome — the in-process tier does the same
     // at task_end, where the gate runs on budget_exhausted too.
-    let shortfall: NodeFailure | undefined;
+    let shortfall: NodeFailure | TransportError | undefined;
     const ranInProcess = wantsInProcess && canInProcess;
     if (ranInProcess) {
       const loop = await this.runInProcess(node, role, invokeOpts, taskId, startCommit);
@@ -237,17 +248,19 @@ export class RoleDispatcher {
     await this.config.lcmBridge.flush();
 
     if (startCommit !== undefined && !ranInProcess) {
-      // In-process runs reach the security gate at task_end via SecurityGateProcessor
-      // (which still calls it only for a role named 'coder'); the CLI path, including the
-      // adapter-capability fallback, runs it here. `startCommit !== undefined` and
+      // In-process runs reach the security gate at task_end via SecurityGateProcessor, which
+      // runs it for every role that was handed a runner — every writer; the CLI path,
+      // including the adapter-capability fallback, runs it here. `startCommit !== undefined` and
       // `isWriterRole(role)` are the same condition by construction.
       await this.runPostCoderGates(node, startCommit);
     }
 
     if (shortfall) {
-      // Only running out of the node's own budget can be accepted, and only by a node that
-      // asked for it; an adapter that failed or a writer that said nothing has no partial work
-      // to keep.
+      // A transport failure is thrown as itself so the scheduler can retry it (D-06). Of the
+      // judged failures, only running out of the node's own budget can be accepted, and only
+      // by a node that asked for it; an adapter that failed or a writer that said nothing has
+      // no partial work to keep.
+      if (shortfall instanceof TransportError) throw shortfall;
       if (shortfall.reason !== 'budget_exhausted' || node.allowPartial !== true) throw shortfall;
       await this.config.transcript.append(
         'system',
@@ -407,7 +420,6 @@ export class RoleDispatcher {
   }
 }
 
-// Re-exported for callers that build DAG nodes inline without the planner.
-export const DEFAULT_NODE_RETRY: RetryPolicy = {
-  maxAttempts: 3, backoffMs: 1000, backoffFactor: 2, jitterMs: 500,
-};
+// Re-exported for callers that build DAG nodes inline without the planner; the value itself
+// is the one default in @maf/types (D-06).
+export const DEFAULT_NODE_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;

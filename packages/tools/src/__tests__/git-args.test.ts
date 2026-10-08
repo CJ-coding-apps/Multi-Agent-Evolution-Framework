@@ -93,7 +93,7 @@ test('git.log rejects any n that is not a positive safe integer, before anything
 
 // ── git.reset ─────────────────────────────────────────────────────────────────
 
-test('git.reset puts --end-of-options before a revision it has checked', async () => {
+test('git.reset ends its argv with -- so a checked revision is read as a revision', async () => {
   const accepted = [
     'HEAD', 'HEAD~', 'HEAD~1', 'HEAD~12', 'HEAD^', 'HEAD^2',
     'a1b2c3d', 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
@@ -106,7 +106,7 @@ test('git.reset puts --end-of-options before a revision it has checked', async (
       await tool.execute({ to, hard }, ctxIn(CWD));
       assert.deepEqual(
         calls.map((c) => c.args),
-        [['reset', hard ? '--hard' : '--soft', '--end-of-options', to]],
+        [['reset', hard ? '--hard' : '--soft', to, '--']],
         `to = ${to}, hard = ${String(hard)}`,
       );
     }
