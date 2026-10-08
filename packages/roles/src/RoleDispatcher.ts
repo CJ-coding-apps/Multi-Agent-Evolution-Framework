@@ -2,7 +2,7 @@ import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
   AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult,
 } from '@maf/types';
-import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
+import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -397,7 +397,7 @@ export class RoleDispatcher {
     if (!diff.trim()) return;
 
     const securityGate = this.config.securityGate;
-    if (!securityGate) return;
+    if (!securityGate) return this.runReviewGate(node, startCommit, diff);
 
     // A diff over the gate's size cap is refused by a throw, before any model call. It is
     // still this node's verdict, so it is attested and remembered like a blocking finding
@@ -435,6 +435,37 @@ export class RoleDispatcher {
         secRes.findings,
       );
     }
+    // After the security verdict, never instead of it: a refused change has thrown above, so
+    // nobody is asked to approve what the gate would not pass.
+    await this.runReviewGate(node, startCommit, diff);
+  }
+
+  /**
+   * The human review of a writer's change, alongside the security gate. Required: the node waits
+   * for the decision, and anything but an approval fails it with ReviewRefused, a verdict (D-06).
+   * Advisory, the default: the node goes on whatever the decision. Either way the request and
+   * its outcome are in the attestation before anything is thrown.
+   */
+  private async runReviewGate(node: DagNode, startCommit: string, diff: string): Promise<void> {
+    const gate = this.config.reviewGate;
+    // The harness is the configuration the bundle names for this run, so a harness that requires
+    // review does not run with an advisory gate or with none: the bundle would attest a
+    // requirement nobody enforced.
+    const harness = this.config.harness;
+    if (harness?.reviewGate?.required === true && gate?.required !== true) {
+      throw new ReviewRefused(
+        `Harness "${harness.id}" requires a human review of every writer's change, but ` +
+        `${gate ? 'the review gate wired for this run is advisory (required: false)' : 'no review gate is wired for this run'}, ` +
+        `so the change from node ${node.id} cannot be approved and is refused. Pass a ReviewGate ` +
+        `constructed with required: true as RoleDispatcherConfig.reviewGate.`,
+      );
+    }
+    if (!gate) return;
+    const outcome = await gate.review({
+      runId: this.config.runId, nodeId: node.id, role: node.agentRole, baseCommit: startCommit, diff,
+    });
+    this.config.attestor.addApproval(outcome.attestation);
+    if (outcome.refusal) throw outcome.refusal;
   }
 }
 
