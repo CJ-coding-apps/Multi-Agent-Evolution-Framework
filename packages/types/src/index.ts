@@ -696,6 +696,26 @@ export class GateRefused extends VerdictError {
   }
 }
 
+/**
+ * A required human review did not approve a writer node's change: the reviewer denied it, did not
+ * answer in time, failed before deciding or answered with something that is not a decision — or
+ * the run's harness requires review and no required review gate was wired to ask anyone.
+ *
+ * A GateRefused, so whatever already treats a gate's refusal as final treats this one the same: it
+ * is never retried (D-06), and a dispatcher that meets it on the way out of a failing backend does
+ * not review the diff a second time. `findings` is empty; a human review produces none.
+ */
+export class ReviewRefused extends GateRefused {
+  /** The review request this refusal answers; undefined when no reviewer was asked. */
+  readonly requestId: string | undefined;
+
+  constructor(message: string, requestId?: string) {
+    super(message, []);
+    this.name = 'ReviewRefused';
+    this.requestId = requestId;
+  }
+}
+
 export interface GoldensSection {
   harnessSha:      string;
   harnessId:       string;
