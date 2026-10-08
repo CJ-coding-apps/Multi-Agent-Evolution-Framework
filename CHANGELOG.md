@@ -123,6 +123,10 @@ earlier sweep.
 - **`inprocess-demo` no longer depends on your global git configuration** (P0 #6). The fixture's commit
   ran plain `git`, so a global `commit.gpgsign=true` or a failing global hook broke the demo. It now goes
   through the isolated git helper with `commit.gpgsign=false`.
+- **The Claude adapter no longer passes `--max-tokens`** (found by the WP-1.12 fresh-clone proof). The `claude`
+  binary has no such flag, so any role with a `tokenBudget` made every `cli`-tier node exit 1 on "unknown option".
+  The knob is ignored on that path, as `temperature` already was, and enforced by the in-process loop; the HTTP
+  adapters still send it as `max_tokens` / `num_predict`.
 - **OpenRouter and Ollama name no model** (P0 #9). They fell back to pinned model ids
   (`anthropic/claude-sonnet-4-6`, `llama3.2`), billing or requesting a model nobody chose. OpenRouter's
   `HTTP-Referer` named `https://github.com/maf`, which is not this project; it now names this repository.
@@ -135,6 +139,11 @@ earlier sweep.
 
 Behaviour you may notice:
 
+- **What `Succeeded` means on the `cli` tier is written down.** The README's "Before `maf run`" list now says
+  that the backend keeps its own permissions — `claude --print` refuses file edits unless your Claude Code settings
+  allow them — so a run on a fresh machine can report `Succeeded` (the CLI exited 0 with an answer) having changed
+  nothing; the attestation's empty diff hashes are the record of that. Making the verdict say it is planned for
+  0.3.0 (Status table).
 - **Retries:** two attempts by default (was three), everywhere a default was minted — `DagParser`,
   `DagSynthesizer`, the planner, `DEFAULT_NODE_RETRY` — and only transport failures are retried. A CLI
   agent that times out is therefore run a second time, so a node's wall time can reach twice its

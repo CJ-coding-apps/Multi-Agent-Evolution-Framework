@@ -60,7 +60,7 @@ Fields:
 | `policyTag`         | no       | Optional tag for grouping in policy rules (currently informational). |
 | `model`             | no       | Per-role model override. Beats the CLI's `--model`. |
 | `timeoutMs`         | no       | Per-role timeout, otherwise the node's `timeoutMs` applies. |
-| `tokenBudget`       | no       | Token cap. Enforced on the in-process path (real usage if reported, else estimated). |
+| `tokenBudget`       | no       | Token cap. Enforced on the in-process path (real usage if reported, else estimated) and sent as `max_tokens`/`num_predict` by the HTTP adapters; the `claude`, `codex` and `gemini` CLIs have no such flag, so a `cli`-tier node ignores it. |
 | `maxToolIterations` | no       | Cap on tool-call iterations (turns) in the loop. |
 | `execution`         | no       | `'cli'` (default) or `'in-process'`. `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair); requires a `TurnAdapter` with `inProcessLoop` capability, else falls back to `cli` and notes the fallback in the run's transcript. See the README "In-process execution" section. |
 

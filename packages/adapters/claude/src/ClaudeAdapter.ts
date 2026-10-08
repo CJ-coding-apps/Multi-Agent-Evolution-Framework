@@ -103,11 +103,12 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     const args: string[] = ['--print'];
     if (options.systemPrompt) args.push('--system-prompt', options.systemPrompt);
     if (options.model)        args.push('--model', options.model);
-    if (options.tokenBudget)  args.push('--max-tokens', String(options.tokenBudget));
-    // NOTE: the claude CLI has no temperature flag in --print mode, so
-    // opts.temperature is intentionally ignored here (contract: adapters that
-    // cannot pin temperature must ignore it, never error). Golden determinism on
-    // the CLI path relies on the model default, not a pinned temperature.
+    // NOTE: the claude CLI has neither a token-cap nor a temperature flag in --print mode
+    // (`claude --help | grep -c max-tokens` → 0; passing `--max-tokens` made every node of a
+    // role with a tokenBudget exit 1 on "unknown option"), so opts.tokenBudget and
+    // opts.temperature are intentionally ignored here (contract: adapters that cannot honour
+    // a knob must ignore it, never error). The in-process loop enforces tokenBudget itself;
+    // golden determinism on the CLI path relies on the model default, not a pinned temperature.
     args.push('-p', options.prompt);
     return args;
   }

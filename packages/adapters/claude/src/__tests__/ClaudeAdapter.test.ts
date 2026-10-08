@@ -113,3 +113,18 @@ test('stream runs through the injected spawnStreaming', async () => {
   assert.deepEqual(chunks, ['a', 'b']);
   assert.deepEqual(seen, ['claude', '--stream']);
 });
+
+// ORACLE (WP-1.12 proof). `claude --help | grep -c max-tokens` is 0: the binary has no token-cap
+// flag, so a role with a tokenBudget used to make every cli-tier node exit 1 on "unknown option".
+// The knob is ignored on this path, as temperature already is, and enforced by the in-process loop.
+test('invoke passes no --max-tokens to a claude binary that has no such flag', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  const out = await new ClaudeAdapter({ spawn }).invoke({ ...CALL, tokenBudget: 200_000, model: 'opus' });
+
+  assert.equal(out.success, true);
+  const args = calls[0]?.args ?? [];
+  assert.equal(args.includes('--max-tokens'), false, 'the flag the binary rejects');
+  assert.equal(args.includes('200000'), false, 'nor its value as a stray positional');
+  assert.deepEqual(args.slice(0, 3), ['--print', '--model', 'opus'], 'the flags it does accept stay');
+  assert.deepEqual(args.slice(-2), ['-p', 'say hi']);
+});
