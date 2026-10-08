@@ -1,56 +1,70 @@
 # Policy
 
-The policy engine intercepts every tool call from inside `ToolLoop.executeTool` and returns one of three verdicts:
+On the `in-process` tier, every tool call a role makes passes through `executeToolGated` (`@maf/tool-loop`), which asks the policy engine for a verdict before the tool runs. Only `Allow` runs the tool; every other verdict refuses the call. (On the default `cli` tier the backend CLI runs its own tools and no policy applies at all — see [SECURITY.md](SECURITY.md).)
 
-| Verdict     | What happens |
-|-------------|--------------|
-| `Allow`     | Tool runs normally. |
-| `Deny`      | `PolicyViolationError` is thrown; the agent sees the rule's `reason`. |
-| `Escalate`  | An `ApprovalRequest` is generated; `@maf/approval-gate` decides whether to wait, prompt the human, or auto-fail. |
+| Verdict         | What happens |
+|-----------------|--------------|
+| `Allow`         | The tool runs, and the call is recorded in the attestation bundle. |
+| `Deny`          | The tool does not run. The refusal is recorded in the bundle with the id of the rule that denied (a confinement `Deny`, which no rule decides, has none), and the model is told `policy Deny: <reason>`. |
+| `Escalate`      | Refused in 0.2.1, exactly as `Deny` is: the tool does not run, the refusal is recorded with the rule id, and the model is told the call requires approval. No one is asked; an approval flow is planned for 0.3.0. |
+| `Indeterminate` | The policy could not be evaluated: a rule's `memoryPattern` query failed, or named a parameter that cannot be bound. Refused like `Deny`, and recorded with the rule id. |
+
+A refused call is thrown inside `executeToolGated` as `PolicyViolationError`; the in-process loop turns that into an error result for the model, and the loop carries on. A call to a tool outside the role's allowlist never reaches the policy engine: the loop answers it with an error before policy, and it is not recorded in the bundle.
 
 Rules are evaluated in **descending priority** order. The first rule whose predicate matches the call wins. If no rule matches, the verdict is `Allow`.
 
+## The policy file
+
+`maf run` reads `.maf/policy.yaml` in the target directory, or the file `--policy <path>` names (resolved against the target directory). `PolicyLoader` (`packages/policy-engine/src/PolicyLoader.ts`) loads it with a real YAML parser; JSON is valid YAML, so a JSON policy file loads too.
+
+- **A missing file** prints one warning line and loads no rules. Path confinement (below) still applies.
+- **A file that exists but cannot be used stops the run**: one that cannot be read, is not valid YAML, or fails validation. The error carries the parse error, or every validation problem at once. An empty or comment-only file is refused; write `rules: []` to run with no rules on purpose.
+- **Validation.** Each rule needs `id` (unique across the file), `priority` (a finite number), `predicate` (a mapping; `{}` matches every call) and `action`; `description` is optional. A `Deny` action needs `reason`, and an `Escalate` action needs `requiresApproval` (`true` or `false`). An unknown field is refused wherever it appears — the document, a rule, a predicate, a `memoryPattern`, an action — because a misspelt `agentRole` would otherwise widen a rule to every role. An empty glob and an empty list are refused too: the engine would read either as "no condition".
+- **Quote every glob.** YAML reads a bare value starting with `*` as an alias and one starting with `{` as a mapping.
+
 ## Rule shape
 
-```json
-{
-  "id": "tester-write-only-tests",
-  "description": "Tester role may only write/patch files matching test path globs",
-  "priority": 80,
-  "predicate": {
-    "agentRole": "tester",
-    "toolId": ["fs.write", "patch.apply", "fs.delete"],
-    "allowedPathGlobs": [
-      "**/*test*", "**/*spec*", "**/tests/**", "**/__tests__/**"
-    ]
-  },
-  "action": { "kind": "Deny", "reason": "Tester role may only modify test files" }
-}
+```yaml
+rules:
+  - id: tester-write-only-tests
+    description: Tester role may only write/patch files matching test path globs
+    priority: 80
+    predicate:
+      agentRole: tester
+      toolId: [fs.write, patch.apply, fs.delete]
+      allowedPathGlobs:
+        - "**/*test*"
+        - "**/*spec*"
+        - "**/tests/**"
+        - "**/__tests__/**"
+    action:
+      kind: Deny
+      reason: Tester role may only modify test files
 ```
 
-`id` and `priority` are required. The rest is documented below.
+`id`, `priority`, `predicate` and `action` are required. The rest is documented below.
 
 ## Predicate fields
 
-All are optional. A rule with **no** predicate fields matches every tool call — usually a footgun, but useful in tests.
+All are optional. A rule whose predicate is `{}` matches every tool call — usually a footgun, but useful in tests.
 
 ### `toolId`
 
-```json
-"toolId": "fs.write"
-"toolId": ["fs.write", "patch.apply"]
+```yaml
+toolId: fs.write
+toolId: [fs.write, patch.apply]
 ```
 
 Match a single tool or any of a list. Omitted → matches every tool.
 
 ### `agentRole`
 
-```json
-"agentRole": "tester"
-"agentRole": ["security", "reviewer"]
+```yaml
+agentRole: tester
+agentRole: [security, reviewer]
 ```
 
-Match the role currently running the tool (`ToolContext.agentRole`). Omitted → matches every role *including* unspecified. Note the asymmetry with `toolId`: an omitted role predicate is a wildcard, but a role-predicate that *can't* match (because the context has no `agentRole`) returns false. That keeps role-targeted rules from accidentally firing on legacy code that doesn't set `agentRole`.
+Match the role currently running the tool (`ToolContext.agentRole`, which `InProcessAgentLoop` sets from the role it runs). Omitted → matches every role *including* unspecified. Note the asymmetry with `toolId`: an omitted role predicate is a wildcard, but a role-predicate that *can't* match (because the context has no `agentRole`) returns false. That keeps role-targeted rules from accidentally firing on legacy code that doesn't set `agentRole`.
 
 ### Paths are confined before any rule
 
@@ -64,44 +78,50 @@ Two things follow, and both are the point:
   outside the project root — `/etc/.env`, `../.env`, or a symlink whose name is inside and whose target
   is not — is a decision about the call, not a failure to reach one, so it is `Deny` rather than
   `Indeterminate`, and it is not escalatable. Because it does not depend on a rule, an empty policy file
-  — maf's default posture — does not switch confinement off.
+  does not switch confinement off. No rule decided it, so its record in the bundle carries no rule id.
 - **One file has one spelling.** `.env`, `./.env`, `a/../.env` and `sub/../.env` all resolve to `.env`
   before a glob is matched. A glob is written against a path, so before this it matched only the
   spellings a caller happened to use: `**/.env*` denied `.env` and allowed `./.env` and `../.env`.
 
 The fs tools apply the same check in `execute` (`packages/tools/src/plugins/fs.ts`), so a direct tool
-call that never went through the policy engine is no less confined. The checked path and the executed
-path are the same value because both come from the same call.
+call that never went through the policy engine is no less confined. For the `fs.*` tools the checked
+path and the executed path are the same value, because both come from `resolveInside` on the same
+input. `git.diff` declares and diffs one list (`paths`). `git.add`, `grep` and `patch.apply` are
+confined by the policy engine only: it checks the resolved form of what they declare, and the tool then
+passes its own input to git (with literal pathspecs), to rg or grep (after `--`), or to `patch`. That is
+the same input, but not one resolved value.
 
 ### `pathGlob`
 
-```json
-"pathGlob": "**/.env*"
+```yaml
+pathGlob: "**/.env*"
 ```
 
 A single minimatch pattern checked against the paths the tool **declares** for this call, after they have
-been resolved and confined as described above. Matches if **any** declared path matches.
+been resolved and confined as described above. Matches if **any** declared path matches. Globs are
+matched with `{ dot: true }`, so `*` and `**` match path segments that start with a dot: `**/secrets/**`
+covers `secrets/.hidden`, and `**/*test*` covers `.github/workflows/test.yml`.
 
 Declared paths come from the tool itself — `ToolPlugin.declaredPaths(input)`, a pure function of the input that the policy layer calls before any rule is consulted. It is not a guess made from which input keys look path-like:
 
 - `fs.*` declare `input.path`.
 - `grep` declares `input.path`, or `.` when it searches the whole working directory.
-- `git.diff` / `git.add` declare `input.path` / `input.paths`.
+- `git.diff` declares `input.paths` (a legacy `input.path` is merged into it), and diffs exactly that list.
+- `git.add` declares `input.paths` (or `input.path`).
 - `patch.apply` declares every file in the diff headers (`extractDiffPaths`), so a path-glob rule applies to every file the patch touches, not just whatever the caller passed in.
-- `git.status` / `git.commit` / `git.log` / `git.reset` and `test.run` act on the repository or project as a whole and declare `[]`, so no path rule can match them.
+- `git.status` / `git.commit` / `git.log` / `git.reset` and `test.run` act on the repository or project as a whole and declare `[]`, so no path rule can match them. Their inputs are checked by the tools instead: `git.log` accepts only a positive whole number of commits, and `git.reset` only a hex object name, `HEAD`, `HEAD~N`, `HEAD^N` or a branch or tag name not starting with `-`, which it passes before a trailing `--` so git reads it as a revision ([D-28](DECISIONS.md): not `--end-of-options`, which `git reset` accepts only from git 2.44).
 
-Three consequences worth stating:
+Four consequences worth stating:
 
 - A path that cannot be confined refuses the whole call, so one escaping path in a multi-path declaration is enough to deny it.
 - A declaration of `[]` has nothing to confine, so confinement has no path to refuse either.
-
 - A rule with a `pathGlob` **cannot match a call that declares no path** — matching on an empty set would make a Deny rule fire on calls that named no file.
 - A rule matches if **any** declared path matches. A multi-file call (a patch spanning `src/a.ts` and `.env`) is denied by a `**/.env*` rule, because one of its declared paths matches.
 
 ### `allowedPathGlobs`
 
-```json
-"allowedPathGlobs": ["**/*test*", "**/tests/**"]
+```yaml
+allowedPathGlobs: ["**/*test*", "**/tests/**"]
 ```
 
 Inverted semantics. The rule matches when **any** declared path falls *outside* every allowed pattern. The paths are the resolved ones (see above), so `./tests/util.ts` and `tests/util.ts` are the same path here — before, the `./` spelling matched neither allowed glob and the rule read it as outside the tree it was inside.
@@ -114,22 +134,27 @@ When `pathGlob` and `allowedPathGlobs` are both set, **both** must hold for the 
 
 ### `memoryPattern`
 
-```json
-"memoryPattern": {
-  "cypher": "MATCH (f:Failure {nodeId: $taskId, kind: 'Security'}) RETURN f LIMIT 1"
-}
+```yaml
+memoryPattern:
+  cypher: "MATCH (f:MemoryNode {kind: 'Failure', run_id: $runId}) RETURN f.id LIMIT 1"
 ```
 
-The string is template-substituted before execution:
+The query runs against the memory graph, where every node is a `MemoryNode` with `kind`, `label`,
+`run_id` and a JSON `properties` string (`packages/memory-graph/src/schema.ts`). The example matches
+once the current run has recorded a `Failure` node, which the security gate writes when it refuses a
+change. A query naming a table the schema does not have fails, and so refuses every call the rule's
+other predicates match (see below).
 
-| Placeholder | Replaced with                                       |
+The placeholders are bound as query parameters, never spliced into the query text:
+
+| Placeholder | Bound to                                            |
 |-------------|-----------------------------------------------------|
-| `$tool`     | `'<toolId>'`                                        |
-| `$path`     | `'<first declared path>'` (single-quotes escaped)   |
-| `$runId`    | `'<ctx.runId>'`                                     |
-| `$taskId`   | `'<ctx.taskId>'`                                    |
+| `$tool`     | the tool id                                         |
+| `$path`     | the first declared path (resolved, root-relative)   |
+| `$runId`    | `ctx.runId`                                         |
+| `$taskId`   | `ctx.taskId`                                        |
 
-The rule matches if the query returns at least one row. Errors are swallowed (treated as no match) so a broken Cypher rule doesn't take down a run.
+The rule matches if the query returns at least one row. If the query fails, or names a parameter that cannot be bound (a typo like `$filePath`), the verdict is `Indeterminate` and the call is refused: a broken graph query must not silently switch a `Deny` rule off.
 
 ### `minFailureCount`
 
@@ -137,79 +162,88 @@ Reserved for graph-derived predicates that count prior failure rows. Currently u
 
 ## Actions
 
-```json
-"action": { "kind": "Allow" }
-"action": { "kind": "Deny", "reason": "<text>", "alternative": "<toolId>" }
-"action": { "kind": "Escalate", "requiresApproval": true }
+```yaml
+action: { kind: Allow }
+action: { kind: Deny, reason: "<text>", alternative: "<toolId>" }
+action: { kind: Escalate, requiresApproval: true }
 ```
 
 - `Allow` produces an `Allow` verdict and short-circuits further evaluation.
-- `Deny` includes the rule's `reason` in the thrown error. The optional `alternative` is surfaced to the agent (e.g. "use `patch.apply` instead of `fs.write`").
-- `Escalate` generates an `ApprovalRequest` keyed to `ruleId`. Expiry is 24 hours.
+- `Deny` includes the rule's `reason` in what the model is told, and carries the rule's id. The optional `alternative` is carried on the decision (e.g. "use `patch.apply` instead of `fs.write`").
+- `Escalate` builds an `ApprovalRequest` keyed to `ruleId`, with a 24-hour expiry, and the call is then refused as described at the top of this page.
 
 ## Default rules in `.maf/policy.yaml`
 
-The shipped policy bundle:
+The policy shipped in this repository:
 
 | Priority | ID | Effect |
 |----------|----|--------|
+| 1000 | `deny-git-dir` | Deny `fs.write`, `fs.delete`, `patch.apply` and `git.add` on `{**/.git,**/.git/**}` — a `.git` directory or file at any depth — for every role. |
+| 1000 | `deny-maf-dir` | Deny `fs.write`, `fs.delete`, `patch.apply` and `git.add` on `{.maf,.maf/**}` — the project's own MAF state — for every role. |
 | 100 | `deny-env-files` | Deny `fs.write` to `**/.env*`. |
-| 95  | `protect-lock-files` | Escalate writes/patches to `**/*.lock`. |
-| 90  | `protect-migrations` | Escalate writes/patches to `**/migrations/**`. |
+| 95  | `protect-lock-files` | Escalate (today: refuse) writes/patches to `**/*.lock`. |
+| 90  | `protect-migrations` | Escalate (today: refuse) writes/patches to `**/migrations/**`. |
 | 90  | `coder-no-secrets-dir` | Deny `coder` writes to `**/secrets/**`. |
 | 85  | `deny-readonly-roles`  | Deny mutating tools for `reviewer`/`security`. |
+| 81  | `tester-no-ci-config` | Deny `tester` writes/patches/deletes under `{.github,.github/**}`: once globs matched dotfiles, `**/*test*` reached `.github/workflows/test.yml`, which is CI configuration, not a test ([D-30](DECISIONS.md)). |
 | 80  | `tester-write-only-tests` | Deny `tester` writes outside test path patterns. |
 
-Priorities are conventional, not enforced: keep them widely spaced so rules can be inserted between them later without renumbering.
+The two priority-1000 rules exist because anything written into `.git/` — a hook, or `core.hooksPath` in `.git/config` — runs outside every gate, and `.maf/` holds the policy, roles and run records an agent could otherwise rewrite. A coder commits through the gated `git.commit` tool instead; `.gitignore`, `.gitattributes` and a `.githooks/` directory stay writable, and reads are unaffected.
+
+Priorities are conventional, not enforced: keep them widely spaced so rules can be inserted between them later without renumbering. Two rules may share a priority; their relative order is then not something to rely on.
 
 ## Backward compatibility
 
-A rule with no `agentRole` matches every role and every legacy code path. Pre-role policy files keep working unchanged. Adding a role-scoped rule does not affect rules above it in priority.
+A rule with no `agentRole` matches every role and every legacy code path. Pre-role policy files keep working unchanged, provided they pass validation. Adding a role-scoped rule does not affect rules above it in priority.
 
 ## Common patterns
 
+Each example is one entry in the file's `rules:` list.
+
 **Restrict a role to a path prefix:**
 
-```json
-{
-  "id": "docs-writer-docs-only",
-  "priority": 80,
-  "predicate": {
-    "agentRole": "docs-writer",
-    "toolId": ["fs.write", "patch.apply"],
-    "allowedPathGlobs": ["docs/**", "**/*.md"]
-  },
-  "action": { "kind": "Deny", "reason": "docs-writer may only modify docs" }
-}
+```yaml
+- id: docs-writer-docs-only
+  priority: 80
+  predicate:
+    agentRole: docs-writer
+    toolId: [fs.write, patch.apply]
+    allowedPathGlobs: ["docs/**", "**/*.md"]
+  action:
+    kind: Deny
+    reason: docs-writer may only modify docs
 ```
 
-**Require approval before modifying any code in a specific directory:**
+**Mark a directory as needing approval** (refused outright until the approval flow ships):
 
-```json
-{
-  "id": "platform-needs-review",
-  "priority": 70,
-  "predicate": { "pathGlob": "packages/platform-core/**" },
-  "action": { "kind": "Escalate", "requiresApproval": true }
-}
+```yaml
+- id: platform-needs-review
+  priority: 70
+  predicate:
+    pathGlob: "packages/platform-core/**"
+  action:
+    kind: Escalate
+    requiresApproval: true
 ```
 
 **Block a tool from a role even if the role's allowlist somehow grants it:**
 
-```json
-{
-  "id": "tester-no-deletes",
-  "priority": 90,
-  "predicate": { "agentRole": "tester", "toolId": "fs.delete" },
-  "action": { "kind": "Deny", "reason": "tester cannot delete files" }
-}
+```yaml
+- id: tester-no-deletes
+  priority: 90
+  predicate:
+    agentRole: tester
+    toolId: fs.delete
+  action:
+    kind: Deny
+    reason: tester cannot delete files
 ```
 
 ## How verdicts are produced
 
 ```
-ToolLoop.executeTool(toolId, input, ctx)
-  ↓
+executeToolGated(tool, input, ctx)                 // @maf/tool-loop
+  ↓ declaredPaths = tool.declaredPaths(input)
 PolicyEngine.evaluate(toolId, input, ctx, declaredPaths)
   → confine every declared path against ctx.projectRoot
       → any path escapes or cannot be resolved: { verdict: 'Deny' }   ← no rule needed
@@ -218,9 +252,14 @@ PolicyEngine.evaluate(toolId, input, ctx, declaredPaths)
       if !matchesAgentRole     : skip
       if !matchesPath          : skip
       if !matchesAllowedPaths  : skip
-      if memoryPattern set and Cypher returns 0 rows : skip
+      if memoryPattern set:
+          query fails          : { verdict: 'Indeterminate', ruleId }  → return
+          query returns 0 rows : skip
       → buildDecision(rule.action) → return
   → no rules matched → { verdict: 'Allow' }
+  ↓
+verdict !== 'Allow' : attestor.record(refusal) → throw PolicyViolationError
+verdict === 'Allow' : tool.execute → redact secrets → attestor.record(call)
 ```
 
-A `Deny` verdict throws `PolicyViolationError` from `ToolLoop`. An `Escalate` verdict pauses for approval through `@maf/approval-gate`. An `Allow` verdict lets the tool run, and the call is appended to the run's tool-invocation log on the memory graph (via `Attestor.record`).
+Anything but `Allow` is attested as a refusal (`metadata.refused: true`, with the rule id where a rule decided) and then thrown as `PolicyViolationError`, which the in-process loop reports to the model as an error. An `Allow` verdict lets the tool run; the call is then recorded in the attestation bundle and as a `ToolInvocation` node on the memory graph (via `Attestor.record`), as a refusal is.

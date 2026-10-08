@@ -178,6 +178,12 @@ export interface DagNode {
   inputs:        Record<string, BlackboardKey>;
   outputs:       Record<string, BlackboardKey>;
   metadata:      Record<string, unknown>;
+  /**
+   * Accept this node as succeeded when its role stops on its own budget (`budget_exhausted`),
+   * with the reason returned beside its output as a {@link PartialNodeOutcome}. Off unless a
+   * node says so, because a node that did not finish did not succeed (D-04).
+   */
+  allowPartial?: boolean;
 }
 
 export interface DagEdge {
@@ -222,6 +228,45 @@ export interface RetryPolicy {
   jitterMs:      number;
 }
 
+/**
+ * Two attempts: one retry rides out a dropped connection or a stalled process, and every
+ * further attempt re-runs an agent that may already have changed the tree (D-06). Every
+ * place that mints a node's retry policy starts from this one value, so the default cannot
+ * drift between the planner, the parser and the dispatcher.
+ */
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  maxAttempts:   2,
+  backoffMs:     1000,
+  backoffFactor: 2,
+  jitterMs:      500,
+};
+
+/**
+ * The channel failed, not the work: the backend timed out, exited non-zero without writing
+ * anything, could not be started, or the network dropped. Nothing about the request was
+ * judged, so asking again can succeed. This is the only kind of error a DAG node is retried
+ * on (D-06); subclass it for a more specific transport failure.
+ */
+export class TransportError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'TransportError';
+  }
+}
+
+/**
+ * A judgement on the work: a gate refused it, or policy forbade it. Asking again puts the
+ * same question to the same judge, and a refusal that a retry can overturn was never a
+ * refusal — so a VerdictError is terminal and never retried (D-06). Gate and policy errors
+ * subclass it.
+ */
+export class VerdictError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'VerdictError';
+  }
+}
+
 export interface DagNodeExecution {
   nodeId:      NodeId;
   runId:       RunId;
@@ -232,6 +277,52 @@ export interface DagNodeExecution {
   finishedAt?: Date;
   error?:      string;
   agentId?:    AgentId;
+}
+
+/**
+ * Why a node that ran did not finish its work.
+ *
+ *  - `adapter_failed`   — CLI tier: the adapter reported `success: false` (a timeout's exit 124,
+ *                         an expired login, an HTTP error body).
+ *  - `empty_output`     — CLI tier: a role holding a write tool returned no output.
+ *  - `budget_exhausted` — in-process: the role's own `maxToolIterations` or `tokenBudget` ran
+ *                         out, or a processor stopped the loop before a step.
+ *  - `loop_failed`      — in-process: the loop itself reported failure.
+ */
+export type NodeFailureReason =
+  | 'adapter_failed'
+  | 'empty_output'
+  | 'budget_exhausted'
+  | 'loop_failed';
+
+/**
+ * A node that ran but did not finish (D-04). Before this existed, a failed adapter call and an
+ * exhausted budget both came back as ordinary output, and the scheduler recorded the node as
+ * succeeded. The `reason` is a field rather than a phrase in the message so that whoever
+ * decides what happens next — retry, fail the run, accept partial work — branches on a value.
+ */
+export class NodeFailure extends Error {
+  readonly reason:   NodeFailureReason;
+  /** The adapter's exit code, when the failure came from a CLI-tier invocation. */
+  readonly exitCode: number | undefined;
+
+  constructor(reason: NodeFailureReason, message: string, exitCode?: number) {
+    super(message);
+    this.name = 'NodeFailure';
+    this.reason = reason;
+    this.exitCode = exitCode;
+  }
+}
+
+/**
+ * What a node that opted in to `allowPartial` returns beside its output, under the `outcome`
+ * key, when it stopped early: the node still succeeds, and this is how a run summary can say
+ * the work was partial rather than finished.
+ */
+export interface PartialNodeOutcome {
+  status: 'partial';
+  reason: NodeFailureReason;
+  detail: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -433,7 +524,7 @@ export interface MemoryGraphApi extends GraphQueryRunner {
 
 export type PolicyDecision =
   | { verdict: 'Allow' }
-  | { verdict: 'Deny';     reason: string; alternative?: ToolId }
+  | { verdict: 'Deny';     reason: string; alternative?: ToolId; ruleId?: string }
   | { verdict: 'Escalate'; reason: string; approvalRequest: ApprovalRequest }
   /**
    * The policy could not be evaluated, so no verdict about the call is available — and the call
@@ -590,6 +681,21 @@ export interface SecurityFindingsRecord {
   result: SecurityReviewResult;
 }
 
+/**
+ * The security gate refused a writer node's change: blocking findings, an unreadable review,
+ * or a diff over the gate's size cap (then `findings` is empty, because nothing was reviewed).
+ *
+ * A class rather than a message, because the scheduler has to tell a verdict from a transport
+ * failure: retrying a refused node would diff a tree the first attempt may already have
+ * committed, and an empty diff passes (D-06).
+ */
+export class GateRefused extends VerdictError {
+  constructor(message: string, readonly findings: SecurityFinding[]) {
+    super(message);
+    this.name = 'GateRefused';
+  }
+}
+
 export interface GoldensSection {
   harnessSha:      string;
   harnessId:       string;
@@ -598,8 +704,16 @@ export interface GoldensSection {
   ranAt:           string;
 }
 
+/**
+ * Which key signed a bundle. `'dev'` is the public development key: anyone can produce a bundle
+ * that verifies under it, so such a bundle is no evidence of who ran what.
+ */
+export type KeySource = 'env' | 'dev';
+
 export interface AttestationBundle {
   runId:             RunId;
+  /** Part of the signed payload, so it cannot be stripped or flipped without breaking the signature. */
+  keySource:         KeySource;
   provenance:        SlsaProvenance;
   toolCalls:         ToolCallRecord[];
   approvals:         ReviewAttestation[];
@@ -657,6 +771,13 @@ export interface AdapterInvokeResult {
   toolCallLog: ToolCallRecord[];
   exitCode:    number;
   duration:    number;
+  /**
+   * Set when the backend gave no answer for a reason that says nothing about the request —
+   * a timeout, a silent non-zero exit, a process that could not start. The dispatcher turns it
+   * into a retryable failure (D-06); without it, `success: false` is a judgement and is not
+   * retried.
+   */
+  transportError?: TransportError;
 }
 
 export interface CliAdapter {

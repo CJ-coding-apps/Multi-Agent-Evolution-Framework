@@ -1,7 +1,8 @@
 import type { PolicyDecision } from '@maf/types';
+import { VerdictError } from '@maf/types';
 import type { Refusal } from './PolicyEngine.js';
 
-export class PolicyViolationError extends Error {
+export class PolicyViolationError extends VerdictError {
   constructor(public readonly decision: Refusal) {
     super(`Policy violation: ${decision.verdict} — ${decision.reason}`);
     this.name = 'PolicyViolationError';

@@ -1,6 +1,6 @@
 {
   "name": "@maf/adapter-ollama",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test dist/__tests__/*.test.js"
   },
   "dependencies": {
     "@maf/types": "workspace:*",

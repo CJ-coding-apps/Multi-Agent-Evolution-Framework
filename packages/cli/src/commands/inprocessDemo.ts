@@ -12,6 +12,7 @@ import type {
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { buildTurnSystemPrompt } from '@maf/adapter-base';
+import { runIsolatedGit } from '@maf/git-ops';
 import { buildRunStack } from '../wiring.js';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 
@@ -93,21 +94,35 @@ class ScriptedCoderAdapter implements TurnAdapter {
   }
 }
 
-async function makeFixture(): Promise<string> {
-  const dir = path.join(await mkdtemp(path.join(tmpdir(), 'maf-inproc-')), 'repo');
+/**
+ * Writes the demo's buggy repository under `<tmpDir>/repo` and commits it as the baseline;
+ * returns the repository path.
+ *
+ * The git calls go through `runIsolatedGit` because the fixture is maf's, not the user's:
+ * a global `commit.gpgsign`, `core.hooksPath` or template dir made the baseline commit fail
+ * (or run the user's hooks) depending on whose machine the demo ran on. `commit.gpgsign` is
+ * also pinned on the command line, as the golden runner does, since `-c` beats any config
+ * that still reaches git through the environment.
+ */
+export async function createDemoFixture(tmpDir: string): Promise<string> {
+  const dir = path.join(tmpDir, 'repo');
   await mkdir(dir, { recursive: true });
   await writeFile(path.join(dir, 'package.json'),
     JSON.stringify({ name: 'demo', version: '1.0.0', scripts: { test: 'node test.js' } }, null, 2), 'utf8');
   await writeFile(path.join(dir, 'sum.js'), SUM_BUGGY, 'utf8');
   await writeFile(path.join(dir, 'test.js'), TEST_JS, 'utf8');
   await writeFile(path.join(dir, 'config.txt'), CONFIG_WITH_SECRET, 'utf8');
-  const git = (args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
-  git(['init', '-q']);
-  git(['config', 'user.email', 'demo@maf.local']);
-  git(['config', 'user.name', 'maf-demo']);
-  git(['add', '-A']);
-  git(['commit', '-q', '-m', 'baseline (buggy sum)']);
+  const git = (args: string[]) => runIsolatedGit(dir, args);
+  await git(['init', '-q']);
+  await git(['config', 'user.email', 'demo@maf.local']);
+  await git(['config', 'user.name', 'maf-demo']);
+  await git(['add', '-A']);
+  await git(['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'baseline (buggy sum)']);
   return dir;
+}
+
+async function makeFixture(): Promise<string> {
+  return createDemoFixture(await mkdtemp(path.join(tmpdir(), 'maf-inproc-')));
 }
 
 export function registerInProcessDemoCommand(program: Command): void {

@@ -24,6 +24,7 @@ jobs:
   actionlint:
     name: lint workflows
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +36,7 @@ jobs:
   build-test:
     name: build · typecheck · test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 

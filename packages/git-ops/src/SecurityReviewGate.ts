@@ -2,6 +2,7 @@ import type {
   CliAdapter, AdapterInvokeOptions,
   SecurityFinding, SecurityReviewResult, SecuritySeverity,
 } from '@maf/types';
+import { GateRefused } from '@maf/types';
 
 export interface SecurityReviewGateConfig {
   adapter:        CliAdapter;
@@ -9,20 +10,51 @@ export interface SecurityReviewGateConfig {
   securityPrompt: string;
   timeoutMs?:     number;
   model?:         string;
+  /** Longest diff, in characters, the gate will send for review. Default 60,000. */
+  maxDiffChars?:  number;
 }
 
 const BLOCKING_SEVERITIES: ReadonlySet<SecuritySeverity> = new Set(['critical', 'high']);
+const DEFAULT_MAX_DIFF_CHARS = 60_000;
+/** Stands in for a category or file the model left out of a finding the verdict still needs. */
+const UNSPECIFIED = '(unspecified)';
 
 export class SecurityReviewGate {
-  constructor(private readonly config: SecurityReviewGateConfig) {}
+  private readonly maxDiffChars: number;
 
+  constructor(private readonly config: SecurityReviewGateConfig) {
+    // Checked here because a NaN cap would make every `length > cap` false, and the gate
+    // would send diffs of any size.
+    const cap = config.maxDiffChars ?? DEFAULT_MAX_DIFF_CHARS;
+    if (!Number.isSafeInteger(cap) || cap < 1) {
+      throw new Error(
+        `SecurityReviewGate maxDiffChars must be a positive safe integer; got ${String(cap)}.`,
+      );
+    }
+    this.maxDiffChars = cap;
+  }
+
+  /**
+   * Reviews the whole diff or refuses it (D-07). A slice would be reviewed as if it were the
+   * change, and the part that was cut would be attested as reviewed — so a diff over the cap
+   * throws `GateRefused` before any model call.
+   */
   async reviewDiff(diff: string): Promise<SecurityReviewResult> {
     if (!diff.trim()) {
       return { findings: [], summary: 'No diff to review.', passed: true };
     }
+    if (diff.length > this.maxDiffChars) {
+      throw new GateRefused(
+        `The security gate refuses a ${diff.length}-character diff: its review cap is ` +
+        `${this.maxDiffChars} characters, and a diff is reviewed whole or not at all, so nothing ` +
+        `was sent to the reviewer. Split the change into smaller tasks, or raise maxDiffChars ` +
+        `where the SecurityReviewGate is constructed.`,
+        [],
+      );
+    }
     const userPrompt =
       `Audit this diff for security issues. Respond with the strict JSON schema in your system prompt.\n` +
-      `\`\`\`diff\n${diff.slice(0, 16000)}\n\`\`\``;
+      `\`\`\`diff\n${diff}\n\`\`\``;
     return this.invoke(userPrompt);
   }
 
@@ -47,10 +79,19 @@ export class SecurityReviewGate {
       ...(this.config.model ? { model: this.config.model } : {}),
     };
     const result = await this.config.adapter.invoke(opts);
+    // A reviewer that timed out or never started has not judged anything: that is a transport
+    // failure the node may be retried on (D-06), not a refusal to carry as a verdict.
+    if (result.transportError !== undefined) throw result.transportError;
     return parseSecurityOutput(result.output);
   }
 }
 
+/**
+ * The verdict is derived from finding severities alone (D-07); the model's own `passed` is
+ * ignored, because it has said `true` beside its own critical finding. Anything that leaves the
+ * severities unknowable — no JSON, bad JSON, no findings array, an entry with no readable
+ * severity — fails closed.
+ */
 export function parseSecurityOutput(raw: string): SecurityReviewResult {
   const json = extractJsonBlock(raw);
   if (!json) {
@@ -60,14 +101,9 @@ export function parseSecurityOutput(raw: string): SecurityReviewResult {
       passed:   false,
     };
   }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(json) as Partial<SecurityReviewResult>;
-    const findings = sanitizeFindings(parsed.findings);
-    const summary  = typeof parsed.summary === 'string' ? parsed.summary : '';
-    const passed   = typeof parsed.passed === 'boolean'
-      ? parsed.passed
-      : !findings.some((f) => BLOCKING_SEVERITIES.has(f.severity));
-    return { findings, summary, passed };
+    parsed = JSON.parse(json);
   } catch {
     return {
       findings: [],
@@ -75,6 +111,27 @@ export function parseSecurityOutput(raw: string): SecurityReviewResult {
       passed:   false,
     };
   }
+  const obj: Record<string, unknown> =
+    parsed !== null && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+  const rawFindings = obj['findings'];
+  if (!Array.isArray(rawFindings)) {
+    return {
+      findings: [],
+      summary:  `Security review output has no findings array, so there are no severities to ` +
+                `derive a verdict from. Raw: ${raw.slice(0, 600)}`,
+      passed:   false,
+    };
+  }
+  const { findings, unclassified } = sanitizeFindings(rawFindings);
+  let summary = typeof obj['summary'] === 'string' ? obj['summary'] : '';
+  if (unclassified > 0) {
+    const note =
+      `${unclassified} finding(s) had no recognisable severity (expected critical, high, ` +
+      `medium, low or info), so the review fails closed.`;
+    summary = summary ? `${summary} ${note}` : note;
+  }
+  const passed = unclassified === 0 && !findings.some((f) => BLOCKING_SEVERITIES.has(f.severity));
+  return { findings, summary, passed };
 }
 
 function extractJsonBlock(raw: string): string | null {
@@ -90,27 +147,33 @@ function extractJsonBlock(raw: string): string | null {
   return null;
 }
 
-function sanitizeFindings(raw: unknown): SecurityFinding[] {
-  if (!Array.isArray(raw)) return [];
+/**
+ * An entry is dropped only when dropping it cannot change the verdict. A blocking finding with
+ * no category or file is kept, since dropping it would pass the diff; an entry whose severity
+ * cannot be read is counted as `unclassified`, since it may have been critical.
+ */
+function sanitizeFindings(raw: readonly unknown[]): { findings: SecurityFinding[]; unclassified: number } {
   const out: SecurityFinding[] = [];
+  let unclassified = 0;
   for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
+    if (!item || typeof item !== 'object') { unclassified++; continue; }
     const f = item as Record<string, unknown>;
     const severity = normalizeSeverity(f['severity']);
-    if (!severity) continue;
-    if (typeof f['category'] !== 'string') continue;
-    if (typeof f['file']     !== 'string') continue;
+    if (!severity) { unclassified++; continue; }
+    const category = typeof f['category'] === 'string' ? f['category'] : undefined;
+    const file     = typeof f['file']     === 'string' ? f['file']     : undefined;
+    if ((category === undefined || file === undefined) && !BLOCKING_SEVERITIES.has(severity)) continue;
     const finding: SecurityFinding = {
       severity,
-      category:    f['category'],
-      file:        f['file'],
+      category:    category ?? UNSPECIFIED,
+      file:        file     ?? UNSPECIFIED,
       rationale:   typeof f['rationale']   === 'string' ? f['rationale']   : '',
       remediation: typeof f['remediation'] === 'string' ? f['remediation'] : '',
     };
     if (typeof f['line'] === 'number') finding.line = f['line'];
     out.push(finding);
   }
-  return out;
+  return { findings: out, unclassified };
 }
 
 function normalizeSeverity(x: unknown): SecuritySeverity | null {

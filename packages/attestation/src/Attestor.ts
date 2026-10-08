@@ -5,23 +5,85 @@ import type {
   AttestorHandle, ToolCallRecord, AttestationBundle, SlsaProvenance,
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
-  RunOutcome,
+  RunOutcome, KeySource,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
+
+/** The public development key. Anyone can sign with it, which is why a bundle says when it was used. */
+export { DEV_SIGNING_KEY } from './devKey.js';
+import { DEV_SIGNING_KEY } from './devKey.js';
+
+const SIGNING_KEY_ENV = 'MAF_SIGNING_KEY';
+
+const DEV_KEY_WARNING =
+  `[maf] WARNING: ${SIGNING_KEY_ENV} is not set to a secret of your own — attestation bundles from ` +
+  `this run are signed with the public development key and can be forged by anyone. Set ` +
+  `${SIGNING_KEY_ENV} before treating a bundle as evidence.`;
+
+/**
+ * Which key signs (or checks) a bundle. No secret means the public development key; the caller
+ * that lets that happen owes the operator a warning, which `Attestor.resolveSigningSecret` gives.
+ * `| undefined` so a call site can hand over an environment variable as it is.
+ */
+export interface SigningOptions {
+  secret?: string | undefined;
+}
+
+export interface VerifyResult {
+  /** True for a bundle written before `keySource` existed (0.2.0): its key is whatever verified it. */
+  legacy:    boolean;
+  /** The signature matches AND the bundle's own `keySource` names the key that checked it. */
+  valid:     boolean;
+  /** The key this check used. `'dev'` means a valid result is still no evidence of authorship. */
+  keySource: KeySource;
+}
+
+// An empty secret is no secret (HMAC accepts it, and so does a forger), and a secret equal to the
+// published development key is that key whatever variable it came from.
+function signingKey(signing: SigningOptions): { secret: string; keySource: KeySource } {
+  const secret = signing.secret;
+  return secret && secret !== DEV_SIGNING_KEY
+    ? { secret, keySource: 'env' }
+    : { secret: DEV_SIGNING_KEY, keySource: 'dev' };
+}
 
 export class Attestor implements AttestorHandle {
   private calls:     ToolCallRecord[] = [];
   private approvals: ReviewAttestation[] = [];
   private diffHashes: Record<string, string> = {};
   private securityFindings: SecurityFindingsRecord[] = [];
+  private readonly signingSecret: string;
+  private readonly keySource: KeySource;
 
+  /**
+   * `signing` is required so no call site gets the development key by leaving an argument out —
+   * which is how both production call sites came to sign with it silently.
+   */
   constructor(
     private readonly runId: RunId,
     private readonly graph: MemoryGraph,
     private readonly attestationsDir: string,
-    private readonly signingSecret: string = process.env['MAF_SIGNING_KEY'] ?? 'dev-secret',
+    signing: SigningOptions,
     private readonly harnessSha?: string,
-  ) {}
+  ) {
+    const key = signingKey(signing);
+    this.signingSecret = key.secret;
+    this.keySource = key.keySource;
+  }
+
+  /**
+   * Signing options for a production call site, from `MAF_SIGNING_KEY`. When that gives no usable
+   * secret it writes one warning line to stderr: the bundle records `keySource: 'dev'`, but nobody
+   * reads a bundle before trusting a run, so the run itself has to say it.
+   */
+  static resolveSigningSecret(env: NodeJS.ProcessEnv = process.env): SigningOptions {
+    const secret = env[SIGNING_KEY_ENV];
+    if (!secret || secret === DEV_SIGNING_KEY) {
+      process.stderr.write(`${DEV_KEY_WARNING}\n`);
+      return {};
+    }
+    return { secret };
+  }
 
   async record(call: Omit<ToolCallRecord, 'id'>): Promise<void> {
     const record: ToolCallRecord = { id: crypto.randomUUID(), ...call };
@@ -75,6 +137,7 @@ export class Attestor implements AttestorHandle {
 
     const unsignedBundle = {
       runId:            this.runId,
+      keySource:        this.keySource,
       provenance,
       toolCalls:        this.calls,
       approvals:        this.approvals,
@@ -99,11 +162,38 @@ export class Attestor implements AttestorHandle {
     await writeFile(filePath, JSON.stringify(bundle, null, 2), 'utf8');
   }
 
-  static verify(bundle: AttestationBundle, signingSecret: string): boolean {
+  /**
+   * Checks `bundle` against the key `signing` names (no secret: the development key). The claim
+   * has to agree as well as the signature: anyone holding the public development key can sign a
+   * bundle that says `keySource: 'env'`, and that bundle must not pass as one.
+   */
+  /**
+   * Whether `bundle` was signed with the key `signing` names, and by that key alone. A bundle
+   * that says `keySource: "env"` must verify with the env key; one that says `"dev"` with the
+   * development key — so a bundle re-signed with the public key cannot claim a real one.
+   *
+   * A boolean, so `if (!Attestor.verify(…))` means what it says. `inspect` returns the detail.
+   */
+  static verify(bundle: AttestationBundle, signing: SigningOptions): boolean {
+    return Attestor.inspect(bundle, signing).valid;
+  }
+
+  /** `verify`, with the key source the check was made against and whether the bundle is legacy. */
+  static inspect(bundle: AttestationBundle, signing: SigningOptions): VerifyResult {
+    const { secret, keySource } = signingKey(signing);
     const { signature, ...rest } = bundle;
     const payload = JSON.stringify(rest);
-    const expected = crypto.createHmac('sha256', signingSecret).update(payload).digest('hex');
-    return crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex'));
+    const expected = crypto.createHmac('sha256', secret).update(payload).digest();
+    const given = Buffer.from(signature, 'hex');
+    // timingSafeEqual throws on unequal lengths; a truncated signature is simply not this one.
+    const signatureMatches = given.length === expected.length && crypto.timingSafeEqual(given, expected);
+    // A bundle from before keySource existed (0.2.0) says nothing about its key. It verifies
+    // against whichever key the caller supplies, and the result says so, so a reader cannot
+    // mistake "verified with the dev key because that is what I tried" for "signed with mine".
+    if ((bundle as { keySource?: KeySource }).keySource === undefined) {
+      return { valid: signatureMatches, keySource, legacy: true };
+    }
+    return { valid: signatureMatches && bundle.keySource === keySource, keySource, legacy: false };
   }
 }
 

@@ -7,7 +7,7 @@ import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor } from '@maf/attestation';
-import { PolicyEngine } from '@maf/policy-engine';
+import { PolicyLoader } from '@maf/policy-engine';
 import { RollbackManager, SecurityReviewGate } from '@maf/git-ops';
 import { DagRunner } from '@maf/dag-runner';
 import { GraphAwareInjector } from '@maf/prompt-injector';
@@ -19,6 +19,7 @@ import { roleSetFromHarness } from '@maf/roles';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
+import { ensureMafDir } from '../ensureMafDir.js';
 
 const SECURITY_REVIEW_FALLBACK_PROMPT = `You are a security auditor. Review the supplied diff for vulnerabilities. Respond with a strict JSON block:
 {
@@ -44,6 +45,8 @@ export function registerRunCommand(program: Command): void {
     .action(async (taskDescription: string, opts: { adapter: string; model?: string; dir: string; worktree: boolean; policy: string; roles: string; harness?: string }) => {
       const cwd         = path.resolve(opts.dir);
       const mafDir      = path.join(cwd, '.maf');
+      // The stores below open files inside .maf/ and do not create it; a repo maf never ran in has none.
+      await ensureMafDir(mafDir);
       const runId       = makeRunId(crypto.randomUUID());
       const taskId      = makeTaskId(crypto.randomUUID());
       const sessionId   = runId;
@@ -62,7 +65,7 @@ export function registerRunCommand(program: Command): void {
       const graph     = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
       // Attestor constructed after harness resolution (harnessSha stamps ToolInvocation
       // nodes); created in two steps below.
-      const policy    = await PolicyEngine.fromYaml(path.resolve(cwd, opts.policy), graph);
+      const policy    = await PolicyLoader.loadEngine(path.resolve(cwd, opts.policy), graph);
       const rollback  = new RollbackManager(cwd);
       const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
         logDir: path.join(mafDir, 'transcripts'),
@@ -102,7 +105,7 @@ export function registerRunCommand(program: Command): void {
         harness = await harnessStore.adoptLegacy(legacyRoleSet);
         roles = legacyRegistry;
       }
-      const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), undefined, harness.sha);
+      const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), harness.sha);
 
       // `security` may or may not be one of this set's roles; `resolve` answers that without
       // minting the name. The old `hasRole` + `getRole` pair asked twice, and `getRole` answered
@@ -182,7 +185,12 @@ export function registerRunCommand(program: Command): void {
         // only costs concurrency, but treating a writer as a reader costs the tree.
         isWriter: (node) => roles.writesToWorkingTree(node.agentRole, baseTools),
         onNodeStart: (id) => console.log(`[maf] → node ${id} started`),
-        onNodeEnd:   (id, status) => console.log(`[maf] ← node ${id} ${status}`),
+        onNodeEnd:   (id, status) => {
+          // The baseline commit captured for a writer node is held until the node ends, so a
+          // retry reviews against the same base (D-06); release it here.
+          dispatcher.endNode(id);
+          console.log(`[maf] ← node ${id} ${status}`);
+        },
       });
 
       // Every failed node leaves a Failure node behind. Until now only the security
@@ -218,7 +226,7 @@ export function registerRunCommand(program: Command): void {
       );
 
       console.log(`[maf] done. Attestation: ${path.join(mafDir, 'attestations', runId + '.bundle.json')}`);
-      console.log(`[maf] signature: ${bundle.signature.slice(0, 16)}...`);
+      console.log(`[maf] signature: ${bundle.signature.slice(0, 16)}... (keySource: ${bundle.keySource})`);
 
       // The bundle is written first so the failed run is still attested; the exit
       // code is what callers and CI actually branch on.

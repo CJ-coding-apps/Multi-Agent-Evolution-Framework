@@ -77,11 +77,20 @@ export class ProcessorPipeline {
     for (const processor of processors) {
       const next: HarnessEvent[] = [];
       for (const e of current) {
+        // Checked against a copy taken before the processor runs: a processor
+        // that edits `e` in place and yields it makes input and output the same
+        // object, so comparing against `e` would pass any in-place change.
+        const before = snapshot(e);
         const emitted = await collect(processor, e);
         for (const out of emitted) {
-          validateContract(processor, hook, e, out);
+          validateContract(processor, hook, before, out);
           next.push(out);
         }
+        // `e` shares sub-objects with the caller (the loop hands over a shallow
+        // history copy), so an in-place edit followed by an intercept or by a
+        // fresh copy would otherwise reach the caller unchecked. Skipped when `e`
+        // itself was yielded, since that case was just checked above.
+        if (!emitted.includes(e)) validateContract(processor, hook, before, e);
       }
       current = next;
       if (current.length === 0) {
@@ -128,6 +137,36 @@ function topologicalOrder(processors: Processor[]): Processor[] {
   return result.sort((a, b) => ORDER_RANK[a.order]! - ORDER_RANK[b.order]!);
 }
 
+/**
+ * Pre-processor copy of an event for the contract check. It keeps exactly what
+ * `canonical` observes (arrays element-wise, other objects as their own
+ * enumerable entries, everything else as is), so an untouched event always
+ * compares equal to its snapshot. `ToolInput` and `ToolResult.metadata` hold
+ * `unknown` values: a JSON round-trip would drop undefined-valued keys (git.commit
+ * emits `metadata.hash: undefined`) and turn a Date into a string, and
+ * structuredClone throws on a function — each would raise false violations.
+ * Strings are shared rather than copied, so the cost is one walk of the object
+ * graph whatever the text sizes. Freezing the event instead was rejected: a
+ * write to a frozen object surfaces as a TypeError inside the processor rather
+ * than a ContractViolation, it would freeze objects the caller owns, and it
+ * would forbid the in-place edits the contract permits.
+ */
+function snapshot(event: HarnessEvent): HarnessEvent {
+  return copyStructure(event) as HarnessEvent;
+}
+
+function copyStructure(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(copyStructure);
+  if (v && typeof v === 'object') {
+    // fromEntries defines own properties, so a JSON-parsed "__proto__" key in a
+    // tool input stays a key instead of becoming the copy's prototype.
+    return Object.fromEntries(
+      Object.entries(v as Record<string, unknown>).map(([k, val]): [string, unknown] => [k, copyStructure(val)]),
+    );
+  }
+  return v;
+}
+
 /** Deep-compare two values via canonical JSON (key order irrelevant). */
 function deepEqual(a: unknown, b: unknown): boolean {
   return canonical(a) === canonical(b);
@@ -147,6 +186,8 @@ function canonical(v: unknown): string {
 /**
  * Contract check: fields outside HOOK_CONTRACTS[hook] must deep-equal the
  * input. Mutable fields are checked per-prefix from the contract table.
+ * `input` must be a snapshot taken before the processor ran; the live input
+ * object already carries any edit the processor made in place.
  */
 export function validateContract(
   processor: Processor,

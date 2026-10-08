@@ -82,7 +82,7 @@ test('malformed DAGs are refused before any node is dispatched', async () => {
   const refusals: Array<[NodeSpec, number | undefined, RegExp]> = [
     [[], undefined, /no nodes/],
     [[{ id: 'a', label: 'a', dependencies: ['ghost'] }], undefined, /unknown node "ghost"/],
-    [CHAIN, 0, /maxConcurrent must be at least 1, got 0/],
+    [CHAIN, 0, /maxConcurrent must be a positive safe integer \(1 or more\), got 0\./],
   ];
 
   for (const [nodes, maxConcurrent, expected] of refusals) {

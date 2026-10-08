@@ -12,7 +12,7 @@ const program = new Command();
 program
   .name('maf')
   .description('Multi-Agent Framework — CLI-agnostic orchestration with LCM memory')
-  .version('0.2.0');
+  .version('0.2.1');
 
 registerRunCommand(program);
 registerHarnessCommand(program);

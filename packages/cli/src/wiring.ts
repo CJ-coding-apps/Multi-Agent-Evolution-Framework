@@ -8,7 +8,7 @@ import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor } from '@maf/attestation';
-import { PolicyEngine } from '@maf/policy-engine';
+import { PolicyLoader } from '@maf/policy-engine';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { GraphAwareInjector } from '@maf/prompt-injector';
 import { TranscriptLogger } from '@maf/transcript';
@@ -71,8 +71,8 @@ export async function buildRunStack(cfg: {
   harnessSha: string;
 }): Promise<RunStack> {
   const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
-  const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), undefined, cfg.harnessSha);
-  const policy = await PolicyEngine.fromYaml(cfg.policyPath, graph);
+  const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
+  const policy = await PolicyLoader.loadEngine(cfg.policyPath, graph);
   const baseTools = createDefaultRegistry();
   const board = new BlackboardStore();
   const lcm = new LcmEngine({

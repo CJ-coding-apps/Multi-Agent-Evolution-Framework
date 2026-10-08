@@ -3,7 +3,7 @@ import type {
   Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
   GraphQueryRunner, GraphRow,
 } from '@maf/types';
-import { makeNodeId } from '@maf/types';
+import { makeNodeId, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { LcmEngine } from '@maf/lcm';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
 
@@ -69,7 +69,7 @@ export class RetrievalAugmentedPlanner {
     const catalog = this.config.roleCatalog ?? [];
     if (catalog.length === 0) return PLANNING_INSTRUCTIONS_BASE(defaultRole);
     const rolesBlock = catalog.map((r) => `- ${r.role}${r.role === defaultRole ? ' (default)' : ''}: ${r.description}`).join('\n');
-    return PLANNING_INSTRUCTIONS_BASE(defaultRole) + `\n\nAvailable agent roles (use these in node.agentRole):\n${rolesBlock}\n\nGuidance:\n- After any coder node that introduces new behavior, emit a tester node that depends on it.\n- When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every coder diff.)`;
+    return PLANNING_INSTRUCTIONS_BASE(defaultRole) + `\n\nAvailable agent roles (use these in node.agentRole):\n${rolesBlock}\n\nGuidance:\n- After any coder node that introduces new behavior, emit a tester node that depends on it.\n- When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every writer role's diff.)`;
   }
 
   private async getFailureContext(title: string): Promise<string> {
@@ -210,7 +210,7 @@ function resolveRole(
   return resolved.value;
 }
 
-const DEFAULT_RETRY: RetryPolicy = { maxAttempts: 3, backoffMs: 1000, backoffFactor: 2, jitterMs: 500 };
+const DEFAULT_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;
 const DEFAULT_DAG_CONFIG: DagConfig = { maxConcurrent: 4, retryPolicy: DEFAULT_RETRY, timeoutMs: 600_000, reviewGateNodeIds: [] };
 
 const PLANNING_INSTRUCTIONS_BASE = (defaultRole: string): string => `

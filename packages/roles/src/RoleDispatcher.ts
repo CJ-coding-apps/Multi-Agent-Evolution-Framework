@@ -1,7 +1,8 @@
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
+  AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult,
 } from '@maf/types';
-import { isTurnAdapter, makeTaskId } from '@maf/types';
+import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -13,12 +14,14 @@ import type { ReviewGate, SecurityReviewGate } from '@maf/git-ops';
 import { snapshotDiff, runIsolatedGit, GIT_EMPTY_TREE } from '@maf/git-ops';
 import type { HarnessConfig } from '@maf/harness-config';
 import {
-  ProcessorPipeline, createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS,
-} from '@maf/processors';
+  ProcessorPipeline, createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS, redactCredentials } from '@maf/processors';
 import type { ProcessorDeps } from '@maf/processors';
 import { InProcessAgentLoop } from '@maf/tool-loop';
+import type { InProcessLoopResult } from '@maf/tool-loop';
+import type { RoleConfig } from './RoleConfig.js';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
+import { isWriterRole } from './isWriterRole.js';
 
 export interface RoleDispatcherConfig {
   adapter:        CliAdapter;
@@ -48,6 +51,78 @@ export interface RoleNodeOutput {
 
 const MAX_OUTPUT_BYTES        = 2 * 1024 * 1024;  // 2MB per node response
 const MAX_STORED_OUTPUT_CHARS = 64_000;
+/** Enough of a failed call's output to show its last error, without pasting a transcript into an error. */
+const OUTPUT_TAIL_CHARS       = 500;
+
+/**
+ * The end of an adapter's output, credentials masked, quoted so an empty or whitespace-only tail
+ * is still visible. Masked because the message lands in the signed bundle and the memory graph,
+ * which the transcript scrubber never sees.
+ */
+function outputTail(output: string): string {
+  const masked = redactCredentials(output);
+  return JSON.stringify(
+    masked.length > OUTPUT_TAIL_CHARS ? `…${masked.slice(-OUTPUT_TAIL_CHARS)}` : masked,
+  );
+}
+
+/**
+ * Whether a CLI-tier result counts as the role having done its work (D-04). Until this, the
+ * result's `success` and `exitCode` were never read, so a timeout (exit 124), an expired login or
+ * an HTTP error body was stored as the node's output and the node was recorded as succeeded.
+ *
+ * Empty output is held against writers only. A writer that says nothing is what a CLI that died
+ * or was cut off looks like, and accepting it records a coder that did nothing as one that
+ * succeeded; a read-only role with nothing to report has changed nothing by saying so.
+ */
+function cliShortfall(
+  role: RoleConfig,
+  adapterName: string,
+  result: AdapterInvokeResult,
+): NodeFailure | TransportError | undefined {
+  // A transport failure is not a judgement on the work: the backend timed out, exited without
+  // a word, or never started. It is the one kind of shortfall a retry can fix, so it keeps its
+  // class (D-06) and carries the exit code and tail the same way a judged failure does.
+  if (result.transportError) {
+    return new TransportError(
+      `adapter "${adapterName}" gave no answer for role "${role.role}": ` +
+      `${result.transportError.message} (exit code ${result.exitCode}). ` +
+      `Output tail: ${outputTail(result.output)}`,
+      { cause: result.transportError },
+    );
+  }
+  if (!result.success) {
+    return new NodeFailure(
+      'adapter_failed',
+      `adapter "${adapterName}" was expected to succeed for role "${role.role}", but it reported ` +
+      `failure (exit code ${result.exitCode}). Output tail: ${outputTail(result.output)}`,
+      result.exitCode,
+    );
+  }
+  if (isWriterRole(role) && result.output.trim() === '') {
+    return new NodeFailure(
+      'empty_output',
+      `role "${role.role}" holds a write tool, so adapter "${adapterName}" was expected to report ` +
+      `what it did, but it returned no output (exit code ${result.exitCode}). ` +
+      `Output tail: ${outputTail(result.output)}`,
+      result.exitCode,
+    );
+  }
+  return undefined;
+}
+
+/** The in-process counterpart: a loop that ran out of its own budget did not finish (D-04). */
+function loopShortfall(role: RoleConfig, loop: InProcessLoopResult): NodeFailure | undefined {
+  if (loop.outcome !== 'budget_exhausted') return undefined;
+  // The loop names the cause only for maxTurns; a token budget or a processor stopping the
+  // loop at step_start leaves `error` unset.
+  const cause = loop.error ?? 'the token budget ran out or a processor stopped the loop';
+  return new NodeFailure(
+    'budget_exhausted',
+    `in-process role "${role.role}" was expected to finish, but its loop stopped with ` +
+    `budget_exhausted (${cause}). Set allowPartial: true on the node to accept partial work.`,
+  );
+}
 
 function gitSaid(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -69,14 +144,47 @@ function notARepository(cwd: string, err: unknown): Error {
 export class RoleDispatcher {
   constructor(private readonly config: RoleDispatcherConfig) {}
 
+  /**
+   * The commit each node first started from, keyed by run and node, held until the node ends.
+   * A retry re-enters `runNode`, and a coder that committed on the failed attempt would hand a
+   * freshly captured baseline its own change — attempt 2 would diff clean and the gate would
+   * call it reviewed (D-06). Only a successful capture is held: one that failed ended its
+   * attempt before the node did anything, so the next attempt has nothing to answer for.
+   */
+  private readonly baselines = new Map<string, string>();
+
+  /**
+   * The node has ended, succeeded or failed, and will not be attempted again: forget its
+   * baseline. Call it from the scheduler's `onNodeEnd`, which fires once per node after its
+   * last attempt; a later run of the same node then starts from wherever the tree is.
+   */
+  endNode(nodeId: DagNode['id']): void {
+    this.baselines.delete(this.baselineKey(nodeId));
+  }
+
+  private baselineKey(nodeId: DagNode['id']): string {
+    return JSON.stringify([this.config.runId, nodeId]);
+  }
+
+  private async baselineFor(nodeId: DagNode['id']): Promise<string> {
+    const key = this.baselineKey(nodeId);
+    const held = this.baselines.get(key);
+    if (held !== undefined) return held;
+    const commit = await this.startCommit();
+    this.baselines.set(key, commit);
+    return commit;
+  }
+
   async runNode(node: DagNode): Promise<Record<string, BlackboardValue>> {
     const role = this.config.roles.getRole(node.agentRole);
     const taskId = makeTaskId(node.id);
 
     // Captured BEFORE the node does anything, and before any model call is spent. A
-    // coder that commits its own work would otherwise diff clean against HEAD, so the
-    // security gate would be handed an empty diff and call the change reviewed.
-    const startCommit = role.role === 'coder' ? await this.startCommit() : undefined;
+    // writer that commits its own work would otherwise diff clean against HEAD, so the
+    // security gate would be handed an empty diff and call the change reviewed. Which
+    // roles are writers is decided by the tools they hold, not their name (D-07), and
+    // the baseline is captured once per node so a retry reviews against the same commit (D-06).
+    const startCommit = isWriterRole(role) ? await this.baselineFor(node.id) : undefined;
 
     await this.config.transcript.append(
       'user',
@@ -124,22 +232,66 @@ export class RoleDispatcher {
     }
 
     let outputForMemory: string;
+    // Built where the evidence is, thrown only after the transcript has the node's output and
+    // the security gate has seen its diff: an agent can change the tree before it fails, and
+    // a diff left behind is reviewed whatever the outcome — the in-process tier does the same
+    // at task_end, where the gate runs on budget_exhausted too.
+    let shortfall: NodeFailure | TransportError | undefined;
     const ranInProcess = wantsInProcess && canInProcess;
-    if (ranInProcess) {
-      outputForMemory = await this.runInProcess(node, role, invokeOpts, taskId, startCommit);
-    } else {
-      const result = await adapter.invoke(invokeOpts);
-      outputForMemory = result.output.slice(0, MAX_STORED_OUTPUT_CHARS);
+    try {
+      if (ranInProcess) {
+        const loop = await this.runInProcess(node, role, invokeOpts, taskId, startCommit);
+        outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
+        shortfall = loopShortfall(role, loop);
+      } else {
+        const result = await adapter.invoke(invokeOpts);
+        outputForMemory = result.output.slice(0, MAX_STORED_OUTPUT_CHARS);
+        shortfall = cliShortfall(role, adapter.name, result);
+      }
+    } catch (err: unknown) {
+      // The loop or the adapter threw — a turn timed out, a backend never started. Tools may
+      // already have changed the tree, and on the in-process tier the gate that reviews it
+      // runs at task_end, which a throw never reaches. So the diff is reviewed here, before
+      // the failure propagates: a refusal (a verdict) outranks the transport failure, and a
+      // clean or empty diff lets the original error through for the scheduler to classify.
+      // Not when the error already carries a verdict (GateRefused: the gate has spoken) or
+      // comes from a loop that finished its task — including its task_end review — and
+      // reported failure (NodeFailure): reviewing again would record the same findings twice.
+      const alreadyJudged = err instanceof GateRefused || err instanceof NodeFailure;
+      if (startCommit !== undefined && !alreadyJudged) await this.runPostCoderGates(node, startCommit);
+      throw err;
     }
 
     await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
     await this.config.lcmBridge.flush();
 
     if (startCommit !== undefined && !ranInProcess) {
-      // In-process coder runs the security gate at task_end via SecurityGateProcessor;
-      // CLI path (including adapter-capability fallback) runs it here. `startCommit !==
-      // undefined` and `role.role === 'coder'` are the same condition by construction.
+      // In-process runs reach the security gate at task_end via SecurityGateProcessor, which
+      // runs it for every role that was handed a runner — every writer; the CLI path,
+      // including the adapter-capability fallback, runs it here. `startCommit !== undefined` and
+      // `isWriterRole(role)` are the same condition by construction.
       await this.runPostCoderGates(node, startCommit);
+    }
+
+    if (shortfall) {
+      // A transport failure is thrown as itself so the scheduler can retry it (D-06). Of the
+      // judged failures, only running out of the node's own budget can be accepted, and only
+      // by a node that asked for it; an adapter that failed or a writer that said nothing has
+      // no partial work to keep.
+      if (shortfall instanceof TransportError) throw shortfall;
+      if (shortfall.reason !== 'budget_exhausted' || node.allowPartial !== true) throw shortfall;
+      await this.config.transcript.append(
+        'system',
+        `[partial] node "${node.id}" stopped early and allowPartial accepts it: ${shortfall.message}`,
+        { agentRole: role.role, nodeId: node.id },
+      );
+      const partial: PartialNodeOutcome = {
+        status: 'partial', reason: shortfall.reason, detail: shortfall.message,
+      };
+      return {
+        output:  { kind: 'string', value: outputForMemory },
+        outcome: { kind: 'json', value: partial },
+      };
     }
 
     return { output: { kind: 'string', value: outputForMemory } };
@@ -156,7 +308,7 @@ export class RoleDispatcher {
     invokeOpts: AdapterInvokeOptions,
     taskId: ReturnType<typeof makeTaskId>,
     startCommit: string | undefined,
-  ): Promise<string> {
+  ): Promise<InProcessLoopResult> {
     const adapter = this.config.adapter;
     if (!isTurnAdapter(adapter)) throw new Error('unreachable: gated by caller');
 
@@ -203,9 +355,11 @@ export class RoleDispatcher {
 
     const result = await loop.run();
     if (result.outcome === 'failed') {
-      throw new Error(`in-process role "${role.role}" failed: ${result.error ?? 'unknown'}`);
+      throw new NodeFailure('loop_failed', `in-process role "${role.role}" failed: ${result.error ?? 'unknown'}`);
     }
-    return result.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
+    // budget_exhausted is returned, not thrown: whether it fails the node depends on the node's
+    // allowPartial, which the caller decides after the transcript has the output.
+    return result;
   }
 
   /**
@@ -245,7 +399,18 @@ export class RoleDispatcher {
     const securityGate = this.config.securityGate;
     if (!securityGate) return;
 
-    const secRes = await securityGate.reviewDiff(diff);
+    // A diff over the gate's size cap is refused by a throw, before any model call. It is
+    // still this node's verdict, so it is attested and remembered like a blocking finding
+    // before it propagates, rather than surfacing only as a crash.
+    let secRes: SecurityReviewResult;
+    let refusal: GateRefused | undefined;
+    try {
+      secRes = await securityGate.reviewDiff(diff);
+    } catch (err: unknown) {
+      if (!(err instanceof GateRefused)) throw err;
+      refusal = err;
+      secRes = { findings: err.findings, summary: err.message, passed: false };
+    }
     this.config.attestor.recordSecurityFindings(node.id, secRes);
 
     if (!secRes.passed) {
@@ -259,13 +424,20 @@ export class RoleDispatcher {
         },
         runId: this.config.runId,
       });
+      // GateRefused rather than a plain Error, so the scheduler can tell a verdict from a
+      // transport failure: a retried attempt diffs a tree the first may already have
+      // committed, and an empty diff passes (D-06).
+      if (refusal) throw refusal;
       const blockingCount = secRes.findings.filter((f) => f.severity === 'critical' || f.severity === 'high').length;
-      throw new Error(`Security review failed: ${blockingCount} blocking finding(s)`);
+      throw new GateRefused(
+        `Security review refused the change from node ${node.id}: ${blockingCount} blocking ` +
+        `(critical or high) finding(s).${secRes.summary ? ` ${secRes.summary}` : ''}`,
+        secRes.findings,
+      );
     }
   }
 }
 
-// Re-exported for callers that build DAG nodes inline without the planner.
-export const DEFAULT_NODE_RETRY: RetryPolicy = {
-  maxAttempts: 3, backoffMs: 1000, backoffFactor: 2, jitterMs: 500,
-};
+// Re-exported for callers that build DAG nodes inline without the planner; the value itself
+// is the one default in @maf/types (D-06).
+export const DEFAULT_NODE_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;

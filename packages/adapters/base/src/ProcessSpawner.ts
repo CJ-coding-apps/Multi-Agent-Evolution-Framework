@@ -1,13 +1,49 @@
 import { spawn, type SpawnOptions } from 'node:child_process';
+import { TransportError } from '@maf/types';
+import { failureTail } from './failure.js';
 
 export interface SpawnResult {
   stdout:   string;
   stderr:   string;
   exitCode: number;
   duration: number;
+  /**
+   * Present when no answer came back for a reason that says nothing about the request: the
+   * process timed out (exit 124), or it exited non-zero without writing to stdout. A field
+   * rather than a rejection so every adapter keeps returning its `exitCode`/`success` result
+   * as before; a caller that wants the node retried throws it (D-06).
+   */
+  transportError?: TransportError;
 }
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024; // 8MB cap — prevents OOM on large codebase outputs
+
+/**
+ * A non-zero exit that wrote something is an answer — an error the backend chose to report —
+ * and judging it is the caller's business. Silence, or a kill on timeout, is no answer at all.
+ */
+function transportFailure(
+  cmd: string, exitCode: number, timedOut: boolean, stdout: string, stderr: string, timeoutMs: number | undefined,
+): TransportError | undefined {
+  // stderr is where a backend says why — an expired login, a missing flag — so the tail rides
+  // along, credential shapes masked; without it an "exit 3" is a number and nothing more.
+  if (timedOut) {
+    return new TransportError(
+      `"${cmd}" did not finish within ${timeoutMs} ms and was killed (exit code 124). stderr tail: ${failureTail(stderr)}`,
+    );
+  }
+  if (exitCode !== 0 && stdout.trim() === '') {
+    return new TransportError(
+      `"${cmd}" exited with code ${exitCode} without writing any output. stderr tail: ${failureTail(stderr)}`,
+    );
+  }
+  return undefined;
+}
+
+/** The process never produced a result: it could not be started, or the OS refused it. */
+function spawnFailure(cmd: string, err: Error): TransportError {
+  return new TransportError(`Could not run "${cmd}": ${err.message}`, { cause: err });
+}
 
 export async function spawnAndCollect(
   cmd: string,
@@ -58,12 +94,17 @@ export async function spawnAndCollect(
         }, opts.timeoutMs)
       : undefined;
 
-    proc.on('error', reject);
+    proc.on('error', (err) => reject(spawnFailure(cmd, err)));
     proc.on('close', (code) => {
       if (timer) clearTimeout(timer);
       const stdout = Buffer.concat(stdoutChunks).toString();
       const stderr = Buffer.concat(stderrChunks).toString();
-      resolve({ stdout, stderr, exitCode: timedOut ? 124 : (code ?? 1), duration: Date.now() - start });
+      const exitCode = timedOut ? 124 : (code ?? 1);
+      const transportError = transportFailure(cmd, exitCode, timedOut, stdout, stderr, opts.timeoutMs);
+      resolve({
+        stdout, stderr, exitCode, duration: Date.now() - start,
+        ...(transportError ? { transportError } : {}),
+      });
     });
   });
 }
@@ -88,7 +129,7 @@ export async function* spawnStreaming(
     queue.push(d.toString());
     resolve?.();
   });
-  proc.on('error', (e) => { error = e; done = true; resolve?.(); });
+  proc.on('error', (e) => { error = spawnFailure(cmd, e); done = true; resolve?.(); });
   proc.on('close', () => { done = true; resolve?.(); });
 
   while (!done || queue.length > 0) {

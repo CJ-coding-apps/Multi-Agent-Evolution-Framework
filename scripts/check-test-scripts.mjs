@@ -3,9 +3,9 @@
 //
 // `pnpm -r test` only runs packages that declare a `test` script, so a package with
 // tests and no script is invisible: its tests pass, fail, or do not exist with equal
-// silence. 15 of this repo's 28 packages are in exactly that position, which is why the
-// "225 tests" headline said nothing about `dag-runner`, `prompt-injector`, `transcript`,
-// `memory-graph` or the adapters.
+// silence, and a headline test count says nothing about it. At 0.2.1 the workspace has
+// 27 packages (21 under packages/, 6 under packages/adapters/): 21 have tests and a script
+// that runs them, and the other 6 have no tests yet.
 //
 // The guard therefore holds the invariant in BOTH directions:
 //   * tests present, no script        -> FAIL (invisible tests)
@@ -55,6 +55,18 @@ async function testFiles(dir) {
   return (await readdir(testsDir)).filter((f) => f.endsWith('.test.ts')).sort();
 }
 
+// Packages that have tests today, by name. Losing the tests of any of these — the file deleted
+// along with its script, say — is a regression the two-way invariant below cannot see, because
+// "neither tests nor script" is legal for a package that never had them. Add a package here when
+// it gains tests; remove one only with a decision that it may be untested again.
+const REQUIRED_TESTED = new Set([
+  '@maf/adapter-base', '@maf/adapter-claude', '@maf/adapter-codex', '@maf/adapter-gemini',
+  '@maf/adapter-ollama', '@maf/adapter-openrouter', '@maf/attestation', '@maf/cli', '@maf/dag-runner',
+  '@maf/eval-harness', '@maf/evolver', '@maf/git-ops', '@maf/harness-config', '@maf/memory-graph',
+  '@maf/planning-agent', '@maf/policy-engine', '@maf/processors', '@maf/roles', '@maf/tool-loop',
+  '@maf/tools', '@maf/types',
+]);
+
 const dirs = await packageDirs();
 const problems = [];
 const untested = [];
@@ -77,6 +89,10 @@ for (const dir of dirs) {
     continue;
   }
   if (files.length === 0) {
+    if (REQUIRED_TESTED.has(name)) {
+      problems.push(`${name} (${relative}): had tests and must keep them — none found under ${TESTS_DIR}`);
+      continue;
+    }
     untested.push(name);
     continue;
   }
