@@ -13,3 +13,7 @@ export type { JudgeVerdict, JudgeDisclosure, ModelRef } from './judge.js';
 export {
   JUDGE_SYSTEM_PROMPT, judgePrompt, formatJudgeVerdict, parseJudgeVerdict, describeJudge, makeLlmJudge,
 } from './judge.js';
+export type { ScriptedStep, ScriptedTask, ScriptedExchange } from './ScriptedAdapter.js';
+export {
+  ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SCRIPTED_JUDGE_RATIONALE,
+} from './ScriptedAdapter.js';
