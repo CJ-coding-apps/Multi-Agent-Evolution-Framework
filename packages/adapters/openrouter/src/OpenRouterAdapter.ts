@@ -2,6 +2,8 @@ import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, To
 import { BaseAdapter } from '@maf/adapter-base';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+/** OpenRouter attributes traffic to the app named by HTTP-Referer, so it must be this project. */
+const MAF_REPOSITORY_URL = 'https://github.com/CJ-coding-apps/Multi-Agent-Evolution-Framework';
 
 interface OAIMessage  { role: 'system'|'user'|'assistant'; content: string }
 interface OAIRequest  { model: string; messages: OAIMessage[]; stream: boolean; max_tokens?: number | undefined; temperature?: number | undefined }
@@ -20,19 +22,21 @@ export interface OpenRouterAdapterOptions {
 export class OpenRouterAdapter extends BaseAdapter {
   readonly name = 'openrouter' as const;
   private readonly apiKey:  string;
-  private readonly defaultModel: string;
+  private readonly defaultModel: string | undefined;
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
 
   constructor(opts: OpenRouterAdapterOptions = {}) {
     super();
     this.apiKey       = opts.apiKey   ?? process.env['OPENROUTER_API_KEY'] ?? '';
-    this.defaultModel = opts.model    ?? process.env['OPENROUTER_MODEL']   ?? 'anthropic/claude-sonnet-4-6';
+    // No fallback id: a pinned default goes stale and bills a model nobody chose. A missing
+    // model is refused at the first call, not here, so the adapter can still be listed.
+    this.defaultModel = opts.model    ?? process.env['OPENROUTER_MODEL'];
     this.baseUrl      = opts.baseUrl  ?? OPENROUTER_BASE;
     this.headers = {
       'Authorization': `Bearer ${this.apiKey}`,
       'Content-Type':  'application/json',
-      'HTTP-Referer':  opts.appUrl  ?? 'https://github.com/maf',
+      'HTTP-Referer':  opts.appUrl  ?? MAF_REPOSITORY_URL,
       'X-Title':       opts.appName ?? 'MAF',
     };
   }
@@ -62,7 +66,7 @@ export class OpenRouterAdapter extends BaseAdapter {
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const start = Date.now();
     const body: OAIRequest = {
-      model:       options.model ?? this.defaultModel,
+      model:       this.resolveModel(options),
       messages:    this.buildMessages(options),
       stream:      false,
       max_tokens:  options.tokenBudget,
@@ -100,7 +104,7 @@ export class OpenRouterAdapter extends BaseAdapter {
 
   override async *stream(options: AdapterInvokeOptions): AsyncGenerator<string> {
     const body: OAIRequest = {
-      model:       options.model ?? this.defaultModel,
+      model:       this.resolveModel(options),
       messages:    this.buildMessages(options),
       stream:      true,
       temperature: options.temperature,
@@ -133,6 +137,17 @@ export class OpenRouterAdapter extends BaseAdapter {
         } catch { /* skip */ }
       }
     }
+  }
+
+  /** Runs before the request body exists, so a call with no model never reaches the network. */
+  private resolveModel(options: AdapterInvokeOptions): string {
+    const model = options.model ?? this.defaultModel;
+    if (model) return model;
+    throw new Error(
+      'The OpenRouter adapter has no model to call: expected `model` in the call options, `model` in '
+      + 'OpenRouterAdapterOptions, or the OPENROUTER_MODEL environment variable, and none is set to a '
+      + 'non-empty value. No request was sent.',
+    );
   }
 
   private buildMessages(options: AdapterInvokeOptions): OAIMessage[] {
