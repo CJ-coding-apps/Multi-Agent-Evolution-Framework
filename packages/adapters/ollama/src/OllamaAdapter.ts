@@ -1,5 +1,6 @@
 import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord } from '@maf/types';
-import { BaseAdapter } from '@maf/adapter-base';
+import { TransportError } from '@maf/types';
+import { BaseAdapter, failureTail } from '@maf/adapter-base';
 
 interface OllamaChatMessage {
   role:    'system' | 'user' | 'assistant';
@@ -22,6 +23,39 @@ interface OllamaResponse {
 interface OllamaStreamChunk {
   message: OllamaChatMessage;
   done:    boolean;
+}
+
+/** The request's own deadline, so an abort it caused is reported as the timeout it is. */
+interface Deadline { signal: AbortSignal; ms: number }
+
+/** undici reports every network failure as "fetch failed"; the reason is on its cause. */
+function describe(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  return err.cause instanceof Error ? `${err.message} (${err.cause.message})` : err.message;
+}
+
+/**
+ * `pending`, with every way of getting no answer — a refused or reset connection (no server on
+ * the port), a DNS failure, a body cut off part-way, the request's own deadline — turned into a
+ * TransportError. None of them says anything about the request, so the node may be retried on it
+ * (D-06).
+ */
+async function answered<T>(url: string, pending: Promise<T>, deadline?: Deadline): Promise<T> {
+  try {
+    return await pending;
+  } catch (err) {
+    const message = deadline !== undefined && deadline.signal.aborted
+      ? `Ollama was expected to answer ${url} within ${deadline.ms} ms, but it had not, so the request was aborted.`
+      : `Ollama was expected to answer ${url}, but the request failed before an answer arrived: ${describe(err)}`;
+    throw new TransportError(message, { cause: err });
+  }
+}
+
+/** A 5xx is the server failing, not judging the request, so asking again can succeed (D-06). */
+function serverFailure(url: string, status: number, body: string): TransportError {
+  return new TransportError(
+    `Ollama was expected to answer ${url}, but it failed with HTTP ${status}. Body tail: ${failureTail(body)}`,
+  );
 }
 
 export interface OllamaAdapterOptions {
@@ -78,20 +112,25 @@ export class OllamaAdapter extends BaseAdapter {
       ...this.optionsBag(options),
     };
 
+    const url = `${this.baseUrl}/api/chat`;
     const controller = new AbortController();
+    const deadline: Deadline = { signal: controller.signal, ms: options.timeoutMs };
     const timer = setTimeout(() => controller.abort(), options.timeoutMs);
     try {
-      const res = await fetch(`${this.baseUrl}/api/chat`, {
+      const res = await answered(url, fetch(url, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(body),
         signal:  controller.signal,
-      });
+      }), deadline);
+      const text = await answered(url, res.text(), deadline);
+      if (res.status >= 500) throw serverFailure(url, res.status, text);
       if (!res.ok) {
-        const text = await res.text();
+        // A 4xx is the server judging the request (an unknown model is a 404). Classifying those
+        // is D-05's (0.4.0); until then it is a failed result, not a retry.
         return { success: false, output: text, toolCallLog: [], exitCode: res.status, duration: Date.now() - start };
       }
-      const data = await res.json() as OllamaResponse;
+      const data = JSON.parse(text) as OllamaResponse;
       return {
         success:     true,
         output:      data.message.content,
@@ -114,12 +153,14 @@ export class OllamaAdapter extends BaseAdapter {
       ...this.optionsBag(options),
     };
 
-    const res = await fetch(`${this.baseUrl}/api/chat`, {
+    const url = `${this.baseUrl}/api/chat`;
+    const res = await answered(url, fetch(url, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(body),
-    });
+    }));
 
+    if (res.status >= 500) throw serverFailure(url, res.status, await answered(url, res.text()));
     if (!res.ok || !res.body) throw new Error(`Ollama stream error: ${res.status}`);
 
     const reader = res.body.getReader();
@@ -127,7 +168,7 @@ export class OllamaAdapter extends BaseAdapter {
     let buf = '';
 
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await answered(url, reader.read());
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n');

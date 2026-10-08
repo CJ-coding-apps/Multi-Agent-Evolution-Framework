@@ -6,14 +6,31 @@ import type {
 } from '@maf/types';
 import { BaseAdapter } from '@maf/adapter-base';
 import {
-  spawnAndCollect, spawnStreaming,
+  spawnAndCollect, spawnStreaming, turnStdout,
   buildTurnSystemPrompt, serializeHistory, parseTurn,
 } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * The functions the adapter runs the `claude` binary through. Injectable so a test can stand in
+ * for the binary and its failures; production uses the real spawner.
+ */
+export interface ClaudeAdapterOptions {
+  spawn?:          typeof spawnAndCollect;
+  spawnStreaming?: typeof spawnStreaming;
+}
+
 export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
   readonly name = 'claude' as const;
+  private readonly spawn:          typeof spawnAndCollect;
+  private readonly spawnStreaming: typeof spawnStreaming;
+
+  constructor(opts: ClaudeAdapterOptions = {}) {
+    super();
+    this.spawn          = opts.spawn          ?? spawnAndCollect;
+    this.spawnStreaming = opts.spawnStreaming ?? spawnStreaming;
+  }
 
   capabilities(): AdapterCapabilities {
     return {
@@ -31,7 +48,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     // (by id — the loop resolves calls by tool id). Without the catalog the model
     // is blind to which tools exist.
     const systemPrompt = buildTurnSystemPrompt(opts.systemPrompt, opts.tools);
-    const result = await spawnAndCollect('claude', this.buildArgs({
+    const result = await this.spawn('claude', this.buildArgs({
       ...opts,
       prompt: serializeHistory(history),
       systemPrompt,
@@ -41,7 +58,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       env: { ...process.env },
       ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
     });
-    return parseTurn(result.stdout);
+    return parseTurn(turnStdout(this.name, result));
   }
 
 
@@ -56,7 +73,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     const start = Date.now();
     const args = this.buildArgs(options);
 
-    const result = await spawnAndCollect('claude', args, {
+    const result = await this.spawn('claude', args, {
       cwd: options.workingDir,
       timeoutMs: options.timeoutMs,
       env: { ...process.env },
@@ -77,7 +94,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
 
   override async *stream(options: AdapterInvokeOptions): AsyncGenerator<string> {
     const args = [...this.buildArgs(options), '--stream'];
-    for await (const chunk of spawnStreaming('claude', args, { cwd: options.workingDir })) {
+    for await (const chunk of this.spawnStreaming('claude', args, { cwd: options.workingDir })) {
       yield chunk;
     }
   }

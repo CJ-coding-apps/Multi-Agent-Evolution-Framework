@@ -5,14 +5,31 @@ import type {
   TurnAdapter, TurnMessage, AssistantTurn,
 } from '@maf/types';
 import {
-  BaseAdapter, spawnAndCollect, spawnStreaming,
+  BaseAdapter, spawnAndCollect, spawnStreaming, turnStdout,
   buildTurnSystemPrompt, serializeHistory, parseTurn,
 } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * The functions the adapter runs the `codex` binary through. Injectable so a test can stand in
+ * for the binary and its failures; production uses the real spawner.
+ */
+export interface CodexAdapterOptions {
+  spawn?:          typeof spawnAndCollect;
+  spawnStreaming?: typeof spawnStreaming;
+}
+
 export class CodexAdapter extends BaseAdapter implements TurnAdapter {
   readonly name = 'codex' as const;
+  private readonly spawn:          typeof spawnAndCollect;
+  private readonly spawnStreaming: typeof spawnStreaming;
+
+  constructor(opts: CodexAdapterOptions = {}) {
+    super();
+    this.spawn          = opts.spawn          ?? spawnAndCollect;
+    this.spawnStreaming = opts.spawnStreaming ?? spawnStreaming;
+  }
 
   capabilities(): AdapterCapabilities {
     return {
@@ -41,14 +58,14 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
     const input = `${systemBlock}\n\n${serializeHistory(history)}`;
     const args: string[] = [];
     if (opts.model) args.push('--model', opts.model);
-    const result = await spawnAndCollect('codex', args, {
+    const result = await this.spawn('codex', args, {
       cwd:       opts.workingDir,
       timeoutMs: opts.timeoutMs,
       input,
       env:       { ...process.env },
       ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
     });
-    return parseTurn(result.stdout);
+    return parseTurn(turnStdout(this.name, result));
   }
 
   async isAvailable(): Promise<boolean> {
@@ -68,7 +85,7 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
     const args: string[] = ['--full-auto'];
     if (options.model) args.push('--model', options.model);
 
-    const result = await spawnAndCollect('codex', args, {
+    const result = await this.spawn('codex', args, {
       cwd:       options.workingDir,
       timeoutMs: options.timeoutMs,
       input:     fullPrompt,
@@ -92,7 +109,7 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       : options.prompt;
     const args: string[] = ['--full-auto', '--stream'];
     if (options.model) args.push('--model', options.model);
-    const proc = spawnStreaming('codex', args, { cwd: options.workingDir });
+    const proc = this.spawnStreaming('codex', args, { cwd: options.workingDir });
     // Write stdin by injecting via process pipe — handled in spawnStreaming
     for await (const chunk of proc) yield chunk;
   }

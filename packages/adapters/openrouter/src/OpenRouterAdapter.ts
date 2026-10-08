@@ -1,5 +1,6 @@
 import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord } from '@maf/types';
-import { BaseAdapter } from '@maf/adapter-base';
+import { TransportError } from '@maf/types';
+import { BaseAdapter, failureTail } from '@maf/adapter-base';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 /** OpenRouter attributes traffic to the app named by HTTP-Referer, so it must be this project. */
@@ -10,6 +11,38 @@ interface OAIRequest  { model: string; messages: OAIMessage[]; stream: boolean; 
 interface OAIChoice   { message: OAIMessage; finish_reason: string }
 interface OAIResponse { choices: OAIChoice[]; usage?: { total_tokens?: number } }
 interface OAIStreamDelta { choices: Array<{ delta: { content?: string }; finish_reason?: string }> }
+
+/** The request's own deadline, so an abort it caused is reported as the timeout it is. */
+interface Deadline { signal: AbortSignal; ms: number }
+
+/** undici reports every network failure as "fetch failed"; the reason is on its cause. */
+function describe(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  return err.cause instanceof Error ? `${err.message} (${err.cause.message})` : err.message;
+}
+
+/**
+ * `pending`, with every way of getting no answer — a refused or reset connection, a DNS failure, a
+ * body cut off part-way, the request's own deadline — turned into a TransportError. None of them
+ * says anything about the request, so the node may be retried on it (D-06).
+ */
+async function answered<T>(url: string, pending: Promise<T>, deadline?: Deadline): Promise<T> {
+  try {
+    return await pending;
+  } catch (err) {
+    const message = deadline !== undefined && deadline.signal.aborted
+      ? `OpenRouter was expected to answer ${url} within ${deadline.ms} ms, but it had not, so the request was aborted.`
+      : `OpenRouter was expected to answer ${url}, but the request failed before an answer arrived: ${describe(err)}`;
+    throw new TransportError(message, { cause: err });
+  }
+}
+
+/** A 5xx is the provider failing, not judging the request, so asking again can succeed (D-06). */
+function serverFailure(url: string, status: number, body: string): TransportError {
+  return new TransportError(
+    `OpenRouter was expected to answer ${url}, but it failed with HTTP ${status}. Body tail: ${failureTail(body)}`,
+  );
+}
 
 export interface OpenRouterAdapterOptions {
   apiKey?: string;
@@ -73,20 +106,25 @@ export class OpenRouterAdapter extends BaseAdapter {
       temperature: options.temperature,   // honored (golden determinism when pinned to 0)
     };
 
+    const url = `${this.baseUrl}/chat/completions`;
     const controller = new AbortController();
+    const deadline: Deadline = { signal: controller.signal, ms: options.timeoutMs };
     const timer = setTimeout(() => controller.abort(), options.timeoutMs);
     try {
-      const res = await fetch(`${this.baseUrl}/chat/completions`, {
+      const res = await answered(url, fetch(url, {
         method:  'POST',
         headers: this.headers,
         body:    JSON.stringify(body),
         signal:  controller.signal,
-      });
+      }), deadline);
+      const text = await answered(url, res.text(), deadline);
+      if (res.status >= 500) throw serverFailure(url, res.status, text);
       if (!res.ok) {
-        const text = await res.text();
+        // A 4xx is the provider judging the request. Which of those are auth or quota is D-05's
+        // classification (0.4.0); until then it is a failed result, not a retry.
         return { success: false, output: text, toolCallLog: [], exitCode: res.status, duration: Date.now() - start };
       }
-      const data = await res.json() as OAIResponse;
+      const data = JSON.parse(text) as OAIResponse;
       const content    = data.choices[0]?.message.content ?? '';
       const tokensUsed = data.usage?.total_tokens;
       return {
@@ -109,11 +147,13 @@ export class OpenRouterAdapter extends BaseAdapter {
       stream:      true,
       temperature: options.temperature,
     };
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+    const url = `${this.baseUrl}/chat/completions`;
+    const res = await answered(url, fetch(url, {
       method:  'POST',
       headers: this.headers,
       body:    JSON.stringify(body),
-    });
+    }));
+    if (res.status >= 500) throw serverFailure(url, res.status, await answered(url, res.text()));
     if (!res.ok || !res.body) throw new Error(`OpenRouter stream error: ${res.status}`);
 
     const reader  = res.body.getReader();
@@ -121,7 +161,7 @@ export class OpenRouterAdapter extends BaseAdapter {
     let buf = '';
 
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await answered(url, reader.read());
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n');
