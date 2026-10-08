@@ -222,6 +222,32 @@ export interface RetryPolicy {
   jitterMs:      number;
 }
 
+/**
+ * The channel failed, not the work: the backend timed out, exited non-zero without writing
+ * anything, could not be started, or the network dropped. Nothing about the request was
+ * judged, so asking again can succeed. This is the only kind of error a DAG node is retried
+ * on (D-06); subclass it for a more specific transport failure.
+ */
+export class TransportError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'TransportError';
+  }
+}
+
+/**
+ * A judgement on the work: a gate refused it, or policy forbade it. Asking again puts the
+ * same question to the same judge, and a refusal that a retry can overturn was never a
+ * refusal — so a VerdictError is terminal and never retried (D-06). Gate and policy errors
+ * subclass it.
+ */
+export class VerdictError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'VerdictError';
+  }
+}
+
 export interface DagNodeExecution {
   nodeId:      NodeId;
   runId:       RunId;
