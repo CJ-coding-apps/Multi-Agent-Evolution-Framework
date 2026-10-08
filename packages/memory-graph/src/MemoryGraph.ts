@@ -2,13 +2,13 @@ import crypto from 'node:crypto';
 import type {
   MemoryGraphApi, MemoryNode, MemoryEdge, MemorySubgraph,
   MemoryNodeKind, MemoryRelation, MergeReport, RunId,
-  GraphQuery, GraphRow,
+  GraphQuery, GraphRow, GraphQueryRunner, FailureRecorder, NodeFailureRecord,
 } from '@maf/types';
 import { KuzuDriver } from './KuzuDriver.js';
 import { SCHEMA_DDL } from './schema.js';
 import { intLiteral, idListParams } from './cypherText.js';
 
-export class MemoryGraph implements MemoryGraphApi {
+export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
   private driver: KuzuDriver;
   private schemaReady: Promise<void>;
 
@@ -63,20 +63,26 @@ export class MemoryGraph implements MemoryGraphApi {
     const keywords = taskContext.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 5);
     if (keywords.length === 0) return empty(taskContext);
 
+    // Scored and ranked in the query, then limited. This took the first `maxNodes * 3` nodes in
+    // storage order and filtered those, so past that size the newest memory was never searched.
+    // A keyword holds no whitespace, so testing each column is the same as testing the old
+    // `label kind properties` text.
+    const params: Record<string, string> = {};
+    const hits = keywords.map((word, i) => {
+      const p = `$kw${i}`;
+      params[`kw${i}`] = word;
+      return `(CASE WHEN lower(n.label) CONTAINS ${p} OR lower(n.kind) CONTAINS ${p} OR lower(n.properties) CONTAINS ${p} THEN 1 ELSE 0 END)`;
+    }).join(' + ');
     let rows: GraphRow[] = [];
     try {
       rows = await this.driver.run({
-        cypher: `MATCH (n:MemoryNode) RETURN n LIMIT ${intLiteral(maxNodes * 3, 'maxNodes')}`,
-        params: {},
+        cypher: `MATCH (n:MemoryNode) WITH n, ${hits} AS score WHERE score > 0
+         RETURN n, score ORDER BY score DESC, n.created_at DESC LIMIT ${intLiteral(maxNodes, 'maxNodes')}`,
+        params,
       });
     } catch { return empty(taskContext); }
 
-    const scored = rows
-      .map(rowToNode)
-      .map((n) => [n, score(n, keywords)] as [MemoryNode, number])
-      .filter(([, s]) => s > 0)
-      .sort(([, a], [, b]) => b - a)
-      .slice(0, maxNodes);
+    const scored = rows.map((r) => [rowToNode(r), Number(r['score'])] as [MemoryNode, number]);
 
     if (scored.length === 0) return empty(taskContext);
 
@@ -97,6 +103,34 @@ export class MemoryGraph implements MemoryGraphApi {
     } catch { /* edges best-effort */ }
 
     return { nodes, edges, queryContext: taskContext, relevanceScores };
+  }
+
+  /**
+   * D-16: a failed node, written in the shape `recallFailures` reads — a `Task` that
+   * `CAUSED_FAILURE` a `Failure`, the relation a value on `MemoryEdge`. One statement, so a crash
+   * between writes cannot leave a Task with no Failure, or a Failure no recall can reach.
+   */
+  async recordFailure(input: NodeFailureRecord): Promise<void> {
+    await this.schemaReady;
+    const now = new Date().toISOString();
+    await this.driver.run({
+      cypher: `CREATE (:MemoryNode {id: $taskId, kind: 'Task', label: $task, properties: $taskProps, run_id: $runId, created_at: $now, updated_at: $now})
+         -[:MemoryEdge {id: $edgeId, relation: 'CAUSED_FAILURE', weight: 1.0, metadata: '{}', created_at: $now}]->
+         (:MemoryNode {id: $failureId, kind: 'Failure', label: $nodeId, properties: $failureProps, run_id: $runId, created_at: $now, updated_at: $now})`,
+      params: {
+        taskId: crypto.randomUUID(), edgeId: crypto.randomUUID(), failureId: crypto.randomUUID(),
+        task: input.task, nodeId: input.nodeId, runId: input.runId, now,
+        taskProps: JSON.stringify({ nodeId: input.nodeId, nodeLabel: input.label, role: input.role }),
+        failureProps: JSON.stringify({
+          nodeId: input.nodeId, role: input.role, reason: input.reason, message: input.message,
+          ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }),
+        }),
+      },
+    });
+  }
+
+  recallFailures(filter: FailureRecallFilter): Promise<RecalledFailure[]> {
+    return recallFailures(this, filter);
   }
 
   async mergeRuns(sourceRunIds: RunId[], targetRunId: RunId): Promise<MergeReport> {
@@ -146,9 +180,80 @@ export class MemoryGraph implements MemoryGraphApi {
   close(): void { this.driver.close(); }
 }
 
-function score(node: MemoryNode, keywords: string[]): number {
-  const text = `${node.label} ${node.kind} ${JSON.stringify(node.properties)}`.toLowerCase();
-  return keywords.reduce((s, kw) => s + (text.includes(kw) ? 1 : 0), 0);
+/** What `recallFailures` matches. Every filter given must hold; with none, the latest failures. */
+export interface FailureRecallFilter {
+  /**
+   * A task title. Its first three words, as one phrase, must appear in the failed task's text,
+   * ignoring case: the planner's notion of "a similar task".
+   */
+  title?: string;
+  /** A file the failed task `MODIFIED` (the label of a `File` node). */
+  path?:  string;
+  limit:  number;
+}
+
+/** One failed node, as the planner reads it back. */
+export interface RecalledFailure {
+  task:       string;
+  role:       string;
+  reason:     string;
+  message:    string;
+  nodeId:     string;
+  runId:      RunId;
+  recordedAt: string;
+}
+
+/**
+ * The failure recall (D-16): Tasks joined to the Failure each caused, most recent first. This is
+ * the one copy of the query — the planner and `FailurePatternDetector` both call it — and it takes
+ * the narrow `GraphQueryRunner`, because its callers read the graph and never write it.
+ *
+ * The query text is assembled from fixed fragments only; every value is a bound parameter.
+ */
+export async function recallFailures(
+  graph: GraphQueryRunner,
+  filter: FailureRecallFilter,
+): Promise<RecalledFailure[]> {
+  const params: Record<string, string> = {};
+  let modified = '';
+  let where = '';
+  if (filter.path !== undefined) {
+    params['path'] = filter.path;
+    modified = `MATCH (t)-[:MemoryEdge {relation: 'MODIFIED'}]->(:MemoryNode {kind: 'File', label: $path})`;
+  }
+  if (filter.title !== undefined) {
+    const phrase = filter.title.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
+    // A blank title is contained in every task, which is no recall at all.
+    if (phrase === '') return [];
+    params['phrase'] = phrase;
+    where = 'WHERE lower(t.label) CONTAINS $phrase';
+  }
+
+  const rows = await graph.run({
+    cypher: `MATCH (t:MemoryNode {kind: 'Task'})-[:MemoryEdge {relation: 'CAUSED_FAILURE'}]->(f:MemoryNode {kind: 'Failure'})
+       ${modified}
+       ${where}
+       RETURN DISTINCT f.id AS id, t.label AS task, f.properties AS failure, f.run_id AS runId, f.created_at AS recordedAt
+       ORDER BY recordedAt DESC, id LIMIT ${intLiteral(filter.limit, 'limit')}`,
+    params,
+  });
+
+  return rows.map((r) => {
+    const failure = tryParse(String(r['failure'] ?? '{}'), 'Failure.properties');
+    const text = (key: string, fallback: string): string => {
+      const value = failure[key];
+      return typeof value === 'string' ? value : fallback;
+    };
+    return {
+      task:       String(r['task'] ?? ''),
+      role:       text('role', 'unknown'),
+      reason:     text('reason', 'unknown'),
+      message:    text('message', ''),
+      nodeId:     text('nodeId', ''),
+      runId:      String(r['runId'] ?? '') as RunId,
+      recordedAt: String(r['recordedAt'] ?? ''),
+    };
+  });
 }
 
 function empty(ctx: string): MemorySubgraph {
