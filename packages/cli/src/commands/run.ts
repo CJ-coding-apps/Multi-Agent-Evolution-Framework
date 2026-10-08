@@ -226,7 +226,7 @@ export function registerRunCommand(program: Command): void {
       );
 
       console.log(`[maf] done. Attestation: ${path.join(mafDir, 'attestations', runId + '.bundle.json')}`);
-      console.log(`[maf] signature: ${bundle.signature.slice(0, 16)}...`);
+      console.log(`[maf] signature: ${bundle.signature.slice(0, 16)}... (keySource: ${bundle.keySource})`);
 
       // The bundle is written first so the failed run is still attested; the exit
       // code is what callers and CI actually branch on.

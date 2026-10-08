@@ -1,0 +1,10 @@
+
+## Added during Phase 1 integration (2026-10-08)
+
+**D-28 · `git.reset` ends its argv with `--`, not `--end-of-options`.** Supersedes the second clause of D-12 for `reset` only. `git reset` accepts `--end-of-options` only from git 2.44; the trailing separator makes git read the checked revision as a revision on every supported git, and the revision pattern already refuses anything that starts with `-`.
+
+**D-29 · The security diff is the whole repository minus this run's runtime state.** The reviewed diff is taken with the `:(top)` pathspec — the full tree, however deep inside the repository MAF was pointed — and excludes only the entries under `<cwd>/.maf/` that a run produces (the `.gitignore` "runtime state" list: `runs/`, `cache/`, `memory.kuzu`, `lcm.db*`, `transcripts/`, `attestations/`, `harnesses/`, `goldens/results/`, `evolve/`). MAF's configuration under `.maf/` — `policy.yaml`, `roles.yaml`, `config.yaml`, `prompts/` — is content an agent could rewrite to shape the next run, and stays in the diff. Runtime state is excluded because it grows during the run, is written by MAF rather than the agent, and would push an honest diff past the gate's cap (D-07) in a repository that does not ignore it.
+
+**D-30 · A tester may not write CI configuration.** Globs match dotfiles (D-08), so the tester's `**/*test*` allow-list reached `.github/workflows/test.yml`. The shipped policy denies the tester writes under `.github/` at a priority above its allow-list. A workflow file is CI configuration, not a test.
+
+**D-31 · A backend that throws is reviewed before the failure propagates.** When the adapter or the in-process loop throws (a timed-out turn, a backend that never started), the dispatcher runs the security gate on whatever the agent left in the tree before rethrowing: a gate refusal (a verdict) outranks the transport failure; a clean or empty diff lets the original error through for the scheduler to classify (D-06). On the in-process tier the gate otherwise runs at `task_end`, which a throw never reaches.

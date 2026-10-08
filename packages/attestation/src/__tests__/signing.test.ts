@@ -7,6 +7,7 @@ import path from 'node:path';
 import type { AttestationBundle, KeySource, SlsaBuilder, SlsaInvocation } from '@maf/types';
 import { makeRunId } from '@maf/types';
 import { Attestor, DEV_SIGNING_KEY } from '../Attestor.js';
+import { BundleSigner } from '../BundleSigner.js';
 import type { SigningOptions } from '../Attestor.js';
 
 // ORACLE: D-13 (part 1) + audit P0 #8 — a bundle says which key signed it, inside the signature,
@@ -63,21 +64,22 @@ function captureStderr<T>(body: () => T): { value: T; written: string[] } {
 test('keySource: a bundle signed with a secret says "env", and verify reports it', async () => {
   await withBundle({ secret: 's3cret' }, (bundle) => {
     assert.equal(bundle.keySource, 'env');
-    assert.deepEqual(Attestor.verify(bundle, { secret: 's3cret' }), { valid: true, keySource: 'env' });
+    assert.deepEqual(Attestor.inspect(bundle, { secret: 's3cret' }), { valid: true, keySource: 'env', legacy: false });
+    assert.equal(Attestor.verify(bundle, { secret: 's3cret' }), true);
   });
 });
 
 test('keySource: a bundle signed without a secret says "dev"; verify still passes and reports "dev"', async () => {
   await withBundle({}, async (bundle, dir) => {
     assert.equal(bundle.keySource, 'dev');
-    assert.deepEqual(Attestor.verify(bundle, {}), { valid: true, keySource: 'dev' });
-    assert.equal(Attestor.verify(bundle, { secret: 's3cret' }).valid, false,
+    assert.deepEqual(Attestor.inspect(bundle, {}), { valid: true, keySource: 'dev', legacy: false });
+    assert.equal(Attestor.verify(bundle, { secret: 's3cret' }), false,
       'a dev-signed bundle does not pass a check against a real secret');
 
     // The persisted bundle, as a third party would read it, verifies the same way.
     const onDisk = JSON.parse(await readFile(path.join(dir, 'r-key.bundle.json'), 'utf8')) as AttestationBundle;
     assert.equal(onDisk.keySource, 'dev');
-    assert.deepEqual(Attestor.verify(onDisk, {}), { valid: true, keySource: 'dev' });
+    assert.deepEqual(Attestor.inspect(onDisk, {}), { valid: true, keySource: 'dev', legacy: false });
   });
 });
 
@@ -89,27 +91,27 @@ test('keySource: an empty secret, or the development key itself, signs as "dev"'
 test('keySource is inside the signed payload: flipping it breaks the signature', async () => {
   await withBundle({ secret: 's3cret' }, (bundle) => {
     const flipped: AttestationBundle = { ...bundle, keySource: 'dev' };
-    assert.equal(Attestor.verify(flipped, { secret: 's3cret' }).valid, false);
-    assert.equal(Attestor.verify(flipped, {}).valid, false);
+    assert.equal(Attestor.verify(flipped, { secret: 's3cret' }), false);
+    assert.equal(Attestor.verify(flipped, {}), false);
   });
 });
 
 test('a bundle re-signed with the public development key cannot pass as "env"', async () => {
   await withBundle({}, (bundle) => {
     // Control: the forger's signing is correct — an honest "dev" claim re-signed this way verifies.
-    assert.equal(Attestor.verify(resignedWithDevKey(bundle, 'dev'), {}).valid, true);
+    assert.equal(Attestor.verify(resignedWithDevKey(bundle, 'dev'), {}), true);
 
     const forged = resignedWithDevKey(bundle, 'env');
-    assert.deepEqual(Attestor.verify(forged, {}), { valid: false, keySource: 'dev' },
+    assert.deepEqual(Attestor.inspect(forged, {}), { valid: false, keySource: 'dev', legacy: false },
       'the signature matches the dev key, but the claim does not name it');
-    assert.equal(Attestor.verify(forged, { secret: 's3cret' }).valid, false);
+    assert.equal(Attestor.verify(forged, { secret: 's3cret' }), false);
   });
 });
 
 test('verify answers invalid, rather than throwing, for a truncated signature', async () => {
   await withBundle({ secret: 's3cret' }, (bundle) => {
     const truncated: AttestationBundle = { ...bundle, signature: bundle.signature.slice(0, 10) };
-    assert.equal(Attestor.verify(truncated, { secret: 's3cret' }).valid, false);
+    assert.equal(Attestor.verify(truncated, { secret: 's3cret' }), false);
   });
 });
 
@@ -150,4 +152,29 @@ test('the Attestor itself never warns, so a call site that resolves once prints 
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('a 0.2.0 bundle with no keySource verifies against the key supplied, and says it is legacy', async () => {
+  await withBundle({ secret: 's3cret' }, (signed) => {
+    // What a 0.2.0 Attestor wrote: the same payload without keySource, signed over that payload.
+    const { keySource: _k, signature: _s, ...rest } = signed as AttestationBundle & { keySource?: KeySource };
+    const legacySig = crypto.createHmac('sha256', 's3cret').update(JSON.stringify(rest)).digest('hex');
+    const legacy = { ...rest, signature: legacySig } as unknown as AttestationBundle;
+
+    assert.deepEqual(Attestor.inspect(legacy, { secret: 's3cret' }), { valid: true, keySource: 'env', legacy: true });
+    assert.equal(Attestor.verify(legacy, {}), false, 'not the dev key');
+    assert.equal(new BundleSigner('s3cret').verify(legacy), true, 'the exported signer agrees');
+  });
+});
+
+test('the exported BundleSigner applies the keySource rule too', async () => {
+  await withBundle({ secret: 's3cret' }, (bundle) => {
+    assert.equal(new BundleSigner('s3cret').verify(bundle), true);
+    assert.equal(BundleSigner.verifyStatic(bundle, 's3cret'), true);
+    // Re-signed with the public key while still claiming "env": the signature matches the dev
+    // key, and the claim does not, so it is refused — by both verifiers.
+    const forged = resignedWithDevKey(bundle, 'env');
+    assert.equal(BundleSigner.verifyStatic(forged, DEV_SIGNING_KEY), false);
+    assert.equal(Attestor.verify(forged, {}), false);
+  });
 });

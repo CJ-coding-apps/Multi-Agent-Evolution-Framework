@@ -36,7 +36,7 @@ test('recordSecurityFindings flows into bundle output and signature payload', as
     assert.equal(bundle.securityFindings?.[0]?.nodeId, 'node-1');
     assert.equal(bundle.securityFindings?.[0]?.result.passed, false);
     assert.ok(bundle.signature, 'bundle must be signed');
-    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }).valid, true, 'signature verifies against same secret');
+    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true, 'signature verifies against same secret');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

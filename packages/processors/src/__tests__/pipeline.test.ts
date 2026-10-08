@@ -197,6 +197,24 @@ test('M2: coder security gate runs at task_end on budget_exhausted (not only com
     'a budget-exhausted coder run must still be security-reviewed');
 });
 
+test('D-07: the security gate runs for any role handed a runner — a tester, a custom writer — and for none without one', async () => {
+  const reg = createDefaultProcessorRegistry();
+  for (const role of ['tester', 'release-engineer']) {
+    const appended: string[] = [];
+    const pipe = ProcessorPipeline.build([...DEFAULT_BUNDLE_REFS], reg, {
+      transcript: { append: async () => {} },
+      securityRunner: async () => { appended.push('security-ran'); },
+    });
+    const end: HarnessEvent = { ...ctx, role, hook: 'task_end', finalText: 'x', totalSteps: 1, outcome: 'completed' };
+    await pipe.run(end);
+    assert.ok(appended.includes('security-ran'), `${role}: a runner was handed in, so the gate runs — the name decides nothing`);
+  }
+  // No runner: the dispatcher hands one only to writer roles, so its absence is the read-only case.
+  const pipe = ProcessorPipeline.build([...DEFAULT_BUNDLE_REFS], reg, { transcript: { append: async () => {} } });
+  const end: HarnessEvent = { ...ctx, role: 'coder', hook: 'task_end', finalText: 'x', totalSteps: 1, outcome: 'completed' };
+  await pipe.run(end); // must not throw for want of a runner
+});
+
 test('L1: redactSecrets (evidence-grade) scrubs credential FORMATS, byte-faithful otherwise', () => {
   const raw = 'line before\nexport KEY=AKIAIOSFODNN7EXAMPLE and sk-ant-abcdefghijklmnopqrstuvwxyz\nline after';
   const out = redactSecrets(raw);

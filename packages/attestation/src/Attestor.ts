@@ -10,7 +10,8 @@ import type {
 import type { MemoryGraph } from '@maf/memory-graph';
 
 /** The public development key. Anyone can sign with it, which is why a bundle says when it was used. */
-export const DEV_SIGNING_KEY = 'dev-secret';
+export { DEV_SIGNING_KEY } from './devKey.js';
+import { DEV_SIGNING_KEY } from './devKey.js';
 
 const SIGNING_KEY_ENV = 'MAF_SIGNING_KEY';
 
@@ -29,6 +30,8 @@ export interface SigningOptions {
 }
 
 export interface VerifyResult {
+  /** True for a bundle written before `keySource` existed (0.2.0): its key is whatever verified it. */
+  legacy:    boolean;
   /** The signature matches AND the bundle's own `keySource` names the key that checked it. */
   valid:     boolean;
   /** The key this check used. `'dev'` means a valid result is still no evidence of authorship. */
@@ -164,7 +167,19 @@ export class Attestor implements AttestorHandle {
    * has to agree as well as the signature: anyone holding the public development key can sign a
    * bundle that says `keySource: 'env'`, and that bundle must not pass as one.
    */
-  static verify(bundle: AttestationBundle, signing: SigningOptions): VerifyResult {
+  /**
+   * Whether `bundle` was signed with the key `signing` names, and by that key alone. A bundle
+   * that says `keySource: "env"` must verify with the env key; one that says `"dev"` with the
+   * development key — so a bundle re-signed with the public key cannot claim a real one.
+   *
+   * A boolean, so `if (!Attestor.verify(…))` means what it says. `inspect` returns the detail.
+   */
+  static verify(bundle: AttestationBundle, signing: SigningOptions): boolean {
+    return Attestor.inspect(bundle, signing).valid;
+  }
+
+  /** `verify`, with the key source the check was made against and whether the bundle is legacy. */
+  static inspect(bundle: AttestationBundle, signing: SigningOptions): VerifyResult {
     const { secret, keySource } = signingKey(signing);
     const { signature, ...rest } = bundle;
     const payload = JSON.stringify(rest);
@@ -172,7 +187,13 @@ export class Attestor implements AttestorHandle {
     const given = Buffer.from(signature, 'hex');
     // timingSafeEqual throws on unequal lengths; a truncated signature is simply not this one.
     const signatureMatches = given.length === expected.length && crypto.timingSafeEqual(given, expected);
-    return { valid: signatureMatches && bundle.keySource === keySource, keySource };
+    // A bundle from before keySource existed (0.2.0) says nothing about its key. It verifies
+    // against whichever key the caller supplies, and the result says so, so a reader cannot
+    // mistake "verified with the dev key because that is what I tried" for "signed with mine".
+    if ((bundle as { keySource?: KeySource }).keySource === undefined) {
+      return { valid: signatureMatches, keySource, legacy: true };
+    }
+    return { valid: signatureMatches && bundle.keySource === keySource, keySource, legacy: false };
   }
 }
 

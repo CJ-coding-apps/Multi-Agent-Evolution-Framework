@@ -8,7 +8,7 @@ import path from 'node:path';
 import type {
   CliAdapter, AdapterCapabilities, AdapterInvokeResult, DagNode, SecurityReviewResult,
 } from '@maf/types';
-import { makeNodeId, makeRunId, makeToolId, GateRefused } from '@maf/types';
+import { makeNodeId, makeRunId, makeToolId, GateRefused, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -426,6 +426,55 @@ test('a diff over the cap fails the node with GateRefused, attested, and is neve
     assert.equal(reviewCalls, 0, 'the reviewer must never see an oversized diff, whole or sliced');
     assert.equal(fx.reviews.length, 1, 'the refusal is attested');
     assert.match(fx.reviews[0] ?? '', /review cap is 10 characters/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a backend that throws after changing the tree is still reviewed, and a refusal outranks the failure', async () => {
+  // A timed-out turn, a backend that died mid-run: the adapter throws, and on the in-process
+  // tier the gate at task_end is never reached. The dispatcher reviews the diff before the
+  // failure propagates, so a change left behind by a dying agent is never unreviewed.
+  const workDir = await makeRepoDir();
+  const seen: string[] = [];
+  const fx = await makeFixture({
+    workDir,
+    onInvoke: async () => {
+      await writeFile(path.join(workDir, 'hello.txt'), 'changed, then the backend died', 'utf8');
+      throw new TransportError('claude did not finish within 1000 ms and was killed (exit code 124).');
+    },
+    securityGate: {
+      reviewDiff: async (diff: string) => {
+        seen.push(diff);
+        return { findings: [{ severity: 'critical', category: 'secrets', file: 'hello.txt', description: 'planted' }], summary: 'blocked', passed: false };
+      },
+    } as unknown as SecurityReviewGate,
+  });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(CODER_NODE), (err: unknown) => {
+      assert.ok(err instanceof GateRefused, `the verdict outranks the transport failure, got ${String(err)}`);
+      return true;
+    });
+    assert.equal(seen.length, 1, 'the diff was reviewed although the backend threw');
+    assert.match(seen[0] ?? '', /backend died/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a backend that throws without changing the tree lets the transport failure through', async () => {
+  const workDir = await makeRepoDir();
+  const seen: string[] = [];
+  const fx = await makeFixture({
+    workDir,
+    onInvoke: async () => { throw new TransportError('claude exited with code 1 without writing any output.'); },
+    securityGate: {
+      reviewDiff: async (diff: string) => { seen.push(diff); return { findings: [], summary: 'clean', passed: true }; },
+    } as unknown as SecurityReviewGate,
+  });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(CODER_NODE), (err: unknown) => err instanceof TransportError);
+    assert.equal(seen.length, 0, 'an empty diff is not sent for review');
   } finally {
     await fx.cleanup();
   }

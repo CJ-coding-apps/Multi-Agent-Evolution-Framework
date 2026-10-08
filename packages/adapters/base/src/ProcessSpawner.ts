@@ -1,5 +1,6 @@
 import { spawn, type SpawnOptions } from 'node:child_process';
 import { TransportError } from '@maf/types';
+import { failureTail } from './failure.js';
 
 export interface SpawnResult {
   stdout:   string;
@@ -22,13 +23,19 @@ const MAX_OUTPUT_BYTES = 8 * 1024 * 1024; // 8MB cap — prevents OOM on large c
  * and judging it is the caller's business. Silence, or a kill on timeout, is no answer at all.
  */
 function transportFailure(
-  cmd: string, exitCode: number, timedOut: boolean, stdout: string, timeoutMs: number | undefined,
+  cmd: string, exitCode: number, timedOut: boolean, stdout: string, stderr: string, timeoutMs: number | undefined,
 ): TransportError | undefined {
+  // stderr is where a backend says why — an expired login, a missing flag — so the tail rides
+  // along, credential shapes masked; without it an "exit 3" is a number and nothing more.
   if (timedOut) {
-    return new TransportError(`"${cmd}" did not finish within ${timeoutMs} ms and was killed (exit code 124).`);
+    return new TransportError(
+      `"${cmd}" did not finish within ${timeoutMs} ms and was killed (exit code 124). stderr tail: ${failureTail(stderr)}`,
+    );
   }
   if (exitCode !== 0 && stdout.trim() === '') {
-    return new TransportError(`"${cmd}" exited with code ${exitCode} without writing any output.`);
+    return new TransportError(
+      `"${cmd}" exited with code ${exitCode} without writing any output. stderr tail: ${failureTail(stderr)}`,
+    );
   }
   return undefined;
 }
@@ -93,7 +100,7 @@ export async function spawnAndCollect(
       const stdout = Buffer.concat(stdoutChunks).toString();
       const stderr = Buffer.concat(stderrChunks).toString();
       const exitCode = timedOut ? 124 : (code ?? 1);
-      const transportError = transportFailure(cmd, exitCode, timedOut, stdout, opts.timeoutMs);
+      const transportError = transportFailure(cmd, exitCode, timedOut, stdout, stderr, opts.timeoutMs);
       resolve({
         stdout, stderr, exitCode, duration: Date.now() - start,
         ...(transportError ? { transportError } : {}),

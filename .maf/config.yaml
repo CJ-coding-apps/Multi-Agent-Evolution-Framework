@@ -17,7 +17,7 @@
     "dag": {
       "maxConcurrent": 4,
       "retry": {
-        "maxAttempts": 3,
+        "maxAttempts": 2,
         "backoffMs": 1000,
         "backoffFactor": 2,
         "jitterMs": 500

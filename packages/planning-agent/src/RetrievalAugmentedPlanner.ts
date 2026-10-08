@@ -69,7 +69,7 @@ export class RetrievalAugmentedPlanner {
     const catalog = this.config.roleCatalog ?? [];
     if (catalog.length === 0) return PLANNING_INSTRUCTIONS_BASE(defaultRole);
     const rolesBlock = catalog.map((r) => `- ${r.role}${r.role === defaultRole ? ' (default)' : ''}: ${r.description}`).join('\n');
-    return PLANNING_INSTRUCTIONS_BASE(defaultRole) + `\n\nAvailable agent roles (use these in node.agentRole):\n${rolesBlock}\n\nGuidance:\n- After any coder node that introduces new behavior, emit a tester node that depends on it.\n- When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every coder diff.)`;
+    return PLANNING_INSTRUCTIONS_BASE(defaultRole) + `\n\nAvailable agent roles (use these in node.agentRole):\n${rolesBlock}\n\nGuidance:\n- After any coder node that introduces new behavior, emit a tester node that depends on it.\n- When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every writer role's diff.)`;
   }
 
   private async getFailureContext(title: string): Promise<string> {

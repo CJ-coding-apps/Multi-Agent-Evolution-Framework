@@ -64,7 +64,9 @@ const approvalRequest = (policyRuleId: string): ApprovalRequest => ({
 });
 
 const refusals: Array<{ decision: PolicyDecision; ruleId: string | undefined }> = [
-  { decision: { verdict: 'Deny', reason: 'writes are off' }, ruleId: undefined },
+  { decision: { verdict: 'Deny', reason: 'writes are off', ruleId: 'deny-env-files' }, ruleId: 'deny-env-files' },
+  // A Deny the engine reached without a rule (a path outside the root) has no id to record.
+  { decision: { verdict: 'Deny', reason: 'path escapes the project root' }, ruleId: undefined },
   {
     decision: { verdict: 'Escalate', reason: 'Policy requires approval', approvalRequest: approvalRequest('protect-lock-files') },
     ruleId: 'protect-lock-files',

@@ -14,8 +14,7 @@ import type { ReviewGate, SecurityReviewGate } from '@maf/git-ops';
 import { snapshotDiff, runIsolatedGit, GIT_EMPTY_TREE } from '@maf/git-ops';
 import type { HarnessConfig } from '@maf/harness-config';
 import {
-  ProcessorPipeline, createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS,
-} from '@maf/processors';
+  ProcessorPipeline, createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS, redactCredentials } from '@maf/processors';
 import type { ProcessorDeps } from '@maf/processors';
 import { InProcessAgentLoop } from '@maf/tool-loop';
 import type { InProcessLoopResult } from '@maf/tool-loop';
@@ -55,10 +54,15 @@ const MAX_STORED_OUTPUT_CHARS = 64_000;
 /** Enough of a failed call's output to show its last error, without pasting a transcript into an error. */
 const OUTPUT_TAIL_CHARS       = 500;
 
-/** The end of an adapter's output, quoted so an empty or whitespace-only tail is still visible. */
+/**
+ * The end of an adapter's output, credentials masked, quoted so an empty or whitespace-only tail
+ * is still visible. Masked because the message lands in the signed bundle and the memory graph,
+ * which the transcript scrubber never sees.
+ */
 function outputTail(output: string): string {
+  const masked = redactCredentials(output);
   return JSON.stringify(
-    output.length > OUTPUT_TAIL_CHARS ? `…${output.slice(-OUTPUT_TAIL_CHARS)}` : output,
+    masked.length > OUTPUT_TAIL_CHARS ? `…${masked.slice(-OUTPUT_TAIL_CHARS)}` : masked,
   );
 }
 
@@ -234,14 +238,24 @@ export class RoleDispatcher {
     // at task_end, where the gate runs on budget_exhausted too.
     let shortfall: NodeFailure | TransportError | undefined;
     const ranInProcess = wantsInProcess && canInProcess;
-    if (ranInProcess) {
-      const loop = await this.runInProcess(node, role, invokeOpts, taskId, startCommit);
-      outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
-      shortfall = loopShortfall(role, loop);
-    } else {
-      const result = await adapter.invoke(invokeOpts);
-      outputForMemory = result.output.slice(0, MAX_STORED_OUTPUT_CHARS);
-      shortfall = cliShortfall(role, adapter.name, result);
+    try {
+      if (ranInProcess) {
+        const loop = await this.runInProcess(node, role, invokeOpts, taskId, startCommit);
+        outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
+        shortfall = loopShortfall(role, loop);
+      } else {
+        const result = await adapter.invoke(invokeOpts);
+        outputForMemory = result.output.slice(0, MAX_STORED_OUTPUT_CHARS);
+        shortfall = cliShortfall(role, adapter.name, result);
+      }
+    } catch (err: unknown) {
+      // The loop or the adapter threw — a turn timed out, a backend never started. Tools may
+      // already have changed the tree, and on the in-process tier the gate that reviews it
+      // runs at task_end, which a throw never reaches. So the diff is reviewed here, before
+      // the failure propagates: a refusal (a verdict) outranks the transport failure, and a
+      // clean or empty diff lets the original error through for the scheduler to classify.
+      if (startCommit !== undefined) await this.runPostCoderGates(node, startCommit);
+      throw err;
     }
 
     await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });

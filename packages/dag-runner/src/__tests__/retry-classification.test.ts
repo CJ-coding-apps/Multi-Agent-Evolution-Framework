@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BlackboardStore } from '@maf/blackboard';
 import type { BlackboardValue, DagNode, NodeId, RetryPolicy, RunOutcome } from '@maf/types';
-import { TransportError, VerdictError, makeNodeId, makeRunId } from '@maf/types';
+import { TransportError, VerdictError, makeNodeId, makeRunId, GateRefused } from '@maf/types';
 import { DagRunner, DagParser, withRetry, DEFAULT_RETRY_POLICY } from '../index.js';
 import { testRoleResolver } from './roleResolver.js';
 
@@ -17,8 +17,7 @@ const ROLES = testRoleResolver(['coder'], 'coder');
 /** The default policy with the waiting taken out: the attempt count is what is under test. */
 const NO_WAIT: RetryPolicy = { ...DEFAULT_RETRY_POLICY, backoffMs: 0, jitterMs: 0 };
 
-/** Stand-ins for what gates, policy and transports throw, classified and not. */
-class GateRefused extends VerdictError {}
+/** What transports throw, and an error nobody classified; the gate's own class is the real one. */
 class UnclassifiedPolicyError extends Error {}
 class ConnectionReset extends TransportError {}
 
@@ -86,7 +85,7 @@ test('maxAttempts 1 means no retry, even for a TransportError', async () => {
 test('a VerdictError is not retried', async () => {
   let calls = 0;
   let retries = 0;
-  const refusal = new GateRefused('the security gate refused the diff: 1 blocking finding');
+  const refusal = new GateRefused('the security gate refused the diff: 1 blocking finding', []);
   await assert.rejects(
     () => withRetry(async () => { calls++; throw refusal; }, NO_WAIT, () => { retries++; }),
     (err: unknown) => err === refusal,
@@ -120,7 +119,7 @@ test('a node whose executor throws a gate refusal runs once and fails with the r
   const outcome = await new DagRunner().run({
     dag: dagOf([{ id: 'a', label: 'a', retry: NO_WAIT }]),
     board: new BlackboardStore(),
-    executor: async () => { calls++; throw new GateRefused('the security gate refused the diff'); },
+    executor: async () => { calls++; throw new GateRefused('the security gate refused the diff', []); },
   });
 
   assert.equal(calls, 1);
@@ -170,7 +169,7 @@ test('a node that fails while a sibling is still running: the run waits for the 
     calls.set(node.id, attempt);
     if (node.id === A) {
       if (attempt === 1) throw new TransportError('the backend closed the connection');
-      throw new GateRefused('the security gate refused the diff');
+      throw new GateRefused('the security gate refused the diff', []);
     }
     if (node.id === B) {
       bStarted = true;

@@ -49,6 +49,24 @@ export function runIsolatedGit(
 }
 
 /**
+ * The entries under `.maf/` that a run produces, mirrored from the "MAF runtime state" block of
+ * this repository's `.gitignore`. Anything not listed — the policy, roles, config and prompts —
+ * is reviewed like any other file.
+ */
+export const MAF_RUNTIME_STATE = [
+  'runs', 'cache', 'memory.kuzu', 'lcm.db', 'lcm.db-wal', 'lcm.db-shm',
+  'transcripts', 'attestations', 'harnesses', 'goldens/results', 'evolve',
+] as const;
+
+/** Top-relative `:(top,exclude)` pathspecs for `<cwd>/.maf/<state>`, wherever `cwd` is in the repo. */
+async function runtimeStateExcludes(cwd: string, env: NodeJS.ProcessEnv): Promise<string[]> {
+  // `--show-prefix` is cwd relative to the repository top ('' at the top, 'sub/dir/' below it).
+  const { stdout } = await runIsolatedGit(cwd, ['rev-parse', '--show-prefix'], { env });
+  const prefix = stdout.trim();
+  return MAF_RUNTIME_STATE.map((entry) => `:(top,exclude)${prefix}.maf/${entry}`);
+}
+
+/**
  * Everything the working tree changed since `startCommit`, as a diff, whether or not any
  * of it is tracked, staged, or committed.
  *
@@ -59,14 +77,19 @@ export function runIsolatedGit(
  * into a throwaway index and diff that:
  *
  *   GIT_INDEX_FILE=<tmp> git read-tree <startCommit>   # start from the base
- *   GIT_INDEX_FILE=<tmp> git add -A -- . ':(exclude).maf'       # stage everything, .gitignore respected
- *   GIT_INDEX_FILE=<tmp> git diff --cached <startCommit> -- . ':(exclude).maf'
+ *   GIT_INDEX_FILE=<tmp> git add -A -- ':(top)' ':(top,exclude)<prefix>.maf/transcripts' …
+ *   GIT_INDEX_FILE=<tmp> git diff --cached <startCommit> -- ':(top)' ':(top,exclude)…' …
  *
- * `.maf/` is excluded by name: it is maf's own state — transcripts that grow during the run,
- * the memory graph, the attestation bundles — written by maf, not by the agent, and it is
- * not ignored by the user's `.gitignore` in a repository maf has only just started working in.
- * Left in, it would be reviewed as the agent's change and would push an honest diff past the
- * gate's size cap (D-07).
+ * The pathspec is `:(top)`: the whole repository, however deep inside it `cwd` sits — a plain
+ * `.` would review only the subtree maf was pointed at, and an agent can write anywhere in
+ * the tree. What is excluded is maf's *runtime state* under `<cwd>/.maf/` — transcripts that
+ * grow during the run, the memory graph, attestation bundles, minted harnesses, result files —
+ * which maf writes, not the agent, and which a repository maf has only just started working in
+ * does not ignore. Left in, it would be reviewed as the agent's change and push an honest diff
+ * past the gate's size cap (D-07). maf's *configuration* under `.maf/` — `policy.yaml`,
+ * `roles.yaml`, `config.yaml`, `prompts/` — is tracked content an agent could rewrite to shape
+ * the next run, so it stays in the diff. The list below is the `.gitignore` "runtime state"
+ * list; keep the two together.
  *
  * `GIT_INDEX_FILE` is what makes this safe to run against a user's own repository: their
  * real index is never opened, so running maf cannot leave their staged work altered.
@@ -87,12 +110,13 @@ export async function snapshotDiff(cwd: string, startCommit: string): Promise<st
       startCommit === GIT_EMPTY_TREE ? ['read-tree', '--empty'] : ['read-tree', startCommit],
       { env },
     );
-    // GIT_LITERAL_PATHSPECS=0 so the `:(exclude)` magic works even when the parent process
-    // runs with literal pathspecs on — the tools' git helper sets it for its own children.
-    const pathspec = ['--', '.', ':(exclude).maf'];
-    await runIsolatedGit(cwd, ['add', '-A', ...pathspec], { env: { ...env, GIT_LITERAL_PATHSPECS: '0' } });
+    // GIT_LITERAL_PATHSPECS=0 so the `:(top)`/`:(exclude)` magic works even when the parent
+    // process runs with literal pathspecs on — the tools' git helper sets it for its children.
+    const magicEnv = { ...env, GIT_LITERAL_PATHSPECS: '0' };
+    const pathspec = ['--', ':(top)', ...(await runtimeStateExcludes(cwd, magicEnv))];
+    await runIsolatedGit(cwd, ['add', '-A', ...pathspec], { env: magicEnv });
     const { stdout } = await runIsolatedGit(cwd, ['diff', '--cached', startCommit, ...pathspec], {
-      env: { ...env, GIT_LITERAL_PATHSPECS: '0' },
+      env: magicEnv,
       maxBuffer: MAX_DIFF_BYTES,
     });
     return stdout;

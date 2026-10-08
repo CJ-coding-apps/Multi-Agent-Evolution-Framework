@@ -79,6 +79,9 @@ export class SecurityReviewGate {
       ...(this.config.model ? { model: this.config.model } : {}),
     };
     const result = await this.config.adapter.invoke(opts);
+    // A reviewer that timed out or never started has not judged anything: that is a transport
+    // failure the node may be retried on (D-06), not a refusal to carry as a verdict.
+    if (result.transportError !== undefined) throw result.transportError;
     return parseSecurityOutput(result.output);
   }
 }
