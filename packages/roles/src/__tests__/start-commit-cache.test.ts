@@ -146,12 +146,15 @@ test('a retried coder node is reviewed against the commit its first attempt star
     );
 
     await assert.rejects(() => fx.dispatcher.runNode(coderNode('c1')), TransportError);
-    assert.deepEqual(fx.reviewed, [], 'attempt 1 failed before the gate');
+    // The dying attempt is reviewed before its failure propagates (D-31): what it left in the
+    // tree is never unreviewed, even though it never reached the end of its run.
+    assert.equal(fx.reviewed.length, 1, 'attempt 1 is reviewed before the transport failure propagates');
+    assert.match(fx.reviewed[0] ?? '', /changed by attempt 1/);
 
     await fx.dispatcher.runNode(coderNode('c1'));
-    assert.equal(fx.reviewed.length, 1,
+    assert.equal(fx.reviewed.length, 2,
       'a baseline re-captured on the retry would include attempt 1\'s commit, diff clean and skip the gate');
-    assert.match(fx.reviewed[0] ?? '', /changed by attempt 1/, 'the retry reviews what the failed attempt committed');
+    assert.match(fx.reviewed[1] ?? '', /changed by attempt 1/, 'the retry reviews what the failed attempt committed, against the same base');
   } finally {
     await fx.cleanup();
   }
