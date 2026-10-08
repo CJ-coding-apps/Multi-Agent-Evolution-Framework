@@ -1,27 +1,24 @@
-{
-  "version": "0.2.1",
-  "defaults": {
-    "adapter": "claude",
-    "worktree": true,
-    "circuit": {
-      "maxAttempts": 20,
-      "maxErrors": 5,
-      "tokenBudget": 200000,
-      "callsPerHour": 100
-    },
-    "lcm": {
-      "mode": "Upward",
-      "contextThreshold": 0.75,
-      "freshTailCount": 64
-    },
-    "dag": {
-      "maxConcurrent": 4,
-      "retry": {
-        "maxAttempts": 2,
-        "backoffMs": 1000,
-        "backoffFactor": 2,
-        "jitterMs": 500
-      }
-    }
-  }
-}
+# MAF run settings. Every key is optional and the values below are the built-in defaults.
+# A command-line flag overrides the key it names; a key left out takes its default.
+# The file is validated when a run starts: an unknown key or a bad value stops the run.
+
+adapter: claude            # -a, --adapter
+worktree: true             # --no-worktree sets false
+# model: <name>            # -m, --model; unset means the adapter's own default
+
+lcm:                       # the run's LcmEngine
+  mode: Upward             # Upward | Dolt
+  contextThreshold: 0.75   # share of the token budget that triggers compaction, 0 < x <= 1
+  freshTailCount: 64       # newest messages kept out of compaction
+
+dag:                       # the scheduler
+  maxConcurrent: 4         # nodes running at once (writers still run one at a time)
+  retry:                   # per node, on transport failures only
+    maxAttempts: 2         # 1 means no retry
+    backoffMs: 1000
+    backoffFactor: 2
+    jitterMs: 500
+
+timeouts:
+  planMs: 120000           # the planner's call to the adapter
+  securityReviewMs: 120000 # the security gate's review of a writer node's diff
