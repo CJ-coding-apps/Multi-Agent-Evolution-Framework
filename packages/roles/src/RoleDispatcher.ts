@@ -1,7 +1,8 @@
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
+  AdapterInvokeResult, PartialNodeOutcome,
 } from '@maf/types';
-import { isTurnAdapter, makeTaskId } from '@maf/types';
+import { isTurnAdapter, makeTaskId, NodeFailure } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -17,6 +18,8 @@ import {
 } from '@maf/processors';
 import type { ProcessorDeps } from '@maf/processors';
 import { InProcessAgentLoop } from '@maf/tool-loop';
+import type { InProcessLoopResult } from '@maf/tool-loop';
+import type { RoleConfig } from './RoleConfig.js';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
 
@@ -48,6 +51,74 @@ export interface RoleNodeOutput {
 
 const MAX_OUTPUT_BYTES        = 2 * 1024 * 1024;  // 2MB per node response
 const MAX_STORED_OUTPUT_CHARS = 64_000;
+/** Enough of a failed call's output to show its last error, without pasting a transcript into an error. */
+const OUTPUT_TAIL_CHARS       = 500;
+
+/**
+ * The tools that change the working tree or its history — the same set D-07 uses to decide
+ * which roles the security gate reviews, so "writer" means one thing across the dispatcher.
+ */
+const WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'fs.write', 'fs.delete', 'patch.apply', 'git.commit', 'git.reset', 'git.add',
+]);
+
+function holdsWriteTool(role: RoleConfig): boolean {
+  return role.allowedTools.some((id) => WRITE_TOOLS.has(id));
+}
+
+/** The end of an adapter's output, quoted so an empty or whitespace-only tail is still visible. */
+function outputTail(output: string): string {
+  return JSON.stringify(
+    output.length > OUTPUT_TAIL_CHARS ? `…${output.slice(-OUTPUT_TAIL_CHARS)}` : output,
+  );
+}
+
+/**
+ * Whether a CLI-tier result counts as the role having done its work (D-04). Until this, the
+ * result's `success` and `exitCode` were never read, so a timeout (exit 124), an expired login or
+ * an HTTP error body was stored as the node's output and the node was recorded as succeeded.
+ *
+ * Empty output is held against writers only. A writer that says nothing is what a CLI that died
+ * or was cut off looks like, and accepting it records a coder that did nothing as one that
+ * succeeded; a read-only role with nothing to report has changed nothing by saying so.
+ */
+function cliShortfall(
+  role: RoleConfig,
+  adapterName: string,
+  result: AdapterInvokeResult,
+): NodeFailure | undefined {
+  if (!result.success) {
+    return new NodeFailure(
+      'adapter_failed',
+      `adapter "${adapterName}" was expected to succeed for role "${role.role}", but it reported ` +
+      `failure (exit code ${result.exitCode}). Output tail: ${outputTail(result.output)}`,
+      result.exitCode,
+    );
+  }
+  if (holdsWriteTool(role) && result.output.trim() === '') {
+    return new NodeFailure(
+      'empty_output',
+      `role "${role.role}" holds a write tool, so adapter "${adapterName}" was expected to report ` +
+      `what it did, but it returned no output (exit code ${result.exitCode}). ` +
+      `Output tail: ${outputTail(result.output)}`,
+      result.exitCode,
+    );
+  }
+  return undefined;
+}
+
+/** The in-process counterpart: a loop that ran out of its own budget did not finish (D-04). */
+function loopShortfall(role: RoleConfig, loop: InProcessLoopResult): NodeFailure | undefined {
+  if (loop.outcome !== 'budget_exhausted') return undefined;
+  // The loop names the cause only for maxTurns; a token budget or a processor stopping the
+  // loop at step_start leaves `error` unset.
+  const cause = loop.error ?? 'the token budget ran out or a processor stopped the loop';
+  return new NodeFailure(
+    'budget_exhausted',
+    `in-process role "${role.role}" was expected to finish, but its loop stopped with ` +
+    `budget_exhausted (${cause}). Set allowPartial: true on the node to accept partial work.`,
+  );
+}
 
 function gitSaid(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -124,12 +195,20 @@ export class RoleDispatcher {
     }
 
     let outputForMemory: string;
+    // Built where the evidence is, thrown only after the transcript has the node's output and
+    // the security gate has seen its diff: an agent can change the tree before it fails, and
+    // a diff left behind is reviewed whatever the outcome — the in-process tier does the same
+    // at task_end, where the gate runs on budget_exhausted too.
+    let shortfall: NodeFailure | undefined;
     const ranInProcess = wantsInProcess && canInProcess;
     if (ranInProcess) {
-      outputForMemory = await this.runInProcess(node, role, invokeOpts, taskId, startCommit);
+      const loop = await this.runInProcess(node, role, invokeOpts, taskId, startCommit);
+      outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
+      shortfall = loopShortfall(role, loop);
     } else {
       const result = await adapter.invoke(invokeOpts);
       outputForMemory = result.output.slice(0, MAX_STORED_OUTPUT_CHARS);
+      shortfall = cliShortfall(role, adapter.name, result);
     }
 
     await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
@@ -140,6 +219,25 @@ export class RoleDispatcher {
       // CLI path (including adapter-capability fallback) runs it here. `startCommit !==
       // undefined` and `role.role === 'coder'` are the same condition by construction.
       await this.runPostCoderGates(node, startCommit);
+    }
+
+    if (shortfall) {
+      // Only running out of the node's own budget can be accepted, and only by a node that
+      // asked for it; an adapter that failed or a writer that said nothing has no partial work
+      // to keep.
+      if (shortfall.reason !== 'budget_exhausted' || node.allowPartial !== true) throw shortfall;
+      await this.config.transcript.append(
+        'system',
+        `[partial] node "${node.id}" stopped early and allowPartial accepts it: ${shortfall.message}`,
+        { agentRole: role.role, nodeId: node.id },
+      );
+      const partial: PartialNodeOutcome = {
+        status: 'partial', reason: shortfall.reason, detail: shortfall.message,
+      };
+      return {
+        output:  { kind: 'string', value: outputForMemory },
+        outcome: { kind: 'json', value: partial },
+      };
     }
 
     return { output: { kind: 'string', value: outputForMemory } };
@@ -156,7 +254,7 @@ export class RoleDispatcher {
     invokeOpts: AdapterInvokeOptions,
     taskId: ReturnType<typeof makeTaskId>,
     startCommit: string | undefined,
-  ): Promise<string> {
+  ): Promise<InProcessLoopResult> {
     const adapter = this.config.adapter;
     if (!isTurnAdapter(adapter)) throw new Error('unreachable: gated by caller');
 
@@ -203,9 +301,11 @@ export class RoleDispatcher {
 
     const result = await loop.run();
     if (result.outcome === 'failed') {
-      throw new Error(`in-process role "${role.role}" failed: ${result.error ?? 'unknown'}`);
+      throw new NodeFailure('loop_failed', `in-process role "${role.role}" failed: ${result.error ?? 'unknown'}`);
     }
-    return result.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
+    // budget_exhausted is returned, not thrown: whether it fails the node depends on the node's
+    // allowPartial, which the caller decides after the transcript has the output.
+    return result;
   }
 
   /**
