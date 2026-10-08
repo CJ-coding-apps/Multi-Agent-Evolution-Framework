@@ -254,7 +254,11 @@ export class RoleDispatcher {
       // runs at task_end, which a throw never reaches. So the diff is reviewed here, before
       // the failure propagates: a refusal (a verdict) outranks the transport failure, and a
       // clean or empty diff lets the original error through for the scheduler to classify.
-      if (startCommit !== undefined) await this.runPostCoderGates(node, startCommit);
+      // Not when the error already carries a verdict (GateRefused: the gate has spoken) or
+      // comes from a loop that finished its task — including its task_end review — and
+      // reported failure (NodeFailure): reviewing again would record the same findings twice.
+      const alreadyJudged = err instanceof GateRefused || err instanceof NodeFailure;
+      if (startCommit !== undefined && !alreadyJudged) await this.runPostCoderGates(node, startCommit);
       throw err;
     }
 

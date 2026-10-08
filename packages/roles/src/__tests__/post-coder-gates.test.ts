@@ -479,3 +479,26 @@ test('a backend that throws without changing the tree lets the transport failure
     await fx.cleanup();
   }
 });
+
+test('a backend whose error already carries a verdict is not reviewed a second time', async () => {
+  // The in-process gate refuses at task_end and the loop rethrows the GateRefused; the
+  // dispatcher must not send the same diff for a second review on the way out.
+  const workDir = await makeRepoDir();
+  const seen: string[] = [];
+  const fx = await makeFixture({
+    workDir,
+    onInvoke: async () => {
+      await writeFile(path.join(workDir, 'hello.txt'), 'changed', 'utf8');
+      throw new GateRefused('the security gate refused the diff: 1 blocking finding', []);
+    },
+    securityGate: {
+      reviewDiff: async (diff: string) => { seen.push(diff); return { findings: [], summary: 'clean', passed: true }; },
+    } as unknown as SecurityReviewGate,
+  });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(CODER_NODE), (err: unknown) => err instanceof GateRefused);
+    assert.equal(seen.length, 0, 'the verdict stands; no second review');
+  } finally {
+    await fx.cleanup();
+  }
+});

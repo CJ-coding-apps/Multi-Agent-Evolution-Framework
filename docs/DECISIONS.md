@@ -1,3 +1,72 @@
+# Decisions
+
+Design decisions for MAF, recorded so that contributors — human or agent — build on them rather than re-derive them. One entry per decision: what was decided, why, and what it implies. Entries are numbered for citation in pull requests ("implements D-03"). Status is *decided* unless marked otherwise; an entry is changed by a new entry that supersedes it, never by editing history.
+
+Decided 2026-10-08 by the maintainer, following an independent audit of v0.2.0.
+
+## Execution model
+
+**D-01 · Governed in-process execution is the default for writer roles.** Every guarantee MAF makes — policy verdicts, secret redaction, attested tool calls, processor hooks — exists only on the in-process tier. A role that holds a write tool therefore runs in-process by default. The `cli` tier remains available as an explicit opt-in and prints a visible warning that the run is ungoverned. A writer role whose adapter cannot run in-process refuses to start rather than falling back silently; `--allow-ungoverned` is the override.
+
+**D-02 · Escalate asks a human in the terminal; headless runs deny.** When stdin is a TTY, an `Escalate` verdict prompts for approval. When it is not (CI, scheduled runs), the call is refused and the request is written to `.maf/approvals/pending/<id>.json` for audit. Approval decisions are bound to a hash of the actual request and recorded in the attestation. GitHub pull-request review is not an approval channel in this release.
+
+**D-03 · MAF never modifies the user's branch.** Every run creates a git worktree on a `maf/<runId>` branch and works there. On success MAF prints the merge command; it does not merge. On a gate failure the worktree is kept for inspection. `--no-worktree` runs in place and warns. Rollbacks (`git reset --hard`) are permitted only against the run's own worktree branch.
+
+**D-04 · A node that did not finish did not succeed.** `budget_exhausted` (the node's own `maxTurns` or `tokenBudget`) is a failure with that reason. A DAG node may opt in to `allowPartial: true`. On the `cli` tier, an adapter result with `success: false` or empty output from a writer role fails the node, with the exit code and output tail in the error.
+
+**D-05 · Provider failure is not node failure: fail over, then pause.** Provider errors are classified: transient (retry with backoff), quota or rate limit (fail over to the next entry in the role's `adapters: [primary, fallback, …]` chain, recorded in the attestation), authentication (fail). When the chain is exhausted the run enters `paused` with a checkpoint — DAG state, blackboard, worktree branch — and `maf resume <runId>` continues it, automatically after the provider's retry-after when known, otherwise manually.
+
+**D-06 · Retries are for transport, never for verdicts.** A node is retried only on transport failures (timeout, non-zero exit with no output, network error), at most twice. A security-gate rejection or a policy refusal is terminal. The baseline commit for the security diff is captured once per node, not per attempt.
+
+## Security gate and policy
+
+**D-07 · The security gate reviews the whole diff or fails the node.** A diff above the configured size is a node failure, never a truncated review. `passed` is derived from finding severities alone; the reviewing model's own `passed` boolean is ignored. The gate applies to every role that holds a write tool, not to a role name.
+
+**D-08 · Policy files are YAML, validated, and fail closed.** Policies load through `PolicyLoader` with schema validation (JSON remains valid YAML). A missing file warns and loads no rules. A file that does not parse refuses to run. Path globs match dotfiles (`minimatch` with `dot: true`).
+
+**D-09 · Tool writes to `.git/**` and `.maf/**` are denied by default.** A coder commits through the gated `git.commit` tool, never by writing into `.git/`; a hook written there would execute outside every gate. MAF writes its own transcripts, attestations and harness files through its own code path, not the tool layer, so the rule costs the agent nothing. `.gitignore`, `.gitattributes` and a `.githooks/` directory live outside `.git/` and remain writable.
+
+**D-10 · Child processes get the environment they need and nothing else.** Backend CLIs receive the full environment minus `MAF_*` variables. Tools (`grep`, `patch`, `test.run`) receive an allowlist (`PATH`, `HOME`, `LANG`, `TMPDIR`, plus a configurable passthrough). The signing key never reaches an agent-controlled process.
+
+**D-11 · `test.run` executes project code and says so.** It is bounded — runner allowlist, arguments after `--`, process-group kill on timeout, a timeout ceiling, the minimal environment — and SECURITY.md states plainly that it runs the project's own tests, which the tester role may have written.
+
+**D-12 · Model-supplied strings are never parsed as options.** `grep` passes the pattern as `-e <pattern> --`; `git.log` validates `n` as a positive safe integer; `git.reset` uses `--end-of-options`; the git helper sets `GIT_LITERAL_PATHSPECS=1`.
+
+## Evidence
+
+**D-13 · Attestations are in-toto Statements over canonical JSON.** The bundle is a real in-toto Statement signed (HMAC) over a canonical form so that a third party can reproduce the bytes. Refused tool calls are recorded. The bundle carries `keySource: "env" | "dev"`; running with the development key prints a loud warning and is never mistaken for a real signature.
+
+**D-14 · Evaluation is offline, isolated and reproducible.** `goldens run --adapter scripted` runs without a model. A default harness and a baseline result are committed. Results record the corpus sha, the attempt count and the adapter. Each evaluation uses a fresh in-memory graph so past runs cannot leak into the prompt. The judge uses a different role or model than the agent when one is available and discloses when it does not.
+
+**D-15 · The evolver only proposes edits that can take effect, and pays only after the gate.** Edits that cannot affect a role's configured tier are rejected at proposal time with the reason. Screening and structural checks run before any evaluation spend. The smoke test runs the target task. Sensitive edits are stored as candidates and shipped with `maf evolve approve <id>`.
+
+**D-16 · The planner's failure recall matches the schema it queries.** Task and Failure nodes are written when a node fails; `CAUSED_FAILURE` is a `relation` value on `MemoryEdge`; the recall query is tested against a real Kùzu database.
+
+## Components
+
+**D-17 · The LCM context engine is built, not stubbed.** Summaries come from the run's adapter (model configurable, counted against the budget); both modes are implemented; the fresh tail is newest-first; compaction summarizes the entries it drops; ghost cues reach the injector; the `lcm` section of `config.yaml` is read. Until this ships, the README lists LCM as experimental.
+
+**D-18 · Existing components are wired, not removed.** `ToolLoop`/`PatchTestCycle`/`CircuitBreaker`/`RollbackManager` become the opt-in `--strategy patch-test` coder strategy. `BlackboardSqlitePersistence`/`BlackboardValidator`/`FlushOnSnapshot` provide run persistence, which is the checkpoint D-05 relies on. `DagSynthesizer` backs `--plan-from <spec>`. `FailurePatternDetector` serves D-16. The LCM operators serve D-17. `SubgraphQuery`/`RunMerger` are consolidated with the duplicate methods on `MemoryGraph` into one implementation. Every wired component gets tests and a README status row.
+
+**D-19 · `maf harness import` exists; `maf knowledge sync` does not.** The first is implemented (validate, copy, index). References to the second are removed.
+
+**D-20 · Kùzu is pinned to 0.11.3, the final release, everywhere.** The Node binding moves from 0.7.1 to exactly 0.11.3 behind `maf graph export` / `maf graph import`; an old-format database is refused with instructions. The prebuilt binary must install on the maintainer's platforms with Node 22 before the bump lands; a source build is not an acceptable install path.
+
+**D-21 · Toolchain floor: Node 22, pnpm 10.** `engines` declares Node ≥ 22. pnpm 10 with `onlyBuiltDependencies` for `kuzu` and `better-sqlite3`; lockfile v9. Native prerequisites are documented in the README.
+
+## Process
+
+**D-22 · Releases: 0.2.1, then 0.3.0, then 0.4.0.** 0.2.1 carries the correctness fixes and the documentation truth pass. 0.3.0 carries D-01 through D-03, D-08, D-13, D-14, D-16 and D-19. 0.4.0 carries D-05, D-15, D-17, D-18, D-20 and hardening.
+
+**D-23 · The README describes shipped behaviour only.** A Status table (shipped / experimental / planned) is the first section after the summary. A claim appears as prose only when its row says shipped. The documentation pass runs last in each release so it matches what landed.
+
+**D-24 · CI proves what the README demonstrates.** Every job has `timeout-minutes`. An end-to-end job runs `inprocess-demo` and the offline goldens against a real Kùzu database. Live-model validation runs nightly with a daily cap; credentials exist only in that job.
+
+**D-25 · A change ships with the test that would have caught it.** Each pull request that closes an audit finding carries the regression test for it. Adapters are tested against fake CLI binaries on `PATH`. No package the CLI depends on may be without tests.
+
+**D-26 · Pull requests are small and package-confined; integration is reviewed by the maintainer.** One PR per decision or audit item group, under roughly four hundred changed lines, rebased on `main` daily. Package-confined PRs may be merged by the implementing agent when CI is green and an independent verifier has passed them. PRs touching `run.ts`, `RoleDispatcher.ts`, `wiring.ts`, workflow files, or versions require the maintainer.
+
+**D-27 · Agents stop and ask** before changing behaviour the README describes, adding a dependency, editing a workflow file, refactoring beyond the task, or crossing a phase boundary. Releases, tags, repository settings and visibility are the maintainer's.
 
 ## Added during Phase 1 integration (2026-10-08)
 
