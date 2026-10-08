@@ -26,8 +26,9 @@ const MAIN = path.resolve(__dirname, '../main.js');
 const SEED = path.join(REPO, 'tests/goldens');
 
 /**
- * The dispatch stack opens an LCM store (better-sqlite3). Hosts whose native build does not load
- * skip the tests that dispatch, the way tools' tests skip without ripgrep; CI runs them.
+ * The dispatch stack opens an LCM store (better-sqlite3). A host whose native build does not load
+ * skips the tests that dispatch, the way tools' tests skip without ripgrep — but never under CI,
+ * where a skip would leave "a fresh clone reproduces the baseline" proved by nothing.
  */
 function lcmLoads(): boolean {
   try {
@@ -37,7 +38,10 @@ function lcmLoads(): boolean {
     return false;
   }
 }
-const needsLcm = { skip: lcmLoads() ? false : 'better-sqlite3 does not load on this host', timeout: 120_000 };
+const needsLcm = {
+  skip: lcmLoads() || process.env['CI'] ? false : 'better-sqlite3 does not load on this host (CI runs this)',
+  timeout: 120_000,
+};
 
 const stable = ({ ranAt: _ranAt, ...rest }: GoldenSuiteResult) => rest;
 
