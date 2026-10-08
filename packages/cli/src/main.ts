@@ -6,6 +6,7 @@ import { registerHarnessCommand } from './commands/harness.js';
 import { registerGoldensCommand } from './commands/goldens.js';
 import { registerEvolveCommand } from './commands/evolve.js';
 import { registerInProcessDemoCommand } from './commands/inprocessDemo.js';
+import { registerAttestCommand } from './commands/attest.js';
 
 const program = new Command();
 
@@ -19,6 +20,7 @@ registerHarnessCommand(program);
 registerGoldensCommand(program);
 registerEvolveCommand(program);
 registerInProcessDemoCommand(program);
+registerAttestCommand(program);
 
 // ── adapters list ─────────────────────────────────────────────────────────────
 program
