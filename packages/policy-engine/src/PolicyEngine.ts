@@ -134,7 +134,7 @@ export class PolicyEngine implements PolicyEngineHandle {
     const glob = rule.predicate.pathGlob;
     if (!glob) return true;
     if (declaredPaths.length === 0) return false;
-    return declaredPaths.some((p) => minimatch(p, glob));
+    return declaredPaths.some((p) => matchesGlob(p, glob));
   }
 
   // Rule matches when at least one declared path falls OUTSIDE every allowed glob.
@@ -144,7 +144,7 @@ export class PolicyEngine implements PolicyEngineHandle {
     const allowed = rule.predicate.allowedPathGlobs;
     if (!allowed || allowed.length === 0) return true;
     if (declaredPaths.length === 0) return false;
-    return declaredPaths.some((p) => !allowed.some((g) => minimatch(p, g)));
+    return declaredPaths.some((p) => !allowed.some((g) => matchesGlob(p, g)));
   }
 
   /**
@@ -199,6 +199,23 @@ export class PolicyEngine implements PolicyEngineHandle {
         };
         return { verdict: 'Escalate', reason: 'Policy requires approval', approvalRequest: request };
       }
+      default: {
+        // Unreachable for a rule that came through `PolicyLoader`, which refuses an unknown kind;
+        // `loadRules` takes rules as given, though. Falling off the switch returned `undefined`,
+        // which a caller checking only for the refusing verdicts would have read as permission.
+        const kind: unknown = (action as { kind: unknown }).kind;
+        throw new Error(
+          `Policy rule "${ruleId}" has action kind ${JSON.stringify(kind)}; expected one of ` +
+          '"Allow", "Deny" or "Escalate", so the call is refused rather than decided.',
+        );
+      }
     }
   }
+}
+
+// `dot: true` because a glob here is a statement about every file it names. Without it `**` and
+// `*` skip any path segment starting with `.`, so `**/secrets/**` did not cover
+// `secrets/.hidden` and a Deny rule had a hole exactly where configuration and credentials live.
+function matchesGlob(relativePath: string, glob: string): boolean {
+  return minimatch(relativePath, glob, { dot: true });
 }

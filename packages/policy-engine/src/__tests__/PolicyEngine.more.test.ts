@@ -207,3 +207,60 @@ test('memoryPattern: a rule whose template is malformed refuses rather than neve
 
 // Loading a policy file is `PolicyLoader`'s job now; its tests, including the two `fromYaml()`
 // cases that lived here, are in PolicyLoader.test.ts.
+
+test('globs match dotfiles: **/secrets/** covers secrets/.hidden', async () => {
+  // Without `dot: true`, `**` refused to match a segment starting with `.`, so this Deny rule
+  // had a hole for exactly the files a secrets directory tends to hold.
+  const engine = new PolicyEngine(stubGraph);
+  engine.loadRules([rule({
+    id: 'secrets',
+    predicate: { toolId: FS_WRITE, pathGlob: '**/secrets/**' },
+    action: { kind: 'Deny', reason: 'secrets' },
+  })]);
+  for (const file of ['secrets/.hidden', 'secrets/visible', 'app/secrets/.env']) {
+    assert.equal((await engine.evaluate(FS_WRITE, { path: file }, baseCtx(), [file])).verdict, 'Deny', file);
+  }
+  assert.equal((await engine.evaluate(FS_WRITE, { path: 'src/a.ts' }, baseCtx(), ['src/a.ts'])).verdict, 'Allow');
+});
+
+test('**/.env* still matches .env at the root and .env.local below it, and now under a dot-directory', async () => {
+  const engine = new PolicyEngine(stubGraph);
+  engine.loadRules([rule({
+    id: 'env-guard',
+    predicate: { toolId: FS_WRITE, pathGlob: '**/.env*' },
+    action: { kind: 'Deny', reason: 'env' },
+  })]);
+  for (const file of ['.env', 'sub/.env.local', '.config/.env']) {
+    assert.equal((await engine.evaluate(FS_WRITE, { path: file }, baseCtx(), [file])).verdict, 'Deny', file);
+  }
+  assert.equal((await engine.evaluate(FS_WRITE, { path: 'env.ts' }, baseCtx(), ['env.ts'])).verdict, 'Allow');
+});
+
+test('allowedPathGlobs match dotfiles too: a dotfile inside the allowed tree is inside it', async () => {
+  const engine = new PolicyEngine(stubGraph);
+  engine.loadRules([rule({
+    id: 'only-tests',
+    predicate: { toolId: FS_WRITE, allowedPathGlobs: ['**/tests/**'] },
+    action: { kind: 'Deny', reason: 'outside tests' },
+  })]);
+  const inside = await engine.evaluate(FS_WRITE, { path: 'tests/.fixture.json' }, baseCtx(), ['tests/.fixture.json']);
+  assert.equal(inside.verdict, 'Allow');
+  const outside = await engine.evaluate(FS_WRITE, { path: 'src/.hidden' }, baseCtx(), ['src/.hidden']);
+  assert.equal(outside.verdict, 'Deny');
+});
+
+test('an unknown action kind refuses the call instead of answering undefined', async () => {
+  // `loadRules` takes rules as given, and `buildDecision` had no default branch: a kind it did
+  // not know fell off the switch and returned `undefined`, which a caller checking only for the
+  // refusing verdicts would have read as permission.
+  const engine = new PolicyEngine(stubGraph);
+  engine.loadRules([rule({
+    id: 'mystery',
+    predicate: { toolId: FS_WRITE },
+    action: { kind: 'Block', reason: 'x' } as unknown as PolicyRule['action'],
+  })]);
+  await assert.rejects(
+    engine.evaluate(FS_WRITE, { path: 'x' }, baseCtx(), ['x']),
+    /Policy rule "mystery" has action kind "Block"; expected one of "Allow", "Deny" or "Escalate"/,
+  );
+});
