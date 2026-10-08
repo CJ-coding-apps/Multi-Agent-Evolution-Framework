@@ -11,6 +11,13 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+// MCP isolation: none. Codex loads every server under `[mcp_servers.*]` in ~/.codex/config.toml,
+// and its CLI has no flag that ignores them. A `-c mcp_servers={}` override might, but whether a
+// table override replaces or merges into the configured one is not verified, and an argument the
+// binary rejects fails every call — so no flag is passed rather than one that may not work. The
+// README must say so (WP-2.13): "With --adapter codex, the Codex CLI connects to every MCP server
+// in your ~/.codex/config.toml; MAF cannot withhold them. Disable them there before a run."
+
 /**
  * The functions the adapter runs the `codex` binary through. Injectable so a test can stand in
  * for the binary and its failures; production uses the real spawner.

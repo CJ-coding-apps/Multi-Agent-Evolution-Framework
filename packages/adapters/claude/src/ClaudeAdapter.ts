@@ -13,6 +13,20 @@ import {
 const execFileAsync = promisify(execFile);
 
 /**
+ * MCP isolation for every `claude` spawn: `--strict-mcp-config` ("only use MCP servers from
+ * --mcp-config, ignoring all other MCP configurations") with `--mcp-config` naming an empty server
+ * set, so a backend MAF spawns gets no MCP server MAF did not hand it — none from the user's or
+ * the project's configuration. Flag names as the Claude Code CLI reference documents them
+ * (code.claude.com/docs/en/cli-reference); they are kept here, in one place, so a CLI that
+ * renames them is fixed in one line. The JSON is one argv element, and `--mcp-config` takes
+ * several values, so it must be followed by another option, never by the positional prompt.
+ */
+const CLAUDE_MCP_ISOLATION_ARGS: readonly string[] = [
+  '--strict-mcp-config',
+  '--mcp-config', JSON.stringify({ mcpServers: {} }),
+];
+
+/**
  * The functions the adapter runs the `claude` binary through. Injectable so a test can stand in
  * for the binary and its failures; production uses the real spawner.
  */
@@ -109,6 +123,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     // opts.temperature are intentionally ignored here (contract: adapters that cannot honour
     // a knob must ignore it, never error). The in-process loop enforces tokenBudget itself;
     // golden determinism on the CLI path relies on the model default, not a pinned temperature.
+    args.push(...CLAUDE_MCP_ISOLATION_ARGS);
     args.push('-p', options.prompt);
     return args;
   }
