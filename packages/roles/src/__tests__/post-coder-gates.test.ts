@@ -8,7 +8,7 @@ import path from 'node:path';
 import type {
   CliAdapter, AdapterCapabilities, AdapterInvokeResult, DagNode, SecurityReviewResult,
 } from '@maf/types';
-import { makeNodeId, makeRunId } from '@maf/types';
+import { makeNodeId, makeRunId, makeToolId, GateRefused } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -18,7 +18,7 @@ import type { Attestor } from '@maf/attestation';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
 import type { MemoryGraph } from '@maf/memory-graph';
 import type { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
-import type { SecurityReviewGate } from '@maf/git-ops';
+import { SecurityReviewGate } from '@maf/git-ops';
 import { RoleDispatcher } from '../RoleDispatcher.js';
 import { RoleRegistry } from '../RoleRegistry.js';
 import { defineRoleName } from '../RoleConfig.js';
@@ -39,11 +39,13 @@ class CliOnlyAdapter implements CliAdapter {
   readonly name = 'cli-only';
   /** Stands in for whatever the CLI agent does to the tree while it runs. */
   onInvoke: (() => Promise<void>) | undefined;
+  /** What the call returns; a reviewing adapter returns the review JSON here. */
+  output = 'CLI-PATH';
   capabilities(): AdapterCapabilities { return CAPS; }
   async isAvailable(): Promise<boolean> { return true; }
   async invoke(): Promise<AdapterInvokeResult> {
     await this.onInvoke?.();
-    return { success: true, output: 'CLI-PATH', toolCallLog: [], exitCode: 0, duration: 1 };
+    return { success: true, output: this.output, toolCallLog: [], exitCode: 0, duration: 1 };
   }
   async *stream(): AsyncGenerator<string> { yield 'x'; }
 }
@@ -61,17 +63,34 @@ interface Fixture {
   cleanup: () => Promise<void>;
 }
 
+/** The role under test. The gate keys on the tools a role holds, so the list is the point. */
+interface RoleUnderTest {
+  name: string;
+  allowedTools: string[];
+}
+
+const CODER: RoleUnderTest = { name: 'coder', allowedTools: ['fs.read', 'fs.write', 'git.commit'] };
+
+function nodeFor(role: string): DagNode {
+  return { ...CODER_NODE, id: makeNodeId(`${role}-1`), agentRole: defineRoleName(role) };
+}
+
 async function makeFixture(opts: {
   workDir: string;
   securityGate?: SecurityReviewGate;
   /** What the CLI agent does to the working tree while it runs. */
   onInvoke?: () => Promise<void>;
+  role?: RoleUnderTest;
 }): Promise<Fixture> {
   const reviews: string[] = [];
+  const role = opts.role ?? CODER;
   const roles = RoleRegistry.fromSet({
     version: 1,
-    defaultRole: defineRoleName('coder'),
-    roles: [{ role: defineRoleName('coder'), systemPrompt: 'code', allowedTools: [], execution: 'cli' }],
+    defaultRole: defineRoleName(role.name),
+    roles: [{
+      role: defineRoleName(role.name), systemPrompt: 'work',
+      allowedTools: role.allowedTools.map((id) => makeToolId(id)), execution: 'cli',
+    }],
   }, opts.workDir);
   const adapter = new CliOnlyAdapter();
   if (opts.onInvoke) adapter.onInvoke = opts.onInvoke;
@@ -251,6 +270,162 @@ test('a real change reaches the gate — the silence above is not vacuous', asyn
     assert.equal(seen.length, 1, 'the gate is actually reached on the CLI coder path');
     assert.match(seen[0] ?? '', /changed/);
     assert.deepEqual(fx.reviews, ['clean']);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+// ORACLE: D-07 — the gate applies to every role that holds a write tool, not to the role name
+// 'coder'. The default tester holds `patch.apply`; before this, its changes were never reviewed.
+
+/** A gate double that records every diff it is handed and passes it. */
+function recordingGate(seen: string[]): SecurityReviewGate {
+  return {
+    reviewDiff: async (diff: string) => {
+      seen.push(diff);
+      return { findings: [], summary: 'clean', passed: true };
+    },
+  } as unknown as SecurityReviewGate;
+}
+
+test('a tester that holds fs.write is reviewed like a coder', async () => {
+  const workDir = await makeRepoDir();
+  const seen: string[] = [];
+  const fx = await makeFixture({
+    workDir,
+    role: { name: 'tester', allowedTools: ['fs.read', 'fs.write', 'test.run'] },
+    onInvoke: async () => { await writeFile(path.join(workDir, 'hello.test.txt'), 'expect(hello)', 'utf8'); },
+    securityGate: recordingGate(seen),
+  });
+  try {
+    await fx.dispatcher.runNode(nodeFor('tester'));
+    assert.equal(seen.length, 1, 'a tester holding a write tool must reach the gate');
+    assert.match(seen[0] ?? '', /hello\.test\.txt/);
+    assert.deepEqual(fx.reviews, ['clean'], 'and the review is attested');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a custom role holding only git.commit has its start commit captured and is reviewed', async () => {
+  // The start commit is the half that matters here: a role that commits its own work diffs
+  // clean against HEAD, so without the capture the gate would see nothing.
+  const workDir = await makeRepoDir();
+  const seen: string[] = [];
+  const fx = await makeFixture({
+    workDir,
+    role: { name: 'release-bot', allowedTools: ['git.commit'] },
+    onInvoke: async () => {
+      await writeFile(path.join(workDir, 'hello.txt'), 'hello, released', 'utf8');
+      await execFileAsync('git', ['add', '-A'], { cwd: workDir });
+      await execFileAsync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'bot committed'], { cwd: workDir });
+    },
+    securityGate: recordingGate(seen),
+  });
+  try {
+    await fx.dispatcher.runNode(nodeFor('release-bot'));
+    assert.equal(seen.length, 1);
+    assert.match(seen[0] ?? '', /released/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a role with no write tool is not gated, and needs no repository', async () => {
+  // The other direction: the predicate is "holds a write tool", not "every role". A reader in
+  // a directory with no repository must not hit the start-commit capture at all.
+  const workDir = await mkdtemp(path.join(tmpdir(), 'maf-gates-reader-'));
+  await writeFile(path.join(workDir, 'hello.txt'), 'hello', 'utf8');
+  const seen: string[] = [];
+  const fx = await makeFixture({
+    workDir,
+    role: { name: 'reviewer', allowedTools: ['fs.read', 'grep', 'git.diff', 'git.log'] },
+    securityGate: recordingGate(seen),
+  });
+  try {
+    await fx.dispatcher.runNode(nodeFor('reviewer'));
+    assert.deepEqual(seen, []);
+    assert.deepEqual(fx.reviews, []);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('blocking findings fail the node with GateRefused carrying the findings', async () => {
+  const workDir = await makeRepoDir();
+  const finding = {
+    severity: 'critical' as const, category: 'cmdi', file: 'hello.txt',
+    rationale: 'exec on input', remediation: 'execFile',
+  };
+  const fx = await makeFixture({
+    workDir,
+    onInvoke: async () => { await writeFile(path.join(workDir, 'hello.txt'), 'exec(input)', 'utf8'); },
+    securityGate: {
+      reviewDiff: async () => ({ findings: [finding], summary: 'one critical', passed: false }),
+    } as unknown as SecurityReviewGate,
+  });
+  try {
+    await assert.rejects(
+      () => fx.dispatcher.runNode(CODER_NODE),
+      (err: unknown) => {
+        if (!(err instanceof GateRefused)) assert.fail(`expected GateRefused, got ${String(err)}`);
+        assert.match(err.message, /1 blocking \(critical or high\) finding\(s\)\. one critical/);
+        assert.deepEqual(err.findings, [finding]);
+        return true;
+      },
+    );
+    assert.deepEqual(fx.reviews, ['one critical'], 'the refusal is attested before the node fails');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a real gate blocks a critical finding even when the reviewer says passed: true', async () => {
+  const workDir = await makeRepoDir();
+  const reviewer = new CliOnlyAdapter();
+  reviewer.output = JSON.stringify({
+    findings: [{ severity: 'critical', category: 'cmdi', file: 'hello.txt', rationale: '', remediation: '' }],
+    summary: 'critical, but passing it',
+    passed: true,
+  });
+  const fx = await makeFixture({
+    workDir,
+    onInvoke: async () => { await writeFile(path.join(workDir, 'hello.txt'), 'exec(input)', 'utf8'); },
+    securityGate: new SecurityReviewGate({ adapter: reviewer, projectRoot: workDir, securityPrompt: 'audit' }),
+  });
+  try {
+    await assert.rejects(() => fx.dispatcher.runNode(CODER_NODE), GateRefused);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a diff over the cap fails the node with GateRefused, attested, and is never sent for review', async () => {
+  const workDir = await makeRepoDir();
+  let reviewCalls = 0;
+  const reviewer = new CliOnlyAdapter();
+  reviewer.onInvoke = async () => { reviewCalls++; };
+  reviewer.output = JSON.stringify({ findings: [], summary: 'clean', passed: true });
+  const fx = await makeFixture({
+    workDir,
+    onInvoke: async () => { await writeFile(path.join(workDir, 'hello.txt'), 'hello, changed', 'utf8'); },
+    // Any real diff (headers alone) is longer than 10 characters.
+    securityGate: new SecurityReviewGate({
+      adapter: reviewer, projectRoot: workDir, securityPrompt: 'audit', maxDiffChars: 10,
+    }),
+  });
+  try {
+    await assert.rejects(
+      () => fx.dispatcher.runNode(CODER_NODE),
+      (err: unknown) => {
+        if (!(err instanceof GateRefused)) assert.fail(`expected GateRefused, got ${String(err)}`);
+        assert.match(err.message, /refuses a \d+-character diff: its review cap is 10 characters/);
+        return true;
+      },
+    );
+    assert.equal(reviewCalls, 0, 'the reviewer must never see an oversized diff, whole or sliced');
+    assert.equal(fx.reviews.length, 1, 'the refusal is attested');
+    assert.match(fx.reviews[0] ?? '', /review cap is 10 characters/);
   } finally {
     await fx.cleanup();
   }

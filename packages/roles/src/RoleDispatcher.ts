@@ -1,7 +1,8 @@
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
+  SecurityReviewResult,
 } from '@maf/types';
-import { isTurnAdapter, makeTaskId } from '@maf/types';
+import { isTurnAdapter, makeTaskId, GateRefused } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -19,6 +20,7 @@ import type { ProcessorDeps } from '@maf/processors';
 import { InProcessAgentLoop } from '@maf/tool-loop';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
+import { isWriterRole } from './isWriterRole.js';
 
 export interface RoleDispatcherConfig {
   adapter:        CliAdapter;
@@ -74,9 +76,10 @@ export class RoleDispatcher {
     const taskId = makeTaskId(node.id);
 
     // Captured BEFORE the node does anything, and before any model call is spent. A
-    // coder that commits its own work would otherwise diff clean against HEAD, so the
-    // security gate would be handed an empty diff and call the change reviewed.
-    const startCommit = role.role === 'coder' ? await this.startCommit() : undefined;
+    // writer that commits its own work would otherwise diff clean against HEAD, so the
+    // security gate would be handed an empty diff and call the change reviewed. Which
+    // roles are writers is decided by the tools they hold, not their name (D-07).
+    const startCommit = isWriterRole(role) ? await this.startCommit() : undefined;
 
     await this.config.transcript.append(
       'user',
@@ -136,9 +139,10 @@ export class RoleDispatcher {
     await this.config.lcmBridge.flush();
 
     if (startCommit !== undefined && !ranInProcess) {
-      // In-process coder runs the security gate at task_end via SecurityGateProcessor;
-      // CLI path (including adapter-capability fallback) runs it here. `startCommit !==
-      // undefined` and `role.role === 'coder'` are the same condition by construction.
+      // In-process runs reach the security gate at task_end via SecurityGateProcessor
+      // (which still calls it only for a role named 'coder'); the CLI path, including the
+      // adapter-capability fallback, runs it here. `startCommit !== undefined` and
+      // `isWriterRole(role)` are the same condition by construction.
       await this.runPostCoderGates(node, startCommit);
     }
 
@@ -245,7 +249,18 @@ export class RoleDispatcher {
     const securityGate = this.config.securityGate;
     if (!securityGate) return;
 
-    const secRes = await securityGate.reviewDiff(diff);
+    // A diff over the gate's size cap is refused by a throw, before any model call. It is
+    // still this node's verdict, so it is attested and remembered like a blocking finding
+    // before it propagates, rather than surfacing only as a crash.
+    let secRes: SecurityReviewResult;
+    let refusal: GateRefused | undefined;
+    try {
+      secRes = await securityGate.reviewDiff(diff);
+    } catch (err: unknown) {
+      if (!(err instanceof GateRefused)) throw err;
+      refusal = err;
+      secRes = { findings: err.findings, summary: err.message, passed: false };
+    }
     this.config.attestor.recordSecurityFindings(node.id, secRes);
 
     if (!secRes.passed) {
@@ -259,8 +274,16 @@ export class RoleDispatcher {
         },
         runId: this.config.runId,
       });
+      // GateRefused rather than a plain Error, so the scheduler can tell a verdict from a
+      // transport failure: a retried attempt diffs a tree the first may already have
+      // committed, and an empty diff passes (D-06).
+      if (refusal) throw refusal;
       const blockingCount = secRes.findings.filter((f) => f.severity === 'critical' || f.severity === 'high').length;
-      throw new Error(`Security review failed: ${blockingCount} blocking finding(s)`);
+      throw new GateRefused(
+        `Security review refused the change from node ${node.id}: ${blockingCount} blocking ` +
+        `(critical or high) finding(s).${secRes.summary ? ` ${secRes.summary}` : ''}`,
+        secRes.findings,
+      );
     }
   }
 }
