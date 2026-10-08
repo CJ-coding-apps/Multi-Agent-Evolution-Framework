@@ -1,5 +1,5 @@
-export { WorktreeManager } from './WorktreeManager.js';
-export type { WorktreeInfo } from './WorktreeManager.js';
+export { WorktreeManager, resolveWorkingDir } from './WorktreeManager.js';
+export type { RunWorktree, FinishOutcome, FinishResult, WorkingDir, WorkingDirOptions } from './WorktreeManager.js';
 export { RollbackManager } from './RollbackManager.js';
 export { BranchIsolator } from './BranchIsolator.js';
 export type { BranchInfo } from './BranchIsolator.js';

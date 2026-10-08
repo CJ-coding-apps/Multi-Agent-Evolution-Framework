@@ -147,3 +147,20 @@ test('the exclusion still applies when the parent process runs with literal path
     await rm(repo, { recursive: true, force: true });
   }
 });
+
+test("a run's worktree under .maf/worktrees is runtime state, not part of the diff", async () => {
+  const repo = await makeRepo('maf-snapshot-');
+  try {
+    const base = await git(['rev-parse', 'HEAD'], repo);
+    // A failed run's kept worktree (D-03), in a checkout that does not ignore it: a later
+    // --no-worktree run here would otherwise review it as an embedded repository.
+    await git(['worktree', 'add', '-q', '-b', 'maf/r0', path.join(repo, '.maf', 'worktrees', 'r0')], repo);
+    await writeFile(path.join(repo, 'created.txt'), 'the agent made this', 'utf8');
+
+    const diff = await snapshotDiff(repo, base);
+    assert.match(diff, /created\.txt/);
+    assert.doesNotMatch(diff, /\.maf\/worktrees/, 'the worktree is excluded');
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
