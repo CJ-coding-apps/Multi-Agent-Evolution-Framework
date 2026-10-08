@@ -9,6 +9,11 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-08
+
+D-nn identifiers refer to the maintainer's internal defect sweep of 2026-09-25; every entry below is
+self-contained.
+
 ### Breaking
 
 - **`ToolPlugin.declaredPaths(input)` is now required.** A tool must state the filesystem paths a
@@ -139,3 +144,8 @@ is entitled to know which of their own code stops compiling.
   readers that legitimately tolerate a graph failure (`ScoreRecorder`, the planner's lesson
   recall, `maf knowledge sync`, `querySubgraph`'s edge lookup) now say so in an explicit
   `try`/`catch` at the point where the tolerance is intended.
+
+## [0.1.0] - 2026-09-10
+
+Initial public import — the HarnessX-derived in-process gated loop, harness configs, eval harness
+and evolver (tag `v0.1.0`).
