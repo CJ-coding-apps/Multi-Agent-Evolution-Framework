@@ -3,9 +3,9 @@
 //
 // `pnpm -r test` only runs packages that declare a `test` script, so a package with
 // tests and no script is invisible: its tests pass, fail, or do not exist with equal
-// silence. 15 of this repo's 28 packages are in exactly that position, which is why the
-// "225 tests" headline said nothing about `dag-runner`, `prompt-injector`, `transcript`,
-// `memory-graph` or the adapters.
+// silence, and a headline test count says nothing about it. At 0.2.1 the workspace has
+// 27 packages (21 under packages/, 6 under packages/adapters/): 18 have tests and a script
+// that runs them, and the other 9 have no tests yet.
 //
 // The guard therefore holds the invariant in BOTH directions:
 //   * tests present, no script        -> FAIL (invisible tests)

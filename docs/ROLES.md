@@ -3,23 +3,23 @@
 Every DAG node in MAF runs as a *role*. A role bundles:
 
 1. A **system prompt** (inline or loaded from a file).
-2. An **allowed tool set** — the only tools the role is allowed to call.
+2. An **allowed tool set** — the only tools the role is allowed to call on the `in-process` tier. On the default `cli` tier the allowlist is not passed to the backend CLI, which uses its own tools.
 3. Optional **model**, **timeout**, **token budget**, and **policyTag** overrides.
 
 The planner emits `agentRole` on each node it produces. That name is checked against the role set in force **where the DAG is built** — the planner, `DagParser` and `DagSynthesizer` each refuse a name the set does not define, and the refusal lists the roles that do exist. A node carries a `RoleName`, which only a role set can produce, so an unrecognised name cannot reach the dispatcher at all. (Before this it did, and silently: an unknown name resolved to the *default* role — `coder`, a writer — so a typo or a hallucinated role name widened privilege rather than being refused.)
 
 ## Default roles
 
-The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four roles. They are used when `.maf/roles.yaml` is absent or unparseable.
+The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four roles. They apply when the roles file cannot be read — normally because the target has no `.maf/roles.yaml`. A roles file that exists but is not JSON, does not match the role-set shape, or names a tool that does not exist stops the run with a `RoleConfigError`.
 
-| Role       | Writable? | Allowed tools                                                                                                                  | Use for                              |
-|------------|-----------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
-| `coder`    | yes       | `fs.read`, `fs.write`, `fs.delete`, `fs.stat`, `fs.list`, `grep`, `git.{status,diff,add,commit,log,reset}`, `patch.apply`, `test.run` | Writing & modifying production code  |
-| `tester`   | yes\*     | `fs.read`, `fs.list`, `fs.stat`, `grep`, `test.run`, `patch.apply`                                                            | Writing tests only                   |
-| `security` | no        | `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.diff`, `git.log`                                                                 | CWE/OWASP audit, JSON-only output    |
-| `reviewer` | no        | `fs.read`, `grep`, `git.diff`, `git.log`                                                                                       | Code review, approve/reject diffs    |
+| Role       | Writer? | Allowed tools                                                                                                                  | Use for                              |
+|------------|---------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
+| `coder`    | yes     | `fs.read`, `fs.write`, `fs.delete`, `fs.stat`, `fs.list`, `grep`, `git.{status,diff,add,commit,log,reset}`, `patch.apply`, `test.run` | Writing & modifying production code  |
+| `tester`   | yes\*   | `fs.read`, `fs.list`, `fs.stat`, `grep`, `test.run`, `patch.apply`                                                            | Writing tests only                   |
+| `security` | no      | `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.diff`, `git.log`                                                                 | CWE/OWASP audit, JSON-only output    |
+| `reviewer` | no      | `fs.read`, `grep`, `git.diff`, `git.log`                                                                                       | Code review, approve/reject diffs    |
 
-\* The tester role's only writing tool is `patch.apply` — it has no `fs.write`, so it cannot create or overwrite a file, only apply a diff. `patch.apply` is rated write, which is why the row reads "yes". Restricting *where* a diff may land is a `pathGlob` rule in `.maf/policy.yaml`, not a built-in: the tool allowlist and the policy work together, and neither alone is sufficient.
+\* **The two tester definitions in this repository differ.** The built-in tester above (`TESTER_TOOLS` in `defaults.ts`) holds `patch.apply` and no `fs.write`: it can apply a diff but cannot create or overwrite a file. The `.maf/roles.yaml` this repository ships grants the tester `fs.write` as well. `maf run` reads `.maf/roles.yaml` from the *target* directory, so which tester a run gets depends on that directory: one with no roles file gets the built-in tester, one with a copy of this repository's file gets `fs.write`. Either way the tester is a writer (see [Writer roles](#writer-roles)), so its changes are security-reviewed. On the in-process tier the shipped policy also limits *where* it may write — `tester-write-only-tests` and `tester-no-ci-config` in `.maf/policy.yaml` — because the tool allowlist and the policy work together, and neither alone is sufficient. On the `cli` tier neither the allowlist nor the policy reaches the backend's own tools.
 
 ## `.maf/roles.yaml`
 
@@ -56,17 +56,17 @@ Fields:
 | `description`       | no       | Shown to the planner in the role catalog. |
 | `systemPrompt`      | one of   | Inline prompt — wins if both are set. |
 | `promptFile`        | one of   | Relative to `.maf/` (or absolute). Cached after first read. |
-| `allowedTools`      | yes      | Must reference tool IDs that exist in the base registry — startup throws on unknown IDs. |
+| `allowedTools`      | yes      | Must reference tool IDs that exist in the base registry — startup throws on unknown IDs. Enforced on the `in-process` tier; not passed to a `cli`-tier backend. Holding any write tool makes the role a writer (see [Writer roles](#writer-roles)). |
 | `policyTag`         | no       | Optional tag for grouping in policy rules (currently informational). |
 | `model`             | no       | Per-role model override. Beats the CLI's `--model`. |
 | `timeoutMs`         | no       | Per-role timeout, otherwise the node's `timeoutMs` applies. |
 | `tokenBudget`       | no       | Token cap. Enforced on the in-process path (real usage if reported, else estimated). |
 | `maxToolIterations` | no       | Cap on tool-call iterations (turns) in the loop. |
-| `execution`         | no       | `'cli'` (default) or `'in-process'`. `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair); requires a `TurnAdapter` with `inProcessLoop` capability, else falls back to `cli`. See the README "In-process execution" section. |
+| `execution`         | no       | `'cli'` (default) or `'in-process'`. `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair); requires a `TurnAdapter` with `inProcessLoop` capability, else falls back to `cli` and notes the fallback in the run's transcript. See the README "In-process execution" section. |
 
 ### YAML or JSON?
 
-The parser strips `#` comment lines and runs `JSON.parse`. That accepts a `.json` document directly and tolerates `.yaml` only when its content is a strict-JSON subset with comments. To use real YAML, install a YAML parser and pre-process — the file lives at `.maf/roles.yaml` for forward compatibility, but the current parser is JSON-only. Mirrors the same approach used by `@maf/policy-engine`.
+JSON, despite the extension. The parser removes lines whose first non-blank character is `#` and passes the rest to `JSON.parse`, so a JSON document with `#` comment lines loads and real YAML does not: a file in YAML syntax is a `RoleConfigError`, and the run stops. Policy files moved to a real YAML loader in 0.2.1; the roles file has not (it is on the README's Status table).
 
 ## How dispatch flows
 
@@ -79,23 +79,41 @@ DagRunner.run({ executor: (node) => dispatcher.runNode(node) })
                      ▼
 RoleDispatcher.runNode(node):
   1. role = roles.getRole(node.agentRole)            // node.agentRole is a RoleName: a role set defined it
-  2. roleTools = new RoleToolRegistry(baseTools, role.allowedTools)
-  3. rolePrompt = await roles.loadPrompt(role)
-  4. systemPromptPrefix = injector.assemble(node.label, sessionId, role.role)
-  5. systemPrompt = systemPromptPrefix + '\n' + rolePrompt
-  6. adapter.invoke({ prompt, systemPrompt, tools: roleTools.getAll(), … })
-  7. if role.role === 'coder':
-       diff = git diff HEAD
-       result = await securityGate.reviewDiff(diff)
+  2. if isWriterRole(role):
+       startCommit = git rev-parse HEAD              // captured before the node runs, once per node;
+                                                     // a retry reuses it (empty tree if no commits yet)
+  3. roleTools = new RoleToolRegistry(baseTools, role.allowedTools)
+  4. rolePrompt = await roles.loadPrompt(role)
+  5. systemPrompt = injector.assemble(node.label, sessionId, role.role) + '\n' + rolePrompt
+  6. cli tier:        result = adapter.invoke({ prompt, systemPrompt, … })
+     in-process tier: InProcessAgentLoop.run() — every tool call through executeToolGated;
+                      for a writer, the security-gate processor runs the step-7 review at task_end
+  7. cli tier, writer role:
+       diff = snapshotDiff(cwd, startCommit)         // working tree vs startCommit, .maf/ excluded
+       result = await securityGate.reviewDiff(diff)  // GateRefused above the size cap
        attestor.recordSecurityFindings(node.id, result)
-       if !result.passed: graph.addNode(Failure) + throw
+       if !result.passed: graph.addNode(Failure) + throw GateRefused
+  8. fail the node (NodeFailure) if the adapter reported failure, a writer returned no output,
+     or the loop ended budget_exhausted without node.allowPartial
 ```
 
-The dispatcher never bypasses policy. `RoleToolRegistry.getAll()` only advertises the role's allowed tools to the adapter, and `ToolLoop.executeTool` (in `@maf/tool-loop`) re-checks policy for every call. A role with `fs.write` in its allowlist can still be denied by a path-glob rule.
+The diff base is the commit captured in step 2, not `HEAD` at review time, so a writer that commits its own work is still reviewed. `RoleDispatcher.endNode(nodeId)`, called from the scheduler's `onNodeEnd`, forgets it.
+
+On the `in-process` tier the dispatcher never bypasses policy: the loop advertises only the role's allowed tools, answers a call to any other tool with an error, and sends every allowed call through `executeToolGated` (in `@maf/tool-loop`), which asks the policy engine first. A role with `fs.write` in its allowlist can still be denied by a path-glob rule. On the `cli` tier none of this applies: the backend CLI runs its own tools, and MAF sees only the diff afterwards.
 
 ### Where policy sees the role
 
-`ToolContext.agentRole` is set by `ToolLoop` from `ToolLoopConfig.agentRole`, which `RoleDispatcher` populates from the resolved role. Policy rules with `predicate.agentRole` then match exactly the role currently running the tool. Rules that omit `agentRole` apply to every role — backward-compatible with the pre-role policy file.
+`ToolContext.agentRole` is set by `InProcessAgentLoop` from the role name `RoleDispatcher` hands it. Policy rules with `predicate.agentRole` then match exactly the role currently running the tool. Rules that omit `agentRole` apply to every role — backward-compatible with the pre-role policy file.
+
+## Writer roles
+
+A role is a writer when it holds any of `fs.write`, `fs.delete`, `patch.apply`, `git.commit`, `git.reset` or `git.add` (`isWriterRole`, exported from `@maf/roles`). The role's name plays no part: a `tester` holding `patch.apply` and a custom role holding only `git.commit` are writers; a role called `coder` with only read tools is not. For a writer, MAF:
+
+- captures the start commit before the node runs, so the target directory must be a git repository;
+- security-reviews the diff when the node ends (step 7), on both tiers;
+- fails the node on the `cli` tier if the backend returns empty output.
+
+The scheduler's writer lock — which stops two nodes editing the tree at once — uses a broader test: every `cli`-tier role counts as a writer there, because its backend CLI has file tools of its own whatever the allowlist says, and an `in-process` role counts as one if it holds any tool that is not read-only.
 
 ## Planning instructions
 
@@ -109,27 +127,27 @@ If the LLM emits a node with `agentRole: "ghost"` and the role set does not defi
 
 ## Read-only roles
 
-The default policy bundle (`.maf/policy.yaml`) includes:
+The policy this repository ships (`.maf/policy.yaml`) includes:
 
-```json
-{
-  "id": "deny-readonly-roles",
-  "priority": 85,
-  "predicate": {
-    "agentRole": ["reviewer", "security"],
-    "toolId": ["fs.write", "patch.apply", "fs.delete", "git.add", "git.commit", "git.reset"]
-  },
-  "action": { "kind": "Deny", "reason": "Read-only role cannot mutate state" }
-}
+```yaml
+- id: deny-readonly-roles
+  description: Reviewer and security roles are read-only
+  priority: 85
+  predicate:
+    agentRole: [reviewer, security]
+    toolId: [fs.write, patch.apply, fs.delete, git.add, git.commit, git.reset]
+  action:
+    kind: Deny
+    reason: Read-only role cannot mutate state
 ```
 
-That is belt-and-suspenders with the tool allowlist: even if a future role config grants `fs.write` to `reviewer`, the policy will deny the call.
+That is belt-and-suspenders with the tool allowlist: even if a future role config grants `fs.write` to `reviewer`, the policy will deny the call on the `in-process` tier.
 
 ## Authoring a new role
 
 1. Add the role to `.maf/roles.yaml`.
 2. Drop a prompt file at `.maf/prompts/<role>.md` (or inline it as `systemPrompt`).
-3. Pick the tool allowlist conservatively — start with what's strictly needed.
+3. Pick the tool allowlist conservatively — start with what's strictly needed. Any write tool makes the role a [writer](#writer-roles).
 4. Add a policy rule with `predicate.agentRole: "<role>"` for any path/operation restrictions that aren't already implied by the tool list.
 5. (Optional) Set `model`, `timeoutMs`, or `maxToolIterations` if the role has special performance needs.
 

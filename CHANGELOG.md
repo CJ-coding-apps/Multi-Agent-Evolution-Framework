@@ -9,6 +9,154 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-08
+
+Correctness fixes from an independent audit of v0.2.0 (2026-10-08), and a documentation pass so that the
+README describes only what ships — its new Status table marks every feature shipped, experimental or
+planned. "P0 #n" cites the audit's numbered findings; the audit is not published in this repository, so
+every entry says what was wrong. (The D-nn identifiers in the 0.2.0 section refer to an earlier sweep;
+this section does not use them.)
+
+### Security
+
+- **A security-gate rejection can no longer be retried into a pass** (P0 #3). The retry wrapped the whole
+  node, gate included, with three attempts by default, and captured the writer's start commit afresh on
+  each attempt: a rejected change got a second roll, and if the coder had committed it, attempt 2 diffed
+  clean and passed. Only a `TransportError` is retried now (a CLI timeout, a non-zero exit with no output,
+  a process that could not start); gate and policy refusals are `VerdictError`s and end the node. The
+  start commit is captured once per node and reused by every attempt.
+- **The security gate reviews the whole diff or refuses it** (P0 #4). It sent the first 16,000
+  characters to the reviewer and attested the change as reviewed. A diff over the gate's cap
+  (`maxDiffChars`, default 60,000 characters) now fails the node with `GateRefused`, naming the size,
+  before any model call; the refusal is attested and recorded as a `Failure` node.
+- **The gate's verdict comes from finding severities** (P0 #4). `passed` was taken from the reviewer's
+  JSON, so a review that reported its own critical finding beside `passed: true` let the change through.
+  Any critical or high finding now fails the node and the model's `passed` is ignored; output whose
+  severities cannot be read (no findings array, a finding with no recognisable severity) fails closed.
+- **Every role that holds a write tool is security-reviewed**, not only the role named `coder` (audit,
+  security findings). The default tester holds `patch.apply` and was never reviewed, nor was any custom
+  role holding `fs.write` or `git.commit`. A writer is now any role holding `fs.write`, `fs.delete`,
+  `patch.apply`, `git.commit`, `git.reset` or `git.add` (`isWriterRole`, exported from `@maf/roles`), on
+  the `cli` tier and in the in-process `security-gate` processor alike.
+- **A policy file that cannot be read in full stops the run** (P0 #5). `PolicyEngine.fromYaml` parsed with
+  `parseSimpleYaml`, which answered real YAML, a JSON typo or any other failure with zero rules, silently,
+  so every Deny and Escalate rule disappeared. Policy now loads through `PolicyLoader` with a real YAML
+  parser (the `yaml` package) and schema validation; see Changed for what that means for policy files.
+- **Path globs match dotfiles** (P0 #5). minimatch ran without `{ dot: true }`, so `**/secrets/**` did not
+  cover `secrets/.hidden` and `**/.env*` did not cover `.config/.env`. A rule whose action kind the engine
+  does not know now throws instead of returning `undefined`.
+- **Tool writes under `.git/` and `.maf/` are denied by the shipped policy** (audit, security findings).
+  A hook written to `.git/hooks/`, or `core.hooksPath` in `.git/config`, runs outside every gate; `.maf/`
+  holds the policy, roles and run records an agent could rewrite. New rules `deny-git-dir` and
+  `deny-maf-dir`, at priority 1000 for every role, refuse `fs.write`, `fs.delete`, `patch.apply` and
+  `git.add` there. `.gitignore`, `.gitattributes` and `.githooks/` stay writable.
+- **Model-supplied strings are never read as options** (P0 #7). `grep` passed the pattern as a bare
+  argument, so `--pre=sh` was an rg option; both rg and the grep fallback now get `-e <pattern> -- <path>`,
+  and the flag values the model picks are bound with `=`. `git.log` built `-${n}` from unchecked input, so
+  `n: "-output=/tmp/x"` made git write a file; `n` must now be a positive whole number. `git.reset` passed
+  `to` unchecked; it is now matched against a narrow revision pattern and followed by `--`. The git helper
+  sets `GIT_LITERAL_PATHSPECS=1`. `git.diff` declared `paths` to the policy engine but diffed `path`; it
+  now declares and diffs one list.
+- **The signing key is an explicit choice, and a bundle says which key signed it** (P0 #8). The `Attestor`
+  fell back to the public key `'dev-secret'` whenever `MAF_SIGNING_KEY` was unset, without a word. A run
+  without the key now prints one warning line to stderr, and every bundle carries `keySource: "env" |
+  "dev"` inside the signed payload. `Attestor.verify` reports the `keySource` it checked with, and a bundle
+  re-signed with the development key cannot pass as `"env"`.
+- **Refused tool calls are attested** (P0 #12). `attestor.record` ran only after a tool executed, so a
+  Deny, Escalate or Indeterminate verdict left no trace in the signed bundle. Refusals are now recorded,
+  with the verdict, the reason and the id of the rule that decided (`Deny` decisions now carry it), before
+  `PolicyViolationError` is thrown. The verdict check was a deny-list of three names, which let any other
+  verdict fall through to execute; now anything but `Allow` refuses.
+- **The processor contract catches in-place mutation** (P0 #11). Each processor's output was compared with
+  the live input object, so a processor that edited the event in place — swapping `call.toolName` at
+  `before_tool`, or rewriting an earlier history message at `before_model` — compared equal to itself and
+  passed. Outputs are now checked against a snapshot taken before the processor runs.
+
+### Fixed
+
+- **A failed adapter call fails the node** (P0 #1). The `cli` tier never read the result's `success` or
+  `exitCode`, so a timeout (exit 124), an expired login or an HTTP error body was stored as the node's
+  output and the node succeeded — on the tier every shipped role runs on. `success: false` now fails the
+  node with a `NodeFailure` carrying the exit code and the last 500 characters of output, and a role
+  holding a write tool that returns empty output fails as well.
+- **An in-process loop that ran out of budget fails the node** (P0 #2). `budget_exhausted`
+  (`maxToolIterations`, `tokenBudget`, or a processor stopping the loop) was returned as success, and a
+  test locked that in. It now fails with reason `budget_exhausted`, unless the DAG node sets
+  `allowPartial: true`, in which case the node succeeds and returns the reason as its `outcome`.
+- **`maf run` works on a repository with no `.maf/`** (P0 #6). It opened `.maf/lcm.db` and
+  `.maf/memory.kuzu` before anything created the directory, and crashed. `run` now creates `.maf/` first.
+- **`inprocess-demo` no longer depends on your global git configuration** (P0 #6). The fixture's commit
+  ran plain `git`, so a global `commit.gpgsign=true` or a failing global hook broke the demo. It now goes
+  through the isolated git helper with `commit.gpgsign=false`.
+- **OpenRouter and Ollama name no model** (P0 #9). They fell back to pinned model ids
+  (`anthropic/claude-sonnet-4-6`, `llama3.2`), billing or requesting a model nobody chose. OpenRouter's
+  `HTTP-Referer` named `https://github.com/maf`, which is not this project; it now names this repository.
+- **`validateDag` refuses a concurrency limit the scheduler cannot use** (P0 #10). `maxConcurrent` was
+  tested with `< 1`, which `NaN` and a JSON string pass, and the scheduler then spun forever without
+  awaiting. It must now be a positive safe integer, and so must each node's `retryPolicy.maxAttempts`;
+  `withRetry` throws a `RangeError` for a policy allowing no attempt, where it used to `throw undefined`.
+
+### Changed
+
+Behaviour you may notice:
+
+- **Retries:** two attempts by default (was three), everywhere a default was minted — `DagParser`,
+  `DagSynthesizer`, the planner, `DEFAULT_NODE_RETRY` — and only transport failures are retried.
+- **`OPENROUTER_MODEL` / `OLLAMA_MODEL` are required** for those adapters, unless `--model` or a role's
+  `model` names one. With none, the first model call is refused, naming the variable, before anything is
+  sent. `maf adapters` still lists both adapters without them.
+- **A policy file must be valid YAML and pass validation, or the run stops** with the parse or validation
+  errors. A missing policy file still runs, with one warning line and no rules. Required on every rule:
+  `id` (unique), `priority`, `predicate`, `action`; unknown fields, empty globs and empty lists are
+  refused. Globs must be quoted in YAML. JSON policy files still load.
+- **`.maf/policy.yaml`** is now block YAML with comments, its six existing rules unchanged field for field,
+  plus `deny-git-dir`, `deny-maf-dir` (see Security) and `tester-no-ci-config` (priority 81): the tester
+  may not write, patch or delete under `.github/`, which `**/*test*` reached once globs matched dotfiles.
+- **The security diff leaves out `.maf/`** at the root of the working tree, by name: it is MAF's own state
+  and grows during a run. A nested directory that merely shares the name is still reviewed.
+- **`git.log`** rejects an `n` that is not a positive whole number, before git runs.
+- **`git.add` and `git.diff`** no longer expand globs or pathspec magic: paths are literal.
+- **`git.reset`** accepts only a hex object name, `HEAD`, `HEAD~N`, `HEAD^N`, or a branch or tag name that
+  does not start with `-`.
+- **A run without `MAF_SIGNING_KEY`** prints one warning line to stderr.
+- **Every writer role needs a git repository** at the start of its node, since its start commit is now
+  captured (before, only `coder`'s was), and a `cli`-tier writer that returns empty output fails.
+
+Breaking for code that calls the packages directly:
+
+- `PolicyEngine.fromYaml` and `parseSimpleYaml` are removed. Use `PolicyLoader.load(path)` or
+  `PolicyLoader.loadEngine(path, graph)`; `PolicyLoader.validate(rules)` reports schema problems.
+- `Attestor`'s fourth constructor argument is a required `{ secret?: string }` (it was an optional string
+  defaulting to `MAF_SIGNING_KEY` or `'dev-secret'`); `Attestor.resolveSigningSecret(env)` reads the
+  variable and warns. `Attestor.verify(bundle, { secret? })` returns `{ valid, keySource }` instead of a
+  boolean. `AttestationBundle` gains `keySource`.
+- `SecurityReviewGate` takes `maxDiffChars` and throws `GateRefused` for a diff over it.
+- `withRetry` retries only `TransportError` and throws `RangeError` for `maxAttempts < 1`.
+  `DEFAULT_RETRY_POLICY` moved to `@maf/types` (still re-exported by `@maf/dag-runner`).
+- New in `@maf/types`: `TransportError` and `VerdictError` (base classes the scheduler classifies by),
+  `NodeFailure` with a typed `reason`, `PartialNodeOutcome`, `DagNode.allowPartial`, `GateRefused`,
+  `KeySource`, `AdapterInvokeResult.transportError`, and an optional `ruleId` on `Deny` decisions.
+  `PolicyViolationError` extends `VerdictError`.
+- `spawnAndCollect` marks a timeout or a silent non-zero exit with `transportError`, and a process that
+  cannot start rejects with a `TransportError`.
+- `RoleDispatcher.endNode(nodeId)` releases a node's cached start commit; call it from the scheduler's
+  `onNodeEnd`.
+
+### Documentation
+
+- README: a Status table (shipped / experimental / planned, naming the tests behind each shipped row and
+  saying where there are none) follows the summary, and prose describes only shipped rows. Removed or corrected: the approval flow
+  for `Escalate`, a human review gate running alongside the security gate, in-toto bundles and diff
+  hashes, an offline evaluation harness, `.maf/config.yaml` being read, worktree isolation, planner
+  failure recall, "tsc project references" for the build, Ollama and OpenRouter as CLIs, and the
+  `dev-secret` signing-key fallback described without its warning or `keySource`. Prerequisites now name
+  Node 22, pnpm 8.15.1 through corepack, git, npm, and the native modules.
+- `docs/POLICY.md`, `docs/ROLES.md` and `docs/SECURITY.md` describe the code as of this release:
+  `Indeterminate`, Escalate refused, the loader's rules, the new default rules, writer roles decided by
+  tools held, the start commit as the diff base, the two different tester definitions, the gate's caps,
+  the attested refusals, `keySource`, and `test.run` executing project code.
+- CI: every job has `timeout-minutes: 15`.
+
 ## [0.2.0] - 2026-10-08
 
 D-nn identifiers refer to the maintainer's internal defect sweep of 2026-09-25; every entry below is
@@ -142,8 +290,8 @@ self-contained.
 
 - `run()` **propagates** a query error rather than returning an empty result. The best-effort
   readers that legitimately tolerate a graph failure (`ScoreRecorder`, the planner's lesson
-  recall, `maf knowledge sync`, `querySubgraph`'s edge lookup) now say so in an explicit
-  `try`/`catch` at the point where the tolerance is intended.
+  recall, `querySubgraph`'s edge lookup) now say so in an explicit `try`/`catch` at the point
+  where the tolerance is intended.
 
 ## [0.1.0] - 2026-09-10
 

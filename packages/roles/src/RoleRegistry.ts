@@ -59,7 +59,8 @@ export class RoleRegistry implements RoleResolver {
       return new RoleRegistry(parsed, mafDir);
     } catch (err: unknown) {
       if (err instanceof RoleConfigError) throw err;
-      // File missing or malformed → fall back to defaults (parity with PolicyEngine.fromYaml)
+      // The file could not be read (usually: it does not exist) → the built-in defaults. A file
+      // that was read but does not parse or validate is a RoleConfigError, rethrown above.
       return new RoleRegistry(DEFAULT_ROLE_SET, mafDir);
     }
   }
@@ -164,8 +165,8 @@ export class RoleRegistry implements RoleResolver {
 }
 
 function parseRoleSet(text: string): RoleSet {
-  // Mirrors policy-engine's parseSimpleYaml: strip comment lines, JSON.parse the rest.
-  // Users authoring .maf/roles.yaml as JSON (the existing pattern for .maf/policy.yaml) works directly.
+  // Strip comment lines, JSON.parse the rest: a roles file is JSON despite its .yaml name.
+  // Policy files moved to PolicyLoader's real YAML parser; this parser has not followed yet.
   const stripped = text.replace(/^\s*#.*$/gm, '');
   let parsed: unknown;
   try {
