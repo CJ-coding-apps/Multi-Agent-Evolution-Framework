@@ -35,12 +35,15 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
   where a rule decided, the rule's id — the security findings and the run's outcome. Its `approvals` and
   `diffHashes` fields are always empty in 0.2.1: nothing fills them. Before either the bundle or the
   memory graph sees a tool call, credentials are stripped from its input and from the result's stdout,
-  stderr and metadata (`gatedExec.ts`). The scrubber is **format-based and shallow**, and both limits are deliberate:
-  it knows eight credential shapes (AWS, Anthropic, OpenAI, Google, a GitHub PAT, a Slack token, a bearer
+  stderr and metadata (`gatedExec.ts`). The scrubber is **format-based and shallow**, and both limits
+  are deliberate: it knows eight credential shapes (AWS, Anthropic, OpenAI, Google, a GitHub PAT, a Slack token, a bearer
   token, a PEM private key) and redacts only the top-level string values of the input, because a broader
   pattern set would mangle the evidence the bundle exists to be. So a credential in another format, or one
   nested a level down inside the input, is recorded as written. Treat a bundle as containing whatever the
-  run printed and whatever the agent chose to type.
+  run printed and whatever the agent chose to type. Failure messages, which also reach the bundle's
+  run outcome and the memory graph, are masked the same way: a failed node's output tail with those eight
+  formats, and a backend's stderr or HTTP error-body tail with five of them (bearer tokens, `sk-` keys,
+  Google, GitHub and AWS keys).
 - **On the default execution tier, no tool call is recorded at all.** Redaction describes the `in-process`
   path above. A `cli`-tier role's tools run inside the backend CLI, so there is nothing to record — see
   *The execution-tier boundary* below.
@@ -52,14 +55,21 @@ How a bundle is signed, and what a signature does **not** establish today, state
   published development value — a run prints one warning line to stderr and signs with the public
   development key `'dev-secret'` (`packages/attestation/src/Attestor.ts`). The bundle then says
   `keySource: "dev"`, inside the signed payload, so the label cannot be stripped or flipped without
-  breaking the signature. `Attestor.verify(bundle, { secret })` returns `{ valid, keySource }`: a
-  dev-signed bundle verifies, and anyone can produce one, and a bundle re-signed with the development key
-  cannot pass as `keySource: "env"`. Set `MAF_SIGNING_KEY` to a secret of your own before treating a
-  bundle as evidence of authorship.
-- **The key is not hidden from the agent.** Backend CLIs and `test.run` inherit MAF's whole environment,
-  `MAF_SIGNING_KEY` included, so an agent that can run a command can read the key and sign a bundle of
-  its own. A signature shows that whoever made the bundle held the key; on a run whose agent could run
-  commands, that includes the agent.
+  breaking the signature. `Attestor.verify(bundle, { secret })` returns `true` only when the signature
+  matches that key *and* the bundle's `keySource` names that kind of key; `Attestor.inspect` returns
+  `{ valid, keySource, legacy }`; `BundleSigner.verify` applies the same rule. So a dev-signed bundle
+  verifies, and anyone can produce one, and a bundle re-signed with the development key cannot pass as
+  `keySource: "env"`. Set `MAF_SIGNING_KEY` to a secret of your own before treating a bundle as evidence
+  of authorship.
+- **A 0.2.0 bundle carries no `keySource`.** It verifies on its signature alone, against whatever key
+  you supply, and `inspect` reports it as `legacy: true`. Verifying one with the development key
+  proves only that it was signed with the development key.
+- **The key is not hidden from the agent.** The backend CLIs and every tool that starts a process —
+  `test.run`, the `git.*` tools, `grep` (rg or grep) and `patch.apply` — inherit MAF's whole environment,
+  `MAF_SIGNING_KEY` included. `test.run` runs project code with it, and `git.commit` runs the
+  repository's own hooks with it. So an agent that can run a command — directly, through a test it
+  wrote, or through a hook — can read the key and sign a bundle of its own. A signature shows that whoever made the bundle held the
+  key; on a run whose agent could run commands, that includes the agent.
 - **It is signed, not sealed.** Anyone who can write to the bundle's directory can replace it with one
   they signed with the same key.
 
@@ -79,14 +89,24 @@ boundaries are implemented; anything not written here is not a guarantee.
 
 ### The post-task security gate: what it reads
 
-Every writer role's change is reviewed by `SecurityReviewGate` before the node completes — on both
-execution tiers, including after a node that ran out of budget or failed. A writer is a role that holds
-`fs.write`, `fs.delete`, `patch.apply`, `git.commit`, `git.reset` or `git.add`; the role's name plays no
-part, so a tester holding `patch.apply` is reviewed like a coder. On the `cli` tier `RoleDispatcher` runs
-the gate after the backend returns; on the `in-process` tier the `security-gate` processor runs it at
-`task_end` — the default processor bundle includes it, and a harness whose `processorBundles` leaves it
-out gets no review on that tier. The gate reviews **a diff of the working tree against the commit the
-node started from**, computed by `snapshotDiff` (`packages/git-ops/src/SnapshotDiff.ts`).
+Every writer role's change is reviewed by `SecurityReviewGate` before the node completes. A writer is a
+role that holds `fs.write`, `fs.delete`, `patch.apply`, `git.commit`, `git.reset` or `git.add`; the role's
+name plays no part, so a tester holding `patch.apply` is reviewed like a coder. When the review runs:
+
+- **`cli` tier:** `RoleDispatcher` runs it after the backend returns, whether the result was a success, a
+  failure or empty output.
+- **`in-process` tier:** the `security-gate` processor runs it at `task_end`, whatever outcome the loop
+  returns (completed, `budget_exhausted`, failed). The default processor bundle includes that
+  processor; a harness whose `processorBundles` leaves it out gets no end-of-task review.
+- **Either tier, when the backend or the loop throws** — a timed-out turn, a backend that never started:
+  the dispatcher runs the review on whatever the agent left in the tree before the error propagates. A
+  refusal outranks the error; a clean or empty diff lets the original error through for the scheduler
+  to classify ([D-31](DECISIONS.md)). On the in-process tier this is the only review a throw gets, since
+  the loop never reaches `task_end`.
+
+The gate reviews **a diff of the whole repository's working tree against the commit the node started
+from**, computed by `snapshotDiff` (`packages/git-ops/src/SnapshotDiff.ts`) with the `:(top)` pathspec,
+so a change anywhere in the repository is in it even when MAF was pointed at a subdirectory.
 
 "Against the commit the node started from, not `HEAD`" is load-bearing: an agent that commits its own
 work — normal behaviour for a CLI coding agent — would otherwise diff clean, and an empty diff passes
@@ -102,8 +122,10 @@ What the diff therefore contains:
 | Work the agent committed during the node | yes — the base is not `HEAD` |
 | Deleted file | yes |
 | **File matched by `.gitignore`** | **no** |
-| **`.maf/` at the root of the working tree** | **no** — excluded by name: it is MAF's own state (transcripts, memory graph, bundles), written by MAF rather than the agent, and it grows during the run. A nested directory that merely shares the name is reviewed |
-| Anything outside the working directory | no — it is not in the tree at all |
+| A change elsewhere in the repository than the directory MAF was pointed at | yes — the pathspec is the whole repository |
+| MAF's configuration under `.maf/`: `policy.yaml`, `roles.yaml`, `config.yaml`, `prompts/` | yes — an agent could rewrite it to shape the next run |
+| **This run's runtime state under `<cwd>/.maf/`**: `runs/`, `cache/`, `memory.kuzu`, `lcm.db*`, `transcripts/`, `attestations/`, `harnesses/`, `goldens/results/`, `evolve/` | **no** — excluded by name ([D-29](DECISIONS.md)): MAF writes it, it grows during the run, and it would push an honest diff past the gate's cap. A `.maf/` directory elsewhere in the repository is ordinary content |
+| Anything outside the repository | no — it is not in the tree at all |
 
 #### Limits, stated rather than implied
 
@@ -116,9 +138,10 @@ to the project root before any rule is read, so a write outside the root is refu
 says (see *Path confinement* below). When the write comes from a CLI-tier agent's own file tools, it is
 not visible to maf at all. See the tier boundary below.
 
-**`.maf/` is outside the diff**, by name, for the reason in the table. Tool writes into it are denied by
-the shipped policy (`deny-maf-dir`) on the `in-process` tier; a `cli`-tier agent's own writes there are
-not reviewed.
+**This run's runtime state under `.maf/` is outside the diff**, by name, for the reason in the table;
+the rest of `.maf/` — the configuration — is reviewed. Tool writes anywhere under `.maf/` are denied by
+the shipped policy (`deny-maf-dir`) on the `in-process` tier; a `cli`-tier agent's own writes to a
+runtime-state path are not reviewed.
 
 **An oversized diff is an error, never a truncated review.** There are two caps, and neither truncates.
 `snapshotDiff` fails the node when the diff passes 8 MB. `SecurityReviewGate` refuses a diff longer than
@@ -130,10 +153,15 @@ the diff exists to close, reached a third way.
 
 **The verdict comes from the severities, not from the reviewer's say-so.** Any `critical` or `high`
 finding fails the node with `GateRefused`; the reviewing model's own `passed` boolean is ignored, because
-a model has said `passed: true` beside its own critical finding. Output with no JSON, invalid JSON, no
+a model has said `passed: true` beside its own critical finding — and, the other way round, a review
+that says `passed: false` with only medium, low or info findings passes. Output with no JSON, invalid JSON, no
 `findings` array, or a finding whose severity cannot be read fails closed. A refusal is terminal: the
 scheduler retries only transport failures, and the start commit is captured once per node, so a retry
-could not diff a committed change away in any case.
+could not diff a committed change away in any case. A reviewer that times out, exits non-zero without
+output, cannot start, or whose HTTP request fails, aborts or gets a 5xx has judged nothing: that is a
+`TransportError`, retried like any other transport failure, not a refusal. A reviewer that answers with
+a failure (a non-zero exit with output, an HTTP 4xx) usually leaves no readable findings, so the review
+fails closed as a refusal.
 
 **A `cli`-tier role that holds no write tool is not reviewed**, although its backend CLI has file tools of
 its own. On the `cli` tier the allowlist is not passed to the backend, so it does not limit what the agent

@@ -88,18 +88,24 @@ RoleDispatcher.runNode(node):
   6. cli tier:        result = adapter.invoke({ prompt, systemPrompt, … })
      in-process tier: InProcessAgentLoop.run() — every tool call through executeToolGated;
                       for a writer, the security-gate processor runs the step-7 review at task_end
+     if either throws (a timed-out turn, a backend that never started) and the role is a writer:
+                      run the step-7 review now, then rethrow — a GateRefused outranks the error
   7. cli tier, writer role:
-       diff = snapshotDiff(cwd, startCommit)         // working tree vs startCommit, .maf/ excluded
+       diff = snapshotDiff(cwd, startCommit)         // whole repository vs startCommit;
+                                                     // this run's .maf/ runtime state excluded
        result = await securityGate.reviewDiff(diff)  // GateRefused above the size cap
        attestor.recordSecurityFindings(node.id, result)
        if !result.passed: graph.addNode(Failure) + throw GateRefused
-  8. fail the node (NodeFailure) if the adapter reported failure, a writer returned no output,
-     or the loop ended budget_exhausted without node.allowPartial
+  8. fail the node: a cli result that carried a transport failure → TransportError (may be retried);
+     one that reported failure, or a writer's empty output → NodeFailure;
+     a loop that ended budget_exhausted without node.allowPartial → NodeFailure
 ```
+
+`node.allowPartial` can be set only on a DAG built in code in 0.2.1: neither a DAG spec (`DagParser`), `DagSynthesizer` nor the planner sets it yet, so a planned run cannot accept partial work. Setting it from specs and plans is planned for 0.3.0.
 
 The diff base is the commit captured in step 2, not `HEAD` at review time, so a writer that commits its own work is still reviewed. `RoleDispatcher.endNode(nodeId)`, called from the scheduler's `onNodeEnd`, forgets it.
 
-On the `in-process` tier the dispatcher never bypasses policy: the loop advertises only the role's allowed tools, answers a call to any other tool with an error, and sends every allowed call through `executeToolGated` (in `@maf/tool-loop`), which asks the policy engine first. A role with `fs.write` in its allowlist can still be denied by a path-glob rule. On the `cli` tier none of this applies: the backend CLI runs its own tools, and MAF sees only the diff afterwards.
+On the `in-process` tier the dispatcher never bypasses policy: the loop advertises only the role's allowed tools, answers a call to any other tool with an error, and sends every allowed call through `executeToolGated` (in `@maf/tool-loop`), which asks the policy engine first. A role with `fs.write` in its allowlist can still be denied by a path-glob rule. On the `cli` tier none of this applies: the backend CLI runs its own tools, and MAF sees only a writer role's diff afterwards.
 
 ### Where policy sees the role
 
@@ -110,7 +116,7 @@ On the `in-process` tier the dispatcher never bypasses policy: the loop advertis
 A role is a writer when it holds any of `fs.write`, `fs.delete`, `patch.apply`, `git.commit`, `git.reset` or `git.add` (`isWriterRole`, exported from `@maf/roles`). The role's name plays no part: a `tester` holding `patch.apply` and a custom role holding only `git.commit` are writers; a role called `coder` with only read tools is not. For a writer, MAF:
 
 - captures the start commit before the node runs, so the target directory must be a git repository;
-- security-reviews the diff when the node ends (step 7), on both tiers;
+- security-reviews the diff: on the `cli` tier after the backend returns, whatever it returned; on the `in-process` tier at `task_end` through the `security-gate` processor, which the default bundle includes and a harness's own bundle may leave out; and, on either tier, before an error thrown by the backend or the loop propagates ([D-31](DECISIONS.md));
 - fails the node on the `cli` tier if the backend returns empty output.
 
 The scheduler's writer lock — which stops two nodes editing the tree at once — uses a broader test: every `cli`-tier role counts as a writer there, because its backend CLI has file tools of its own whatever the allowlist says, and an `in-process` role counts as one if it holds any tool that is not read-only.
@@ -121,7 +127,7 @@ The scheduler's writer lock — which stops two nodes editing the tree at once �
 
 > After any coder node that introduces new behavior, emit a tester node that depends on it.
 >
-> When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every coder diff.)
+> When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every writer role's diff.)
 
 If the LLM emits a node with `agentRole: "ghost"` and the role set does not define `ghost`, the plan is **rejected**: `plan()` throws `planner: node "n1" asks for unknown agentRole "ghost". Known roles: coder, tester, ...`. Substituting the default was the escalation — the default is `coder`, a writer — so a plan the model got wrong must not be quietly re-planned as a privileged one.
 

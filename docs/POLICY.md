@@ -109,13 +109,12 @@ Declared paths come from the tool itself — `ToolPlugin.declaredPaths(input)`, 
 - `git.diff` declares `input.paths` (a legacy `input.path` is merged into it), and diffs exactly that list.
 - `git.add` declares `input.paths` (or `input.path`).
 - `patch.apply` declares every file in the diff headers (`extractDiffPaths`), so a path-glob rule applies to every file the patch touches, not just whatever the caller passed in.
-- `git.status` / `git.commit` / `git.log` / `git.reset` and `test.run` act on the repository or project as a whole and declare `[]`, so no path rule can match them.
+- `git.status` / `git.commit` / `git.log` / `git.reset` and `test.run` act on the repository or project as a whole and declare `[]`, so no path rule can match them. Their inputs are checked by the tools instead: `git.log` accepts only a positive whole number of commits, and `git.reset` only a hex object name, `HEAD`, `HEAD~N`, `HEAD^N` or a branch or tag name not starting with `-`, which it passes before a trailing `--` so git reads it as a revision ([D-28](DECISIONS.md): not `--end-of-options`, which `git reset` accepts only from git 2.44).
 
-Three consequences worth stating:
+Four consequences worth stating:
 
 - A path that cannot be confined refuses the whole call, so one escaping path in a multi-path declaration is enough to deny it.
 - A declaration of `[]` has nothing to confine, so confinement has no path to refuse either.
-
 - A rule with a `pathGlob` **cannot match a call that declares no path** — matching on an empty set would make a Deny rule fire on calls that named no file.
 - A rule matches if **any** declared path matches. A multi-file call (a patch spanning `src/a.ts` and `.env`) is denied by a `**/.env*` rule, because one of its declared paths matches.
 
@@ -186,7 +185,7 @@ The policy shipped in this repository:
 | 90  | `protect-migrations` | Escalate (today: refuse) writes/patches to `**/migrations/**`. |
 | 90  | `coder-no-secrets-dir` | Deny `coder` writes to `**/secrets/**`. |
 | 85  | `deny-readonly-roles`  | Deny mutating tools for `reviewer`/`security`. |
-| 81  | `tester-no-ci-config` | Deny `tester` writes/patches/deletes under `{.github,.github/**}`: once globs matched dotfiles, `**/*test*` reached `.github/workflows/test.yml`, which is CI configuration, not a test. |
+| 81  | `tester-no-ci-config` | Deny `tester` writes/patches/deletes under `{.github,.github/**}`: once globs matched dotfiles, `**/*test*` reached `.github/workflows/test.yml`, which is CI configuration, not a test ([D-30](DECISIONS.md)). |
 | 80  | `tester-write-only-tests` | Deny `tester` writes outside test path patterns. |
 
 The two priority-1000 rules exist because anything written into `.git/` — a hook, or `core.hooksPath` in `.git/config` — runs outside every gate, and `.maf/` holds the policy, roles and run records an agent could otherwise rewrite. A coder commits through the gated `git.commit` tool instead; `.gitignore`, `.gitattributes` and a `.githooks/` directory stay writable, and reads are unaffected.
