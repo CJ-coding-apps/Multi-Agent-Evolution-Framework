@@ -26,18 +26,20 @@ interface OllamaStreamChunk {
 
 export interface OllamaAdapterOptions {
   baseUrl?: string;   // default: http://localhost:11434
-  model?:   string;   // default: llama3.2
+  model?:   string;   // no default: falls back to OLLAMA_MODEL, else the first call is refused
 }
 
 export class OllamaAdapter extends BaseAdapter {
   readonly name = 'ollama' as const;
   private readonly baseUrl: string;
-  private readonly defaultModel: string;
+  private readonly defaultModel: string | undefined;
 
   constructor(opts: OllamaAdapterOptions = {}) {
     super();
     this.baseUrl      = opts.baseUrl ?? process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434';
-    this.defaultModel = opts.model   ?? process.env['OLLAMA_MODEL']    ?? 'llama3.2';
+    // No fallback id: which models exist is the user's local install, not ours to guess. A
+    // missing model is refused at the first call, not here, so the adapter can still be listed.
+    this.defaultModel = opts.model   ?? process.env['OLLAMA_MODEL'];
   }
 
   capabilities(): AdapterCapabilities {
@@ -70,7 +72,7 @@ export class OllamaAdapter extends BaseAdapter {
     const start = Date.now();
     const messages = this.buildMessages(options);
     const body: OllamaRequest = {
-      model:   options.model ?? this.defaultModel,
+      model:   this.resolveModel(options),
       messages,
       stream:  false,
       ...this.optionsBag(options),
@@ -106,7 +108,7 @@ export class OllamaAdapter extends BaseAdapter {
   override async *stream(options: AdapterInvokeOptions): AsyncGenerator<string> {
     const messages = this.buildMessages(options);
     const body: OllamaRequest = {
-      model:   options.model ?? this.defaultModel,
+      model:   this.resolveModel(options),
       messages,
       stream:  true,
       ...this.optionsBag(options),
@@ -138,6 +140,17 @@ export class OllamaAdapter extends BaseAdapter {
         } catch { /* skip malformed */ }
       }
     }
+  }
+
+  /** Runs before the request body exists, so a call with no model never reaches the network. */
+  private resolveModel(options: AdapterInvokeOptions): string {
+    const model = options.model ?? this.defaultModel;
+    if (model) return model;
+    throw new Error(
+      'The Ollama adapter has no model to call: expected `model` in the call options, `model` in '
+      + 'OllamaAdapterOptions, or the OLLAMA_MODEL environment variable, and none is set to a '
+      + 'non-empty value. No request was sent.',
+    );
   }
 
   private buildMessages(options: AdapterInvokeOptions): OllamaChatMessage[] {
