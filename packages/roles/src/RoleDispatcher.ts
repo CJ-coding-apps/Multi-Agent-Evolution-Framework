@@ -140,6 +140,37 @@ function notARepository(cwd: string, err: unknown): Error {
 export class RoleDispatcher {
   constructor(private readonly config: RoleDispatcherConfig) {}
 
+  /**
+   * The commit each node first started from, keyed by run and node, held until the node ends.
+   * A retry re-enters `runNode`, and a coder that committed on the failed attempt would hand a
+   * freshly captured baseline its own change — attempt 2 would diff clean and the gate would
+   * call it reviewed (D-06). Only a successful capture is held: one that failed ended its
+   * attempt before the node did anything, so the next attempt has nothing to answer for.
+   */
+  private readonly baselines = new Map<string, string>();
+
+  /**
+   * The node has ended, succeeded or failed, and will not be attempted again: forget its
+   * baseline. Call it from the scheduler's `onNodeEnd`, which fires once per node after its
+   * last attempt; a later run of the same node then starts from wherever the tree is.
+   */
+  endNode(nodeId: DagNode['id']): void {
+    this.baselines.delete(this.baselineKey(nodeId));
+  }
+
+  private baselineKey(nodeId: DagNode['id']): string {
+    return JSON.stringify([this.config.runId, nodeId]);
+  }
+
+  private async baselineFor(nodeId: DagNode['id']): Promise<string> {
+    const key = this.baselineKey(nodeId);
+    const held = this.baselines.get(key);
+    if (held !== undefined) return held;
+    const commit = await this.startCommit();
+    this.baselines.set(key, commit);
+    return commit;
+  }
+
   async runNode(node: DagNode): Promise<Record<string, BlackboardValue>> {
     const role = this.config.roles.getRole(node.agentRole);
     const taskId = makeTaskId(node.id);
@@ -147,7 +178,7 @@ export class RoleDispatcher {
     // Captured BEFORE the node does anything, and before any model call is spent. A
     // coder that commits its own work would otherwise diff clean against HEAD, so the
     // security gate would be handed an empty diff and call the change reviewed.
-    const startCommit = role.role === 'coder' ? await this.startCommit() : undefined;
+    const startCommit = role.role === 'coder' ? await this.baselineFor(node.id) : undefined;
 
     await this.config.transcript.append(
       'user',
