@@ -309,7 +309,7 @@ test('resolveWorkingDir: --no-worktree runs in place, not isolated, and warns', 
   assert.equal(d.cwd, path.resolve('/repo/sub'));
   assert.equal(d.isolated, false);
   assert.match(d.warning ?? '', /in place/);
-  assert.match(d.warning ?? '', /rollbacks are disabled/);
+  assert.match(d.warning ?? '', /MAF cannot undo them/);
 });
 
 test('resolveWorkingDir: a contradiction is an error, not a guess', () => {
