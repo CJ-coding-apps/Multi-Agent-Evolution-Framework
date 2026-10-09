@@ -41,13 +41,27 @@ function ctxIn(cwd: string): ToolContext {
   };
 }
 
-interface ExecCall { file: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }
+/**
+ * The config every git call from the tools pins ahead of its subcommand (WP-2.14), written out
+ * here rather than imported so that a change to it has to change this oracle too.
+ */
+const ISOLATION = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', '-c', 'commit.gpgsign=false'];
+
+/**
+ * `argv` is what git was handed; `args` is the subcommand onward, once the isolation prefix is
+ * matched — or the whole argv when it is not, so a missing prefix fails every argv assertion.
+ */
+interface ExecCall { file: string; argv: string[]; args: string[]; cwd: string; env: NodeJS.ProcessEnv }
 
 /** An exec that records every call and succeeds with no output, so no git runs. */
 function spy(): { exec: GitExec; calls: ExecCall[] } {
   const calls: ExecCall[] = [];
   const exec: GitExec = async (file, args, options) => {
-    calls.push({ file, args: [...args], cwd: options.cwd, env: options.env });
+    const isolated = ISOLATION.every((a, i) => args[i] === a);
+    calls.push({
+      file, argv: [...args], args: isolated ? args.slice(ISOLATION.length) : [...args],
+      cwd: options.cwd, env: options.env,
+    });
     return { stdout: '', stderr: '' };
   };
   return { exec, calls };
@@ -165,24 +179,97 @@ test('git.diff declares and diffs one list, with the legacy path folded into pat
 
 // ── the helper's environment ─────────────────────────────────────────────────
 
-test('every git tool runs with GIT_LITERAL_PATHSPECS=1 and the rest of the environment unchanged', async () => {
-  const { exec, calls } = spy();
-  const runs: Array<[ToolPlugin, ToolInput]> = [
-    [new GitStatusTool(exec), {}],
-    [new GitDiffTool(exec),   { paths: ['a.ts'] }],
-    [new GitAddTool(exec),    { paths: ['a.ts'] }],
-    [new GitCommitTool(exec), { message: 'm' }],
-    [new GitLogTool(exec),    {}],
-    [new GitResetTool(exec),  { to: 'HEAD' }],
-  ];
-  for (const [tool, input] of runs) await tool.execute(input, ctxIn(CWD));
+/** Variables through which a host hands git configuration without a file (WP-2.14). */
+const HOST_CONFIG_VARS = {
+  GIT_CONFIG:            '/tmp/host-gitconfig',
+  GIT_CONFIG_PARAMETERS: "'core.fsmonitor'='/tmp/host-fsmonitor'",
+  GIT_CONFIG_COUNT:      '1',
+  GIT_CONFIG_KEY_0:      'diff.external',
+  GIT_CONFIG_VALUE_0:    '/tmp/host-diff',
+};
 
-  assert.equal(calls.length, runs.length, 'one git call per tool');
-  for (const [i, call] of calls.entries()) {
-    const name = runs[i]?.[0].name ?? '';
-    assert.equal(call.file, 'git', name);
-    assert.equal(call.cwd, CWD, name);
-    assert.deepEqual(call.env, { ...process.env, GIT_LITERAL_PATHSPECS: '1' }, name);
+/**
+ * The opposite of each value the tools pin, so the assertion below holds because the tools set
+ * them and not because the machine running the test already exported the same values.
+ */
+const HOST_PINNED_VARS = {
+  GIT_CONFIG_GLOBAL:     '/tmp/host-global',
+  GIT_CONFIG_NOSYSTEM:   '0',
+  GIT_TERMINAL_PROMPT:   '1',
+  GIT_LITERAL_PATHSPECS: '0',
+};
+
+test('every git tool runs isolated: hooks, fsmonitor and signing pinned off, host config ignored, no prompt, literal pathspecs', async () => {
+  // The variables are set on this process for the length of the test because the tools read
+  // process.env, as they would in a shell that exported them.
+  const host = { ...HOST_CONFIG_VARS, ...HOST_PINNED_VARS };
+  const saved = Object.keys(host).map((k) => [k, process.env[k]] as const);
+  Object.assign(process.env, host);
+  const { exec, calls } = spy();
+  try {
+    const runs: Array<[ToolPlugin, ToolInput]> = [
+      [new GitStatusTool(exec), {}],
+      [new GitDiffTool(exec),   { paths: ['a.ts'] }],
+      [new GitAddTool(exec),    { paths: ['a.ts'] }],
+      [new GitCommitTool(exec), { message: 'm' }],
+      [new GitLogTool(exec),    {}],
+      [new GitResetTool(exec),  { to: 'HEAD' }],
+    ];
+    for (const [tool, input] of runs) await tool.execute(input, ctxIn(CWD));
+
+    // Everything the host exported reaches git except its config: PATH, HOME, the locale. The
+    // counted form is dropped whole — every KEY_n/VALUE_n the host has, not only the ones set here.
+    const expected: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of Object.keys(expected)) {
+      if (k in HOST_CONFIG_VARS || /^GIT_CONFIG_(?:KEY|VALUE)_[0-9]+$/.test(k)) delete expected[k];
+    }
+    Object.assign(expected, {
+      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_LITERAL_PATHSPECS: '1',
+    });
+
+    // git.commit asks the repository for its identity first; the spy's empty answer is "none".
+    assert.deepEqual(calls.map((c) => c.args), [
+      ['status', '--porcelain=v2', '--branch'],
+      ['diff', '--', 'a.ts'],
+      ['add', '--', 'a.ts'],
+      ['config', '-z', '--get-regexp', '^user\\.(name|email)$'],
+      ['-c', 'user.name=maf', '-c', 'user.email=maf@maf.invalid', 'commit', '-m', 'm'],
+      ['log', '-10', '--oneline'],
+      ['reset', '--soft', 'HEAD', '--'],
+    ]);
+    for (const call of calls) {
+      const what = call.argv.join(' ');
+      assert.equal(call.file, 'git', what);
+      assert.equal(call.cwd, CWD, what);
+      assert.deepEqual(call.argv.slice(0, ISOLATION.length), ISOLATION, `${what}: the isolation prefix comes first`);
+      assert.deepEqual(call.env, expected, what);
+    }
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test('git.commit keeps whichever of user.name and user.email the repository sets, and names maf for the rest', async () => {
+  const cases: Array<[string, string, string[]]> = [
+    ['both set',       'user.name\nAlice\0user.email\nalice@example.com\0', []],
+    ['email only',     'user.email\nalice@example.com\0',                   ['-c', 'user.name=maf']],
+    ['name only',      'user.name\nAlice\0',                                ['-c', 'user.email=maf@maf.invalid']],
+    // git uses the last value; an empty one is no identity, and a valueless key is not a name.
+    ['last is empty',  'user.name\nAlice\0user.name\n\0user.email\na@x\0',  ['-c', 'user.name=maf']],
+    ['valueless name', 'user.name\0user.email\na@x\0',                      ['-c', 'user.name=maf']],
+    ['none',           '',                                                  ['-c', 'user.name=maf', '-c', 'user.email=maf@maf.invalid']],
+  ];
+  for (const [what, configured, identity] of cases) {
+    const calls: ExecCall[] = [];
+    const exec: GitExec = async (file, args, options) => {
+      calls.push({ file, argv: [...args], args: args.slice(ISOLATION.length), cwd: options.cwd, env: options.env });
+      return { stdout: args.includes('config') ? configured : '', stderr: '' };
+    };
+    await new GitCommitTool(exec).execute({ message: 'm' }, ctxIn(CWD));
+    assert.deepEqual(calls[1]?.args, [...identity, 'commit', '-m', 'm'], what);
   }
 });
 
