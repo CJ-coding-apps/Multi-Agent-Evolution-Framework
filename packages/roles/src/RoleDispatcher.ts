@@ -21,7 +21,7 @@ import type { InProcessLoopResult } from '@maf/tool-loop';
 import type { RoleConfig } from './RoleConfig.js';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
-import { isWriterRole } from './isWriterRole.js';
+import { isWriterRole, effectiveTier, requestedTier } from './isWriterRole.js';
 
 export interface RoleDispatcherConfig {
   adapter:        CliAdapter;
@@ -43,6 +43,13 @@ export interface RoleDispatcherConfig {
   temperature?:   number;
   /** Phase 1: the resolved harness for this run (processor bundles live here). */
   harness?:       HarnessConfig;
+  /**
+   * `--allow-ungoverned`: let a writer role run on the cli tier — because its `execution` says
+   * so, or because the adapter cannot run the in-process loop — instead of refusing it (D-01).
+   */
+  allowUngoverned?: boolean;
+  /** Where the ungoverned-run banner goes; `process.stderr` when unset. */
+  stderr?:        { write(text: string): unknown };
 }
 
 export interface RoleNodeOutput {
@@ -111,6 +118,48 @@ function cliShortfall(
   return undefined;
 }
 
+/**
+ * D-32: a role that expects to change the tree answered, exited 0 and left no diff against the
+ * node's start commit. On the cli tier that is what a backend looks like when its own permission
+ * settings refused the edit and it said so; read as success, `Succeeded` would mean two things.
+ */
+function noChangeShortfall(
+  role: RoleConfig,
+  adapterName: string,
+  result: AdapterInvokeResult,
+  startCommit: string,
+): NodeFailure {
+  return new NodeFailure(
+    'no_change',
+    `role "${role.role}" expects to change the tree, so adapter "${adapterName}" was expected to ` +
+    `leave a diff against the node's start commit ${startCommit.slice(0, 12)}, but it answered ` +
+    `(exit code ${result.exitCode}) and changed nothing — a backend running under its own ` +
+    `permission settings may have refused the edit. Output tail: ${outputTail(result.output)}`,
+    result.exitCode,
+  );
+}
+
+/**
+ * The security review of one attempt, run at most once whichever route reaches it first: the
+ * security-gate processor at task_end, the end of a cli-tier call, or a backend that threw
+ * (D-31). It keeps the diff it read, which is also D-32's evidence — one snapshot per attempt.
+ */
+class AttemptReview {
+  private begun = false;
+  private seen: string | undefined;
+
+  constructor(private readonly review: (onDiff: (diff: string) => void) => Promise<void>) {}
+
+  /** The diff the review read, once it has read one. */
+  get diff(): string | undefined { return this.seen; }
+
+  async run(): Promise<void> {
+    if (this.begun) return;
+    this.begun = true;
+    await this.review((diff) => { this.seen = diff; });
+  }
+}
+
 /** The in-process counterpart: a loop that ran out of its own budget did not finish (D-04). */
 function loopShortfall(role: RoleConfig, loop: InProcessLoopResult): NodeFailure | undefined {
   if (loop.outcome !== 'budget_exhausted') return undefined;
@@ -175,9 +224,60 @@ export class RoleDispatcher {
     return commit;
   }
 
+  /** The ungoverned banner goes out once per dispatcher; `maf run` builds one per run. */
+  private bannerShown = false;
+
+  /**
+   * The tier this node runs on (D-01), decided before it captures anything or spends a model
+   * call. A writer lands on the cli tier only by its own `execution: 'cli'` or because the
+   * adapter cannot run the loop, and then only with `allowUngoverned`: otherwise it is refused
+   * here, not run where no gate sees its tool calls. A reader on the cli tier can change the
+   * tree through MAF no more than in-process, so its fallback stays the transcript note it was.
+   */
+  private resolveTier(role: RoleConfig): { tier: 'cli' | 'in-process'; note?: string; ungoverned?: string } {
+    const adapter = this.config.adapter;
+    const tier = effectiveTier(role, adapter);
+    if (tier === 'in-process') return { tier };
+    const asked = requestedTier(role);
+    if (!isWriterRole(role)) {
+      if (asked === 'cli') return { tier };
+      return {
+        tier,
+        note: `[warn] role "${role.role}" requested execution=in-process but adapter "${adapter.name}" lacks the capability; falling back to CLI dispatch`,
+      };
+    }
+    const why = asked === 'cli'
+      ? `its execution is set to 'cli'`
+      : `adapter "${adapter.name}" cannot run the in-process loop`;
+    if (this.config.allowUngoverned !== true) {
+      throw new Error(
+        `role "${role.role}" holds a write tool, so it was expected to run on the governed ` +
+        `in-process tier, but ${why}. Policy verdicts, secret redaction, attested tool calls and ` +
+        `processor hooks exist only in-process (D-01), so MAF refuses to start it; pass ` +
+        `--allow-ungoverned to run it on the cli tier anyway.`,
+      );
+    }
+    return { tier, ungoverned: why };
+  }
+
+  private ungovernedBanner(role: RoleConfig, why: string): void {
+    if (this.bannerShown) return;
+    this.bannerShown = true;
+    (this.config.stderr ?? process.stderr).write(
+      `[maf] UNGOVERNED: --allow-ungoverned lets writer role "${role.role}" run on the cli tier ` +
+      `(${why}). There MAF applies no policy verdicts, secret redaction, attested tool calls or ` +
+      `processor hooks, and reviews only the diff the node leaves. A CLI backend (claude, codex, ` +
+      `gemini) edits the tree with its own tools under its own permission settings; an HTTP ` +
+      `backend (ollama, openrouter) has no file tools and cannot change the tree at all, so a role ` +
+      `that expects a change fails with no_change there. Shown once per run; the transcript ` +
+      `records each ungoverned node.\n`,
+    );
+  }
+
   async runNode(node: DagNode): Promise<Record<string, BlackboardValue>> {
     const role = this.config.roles.getRole(node.agentRole);
     const taskId = makeTaskId(node.id);
+    const resolved = this.resolveTier(role);
 
     // Captured BEFORE the node does anything, and before any model call is spent. A
     // writer that commits its own work would otherwise diff clean against HEAD, so the
@@ -185,12 +285,26 @@ export class RoleDispatcher {
     // roles are writers is decided by the tools they hold, not their name (D-07), and
     // the baseline is captured once per node so a retry reviews against the same commit (D-06).
     const startCommit = isWriterRole(role) ? await this.baselineFor(node.id) : undefined;
+    const review = startCommit === undefined
+      ? undefined
+      : new AttemptReview((onDiff) => this.runPostCoderGates(node, startCommit, onDiff));
 
     await this.config.transcript.append(
       'user',
       `[${role.role}] ${node.label}: ${JSON.stringify(node.metadata)}`,
       { agentRole: role.role, nodeId: node.id },
     );
+    if (resolved.note !== undefined) {
+      await this.config.transcript.append('system', resolved.note, { agentRole: role.role, nodeId: node.id });
+    }
+    if (resolved.ungoverned !== undefined) {
+      this.ungovernedBanner(role, resolved.ungoverned);
+      await this.config.transcript.append(
+        'system',
+        `[ungoverned] role "${role.role}" runs on the cli tier: ${resolved.ungoverned}; allowed by --allow-ungoverned`,
+        { agentRole: role.role, nodeId: node.id },
+      );
+    }
 
     const roleTools = new RoleToolRegistry(this.config.baseTools, role.allowedTools);
     const rolePrompt = await this.config.roles.loadPrompt(role);
@@ -216,61 +330,54 @@ export class RoleDispatcher {
     if (role.tokenBudget) invokeOpts.tokenBudget = role.tokenBudget;
     if (this.config.temperature !== undefined) invokeOpts.temperature = this.config.temperature;
 
-    // ── Phase 1 gate: in-process roles go through the processor pipeline loop ──
-    // Requires BOTH a sendTurn implementation AND the inProcessLoop capability:
-    // an adapter may ship sendTurn but keep the capability off (e.g. Codex, whose
-    // autonomous mode would bypass the gate) — that adapter must stay on CLI.
-    const wantsInProcess = (role.execution ?? 'cli') === 'in-process';
     const adapter = this.config.adapter;
-    const canInProcess = isTurnAdapter(adapter) && adapter.capabilities().inProcessLoop;
-    if (wantsInProcess && !canInProcess) {
-      await this.config.transcript.append(
-        'system',
-        `[warn] role "${role.role}" requested execution=in-process but adapter "${adapter.name}" lacks the capability; falling back to CLI dispatch`,
-        { agentRole: role.role, nodeId: node.id },
-      );
-    }
-
     let outputForMemory: string;
     // Built where the evidence is, thrown only after the transcript has the node's output and
     // the security gate has seen its diff: an agent can change the tree before it fails, and
     // a diff left behind is reviewed whatever the outcome — the in-process tier does the same
     // at task_end, where the gate runs on budget_exhausted too.
     let shortfall: NodeFailure | TransportError | undefined;
-    const ranInProcess = wantsInProcess && canInProcess;
+    let cliResult: AdapterInvokeResult | undefined;
+    const ranInProcess = resolved.tier === 'in-process';
     try {
       if (ranInProcess) {
-        const loop = await this.runInProcess(node, role, invokeOpts, taskId, startCommit);
+        const loop = await this.runInProcess(role, invokeOpts, taskId, review);
         outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
         shortfall = loopShortfall(role, loop);
       } else {
-        const result = await adapter.invoke(invokeOpts);
-        outputForMemory = result.output.slice(0, MAX_STORED_OUTPUT_CHARS);
-        shortfall = cliShortfall(role, adapter.name, result);
+        cliResult = await adapter.invoke(invokeOpts);
+        outputForMemory = cliResult.output.slice(0, MAX_STORED_OUTPUT_CHARS);
+        shortfall = cliShortfall(role, adapter.name, cliResult);
       }
     } catch (err: unknown) {
       // The loop or the adapter threw — a turn timed out, a backend never started. Tools may
-      // already have changed the tree, and on the in-process tier the gate that reviews it
-      // runs at task_end, which a throw never reaches. So the diff is reviewed here, before
-      // the failure propagates: a refusal (a verdict) outranks the transport failure, and a
-      // clean or empty diff lets the original error through for the scheduler to classify.
-      // Not when the error already carries a verdict (GateRefused: the gate has spoken) or
-      // comes from a loop that finished its task — including its task_end review — and
-      // reported failure (NodeFailure): reviewing again would record the same findings twice.
+      // already have changed the tree, so the diff is reviewed before the failure propagates:
+      // a refusal (a verdict) outranks the transport failure, and a clean or empty diff lets
+      // the original error through for the scheduler to classify. On the in-process tier the
+      // dispatcher has already fired task_end, so this is a no-op unless the bundle has no
+      // security-gate processor or a task_end processor ahead of it threw. Not when the error
+      // already carries a verdict (GateRefused: the gate has spoken) or comes from a loop that
+      // finished its task, task_end review included, and reported failure (NodeFailure).
       const alreadyJudged = err instanceof GateRefused || err instanceof NodeFailure;
-      if (startCommit !== undefined && !alreadyJudged) await this.runPostCoderGates(node, startCommit);
+      if (review && !alreadyJudged) await review.run();
       throw err;
     }
 
     await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
     await this.config.lcmBridge.flush();
 
-    if (startCommit !== undefined && !ranInProcess) {
-      // In-process runs reach the security gate at task_end via SecurityGateProcessor, which
-      // runs it for every role that was handed a runner — every writer; the CLI path,
-      // including the adapter-capability fallback, runs it here. `startCommit !== undefined` and
-      // `isWriterRole(role)` are the same condition by construction.
-      await this.runPostCoderGates(node, startCommit);
+    // Every writer's diff is reviewed, once per attempt. In-process that normally happened at
+    // task_end, through the security-gate processor; the cli tier, and an in-process bundle
+    // without that processor, get it here. `review` exists exactly when the role is a writer.
+    if (review) await review.run();
+
+    // D-32, judged after the gate so that a refusal still wins, and only where nothing else
+    // already failed the node: a cli-tier answer from a role that expects a change, whose diff
+    // against the start commit — the one the gate just read — is empty. In-process, every tool
+    // call is on the record, and D-04's budget rules judge the loop.
+    if (shortfall === undefined && cliResult !== undefined && role.expectsChange === true &&
+        startCommit !== undefined && review?.diff?.trim() === '') {
+      shortfall = noChangeShortfall(role, adapter.name, cliResult, startCommit);
     }
 
     if (shortfall) {
@@ -303,34 +410,39 @@ export class RoleDispatcher {
    * bundle when the harness carries none (see DEFAULT_BUNDLE_REFS in @maf/processors).
    */
   private async runInProcess(
-    node: DagNode,
     role: ReturnType<RoleRegistry['getRole']>,
     invokeOpts: AdapterInvokeOptions,
     taskId: ReturnType<typeof makeTaskId>,
-    startCommit: string | undefined,
+    review: AttemptReview | undefined,
   ): Promise<InProcessLoopResult> {
     const adapter = this.config.adapter;
     if (!isTurnAdapter(adapter)) throw new Error('unreachable: gated by caller');
 
     const harness = this.config.harness;
+    const harnessSha = harness?.sha ?? '0'.repeat(64);
     const refs = harness && harness.processorBundles.length > 0
       ? harness.processorBundles
       : [...DEFAULT_BUNDLE_REFS];
     const deps: ProcessorDeps = {
       transcript: this.config.transcript,
-      // The processor invokes this only for coder events, which are exactly the events
-      // that have a start commit; a node without one gets no runner at all.
-      ...(startCommit !== undefined
-        ? { securityRunner: () => this.runPostCoderGates(node, startCommit) }
-        : {}),
+      // Every writer gets a runner and no reader does: `review` exists exactly for writers.
+      ...(review !== undefined ? { securityRunner: () => review.run() } : {}),
     };
     const pipeline = ProcessorPipeline.build(refs, createDefaultProcessorRegistry(), deps);
+    // Whether the loop reached task_end, recorded as the event goes in: a task_end processor
+    // that throws (the transcript sorts before the gate) has still been handed the end of the task.
+    let taskEndEmitted = false;
+    const runHook = pipeline.run.bind(pipeline);
+    pipeline.run = (event) => {
+      if (event.hook === 'task_end') taskEndEmitted = true;
+      return runHook(event);
+    };
 
     const toolList = new RoleToolRegistry(this.config.baseTools, role.allowedTools).getAll();
     const loop = new InProcessAgentLoop(
       {
         role:         role.role,
-        harnessSha:   harness?.sha ?? '0'.repeat(64),
+        harnessSha,
         systemPrompt: invokeOpts.systemPrompt ?? '',
         userPrompt:   invokeOpts.prompt,
         tools:        toolList,
@@ -353,7 +465,27 @@ export class RoleDispatcher {
       },
     );
 
-    const result = await loop.run();
+    let result: InProcessLoopResult;
+    try {
+      result = await loop.run();
+    } catch (err: unknown) {
+      // A tool or the backend threw mid-loop, so the loop never reached task_end, where the
+      // processors observe the end of the task: the transcript records it, the security gate
+      // reviews what the agent left. Fired here instead; a refusal it reaches outranks the
+      // original error (D-31). Not when the throw came from task_end itself — a GateRefused, or
+      // any processor there failing — since every processor before it already saw the end once.
+      // (The loop's step count went with its stack, hence totalSteps 0.)
+      if (!taskEndEmitted) {
+        await pipeline.run({
+          hook: 'task_end', runId: this.config.runId, taskId, role: role.role, harnessSha,
+          finalText: '', totalSteps: 0, outcome: 'failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      throw err;
+    }
+    // A harness bundle may leave the security-gate processor out; the writer is reviewed anyway.
+    await review?.run();
     if (result.outcome === 'failed') {
       throw new NodeFailure('loop_failed', `in-process role "${role.role}" failed: ${result.error ?? 'unknown'}`);
     }
@@ -386,7 +518,11 @@ export class RoleDispatcher {
     }
   }
 
-  private async runPostCoderGates(node: DagNode, startCommit: string): Promise<void> {
+  private async runPostCoderGates(
+    node: DagNode,
+    startCommit: string,
+    onDiff: (diff: string) => void,
+  ): Promise<void> {
     // The CLI run path does not currently create per-task worktrees, so we read the diff
     // from `git` instead of WorktreeManager.harvest. `snapshotDiff` stages the whole
     // working tree into a throwaway index, so a file the coder created without staging it
@@ -394,6 +530,8 @@ export class RoleDispatcher {
     // A failure here is an error, never an empty diff: "we could not look" and "nothing
     // changed" must not be the same verdict.
     const diff = await snapshotDiff(this.config.cwd, startCommit);
+    // Handed back before anything else: an empty diff is also D-32's evidence (no_change).
+    onDiff(diff);
     if (!diff.trim()) return;
 
     const securityGate = this.config.securityGate;

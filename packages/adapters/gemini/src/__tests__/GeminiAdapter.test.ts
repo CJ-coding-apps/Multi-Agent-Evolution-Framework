@@ -83,3 +83,28 @@ test('stream runs through the injected spawnStreaming', async () => {
   assert.deepEqual(chunks, ['a', 'b']);
   assert.deepEqual(seen, ['gemini', '-p', 'say hi']);
 });
+
+// ORACLE (WP-2.1; cli-tier hardening). A spawned `gemini` connected to every MCP server in the
+// user's configuration. Its CLI has no strict switch, only an allowlist, so every spawn passes an
+// allowlist naming a server no configuration defines.
+
+test('invoke spawns gemini with an MCP allowlist that admits no configured server', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  await new GeminiAdapter({ spawn }).invoke({ ...CALL, model: 'gemini-2.5-pro' });
+
+  const args = calls[0]?.args ?? [];
+  const at = args.indexOf('--allowed-mcp-server-names');
+  assert.ok(at >= 0, `the allowlist flag is passed: ${JSON.stringify(args)}`);
+  assert.equal(args[at + 1], 'maf-allows-no-mcp-server', 'one name, which no configuration defines; an empty list is not a documented refusal');
+  assert.deepEqual(args, ['--model', 'gemini-2.5-pro', '--allowed-mcp-server-names', 'maf-allows-no-mcp-server', '-p', 'say hi']);
+});
+
+test('stream spawns gemini with the same MCP allowlist', async () => {
+  const seen: string[][] = [];
+  async function* spawnStreaming(_cmd: string, args: string[]): AsyncGenerator<string> {
+    seen.push([...args]);
+    yield 'a';
+  }
+  for await (const _chunk of new GeminiAdapter({ spawnStreaming }).stream(CALL)) { /* drain */ }
+  assert.deepEqual(seen[0], ['--allowed-mcp-server-names', 'maf-allows-no-mcp-server', '-p', 'say hi']);
+});

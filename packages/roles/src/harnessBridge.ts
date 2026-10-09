@@ -23,6 +23,11 @@ function roleConfigFromHarness(r: HarnessRoleConfig): RoleConfig {
       `role "${r.role}": execution must be 'cli' | 'in-process', got ${JSON.stringify(r.execution)}`,
     );
   }
+  if (r.expectsChange !== undefined && typeof r.expectsChange !== 'boolean') {
+    throw new HarnessConfigError(
+      `role "${r.role}": expectsChange must be a boolean, got ${JSON.stringify(r.expectsChange)}`,
+    );
+  }
   if (r.timeoutMs !== undefined && r.timeoutMs <= 0)
     throw new HarnessConfigError(`role "${r.role}": timeoutMs must be positive`);
   if (r.maxToolIterations !== undefined && r.maxToolIterations <= 0)
@@ -36,6 +41,7 @@ function roleConfigFromHarness(r: HarnessRoleConfig): RoleConfig {
     ...(r.policyTag !== undefined ? { policyTag: r.policyTag } : {}),
     ...(r.model !== undefined ? { model: r.model } : {}),
     ...(r.execution !== undefined ? { execution: r.execution } : {}),
+    ...(r.expectsChange !== undefined ? { expectsChange: r.expectsChange } : {}),
     ...(r.timeoutMs !== undefined ? { timeoutMs: r.timeoutMs } : {}),
     ...(r.maxToolIterations !== undefined ? { maxToolIterations: r.maxToolIterations } : {}),
     ...(r.tokenBudget !== undefined ? { tokenBudget: r.tokenBudget } : {}),

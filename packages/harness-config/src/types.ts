@@ -18,6 +18,8 @@ export interface HarnessRoleConfig {
   policyTag?:         string;
   model?:             string;
   execution?:         'cli' | 'in-process';
+  /** D-32: the role is expected to change the tree; see `RoleConfig.expectsChange` in @maf/roles. */
+  expectsChange?:     boolean;
   timeoutMs?:         number;
   maxToolIterations?: number;
   tokenBudget?:       number;

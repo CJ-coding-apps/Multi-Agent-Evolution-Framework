@@ -128,3 +128,76 @@ test('invoke passes no --max-tokens to a claude binary that has no such flag', a
   assert.deepEqual(args.slice(0, 3), ['--print', '--model', 'opus'], 'the flags it does accept stay');
   assert.deepEqual(args.slice(-2), ['-p', 'say hi']);
 });
+
+// ORACLE (WP-2.1; cli-tier hardening carried from WP-1.12). A spawned `claude` inherited every MCP
+// server in the user's and the project's configuration, so a backend MAF dispatched could call
+// tools MAF never handed it. Every spawn now passes --strict-mcp-config with an empty server set.
+
+const MCP_ISOLATION = ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'];
+
+/** Where `needle` starts inside `args`, as a contiguous run; -1 when it is not there. */
+function indexOfRun(args: string[], needle: string[]): number {
+  for (let i = 0; i + needle.length <= args.length; i++) {
+    if (needle.every((v, j) => args[i + j] === v)) return i;
+  }
+  return -1;
+}
+
+test('invoke spawns claude with an empty, strict MCP configuration', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  await new ClaudeAdapter({ spawn }).invoke({ ...CALL, systemPrompt: 'be brief', model: 'opus' });
+
+  const args = calls[0]?.args ?? [];
+  const at = indexOfRun(args, MCP_ISOLATION);
+  assert.ok(at > 0, `the isolation flags are passed together: ${JSON.stringify(args)}`);
+  assert.equal(args.filter((a) => a === '--mcp-config').length, 1);
+  // --mcp-config takes several values: the next element must be an option, or the prompt
+  // would be read as a second MCP configuration.
+  assert.deepEqual(args.slice(at + MCP_ISOLATION.length), ['-p', 'say hi']);
+  assert.deepEqual(args.slice(0, 5), ['--print', '--system-prompt', 'be brief', '--model', 'opus']);
+});
+
+test('sendTurn spawns claude with the same MCP isolation as invoke', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'done', stderr: '', exitCode: 0, duration: 1 });
+  await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, CALL);
+
+  const args = calls[0]?.args ?? [];
+  const at = indexOfRun(args, MCP_ISOLATION);
+  assert.ok(at > 0, `a governed turn gets no MCP server either: ${JSON.stringify(args)}`);
+  assert.equal(args[at + MCP_ISOLATION.length], '-p');
+});
+
+// ORACLE (D-33; verifier F2). A governed turn spawned `claude --print` with Claude Code's own
+// tools on, so inside one turn the backend could read files, or edit them wherever the user's
+// permissions.allow let it, outside MAF's policy and attestation. sendTurn now turns every native
+// tool off with `--tools ""`; invoke is the cli tier, whose backend is meant to use its own tools,
+// and keeps them. Both argvs are pinned whole, so a flag that moves between the two paths fails.
+
+test('sendTurn spawns claude with its native tools off, beside the MCP isolation', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'done', stderr: '', exitCode: 0, duration: 1 });
+  await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, systemPrompt: 'be brief', model: 'opus' });
+
+  const args = calls[0]?.args ?? [];
+  assert.equal(args[0], '--print');
+  assert.equal(args[1], '--system-prompt');
+  assert.match(args[2] ?? '', /^be brief/, 'the role prompt leads the turn system block');
+  assert.deepEqual(args.slice(3), [
+    '--model', 'opus',
+    '--tools', '',
+    ...MCP_ISOLATION,
+    '-p', args[args.length - 1],
+  ]);
+  assert.match(args[args.length - 1] ?? '', /say hi/, 'the serialized history is the prompt');
+  assert.equal(args.indexOf('--tools'), args.lastIndexOf('--tools'));
+});
+
+test('invoke keeps claude\'s native tools on the cli tier: only the MCP isolation is passed', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  await new ClaudeAdapter({ spawn }).invoke({ ...CALL, systemPrompt: 'be brief', model: 'opus' });
+
+  assert.deepEqual(calls[0]?.args, [
+    '--print', '--system-prompt', 'be brief', '--model', 'opus',
+    ...MCP_ISOLATION,
+    '-p', 'say hi',
+  ]);
+});

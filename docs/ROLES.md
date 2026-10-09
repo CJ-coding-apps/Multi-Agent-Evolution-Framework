@@ -3,7 +3,7 @@
 Every DAG node in MAF runs as a *role*. A role bundles:
 
 1. A **system prompt** (inline or loaded from a file).
-2. An **allowed tool set** — the only tools the role is allowed to call on the `in-process` tier. On the default `cli` tier the allowlist is not passed to the backend CLI, which uses its own tools.
+2. An **allowed tool set** — the only tools the role is allowed to call on the `in-process` tier, where a [writer](#writer-roles) runs by default. On the `cli` tier — the default for a read-only role, and a writer's only with `--allow-ungoverned` — the allowlist is not passed to the backend CLI, which uses its own tools.
 3. Optional **model**, **timeout**, **token budget**, and **policyTag** overrides.
 
 The planner emits `agentRole` on each node it produces. That name is checked against the role set in force **where the DAG is built** — the planner, `DagParser` and `DagSynthesizer` each refuse a name the set does not define, and the refusal lists the roles that do exist. A node carries a `RoleName`, which only a role set can produce, so an unrecognised name cannot reach the dispatcher at all. (Before this it did, and silently: an unknown name resolved to the *default* role — `coder`, a writer — so a typo or a hallucinated role name widened privilege rather than being refused.)
@@ -62,7 +62,8 @@ Fields:
 | `timeoutMs`         | no       | Per-role timeout, otherwise the node's `timeoutMs` applies. |
 | `tokenBudget`       | no       | Token cap. Enforced on the in-process path (real usage if reported, else estimated) and sent as `max_tokens`/`num_predict` by the HTTP adapters; the `claude`, `codex` and `gemini` CLIs have no such flag, so a `cli`-tier node ignores it. |
 | `maxToolIterations` | no       | Cap on tool-call iterations (turns) in the loop. |
-| `execution`         | no       | `'cli'` (default) or `'in-process'`. `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair); requires a `TurnAdapter` with `inProcessLoop` capability, else falls back to `cli` and notes the fallback in the run's transcript. See the README "In-process execution" section. |
+| `execution`         | no       | `'in-process'` or `'cli'`. Default: `'in-process'` for a [writer](#writer-roles), `'cli'` for any other role ([D-01](DECISIONS.md)). `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair) and needs a `TurnAdapter` with the `inProcessLoop` capability. Without one, a read-only role falls back to `cli` and notes the fallback in the run's transcript, while a writer refuses to start unless the run allows ungoverned writers (`--allow-ungoverned`). A writer set to `'cli'` needs the same flag. See the README "In-process execution" section. |
+| `expectsChange`     | no       | `true` when the role's job is to change the tree ([D-32](DECISIONS.md)). A `cli`-tier node of such a role that answers and exits 0 but leaves no diff against its start commit fails with `no_change`, the output tail in the error — what a backend that refused the edit under its own permission settings looks like. Only a writer may set it; on any other role it is a `RoleConfigError`. The built-in `coder` and this repository's `.maf/roles.yaml` coder set it; the tester does not, because a tester that adds no test has often done its job. |
 
 ### YAML or JSON?
 
@@ -79,6 +80,13 @@ DagRunner.run({ executor: (node) => dispatcher.runNode(node) })
                      ▼
 RoleDispatcher.runNode(node):
   1. role = roles.getRole(node.agentRole)            // node.agentRole is a RoleName: a role set defined it
+     tier = effectiveTier(role, adapter)             // role.execution, else in-process for a writer and cli
+                                                     // for a reader; cli wherever the adapter cannot run the loop
+     writer on the cli tier, no allowUngoverned:     throw, naming --allow-ungoverned — before anything is
+                                                     // captured, recorded or sent to a model (D-01)
+     writer on the cli tier, allowUngoverned:        UNGOVERNED banner on stderr (once per run) and an
+                                                     // [ungoverned] transcript note for the node
+     reader that asked for in-process, fell back:    [warn] transcript note
   2. if isWriterRole(role):
        startCommit = git rev-parse HEAD              // captured before the node runs, once per node;
                                                      // a retry reuses it (empty tree if no commits yet)
@@ -87,10 +95,12 @@ RoleDispatcher.runNode(node):
   5. systemPrompt = injector.assemble(node.label, sessionId, role.role) + '\n' + rolePrompt
   6. cli tier:        result = adapter.invoke({ prompt, systemPrompt, … })
      in-process tier: InProcessAgentLoop.run() — every tool call through executeToolGated;
-                      for a writer, the security-gate processor runs the step-7 review at task_end
+                      for a writer, the security-gate processor runs the step-7 review at task_end;
+                      a tool or backend turn that throws still fires task_end, once
      if either throws (a timed-out turn, a backend that never started) and the role is a writer:
-                      run the step-7 review now, then rethrow — a GateRefused outranks the error
-  7. cli tier, writer role:
+                      run the step-7 review now if it has not run, then rethrow — a GateRefused outranks the error
+  7. writer role, once per attempt — on the cli tier after the backend returns; in-process at
+     task_end, or right after the loop when the harness bundle leaves the security-gate processor out:
        diff = snapshotDiff(cwd, startCommit)         // whole repository vs startCommit;
                                                      // this run's .maf/ runtime state excluded
        result = await securityGate.reviewDiff(diff)  // GateRefused above the size cap
@@ -99,6 +109,8 @@ RoleDispatcher.runNode(node):
   8. fail the node: a cli result that carried a transport failure → TransportError (may be retried);
      one that reported failure, or a writer's empty output → NodeFailure;
      a loop that ended budget_exhausted without node.allowPartial → NodeFailure
+  9. otherwise, cli tier, role.expectsChange and the step-7 diff is empty:
+       throw NodeFailure('no_change')                // the output tail in the message (D-32)
 ```
 
 `node.allowPartial` can be set only on a DAG built in code in 0.2.1: neither a DAG spec (`DagParser`), `DagSynthesizer` nor the planner sets it yet, so a planned run cannot accept partial work. Setting it from specs and plans is planned for 0.3.0.
@@ -115,11 +127,12 @@ On the `in-process` tier the dispatcher never bypasses policy: the loop advertis
 
 A role is a writer when it holds any of `fs.write`, `fs.delete`, `patch.apply`, `git.commit`, `git.reset` or `git.add` (`isWriterRole`, exported from `@maf/roles`). The role's name plays no part: a `tester` holding `patch.apply` and a custom role holding only `git.commit` are writers; a role called `coder` with only read tools is not. For a writer, MAF:
 
+- runs it on the `in-process` tier unless its `execution` is `'cli'` ([D-01](DECISIONS.md)): policy verdicts, secret redaction, attested tool calls and processor hooks exist only there. A writer that would land on the `cli` tier — by its own `execution: 'cli'`, or because the adapter cannot run the in-process loop (`codex`, `gemini`, `ollama` and `openrouter` cannot; only `claude` can) — refuses to start, before it captures anything or calls a model, with an error naming `--allow-ungoverned`. With that flag it runs on the `cli` tier, the run prints an `UNGOVERNED` banner on stderr once, and the transcript notes each such node. There a CLI backend (`claude`, `codex`, `gemini`) edits the tree with its own tools under its own permission settings, while an HTTP backend (`ollama`, `openrouter`) has no file tools and cannot change the tree at all, so a role with `expectsChange` cannot succeed on it (`no_change`). `effectiveTier(role, adapter)` says which tier a role gets;
 - captures the start commit before the node runs, so the target directory must be a git repository;
-- security-reviews the diff: on the `cli` tier after the backend returns, whatever it returned; on the `in-process` tier at `task_end` through the `security-gate` processor, which the default bundle includes and a harness's own bundle may leave out; and, on either tier, before an error thrown by the backend or the loop propagates ([D-31](DECISIONS.md));
-- fails the node on the `cli` tier if the backend returns empty output.
+- security-reviews the diff once per attempt: on the `cli` tier after the backend returns, whatever it returned; on the `in-process` tier at `task_end` through the `security-gate` processor, or right after the loop when a harness's own bundle leaves that processor out; and, on either tier, before an error thrown by the backend or the loop propagates ([D-31](DECISIONS.md)). A tool or a backend turn that throws inside the loop still fires `task_end`, so every processor sees the task end;
+- fails the node on the `cli` tier if the backend returns empty output, or — for a role with `expectsChange` — if it answers and leaves the tree unchanged against the start commit (`no_change`, [D-32](DECISIONS.md)).
 
-The scheduler's writer lock — which stops two nodes editing the tree at once — uses a broader test: every `cli`-tier role counts as a writer there, because its backend CLI has file tools of its own whatever the allowlist says, and an `in-process` role counts as one if it holds any tool that is not read-only.
+The scheduler's writer lock — which stops two nodes editing the tree at once — uses a broader test, `isWriterForLock(role, adapter, baseTools)`: every role that runs on the `cli` tier counts as a writer there, because its backend CLI has file tools of its own whatever the allowlist says — including a read-only role that asked for `in-process` on an adapter that cannot run it — and an `in-process` role counts as one if it holds any tool that is not read-only.
 
 ## Planning instructions
 
