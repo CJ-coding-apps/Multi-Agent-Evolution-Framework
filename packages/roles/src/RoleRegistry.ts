@@ -220,6 +220,15 @@ function isRoleSet(x: unknown): x is RawRoleSet {
     if (rr['systemPrompt'] !== undefined && typeof rr['systemPrompt'] !== 'string') return false;
     if (rr['promptFile']   !== undefined && typeof rr['promptFile']   !== 'string') return false;
     if (rr['expectsChange'] !== undefined && typeof rr['expectsChange'] !== 'boolean') return false;
+    // Thrown, not `false`, so the message can name the value: a misspelt tier would otherwise
+    // reach the dispatcher and be refused as an adapter that "cannot run the in-process loop".
+    const execution = rr['execution'];
+    if (execution !== undefined && execution !== 'cli' && execution !== 'in-process') {
+      throw new RoleConfigError(
+        `Role "${rr['role']}" sets execution ${JSON.stringify(execution)}, but execution must be ` +
+        `'cli' or 'in-process'.`,
+      );
+    }
   }
   return true;
 }

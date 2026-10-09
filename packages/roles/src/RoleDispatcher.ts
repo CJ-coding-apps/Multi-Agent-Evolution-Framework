@@ -150,9 +150,6 @@ class AttemptReview {
 
   constructor(private readonly review: (onDiff: (diff: string) => void) => Promise<void>) {}
 
-  /** Whether the review has started; one that threw (a refusal) has started too. */
-  get started(): boolean { return this.begun; }
-
   /** The diff the review read, once it has read one. */
   get diff(): string | undefined { return this.seen; }
 
@@ -269,8 +266,11 @@ export class RoleDispatcher {
     (this.config.stderr ?? process.stderr).write(
       `[maf] UNGOVERNED: --allow-ungoverned lets writer role "${role.role}" run on the cli tier ` +
       `(${why}). There MAF applies no policy verdicts, secret redaction, attested tool calls or ` +
-      `processor hooks: the backend acts under its own permission settings, and MAF reviews only ` +
-      `the diff it leaves. Shown once per run; the transcript records each ungoverned node.\n`,
+      `processor hooks, and reviews only the diff the node leaves. A CLI backend (claude, codex, ` +
+      `gemini) edits the tree with its own tools under its own permission settings; an HTTP ` +
+      `backend (ollama, openrouter) has no file tools and cannot change the tree at all, so a role ` +
+      `that expects a change fails with no_change there. Shown once per run; the transcript ` +
+      `records each ungoverned node.\n`,
     );
   }
 
@@ -355,9 +355,9 @@ export class RoleDispatcher {
       // a refusal (a verdict) outranks the transport failure, and a clean or empty diff lets
       // the original error through for the scheduler to classify. On the in-process tier the
       // dispatcher has already fired task_end, so this is a no-op unless the bundle has no
-      // security-gate processor. Not when the error already carries a verdict (GateRefused: the
-      // gate has spoken) or comes from a loop that finished its task, task_end review included,
-      // and reported failure (NodeFailure).
+      // security-gate processor or a task_end processor ahead of it threw. Not when the error
+      // already carries a verdict (GateRefused: the gate has spoken) or comes from a loop that
+      // finished its task, task_end review included, and reported failure (NodeFailure).
       const alreadyJudged = err instanceof GateRefused || err instanceof NodeFailure;
       if (review && !alreadyJudged) await review.run();
       throw err;
@@ -429,6 +429,14 @@ export class RoleDispatcher {
       ...(review !== undefined ? { securityRunner: () => review.run() } : {}),
     };
     const pipeline = ProcessorPipeline.build(refs, createDefaultProcessorRegistry(), deps);
+    // Whether the loop reached task_end, recorded as the event goes in: a task_end processor
+    // that throws (the transcript sorts before the gate) has still been handed the end of the task.
+    let taskEndEmitted = false;
+    const runHook = pipeline.run.bind(pipeline);
+    pipeline.run = (event) => {
+      if (event.hook === 'task_end') taskEndEmitted = true;
+      return runHook(event);
+    };
 
     const toolList = new RoleToolRegistry(this.config.baseTools, role.allowedTools).getAll();
     const loop = new InProcessAgentLoop(
@@ -464,10 +472,10 @@ export class RoleDispatcher {
       // A tool or the backend threw mid-loop, so the loop never reached task_end, where the
       // processors observe the end of the task: the transcript records it, the security gate
       // reviews what the agent left. Fired here instead; a refusal it reaches outranks the
-      // original error (D-31). Not when the throw came from task_end itself — a GateRefused is
-      // the gate's verdict there, and a review that has started means task_end was reached.
+      // original error (D-31). Not when the throw came from task_end itself — a GateRefused, or
+      // any processor there failing — since every processor before it already saw the end once.
       // (The loop's step count went with its stack, hence totalSteps 0.)
-      if (!(err instanceof GateRefused) && review?.started !== true) {
+      if (!taskEndEmitted) {
         await pipeline.run({
           hook: 'task_end', runId: this.config.runId, taskId, role: role.role, harnessSha,
           finalText: '', totalSteps: 0, outcome: 'failed',

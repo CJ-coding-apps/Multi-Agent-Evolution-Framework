@@ -187,10 +187,12 @@ The writer-role diff above is the one thing maf still observes on the `cli` tier
 *after* the node finishes — and only for a role that holds a write tool. Policy refusals, redaction and
 tool-call records exist on the `in-process` tier alone.
 
-No shipped role set sets `execution: in-process` (no role in the built-in catalogue names an `execution`,
-and the field defaults to `cli`), so **maf's default posture is ungoverned; governance is opt-in per
-role.** That is the honest reading of the default and it is the reason the tier is worth knowing before
-trusting a run.
+A role's `execution` field defaults by the tools it holds ([D-01](DECISIONS.md)): `in-process` for a role
+that holds a write tool, `cli` for any other. A writer lands on the `cli` tier only by its own
+`execution: cli` or because the adapter cannot run the in-process loop (`codex`, `gemini`, `ollama`,
+`openrouter`), and then only under `--allow-ungoverned`, which prints an `UNGOVERNED` banner; without it
+maf refuses to start the writer. So **maf's default posture is governed for writers; a read-only role
+still runs on the ungoverned `cli` tier unless it sets `execution: in-process`.**
 
 The tier is *not* yet recorded in the attestation bundle: today it is a local in `RoleDispatcher`, so a
 bundle says what a run produced but not how each node was executed. Until it is recorded per role, the

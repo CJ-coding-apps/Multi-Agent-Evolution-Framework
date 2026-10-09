@@ -10,7 +10,7 @@ import type {
   TurnMessage, AssistantTurn, DagNode, ToolPlugin, ToolContext, ToolResult, SecurityReviewResult,
   ToolId,
 } from '@maf/types';
-import { makeNodeId, makeRunId, makeToolId, GateRefused, TransportError } from '@maf/types';
+import { makeNodeId, makeRunId, makeToolId, GateRefused, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
 import { mintHarnessConfig } from '@maf/harness-config';
@@ -23,7 +23,7 @@ import type { MemoryGraph } from '@maf/memory-graph';
 import type { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import type { SecurityReviewGate } from '@maf/git-ops';
 import { RoleDispatcher } from '../RoleDispatcher.js';
-import { RoleRegistry } from '../RoleRegistry.js';
+import { RoleRegistry, RoleConfigError } from '../RoleRegistry.js';
 import { defineRoleName } from '../RoleConfig.js';
 import type { RoleConfig } from '../RoleConfig.js';
 import { effectiveTier, isWriterForLock } from '../isWriterRole.js';
@@ -82,6 +82,19 @@ class SendTurnWithoutCapability extends TurnStub {
   override capabilities(): AdapterCapabilities { return { ...CAPS, inProcessLoop: false }; }
 }
 
+/** The reverse: the capability claimed, but no sendTurn for the loop to drive. */
+class CapabilityWithoutSendTurn implements CliAdapter {
+  readonly name = 'cap-no-turn';
+  invoked = 0;
+  capabilities(): AdapterCapabilities { return { ...CAPS, inProcessLoop: true }; }
+  async isAvailable(): Promise<boolean> { return true; }
+  async invoke(): Promise<AdapterInvokeResult> {
+    this.invoked++;
+    return { success: true, output: 'CLI-PATH', toolCallLog: [], exitCode: 0, duration: 1 };
+  }
+  async *stream(): AsyncGenerator<string> { yield 'x'; }
+}
+
 /** A writer tool that changes the tree and then crashes, as a real tool can. */
 function crashingTool(): ToolPlugin {
   return {
@@ -133,6 +146,8 @@ async function makeFixture(opts: {
   /** The harness's processor bundle; empty means the default bundle. */
   bundles?: ProcessorRef[];
   gate?: (diff: string) => SecurityReviewResult;
+  /** Make the transcript's append throw, after recording, for the entries this matches. */
+  transcriptThrows?: (content: string) => boolean;
 }): Promise<Fixture> {
   const workDir = await mkdtemp(path.join(tmpdir(), 'maf-tier-'));
   await writeFile(path.join(workDir, 'hello.txt'), 'hello', 'utf8');
@@ -159,7 +174,10 @@ async function makeFixture(opts: {
     } as unknown as Attestor,
     graph: { addNode: async () => 'n' } as unknown as MemoryGraph,
     transcript: {
-      append: async (r: string, content: string) => { transcript.push({ role: r, content }); },
+      append: async (r: string, content: string) => {
+        transcript.push({ role: r, content });
+        if (opts.transcriptThrows?.(content)) throw new Error(`the transcript could not append "${content}"`);
+      },
     } as unknown as TranscriptLogger,
     lcmBridge: { flush: async () => {} } as unknown as BlackboardToLcmAdapter,
     securityGate: {
@@ -431,5 +449,103 @@ test('an in-process writer is reviewed even when the harness bundle leaves out t
     assert.match(fx.reviewed[0] ?? '', /written in-process/);
   } finally {
     await fx.cleanup();
+  }
+});
+
+// ─── verifier F3–F5: the lines the first round left unpinned ─────────────────
+
+test('an adapter with the inProcessLoop capability but no sendTurn cannot run in-process: a writer is refused, not sent to the loop', async () => {
+  // effectiveTier needs BOTH halves. Dropping the sendTurn half would hand this adapter to
+  // runInProcess, which has no turn to drive and fails on "unreachable" instead of refusing.
+  const adapter = new CapabilityWithoutSendTurn();
+  assert.equal(effectiveTier(role('coder', WRITE_TOOLS), adapter), 'cli');
+  assert.equal(effectiveTier(role('reader', READ_TOOLS, 'in-process'), adapter), 'cli');
+  assert.equal(isWriterForLock(role('reader', READ_TOOLS, 'in-process'), adapter, createDefaultRegistry()), true);
+  const fx = await makeFixture({ adapter, role: role('coder', WRITE_TOOLS), noRepository: true });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, UNGOVERNED_REFUSAL);
+      assert.match(err.message, /adapter "cap-no-turn" cannot run the in-process loop/);
+      return true;
+    });
+    assert.equal(adapter.invoked, 0);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a security gate that throws a TransportError at task_end ends the task once: no synthetic task_end follows', async () => {
+  const adapter = new TurnStub();
+  adapter.turns = writeThenFinish();
+  const fx = await makeFixture({
+    adapter, role: role('coder', WRITE_TOOLS),
+    gate: () => { throw new TransportError('the review model timed out'); },
+  });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), TransportError);
+    assert.deepEqual(taskEnds(fx), ['task_end: completed'], 'the loop reached task_end; the dispatcher must not fire it again');
+    assert.equal(fx.reviewed.length, 1, 'the gate was asked once');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a task_end processor ahead of the gate that throws ends the task once, and the diff is still reviewed once', async () => {
+  // The transcript processor sorts before the security gate, so when it throws at task_end the
+  // review has not started — but task_end was reached, and firing it again would record the end
+  // of the task twice.
+  const adapter = new TurnStub();
+  adapter.turns = writeThenFinish();
+  const fx = await makeFixture({
+    adapter, role: role('coder', WRITE_TOOLS), transcriptThrows: (c) => c.startsWith('task_end:'),
+  });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), /the transcript could not append "task_end: completed"/);
+    assert.deepEqual(taskEnds(fx), ['task_end: completed']);
+    assert.equal(fx.reviewed.length, 1, 'the gate never ran at task_end, so the dispatcher reviewed the diff once');
+    assert.match(fx.reviewed[0] ?? '', /written in-process/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a loop that fails on malformed tool calls under a bundle without the security gate is reviewed once', async () => {
+  // loop_failed is a NodeFailure, which the dispatcher's catch treats as already judged; the
+  // review right after loop.run() is the only one this writer gets.
+  const adapter = new TurnStub();
+  const malformed: AssistantTurn = { text: 'oops', toolCalls: [], parseErrors: ['tool_call block is not JSON'] };
+  adapter.turns = [writeThenFinish()[0]!, malformed, malformed, malformed, malformed];
+  const fx = await makeFixture({ adapter, role: role('coder', WRITE_TOOLS), bundles: [{ name: 'transcript' }] });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), (err: unknown) => {
+      assert.ok(err instanceof NodeFailure);
+      assert.equal(err.reason, 'loop_failed');
+      return true;
+    });
+    assert.equal(fx.reviewed.length, 1);
+    assert.match(fx.reviewed[0] ?? '', /written in-process/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('roles.yaml: an execution other than cli or in-process is refused, naming the value and the two allowed', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-roles-exec-'));
+  try {
+    const file = path.join(dir, 'roles.yaml');
+    await writeFile(file, JSON.stringify({
+      version: 1, defaultRole: 'coder',
+      roles: [{ role: 'coder', systemPrompt: 'x', allowedTools: ['fs.write'], execution: 'inprocess' }],
+    }), 'utf8');
+    await assert.rejects(RoleRegistry.fromYamlOrDefault(file, dir, createDefaultRegistry()), (err: unknown) => {
+      assert.ok(err instanceof RoleConfigError);
+      assert.match(err.message, /role "coder"/i);
+      assert.match(err.message, /"inprocess"/);
+      assert.match(err.message, /'cli' or 'in-process'/);
+      return true;
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
