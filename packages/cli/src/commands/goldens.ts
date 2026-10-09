@@ -18,7 +18,7 @@ import type { GoldenSuiteResult } from '@maf/eval-harness';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
-import { loadHarnessFile, loadStoredHarness } from './harness.js';
+import { committedDefaults, loadHarnessFile, locateStoredHarness } from './harness.js';
 
 /**
  * The golden suite's execution verdict: did every attempt run to its verifiers?
@@ -36,21 +36,21 @@ export function goldenRunStatus(result: GoldenSuiteResult): RunStatus {
     : 'Succeeded';
 }
 
-const DEFAULT_HARNESS_RE = /^default-[0-9a-f]{64}\.json$/;
-
 /**
  * The harness a golden run evaluates: `--harness` (a stored ref, or a harness file), else
  * CURRENT, else the committed `.maf/harnesses/default-<sha>.json` — which is all a fresh clone
- * that has never run maf has. The fallback is read in place, not imported into the store.
+ * that has never run maf has. The committed default also answers to its id and (short) sha, and
+ * is read in place, not imported into the store.
  */
 export async function resolveGoldensHarness(mafDir: string, ref?: string): Promise<{ harness: HarnessConfig; source: string }> {
   const store = new HarnessStore(mafDir);
   if (ref !== undefined && (ref.endsWith('.json') || ref.includes('/') || ref.includes(path.sep))) {
     return { harness: await loadHarnessFile(path.resolve(ref)), source: path.resolve(ref) };
   }
-  const stored = ref !== undefined ? await loadStoredHarness(store, ref) : await store.current();
-  if (stored) return { harness: stored, source: path.join(store.dir, `${stored.sha}.yaml`) };
-  const defaults = (await readdir(store.dir).catch(() => [] as string[])).filter((n) => DEFAULT_HARNESS_RE.test(n));
+  if (ref !== undefined) return locateStoredHarness(store, ref);
+  const current = await store.current();
+  if (current) return { harness: current, source: path.join(store.dir, `${current.sha}.yaml`) };
+  const defaults = await committedDefaults(store);
   if (defaults.length !== 1) {
     throw new Error(
       `goldens: no harness to evaluate — no --harness, no CURRENT in ${store.dir}, and ` +
@@ -58,7 +58,7 @@ export async function resolveGoldensHarness(mafDir: string, ref?: string): Promi
       'Pass --harness, or run maf once to mint one.',
     );
   }
-  const file = path.join(store.dir, defaults[0] as string);
+  const file = defaults[0] as string;
   return { harness: await loadHarnessFile(file), source: file };
 }
 

@@ -14,7 +14,7 @@ import { GraphAwareInjector } from '@maf/prompt-injector';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import { incomparable, resolveGoldensHarness, runGoldenSuite } from '../commands/goldens.js';
-import { loadHarnessFile } from '../commands/harness.js';
+import { loadHarnessFile, loadStoredHarness } from '../commands/harness.js';
 
 // ORACLE: D-14 / D-24 — `goldens run --adapter scripted` runs on a fresh clone with no keys and
 // no prior `maf run`, reproduces the committed baseline, never lets the project's memory (or an
@@ -176,6 +176,37 @@ test('goldens picks --harness, else CURRENT, else the committed default — and 
     const tampered = path.join(root, `default-${fallback.harness.sha}.json`);
     await writeFile(tampered, (await readFile(committed, 'utf8')).replace('"maxToolIterations": 12', '"maxToolIterations": 99'), 'utf8');
     await assert.rejects(() => resolveGoldensHarness(mafDir, tampered), /content hashes to/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('on a fresh clone the committed default answers to its id, its short sha and its full sha', async () => {
+  const root = await freshClone();
+  try {
+    const mafDir = path.join(root, '.maf');
+    const committed = await defaultHarnessFile();
+    const sha = (await loadHarnessFile(committed)).sha;
+    const store = new HarnessStore(mafDir);
+    for (const ref of ['default', sha.slice(0, 8), sha]) {
+      const found = await resolveGoldensHarness(mafDir, ref);
+      assert.equal(found.harness.sha, sha, `goldens --harness ${ref}`);
+      assert.equal(path.basename(found.source), path.basename(committed), 'read in place from the committed file');
+      assert.equal((await loadStoredHarness(store, ref)).sha, sha, `the store lookup takes ${ref} too`);
+    }
+    // The committed default's sha takes part in prefix ambiguity like any stored sha.
+    const twin = `${sha.slice(0, 4)}${'0'.repeat(60)}`;
+    await writeFile(path.join(store.dir, `${twin}.yaml`), '{}', 'utf8');
+    await assert.rejects(() => loadStoredHarness(store, sha.slice(0, 4)), /is ambiguous/);
+    await assert.rejects(() => resolveGoldensHarness(mafDir, 'e'.repeat(64)), /No harness e{64} in the store at .*, and no committed default-<sha>\.json has that sha\./);
+    await assert.rejects(() => loadStoredHarness(store, 'no-such-id'), /No harness found for ref "no-such-id"/);
+
+    const { stdout: shown } = await execFileAsync(process.execPath, [MAIN, 'harness', 'show', 'default', '-d', root]);
+    assert.equal(JSON.parse(shown).sha, sha, 'maf harness show default');
+    // CURRENT can only name a stored harness, so set-current imports the committed default first.
+    await execFileAsync(process.execPath, [MAIN, 'harness', 'set-current', sha.slice(0, 8), '-d', root]);
+    assert.equal((await store.current())?.sha, sha, 'set-current by short sha points CURRENT at the committed default');
+
   } finally {
     await rm(root, { recursive: true, force: true });
   }

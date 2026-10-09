@@ -77,6 +77,20 @@ test('import refuses a harness whose content is not what it claims, or that woul
   });
 });
 
+test('import refuses the ids the store reserves, in any case (D-39)', async () => {
+  await withDir(async (dir, store) => {
+    for (const id of ['legacy-default', 'current', 'CURRENT', 'Legacy-Default']) {
+      await assert.rejects(
+        async () => importHarness(store, await writeHarness(dir, harness(id))),
+        new RegExp(`has the id "${id}", which maf reserves: .*Give the harness another id and mint it again before importing it\\.`),
+        `an empty store must still refuse ${id}`,
+      );
+    }
+    assert.deepEqual(await store.list(), [], 'nothing was copied or indexed');
+    assert.equal(await store.tryLoad('legacy-default'), undefined, 'a plain run will still adopt roles.yaml as legacy-default');
+  });
+});
+
 test('a short sha names a stored harness when exactly one starts with it', async () => {
   await withDir(async (dir, store) => {
     const a = harness('a');
