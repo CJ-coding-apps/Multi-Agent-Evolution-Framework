@@ -69,7 +69,8 @@ test('maf goldens run --adapter scripted on a fresh clone reproduces the committ
     const { stdout } = await execFileAsync(process.execPath, [MAIN, 'goldens', 'run', '--adapter', 'scripted', '--corpus', 'tests/goldens'],
       { cwd: root });
     const baseline = JSON.parse(await readFile(path.join(SEED, 'baseline.json'), 'utf8')) as GoldenSuiteResult;
-    const result = JSON.parse(await readFile(path.join(root, '.maf/goldens/results', `${baseline.harnessSha}.json`), 'utf8')) as GoldenSuiteResult;
+    // Named <harnessSha>.<adapter>.json (D-38), so this run cannot overwrite a real model's result.
+    const result = JSON.parse(await readFile(path.join(root, '.maf/goldens/results', `${baseline.harnessSha}.scripted.json`), 'utf8')) as GoldenSuiteResult;
     assert.deepEqual(stable(result), stable(baseline), stdout);
     const state = await readdir(path.join(root, '.maf'));
     for (const store of ['lcm.db', 'transcripts']) {
@@ -122,13 +123,28 @@ test('a poisoned project graph and an earlier attempt\'s memory never reach the 
       // Attempt 1's tool calls are graph nodes that match this task; attempt 2 must not see them.
       assert.doesNotMatch(t.systemPrompt, /<memory-graph>/, 'an earlier attempt\'s memory reached the prompt');
     }
+    // Isolation means the evaluation never opened the project graph — not that it wiped it too.
+    const after = new MemoryGraph(path.join(root, '.maf/memory.kuzu'));
+    try {
+      const rows = await after.run({ cypher: 'MATCH (n:MemoryNode) WHERE n.label CONTAINS $p RETURN n.id AS id', params: { p: 'POISON-7f3a' } });
+      assert.equal(rows.length, 1, 'the project graph lost its node: the evaluation dispatched through (and wiped) the project\'s memory');
+    } finally {
+      after.close();
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
 function result(over: Partial<GoldenSuiteResult>): GoldenSuiteResult {
-  return { harnessSha: 'a'.repeat(64), harnessId: 'h', tasks: [], solvedTaskIds: [], ranAt: 't', ...over };
+  return { harnessSha: 'a'.repeat(64), harnessId: 'h', adapter: 'scripted', attempts: 2, tasks: [], solvedTaskIds: [], ranAt: 't', ...over };
+}
+
+async function compare(dir: string, a: string, b: string): Promise<{ code: number; stdout: string; stderr: string }> {
+  return execFileAsync(process.execPath, [MAIN, 'goldens', 'compare', a, b, '-d', dir]).then(
+    ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
+    (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code ?? -1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }),
+  );
 }
 
 test('goldens compare refuses results measured on different corpora, or on an unknown one', async () => {
@@ -145,9 +161,9 @@ test('goldens compare refuses results measured on different corpora, or on an un
     };
     const a = await write('a.json', result({ corpusSha: one, solvedTaskIds: ['x'] }));
     const b = await write('b.json', result({ corpusSha: 'd'.repeat(64), harnessSha: 'b'.repeat(64), solvedTaskIds: [] }));
-    const err = await execFileAsync(process.execPath, [MAIN, 'goldens', 'compare', a, b, '-d', dir]).then(() => undefined, (e: unknown) => e);
-    assert.equal((err as { code?: number } | undefined)?.code, 2, 'a cross-corpus compare exits 2, not REJECT (1) or SHIP (0)');
-    assert.match((err as { stderr?: string }).stderr ?? '', /cannot compare: the results were measured on different corpora/);
+    const crossCorpus = await compare(dir, a, b);
+    assert.equal(crossCorpus.code, 2, 'a cross-corpus compare exits 2, not REJECT (1) or SHIP (0)');
+    assert.match(crossCorpus.stderr, /cannot compare: the results were measured on different corpora/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -178,6 +194,56 @@ test('goldens picks --harness, else CURRENT, else the committed default — and 
     await assert.rejects(() => resolveGoldensHarness(mafDir, tampered), /content hashes to/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('goldens compare refuses results from another adapter, model or attempt count, and malformed or missing files (D-38)', async () => {
+  const one = 'c'.repeat(64);
+  const base = result({ corpusSha: one });
+  assert.match(incomparable(base, result({ corpusSha: one, adapter: 'claude' })) ?? '', /measured differently \(adapter scripted vs claude\)/);
+  assert.match(incomparable(base, result({ corpusSha: one, model: 'm2' })) ?? '', /model the adapter default vs m2/);
+  assert.match(incomparable(base, result({ corpusSha: one, attempts: 1 })) ?? '', /attempts 2 vs 1/);
+  assert.equal(incomparable(result({ corpusSha: one, model: 'm' }), result({ corpusSha: one, model: 'm' })), undefined);
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-compare-'));
+  try {
+    const write = async (name: string, r: unknown) => {
+      await writeFile(path.join(dir, name), JSON.stringify(r), 'utf8');
+      return path.join(dir, name);
+    };
+    const a = await write('a.json', result({ corpusSha: one, solvedTaskIds: ['x'] }));
+    const realModel = await write('b.json', result({ corpusSha: one, harnessSha: 'b'.repeat(64), adapter: 'claude', attempts: 1 }));
+    const crossAdapter = await compare(dir, a, realModel);
+    assert.equal(crossAdapter.code, 2, `scripted pass@2 vs claude pass@1 is not a regression: ${crossAdapter.stderr}`);
+    assert.match(crossAdapter.stderr, /cannot compare: the results were measured differently \(adapter scripted vs claude; attempts 2 vs 1\)/);
+
+    const { solvedTaskIds: _s, ...noSolved } = result({ corpusSha: one });
+    const { tasks: _t, ...noTasks } = result({ corpusSha: one });
+    for (const [name, body, field] of [['no-solved.json', noSolved, 'solvedTaskIds'], ['no-tasks.json', noTasks, 'tasks']] as const) {
+      const r = await compare(dir, a, await write(name, body));
+      assert.equal(r.code, 2, `a result with no ${field} is refused, not scored: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`is not a golden result: it has no valid ${field}\\.`));
+    }
+    const missing = await compare(dir, a, path.join(dir, 'nope.json'));
+    assert.equal(missing.code, 2, 'a missing file exits 2, distinct from REJECT');
+    assert.match(missing.stderr, /could not be read as a JSON result/);
+
+    const regressed = await compare(dir, a, await write('c.json', result({ corpusSha: one, harnessSha: 'c'.repeat(64) })));
+    assert.equal(regressed.code, 1, 'a comparable regression is still REJECT');
+    assert.match(regressed.stderr, /REJECT cccccccc: regresses x/);
+
+    // Results live at <harnessSha>.<adapter>.json; a bare sha names one only when one adapter ran it.
+    const results = path.join(dir, '.maf/goldens/results');
+    await mkdir(results, { recursive: true });
+    await writeFile(path.join(results, `${'d'.repeat(64)}.scripted.json`), JSON.stringify(result({ corpusSha: one, harnessSha: 'd'.repeat(64) })), 'utf8');
+    await writeFile(path.join(results, `${'d'.repeat(64)}.claude.json`), JSON.stringify(result({ corpusSha: one, harnessSha: 'd'.repeat(64), adapter: 'claude' })), 'utf8');
+    const ambiguous = await compare(dir, a, 'dddddddd');
+    assert.equal(ambiguous.code, 2);
+    assert.match(ambiguous.stderr, /more than one result .* starts with "dddddddd" .*give <sha>\.<adapter>/);
+    const named = await compare(dir, a, `${'d'.repeat(64)}.scripted`);
+    assert.equal(named.code, 1, `<sha>.<adapter> names one result: ${named.stderr}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

@@ -180,7 +180,7 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
   }
 }
 
-/** Why two results cannot be seesaw-compared, or undefined when they can. */
+/** Why two results cannot be seesaw-compared, or undefined when they can (D-38). */
 export function incomparable(a: GoldenSuiteResult, b: GoldenSuiteResult): string | undefined {
   if (!a.corpusSha || !b.corpusSha) {
     return 'a result without a corpus sha (written before 0.3.0) cannot show it measured the same corpus; re-run it.';
@@ -188,20 +188,52 @@ export function incomparable(a: GoldenSuiteResult, b: GoldenSuiteResult): string
   if (a.corpusSha !== b.corpusSha) {
     return `the results were measured on different corpora (${shortSha(a.corpusSha)} vs ${shortSha(b.corpusSha)}), so a difference in score says nothing about the harness.`;
   }
+  const show = (v: string | number | undefined, absent: string) => (v === undefined ? absent : String(v));
+  const differs = [
+    a.adapter !== b.adapter ? `adapter ${show(a.adapter, 'unrecorded')} vs ${show(b.adapter, 'unrecorded')}` : '',
+    a.model !== b.model ? `model ${show(a.model, 'the adapter default')} vs ${show(b.model, 'the adapter default')}` : '',
+    a.attempts !== b.attempts ? `attempts ${show(a.attempts, 'unrecorded')} vs ${show(b.attempts, 'unrecorded')}` : '',
+  ].filter((d) => d !== '');
+  if (differs.length > 0) {
+    return `the results were measured differently (${differs.join('; ')}), so a difference in score may come from that and not from the harness.`;
+  }
   return undefined;
 }
 
-/** A result file by path, or by harness sha (a unique prefix will do) under `.maf/goldens/results`. */
+/** Checks the fields compare reads, so a truncated or foreign file is refused instead of scored as solving nothing. */
+function assertGoldenResult(value: unknown, file: string): asserts value is GoldenSuiteResult {
+  const o = value !== null && typeof value === 'object' ? value as Record<string, unknown> : undefined;
+  const missing = ['tasks', 'solvedTaskIds'].filter((k) => !Array.isArray(o?.[k]));
+  if (typeof o?.['harnessSha'] !== 'string') missing.unshift('harnessSha');
+  if (missing.length > 0) {
+    throw new Error(`goldens compare: ${file} is not a golden result: it has no valid ${missing.join(', ')}.`);
+  }
+}
+
+/**
+ * A result file by path, or by harness sha under `.maf/goldens/results` — a unique prefix of
+ * `<harnessSha>.<adapter>` will do, so a bare sha names the result when only one adapter ran it.
+ */
 async function loadGoldenResult(resultsDir: string, ref: string): Promise<GoldenSuiteResult> {
   let file = path.resolve(ref);
   if (!(ref.endsWith('.json') || ref.includes('/') || ref.includes(path.sep))) {
     const names = (await readdir(resultsDir).catch(() => [] as string[])).filter((n) => n.startsWith(ref) && n.endsWith('.json'));
     if (names.length !== 1) {
-      throw new Error(`goldens compare: ${names.length === 0 ? 'no' : 'more than one'} result in ${resultsDir} starts with ${JSON.stringify(ref)}.`);
+      throw new Error(
+        `goldens compare: ${names.length === 0 ? 'no' : 'more than one'} result in ${resultsDir} starts with ${JSON.stringify(ref)}` +
+        `${names.length > 1 ? ` (${names.join(', ')}); give <sha>.<adapter>` : ''}.`,
+      );
     }
     file = path.join(resultsDir, names[0] as string);
   }
-  return JSON.parse(await readFile(file, 'utf8')) as GoldenSuiteResult;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(file, 'utf8'));
+  } catch (err) {
+    throw new Error(`goldens compare: ${file} could not be read as a JSON result: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  assertGoldenResult(parsed, file);
+  return parsed;
 }
 
 interface GoldenOpts {
@@ -255,7 +287,8 @@ export function registerGoldensCommand(program: Command): void {
 
       const resultsDir = path.join(mafDir, 'goldens', 'results');
       await mkdir(resultsDir, { recursive: true });
-      const resultPath = path.join(resultsDir, `${harness.sha}.json`);
+      // Named for the adapter too, so a scripted run never overwrites a real model's result (D-38).
+      const resultPath = path.join(resultsDir, `${harness.sha}.${agent.name}.json`);
       await writeFile(resultPath, JSON.stringify(result, null, 2), 'utf8');
 
       if (result.judge && !result.judge.distinct) console.log(`[maf] judge: ${result.judge.note ?? ''}`);
@@ -266,11 +299,20 @@ export function registerGoldensCommand(program: Command): void {
   cmd
     .command('compare <a> <b>')
     .option('-d, --dir <path>', 'Working directory', process.cwd())
-    .description('Seesaw-compare two golden results (A=current baseline, B=candidate), each a result file or a harness sha under .maf/goldens/results. Exits 1 on regression, 2 when they were measured on different corpora.')
+    .description('Seesaw-compare two golden results (A=current baseline, B=candidate), each a result file or a harness sha (or <sha>.<adapter>) under .maf/goldens/results. Exits 1 on regression; 2 when a result is missing or malformed, or the two were measured on different corpora, adapters, models or attempt counts.')
     .action(async (a: string, b: string, opts: { dir: string }) => {
       const resultsDir = path.join(path.resolve(opts.dir), '.maf', 'goldens', 'results');
-      const baseline = await loadGoldenResult(resultsDir, a);
-      const candidate = await loadGoldenResult(resultsDir, b);
+      let baseline: GoldenSuiteResult;
+      let candidate: GoldenSuiteResult;
+      try {
+        baseline = await loadGoldenResult(resultsDir, a);
+        candidate = await loadGoldenResult(resultsDir, b);
+      } catch (err) {
+        // Not REJECT's 1: nothing was compared, so nothing regressed.
+        console.error(`[maf] ${err instanceof Error ? err.message : String(err)}`);
+        process.exitCode = 2;
+        return;
+      }
       const refusal = incomparable(baseline, candidate);
       if (refusal) {
         console.error(`[maf] cannot compare: ${refusal}`);
