@@ -1,5 +1,6 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
 import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
@@ -11,7 +12,7 @@ import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor, componentId } from '@maf/attestation';
 import { createApprovalGate } from '@maf/approval-gate';
 import { PolicyLoader } from '@maf/policy-engine';
-import { ReviewGate, RollbackManager, SecurityReviewGate, WorktreeManager, resolveWorkingDir, runIsolatedGit } from '@maf/git-ops';
+import { GIT_EMPTY_TREE, ReviewGate, SecurityReviewGate, WorktreeManager, resolveWorkingDir, runIsolatedGit, snapshotDiff } from '@maf/git-ops';
 import type { FinishResult, Reviewer, RunWorktree } from '@maf/git-ops';
 import { DagRunner } from '@maf/dag-runner';
 import { GraphAwareInjector } from '@maf/prompt-injector';
@@ -125,7 +126,15 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
   // flag > config.yaml > built-in default, per key (WP-2.5). Only a flag the user typed is a flag:
   // commander's `--no-worktree` always sets `worktree`, so its source says whether it was typed.
-  const fileCfg = await ConfigLoader.load(path.join(mafDir, 'config.yaml'));
+  const configPath = path.join(mafDir, 'config.yaml');
+  let fileCfg: MafConfig = {};
+  // A missing file is one line, said here so it reaches the run's own stderr (ConfigLoader would put
+  // it on console.warn); a file that is there, readable or not, is ConfigLoader's to judge.
+  if (await lstat(configPath).then(() => true, (err: unknown) => (err as { code?: string }).code !== 'ENOENT')) {
+    fileCfg = await ConfigLoader.load(configPath);
+  } else {
+    warn(`[maf] config: no config file at ${JSON.stringify(configPath)}; using the built-in defaults.`);
+  }
   const flags: MafConfig = {
     ...(ctx.given('adapter') && opts.adapter !== undefined ? { adapter: opts.adapter } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
@@ -133,6 +142,8 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   };
   const cfg = resolveConfig({ flags, file: fileCfg, defaults: DEFAULT_MAF_CONFIG });
   const model = cfg.model !== undefined ? { model: cfg.model } : {};
+  // What turned isolation off, when it is off, so a warning names what the user did — not a flag never typed.
+  const inPlaceBy = ctx.given('worktree') ? '--no-worktree' : 'worktree: false in .maf/config.yaml';
 
   const runId       = makeRunId(crypto.randomUUID());
   const taskId      = makeTaskId(crypto.randomUUID());
@@ -174,6 +185,19 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     );
   }
 
+  // ── In place (D-03): the gates diff the directory itself, so whatever the user has not committed
+  // reaches the security gate — and a reviewer — as the run's own change, and with rollbacks off a
+  // refusal undoes none of it. A review that cannot tell the user's edits from the agent's is no
+  // review, so --review is refused rather than run.
+  const userWorkInPlace = !cfg.worktree && await gateSeesUncommittedWork(dir);
+  if (userWorkInPlace && opts.review === true) {
+    throw new Error(
+      `--review was given, but worktree isolation is off (${inPlaceBy}) and ${dir} has uncommitted or untracked ` +
+      'changes: the reviewer would be shown them as the run\'s own change, and a denial could not undo them. ' +
+      'Commit them first, or run with worktree isolation on.',
+    );
+  }
+
   // ── Review (D-34): a gate exists only when the harness requires review or --review asks for it.
   // Headless, a required review gets no gate — so every writer change is refused, failing closed —
   // and an advisory one cannot be honoured, so the run goes on without it and says so.
@@ -188,6 +212,12 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     else warn(`[maf] --review was given, but no reviewer is available (${unavailable ?? 'none was given'}); running without a review gate.`);
   }
 
+  if (userWorkInPlace) {
+    warn(`[maf] warning: ${dir} has uncommitted or untracked changes and worktree isolation is off (${inPlaceBy}): ` +
+      `the security gate${reviewGate ? ' and the reviewer' : ''} will see them as the run's own change, and a refused change ` +
+      'is left in place, yours with it (rollbacks are off).');
+  }
+
   // ── Worktree (D-03): one manager for the whole run — `finish` reads the base commit from it.
   // A directory with no committed files is refused here, before any agent work.
   const worktrees = new WorktreeManager(dir);
@@ -195,7 +225,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     warn(`[maf] warning: ${dir} has uncommitted or untracked changes; the run starts from HEAD in its own worktree and will not see them.`);
   }
   const run = cfg.worktree ? await worktrees.createForRun(runId) : undefined;
-  const { cwd, isolated, warning } = resolveWorkingDir({ dir, worktree: cfg.worktree, run });
+  const { cwd, isolated, warning } = resolveWorkingDir({ dir, worktree: cfg.worktree, run, offBy: cfg.worktree ? undefined : inPlaceBy });
   if (warning) warn(`[maf] warning: ${warning}`);
   if (run) say(`[maf] worktree: ${run.path} (branch ${run.branch}, from ${run.baseCommit.slice(0, 12)})`);
 
@@ -213,8 +243,6 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     });
     graph           = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
     const policy    = await PolicyLoader.loadEngine(path.resolve(dir, opts.policy), graph);
-    // Confined to the run's worktree branch; without one (--no-worktree) it refuses every reset.
-    const rollback  = new RollbackManager(cwd, run);
     const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
       logDir: path.join(mafDir, 'transcripts'),
       softThreshold: 20_000,
@@ -353,7 +381,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     graph?.close();
     lcm?.close();
   }
-  // Only a run that succeeded can be refused a merge; the paths are printed above.
+  // Only a run that succeeded gets a reason here: its hand-over was refused or could not be finished.
   if (refusal !== undefined) throw new Error(refusal);
 }
 
@@ -384,9 +412,31 @@ async function hasWorkOutsideHead(dir: string): Promise<boolean> {
 }
 
 /**
+ * Whether the security gate, working in `dir` itself, would be handed changes no agent made: its
+ * diff of the tree against HEAD (the empty tree before the first commit) is already non-empty. The
+ * gate's own `snapshotDiff`, through a throwaway index, so the user's index is not touched. Outside
+ * a repository there is nothing to diff; the dispatcher refuses that when a writer gets there.
+ */
+async function gateSeesUncommittedWork(dir: string): Promise<boolean> {
+  let base: string;
+  try {
+    base = (await runIsolatedGit(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).stdout.trim();
+  } catch {
+    const inRepo = await runIsolatedGit(dir, ['rev-parse', '--git-dir']).then(() => true, () => false);
+    if (!inRepo) return false;
+    base = GIT_EMPTY_TREE;
+  }
+  try {
+    return (await snapshotDiff(dir, base)).trim() !== '';
+  } catch {
+    return true; // too large or unreadable to diff: the gate cannot be handed a clean tree either
+  }
+}
+
+/**
  * Ends the run's worktree (WP-2.4) and says what the user can do with it. Returns the reason the
- * run must exit non-zero although it succeeded, which only a `refused` branch is. `finish` can
- * throw — the agent switched branch or detached HEAD — and the user still needs the path.
+ * run must exit non-zero although it succeeded: a `refused` branch, or a `finish` that threw — the
+ * agent switched branch or detached HEAD — leaving the work uncommitted; the user still needs the path.
  */
 async function finishWorktree(
   worktrees: WorktreeManager, run: RunWorktree, succeeded: boolean,
@@ -396,9 +446,13 @@ async function finishWorktree(
   try {
     fin = await worktrees.finish(run.runId, succeeded ? 'success' : 'failure');
   } catch (err: unknown) {
-    warn(`[maf] ${err instanceof Error ? err.message : String(err)}`);
+    const why = err instanceof Error ? err.message : String(err);
+    warn(`[maf] ${why}`);
     warn(`[maf] the run's worktree is kept at ${run.path} (branch ${run.branch}).`);
-    return undefined;
+    // Exit 0 would tell CI the work was handed over; it was never committed to the branch.
+    return succeeded
+      ? `run ${run.runId} succeeded, but its work is on ${run.branch} at ${run.path} and could not be finished: ${why}`
+      : undefined;
   }
   switch (fin.kind) {
     case 'merge':

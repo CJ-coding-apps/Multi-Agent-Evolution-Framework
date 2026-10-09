@@ -2,7 +2,8 @@ import { readdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { Command } from 'commander';
-import type { AdapterName, CliAdapter } from '@maf/types';
+import type { AdapterInvokeOptions, AdapterName, CliAdapter, TurnAdapter } from '@maf/types';
+import type { ScriptedAdapter } from '@maf/eval-harness';
 import { LcmEngine } from '@maf/lcm';
 import { runIsolatedGit } from '@maf/git-ops';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
@@ -65,6 +66,38 @@ export function unavailableAdapter(name: AdapterName): CliAdapter {
  */
 export function cliOnlyAdapter(name: AdapterName): CliAdapter {
   return { ...unavailableAdapter(name), isAvailable: async () => true };
+}
+
+/** One request an adapter was handed: where it was told to work, and for how long. */
+export interface AdapterCall {
+  via:        'invoke' | 'turn';
+  workingDir: string;
+  timeoutMs:  number;
+  /** Its entry in the inner adapter's `exchanges`, which says what the request was. */
+  exchange:   number;
+}
+
+/**
+ * `inner` behind a wrapper that keeps each request's working directory and timeout. The scripted
+ * adapter ignores both, so a run that pointed the planner or a gate at the wrong directory, or gave
+ * it the wrong timeout, would pass unseen without this.
+ */
+export function recording(inner: ScriptedAdapter): { adapter: TurnAdapter; calls: AdapterCall[] } {
+  const calls: AdapterCall[] = [];
+  const note = (via: AdapterCall['via'], o: AdapterInvokeOptions): void => {
+    calls.push({ via, workingDir: o.workingDir, timeoutMs: o.timeoutMs, exchange: inner.exchanges.length });
+  };
+  return {
+    calls,
+    adapter: {
+      name:         inner.name,
+      capabilities: () => inner.capabilities(),
+      isAvailable:  () => inner.isAvailable(),
+      invoke:       (o) => { note('invoke', o); return inner.invoke(o); },
+      stream:       (o) => inner.stream(o),
+      sendTurn:     (history, o) => { note('turn', o); return inner.sendTurn(history, o); },
+    },
+  };
 }
 
 export function registryOf(...adapters: CliAdapter[]): () => Map<AdapterName, CliAdapter> {

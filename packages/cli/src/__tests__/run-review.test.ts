@@ -57,6 +57,7 @@ test('with neither --review nor a harness that requires it, nothing about review
   await withDir(async (dir) => {
     const run = await driveRun(['fix it', '--dir', dir, '--adapter', 'scripted'],
       { adapters: registryOf(new ScriptedAdapter()), io: headless(), reviewer: async () => { throw new Error('never asked'); } });
-    assert.doesNotMatch(run.err, /review/i);
+    // The directory's own name says "review"; what the run says about it must not.
+    assert.doesNotMatch(run.err.split(dir).join('<dir>'), /review/i);
   });
 });

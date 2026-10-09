@@ -41,10 +41,19 @@ test('a typed --adapter outranks config.yaml, even when it names the built-in de
   });
 });
 
-test('with neither a flag nor a file, the built-in default applies', async () => {
+test('with neither a flag nor a file, the built-in default applies, and the run says so once on its own stderr', async () => {
   await withProject(undefined, async (dir) => {
     const run = await driveRun(['task', '--dir', dir], { adapters });
     assert.match(messageOf(run.error), /Adapter "claude" is not available/);
+    const said = run.err.split('\n').filter((l) => l.includes('config:'));
+    assert.deepEqual(said, [`[maf] config: no config file at ${JSON.stringify(path.join(dir, '.maf', 'config.yaml'))}; using the built-in defaults.`]);
+  });
+});
+
+test('a config file that is there is never reported missing', async () => {
+  await withProject('adapter: from-file\n', async (dir) => {
+    const run = await driveRun(['task', '--dir', dir], { adapters });
+    assert.doesNotMatch(run.err, /no config file/);
   });
 });
 

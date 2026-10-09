@@ -13,7 +13,7 @@ import { runIsolatedGit } from '@maf/git-ops';
 import type { ReviewDecision, ReviewRequest } from '@maf/git-ops';
 import { attestVerify } from '../commands/attest.js';
 import {
-  BUGGY_SUM, FIXED_SUM, dirtyUserRepo, driveRun, lockFilePolicy, needsLcm, registryOf, userState,
+  BUGGY_SUM, FIXED_SUM, dirtyUserRepo, driveRun, lockFilePolicy, needsLcm, recording, registryOf, userState,
 } from './runFixture.js';
 
 // ORACLE: WP-2.10 acceptance (BUILD_PLAN §6) — `maf run` against a temporary repository with the
@@ -40,6 +40,8 @@ test('maf run: worktree → in-process coder → security gate → review record
       ],
       final: 'Fixed sum.js: a - b → a + b.',
     }]);
+    // The scripted adapter ignores the directory it is handed; the wrapper keeps it.
+    const { adapter, calls } = recording(scripted);
     const asked: ReviewRequest[] = [];
     const reviewer = async (request: ReviewRequest): Promise<ReviewDecision> => {
       asked.push(request);
@@ -47,7 +49,7 @@ test('maf run: worktree → in-process coder → security gate → review record
     };
 
     const run = await driveRun([TASK, '--dir', repo, '--adapter', 'scripted', '--review', '--policy', policy], {
-      adapters: registryOf(scripted), reviewer,
+      adapters: registryOf(adapter), reviewer,
       io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: KEY } },
     });
     assert.equal(run.error, undefined, `${run.out}\n${run.err}`);
@@ -78,6 +80,14 @@ test('maf run: worktree → in-process coder → security gate → review record
     const invokes = scripted.exchanges.filter((e) => e.via === 'invoke');
     assert.ok(invokes.every((e) => e.prompt !== TASK), 'the task never went to the cli tier');
     assert.ok(invokes.some((e) => e.prompt.startsWith('Create a task execution DAG for:')), 'the planner was asked');
+
+    // ── every request went to the run's worktree: the planner, each coder turn, the security gate ──
+    const asks = calls.map((c) => ({ ...c, what: `${c.via}:${scripted.exchanges[c.exchange]?.kind ?? '?'}` }));
+    assert.deepEqual([...new Set(asks.map((a) => a.what))].sort(), ['invoke:security-review', 'invoke:task', 'turn:task']);
+    for (const a of asks) {
+      assert.ok(a.workingDir === worktree || a.workingDir.startsWith(worktree + path.sep),
+        `${a.what} was handed ${a.workingDir}, outside the run's worktree ${worktree}`);
+    }
 
     // ── the attestation on disk: an in-toto statement that verifies with the run's key ──
     const file = path.join(repo, '.maf', 'attestations', `${runId}.bundle.json`);
