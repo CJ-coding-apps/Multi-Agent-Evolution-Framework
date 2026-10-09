@@ -80,3 +80,80 @@ jobs:
 
       - name: Test (node:test across all packages)
         run: pnpm -r test
+
+  # D-24: CI proves what the README demonstrates. The unit suites test the pieces; this job runs
+  # the two commands a user is told to try on a fresh clone, as built, against real Kùzu and
+  # better-sqlite3, and fails unless the demo's bundle verifies and the offline goldens reproduce
+  # the committed baseline exactly.
+  e2e:
+    name: e2e · demo · attestation · offline goldens
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Named explicitly so `run:` gets `-o pipefail`; the implicit default shell does not, and the
+    # demo's exit status would be lost in its `| tee`.
+    defaults:
+      run:
+        shell: bash
+    env:
+      # A throwaway key, not a secret: it makes the demo sign with a key of its own, so its bundle
+      # records keySource "env" as a real run's should. Nothing outside this job trusts it.
+      MAF_SIGNING_KEY: ci-e2e-throwaway-signing-key
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (tsc, leaf-first)
+        run: pnpm build
+
+      - name: In-process demo (scripted model, offline)
+        run: node packages/cli/dist/main.js inprocess-demo | tee "$RUNNER_TEMP/demo.log"
+
+      # The demo prints its bundle path even when signing failed (it swallows that error so it can
+      # still report), so the file is checked, not the line. The last check is the control: the
+      # same bundle under another key must not verify, or a pass above would mean nothing.
+      - name: Verify the demo's attestation bundle
+        run: |
+          bundle=$(sed -n 's/^attn signed bundle: *//p' "$RUNNER_TEMP/demo.log")
+          if [ -z "$bundle" ] || [ ! -f "$bundle" ]; then
+            echo "::error::inprocess-demo wrote no attestation bundle (path it printed: '${bundle:-none}')."
+            exit 1
+          fi
+          node packages/cli/dist/main.js attest verify "$bundle" | tee "$RUNNER_TEMP/verify.log"
+          if ! grep -q '^keySource: env ' "$RUNNER_TEMP/verify.log"; then
+            echo "::error::the bundle was not checked against MAF_SIGNING_KEY, so a valid signature proves nothing."
+            exit 1
+          fi
+          if MAF_SIGNING_KEY=not-the-key-it-was-signed-with node packages/cli/dist/main.js attest verify "$bundle" >/dev/null 2>&1; then
+            echo "::error::the demo's bundle verified under a key it was not signed with."
+            exit 1
+          fi
+
+      - name: Self-test the goldens comparator
+        run: node scripts/compare-goldens.mjs --self-test
+
+      # Run in the checkout itself, which holds what a fresh clone gives a user: the committed
+      # policy, default harness and corpus, and no state. The result lands in
+      # .maf/goldens/results/<harnessSha>.scripted.json.
+      - name: Offline goldens (scripted adapter, real Kùzu)
+        run: node packages/cli/dist/main.js goldens run --adapter scripted --corpus tests/goldens -d .
+
+      - name: Compare the goldens result to the baseline (ranAt ignored)
+        run: |
+          shopt -s nullglob
+          results=(.maf/goldens/results/*.scripted.json)
+          if [ "${#results[@]}" -ne 1 ]; then
+            echo "::error::expected one scripted result in .maf/goldens/results, found ${#results[@]}."
+            exit 1
+          fi
+          node scripts/compare-goldens.mjs tests/goldens/baseline.json "${results[0]}"
