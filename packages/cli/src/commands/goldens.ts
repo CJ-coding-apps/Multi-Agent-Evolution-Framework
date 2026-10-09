@@ -11,6 +11,7 @@ import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { MemoryGraph } from '@maf/memory-graph';
 import { RoleRegistry, roleSetFromHarness } from '@maf/roles';
+import { createDefaultRegistry } from '@maf/tools';
 import {
   GoldenRunner, ScoreRecorder, ScriptedAdapter, SCRIPTED_ADAPTER_NAME, assertGoldenCorpus,
   describeJudge, loadScriptedTasks, makeLlmJudge, seesawDecision,
@@ -18,7 +19,7 @@ import {
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
+import { RESOLVER_REFS, buildRunStack, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
 import { committedDefaults, loadHarnessFile, locateStoredHarness } from './harness.js';
 
 /**
@@ -41,26 +42,37 @@ export function goldenRunStatus(result: GoldenSuiteResult): RunStatus {
  * The harness a golden run evaluates: `--harness` (a stored ref, or a harness file), else
  * CURRENT, else the committed `.maf/harnesses/default-<sha>.json` — which is all a fresh clone
  * that has never run maf has. The committed default also answers to its id and (short) sha, and
- * is read in place, not imported into the store.
+ * is read in place, not imported into the store. A stored ref and CURRENT go through `run`'s own
+ * resolution (`resolveRunHarness`).
  */
 export async function resolveGoldensHarness(mafDir: string, ref?: string): Promise<{ harness: HarnessConfig; source: string }> {
   const store = new HarnessStore(mafDir);
   if (ref !== undefined && (ref.endsWith('.json') || ref.includes('/') || ref.includes(path.sep))) {
     return { harness: await loadHarnessFile(path.resolve(ref)), source: path.resolve(ref) };
   }
-  if (ref !== undefined) return locateStoredHarness(store, ref);
-  const current = await store.current();
-  if (current) return { harness: current, source: path.join(store.dir, `${current.sha}.yaml`) };
-  const defaults = await committedDefaults(store);
-  if (defaults.length !== 1) {
-    throw new Error(
-      `goldens: no harness to evaluate — no --harness, no CURRENT in ${store.dir}, and ` +
-      `${defaults.length === 0 ? 'no' : 'more than one'} committed default-<sha>.json there. ` +
-      'Pass --harness, or run maf once to mint one.',
-    );
+  const plain = ref === undefined || ref === 'current' || ref === 'CURRENT';
+  if (!plain && !RESOLVER_REFS.has(ref)) {
+    const found = await locateStoredHarness(store, ref);
+    if (found.source !== path.join(store.dir, `${found.harness.sha}.yaml`)) return found; // a committed default, read in place
   }
-  const file = defaults[0] as string;
-  return { harness: await loadHarnessFile(file), source: file };
+  if (plain && (await store.current()) === undefined) {
+    const defaults = await committedDefaults(store);
+    if (defaults.length !== 1) {
+      throw new Error(
+        `goldens: no harness to evaluate — no --harness, no CURRENT in ${store.dir}, and ` +
+        `${defaults.length === 0 ? 'no' : 'more than one'} committed default-<sha>.json there. ` +
+        'Pass --harness, or run maf once to mint one.',
+      );
+    }
+    const file = defaults[0] as string;
+    return { harness: await loadHarnessFile(file), source: file };
+  }
+  // Everything else is resolved as `run` resolves it, so a CURRENT that tracks the roles file
+  // evaluates the roles file now, and a harness whose prompts are not in its sha is refused.
+  const { harness } = await resolveRunHarness({
+    store, ref: plain ? undefined : ref, rolesPath: path.join(mafDir, 'roles.yaml'), mafDir, baseTools: createDefaultRegistry(),
+  });
+  return { harness, source: (await store.configSource(harness)).uri };
 }
 
 /**

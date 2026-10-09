@@ -15,12 +15,11 @@ import { GraphAwareInjector } from '@maf/prompt-injector';
 import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
 import { TranscriptLogger } from '@maf/transcript';
 import { createDefaultRegistry } from '@maf/tools';
-import { RoleRegistry, RoleDispatcher } from '@maf/roles';
-import { roleSetFromHarness } from '@maf/roles';
-import { HarnessStore, shortSha } from '@maf/harness-config';
-import type { HarnessConfig } from '@maf/harness-config';
+import { RoleRegistry, RoleDispatcher, roleSetFromHarness } from '@maf/roles';
+import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
+import { resolveRunHarness } from '../wiring.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
 import type { MafConfig } from '../config/ConfigLoader.js';
 
@@ -118,29 +117,19 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
   const baseTools = createDefaultRegistry();
 
-  // ── Harness resolution (Phase 0): --harness loads a stored config; otherwise the
-  // legacy --roles file is parsed as today and wrapped as "legacy-default" (idempotent).
+  // ── Harness (WP-2.9): --harness, else an operator-set CURRENT, else legacy-default minted from
+  // the roles file now. A typed --roles means that file, so it must not lose to CURRENT.
   const harnessStore = new HarnessStore(mafDir);
-  let harness: HarnessConfig;
-  let roles: RoleRegistry;
-  if (opts.harness) {
-    harness = await harnessStore.load(opts.harness);
-    roles = RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), mafDir, baseTools);
-    say(`[maf] harness: ${harness.id} (${shortSha(harness.sha)})`);
-  } else {
-    const legacyRegistry = await RoleRegistry.fromYamlOrDefault(
-      path.resolve(dir, opts.roles),
-      mafDir,
-      baseTools,
-    );
-    const legacyRoleSet = {
-      version: 1 as const,
-      defaultRole: legacyRegistry.getDefault().role,
-      roles: legacyRegistry.list(),
-    };
-    harness = await harnessStore.adoptLegacy(legacyRoleSet);
-    roles = legacyRegistry;
-  }
+  const { harness, source: harnessSource } = await resolveRunHarness({
+    store:     harnessStore,
+    ref:       opts.harness ?? (ctx.given('roles') ? LEGACY_DEFAULT_ID : undefined),
+    rolesPath: path.resolve(dir, opts.roles),
+    mafDir,
+    baseTools,
+  });
+  // Dispatched FROM the harness, so the sha the attestation names is the content that ran.
+  const roles = RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), mafDir, baseTools);
+  say(`[maf] harness: ${harness.id} (${shortSha(harness.sha)}) [${harnessSource}]`);
 
   // Wire all components
   const board     = new BlackboardStore();
@@ -266,15 +255,12 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     });
   }
 
-  // Bundle attestation — the harness IS the build's config source (signed):
-  // configSource.uri points at the on-disk harness file, digest is its sha.
+  // Bundle attestation — the harness IS the build's config source (signed): the stored file and
+  // its sha, re-verified now, so the digest names what was dispatched.
   const bundle = await attestor.bundle(
     { id: componentId(`@maf/adapter-${cfg.adapter}`), modelVersion: cfg.model ?? 'default' },
     {
-      configSource: {
-        uri:    path.join(mafDir, 'harnesses', `${harness.sha}.yaml`),
-        digest: { sha256: harness.sha },
-      },
+      configSource: await harnessStore.configSource(harness),
       parameters:  { harnessId: harness.id },
       environment: {},
     },

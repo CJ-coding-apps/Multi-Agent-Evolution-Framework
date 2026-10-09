@@ -13,8 +13,7 @@ import { createDefaultRegistry } from '@maf/tools';
 import { createDefaultProcessorRegistry } from '@maf/processors';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
-import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
-import { loadStoredHarness } from './harness.js';
+import { buildRunStack, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
 
 /**
  * Evolve's smoke check: one attempt of the task it names. It ran the whole corpus and judged
@@ -51,7 +50,9 @@ export function registerEvolveCommand(program: Command): void {
       const runId = makeRunId(crypto.randomUUID());
 
       const store = new HarnessStore(mafDir);
-      const base = await loadStoredHarness(store, opts.harness ?? 'current');
+      const { harness: base } = await resolveRunHarness({
+        store, ref: opts.harness, rolesPath: path.join(mafDir, 'roles.yaml'), mafDir, baseTools: createDefaultRegistry(),
+      });
       console.log(`[maf] evolve ${runId} | base: ${base.id} (${shortSha(base.sha)}) | rounds=${opts.rounds} patience=${opts.patience}`);
 
       const adapter = await resolveAdapter(opts.adapter, createAdapterRegistry());

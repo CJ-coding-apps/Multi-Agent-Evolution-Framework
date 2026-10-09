@@ -13,9 +13,12 @@ import { SecurityReviewGate } from '@maf/git-ops';
 import { GraphAwareInjector } from '@maf/prompt-injector';
 import { TranscriptLogger } from '@maf/transcript';
 import { createDefaultRegistry } from '@maf/tools';
-import { RoleDispatcher, RoleRegistry, roleSetFromHarness } from '@maf/roles';
-import type { HarnessConfig } from '@maf/harness-config';
+import type { ToolRegistry } from '@maf/tools';
+import { RoleDispatcher, RoleRegistry, harnessRoleSetFromRegistry, roleSetFromHarness } from '@maf/roles';
+import { LEGACY_DEFAULT_ID, resolveHarnessRef } from '@maf/harness-config';
+import type { HarnessConfig, HarnessStore, ResolvedHarness } from '@maf/harness-config';
 import type { TaskDispatcher } from '@maf/eval-harness';
+import { importHarness, locateStoredHarness } from './commands/harness.js';
 
 /**
  * Shared CLI wiring for run/goldens/evolve commands: one component stack per
@@ -112,6 +115,40 @@ export async function buildRunStack(cfg: {
     },
   };
   return stack;
+}
+
+/** Refs `resolveHarnessRef` gives a meaning of its own: a plain run, and the roles file as it is now. */
+export const RESOLVER_REFS: ReadonlySet<string> = new Set(['current', 'CURRENT', LEGACY_DEFAULT_ID]);
+
+export interface RunHarnessOptions {
+  store:     HarnessStore;
+  /** `--harness`, or `legacy-default` when only `--roles` was typed; absent for a plain run. */
+  ref?:      string | undefined;
+  /** The legacy roles file a plain run, or `legacy-default`, mints from. */
+  rolesPath: string;
+  mafDir:    string;
+  baseTools: ToolRegistry;
+}
+
+/**
+ * The harness a command dispatches, by the one path `run` takes (WP-2.9, WP-2.7). A stored ref — an
+ * id, a sha or a unique sha prefix — or a committed `default-<sha>.json`, imported into the store on
+ * the way because an attestation can only name a stored harness, is resolved to its full sha; then
+ * `resolveHarnessRef` loads it, else an operator-set CURRENT, else `legacy-default` minted from the
+ * roles file now — never a stale snapshot of it, and never a harness whose prompts live outside its sha.
+ */
+export async function resolveRunHarness(o: RunHarnessOptions): Promise<ResolvedHarness> {
+  let ref = o.ref;
+  if (ref !== undefined && !RESOLVER_REFS.has(ref)) {
+    const found = await locateStoredHarness(o.store, ref);
+    if (found.source !== path.join(o.store.dir, `${found.harness.sha}.yaml`)) await importHarness(o.store, found.source);
+    ref = found.harness.sha;
+  }
+  return resolveHarnessRef({
+    harness: ref,
+    legacyRoleSet: async () => harnessRoleSetFromRegistry(
+      await RoleRegistry.fromYamlOrDefault(o.rolesPath, o.mafDir, o.baseTools)),
+  }, o.store);
 }
 
 /**
