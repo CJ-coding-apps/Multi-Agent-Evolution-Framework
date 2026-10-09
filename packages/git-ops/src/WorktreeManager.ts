@@ -291,7 +291,7 @@ export function resolveWorkingDir(opts: WorkingDirOptions): WorkingDir {
       cwd,
       isolated: false,
       warning: `worktree isolation is off${opts.offBy ? ` (${opts.offBy})` : ''}: this run edits ${cwd} in place, ` +
-        `on whatever branch is checked out there. Its changes mix with yours, and rollbacks are disabled (D-03).`,
+        `on whatever branch is checked out there. Its changes mix with yours and MAF cannot undo them (D-03).`,
     };
   }
   if (!opts.run) {

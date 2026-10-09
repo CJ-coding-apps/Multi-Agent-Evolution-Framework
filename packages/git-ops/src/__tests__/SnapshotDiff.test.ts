@@ -92,6 +92,9 @@ test("maf's runtime state under .maf/ is not part of the agent's diff, but its c
     await writeFile(path.join(repo, '.maf', 'transcripts', 'run.jsonl'), '{"role":"coder"}\n'.repeat(2000), 'utf8');
     await writeFile(path.join(repo, '.maf', 'attestations', 'run.bundle.json'), '{}', 'utf8');
     await writeFile(path.join(repo, '.maf', 'memory.kuzu'), 'binary', 'utf8');
+    // The headless approval gate's pending record, written by MAF during the run (0.3.0).
+    await mkdir(path.join(repo, '.maf', 'approvals', 'pending'), { recursive: true });
+    await writeFile(path.join(repo, '.maf', 'approvals', 'pending', 'req-1.json'), '{"reason":"headless"}', 'utf8');
     // What an agent could write to shape the next run: configuration, reviewed like any file.
     await mkdir(path.join(repo, '.maf', 'prompts'), { recursive: true });
     await writeFile(path.join(repo, '.maf', 'policy.yaml'), 'rules: []\n', 'utf8');
@@ -103,7 +106,7 @@ test("maf's runtime state under .maf/ is not part of the agent's diff, but its c
     assert.match(diff, /created\.txt/, 'the agent change is reviewed');
     assert.match(diff, /\.maf\/policy\.yaml/, 'policy is configuration: reviewed');
     assert.match(diff, /\.maf\/prompts\/security\.md/, 'prompts are configuration: reviewed');
-    assert.doesNotMatch(diff, /run\.jsonl|run\.bundle\.json|memory\.kuzu/, "maf's runtime state is not");
+    assert.doesNotMatch(diff, /run\.jsonl|run\.bundle\.json|memory\.kuzu|req-1\.json/, "maf's runtime state is not");
   } finally {
     await rm(repo, { recursive: true, force: true });
   }

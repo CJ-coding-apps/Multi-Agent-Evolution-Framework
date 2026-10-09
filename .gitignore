@@ -43,3 +43,4 @@ pnpm-debug.log*
 !.maf/harnesses/default-*.json
 .maf/goldens/results/
 .maf/evolve/
+.maf/approvals/

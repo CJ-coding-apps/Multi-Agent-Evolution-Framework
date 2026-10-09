@@ -158,7 +158,8 @@ What the diff therefore contains:
 | MAF's configuration under `.maf/`: `policy.yaml`, `roles.yaml`, `config.yaml`, `prompts/` | yes — an agent could rewrite it to shape the next run |
 | **This run's runtime state under `<cwd>/.maf/`**: `runs/`, `cache/`, `memory.kuzu`, `lcm.db*`, `transcripts/`, `attestations/`, `harnesses/`, `goldens/results/`, `evolve/` | **no** — excluded by name ([D-29](DECISIONS.md)): MAF writes it, it grows during the run, and it would push an honest diff past the gate's cap. A `.maf/` directory elsewhere in the repository is ordinary content |
 | `.maf/worktrees/` — earlier runs' worktrees | **no** — it carries a `.gitignore` of its own that ignores everything in it ([D-35](DECISIONS.md)) |
-| Anything else under `<cwd>/.maf/`, such as `approvals/pending/` | yes — it is not on the runtime-state list. In a run with worktree isolation MAF writes `approvals/` in the target directory, outside the reviewed worktree; with isolation off, a pending record written during the run is in the next writer's diff |
+| `<cwd>/.maf/approvals/` | no — pending records are written by MAF when nobody can answer an escalation, never by the agent (runtime state since 0.3.0) |
+| Anything else under `<cwd>/.maf/` | yes — it is not on the runtime-state list |
 | Anything outside the repository | no — it is not in the tree at all |
 
 #### Limits, stated rather than implied

@@ -13,9 +13,9 @@ const SHA_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_HARNESS_RE = /^default-([0-9a-f]{64})\.json$/;
 
 /**
- * Ids the store itself gives meaning to: `legacy-default` is what a plain run adopts roles.yaml
- * as (first mint wins), and `current` is how CURRENT is looked up, so a harness indexed under it
- * could never be loaded by its id. Compared case-insensitively.
+ * Ids the store itself gives meaning to: `legacy-default` tracks roles.yaml (a plain run re-mints it
+ * whenever the file changes, D-39), and `current` is how CURRENT is looked up, so a harness indexed
+ * under either could never be loaded by its id. Compared case-insensitively.
  */
 const RESERVED_IDS = new Set(['legacy-default', 'current']);
 
@@ -133,7 +133,7 @@ function printConfig(cfg: HarnessConfig, currentSha?: string): void {
   const mark = cfg.sha === currentSha ? ' (CURRENT)' : '';
   const bundles = cfg.processorBundles.length
     ? cfg.processorBundles.map((p) => p.name).join(', ')
-    : '(none — CLI-era behavior)';
+    : '(default bundle: secret-redact, transcript, policy-audit, security-gate)';
   console.log(`  ${cfg.id.padEnd(20)} ${shortSha(cfg.sha)}${mark}`);
   console.log(`    roles:      ${cfg.roleSet.roles.map((r) => r.role).join(', ')} (default: ${cfg.roleSet.defaultRole})`);
   console.log(`    processors: ${bundles}`);
@@ -154,7 +154,12 @@ export function registerHarnessCommand(program: Command): void {
       const store = new HarnessStore(mafDir);
       const all = await store.list();
       if (all.length === 0) {
-        console.log('[maf] no harnesses — run once to mint legacy-default, or use maf harness import');
+        const defaults = await committedDefaults(store);
+        console.log(
+          defaults.length > 0
+            ? `[maf] no harnesses in the store yet; the committed default (${defaults.map((d) => shortSha(path.basename(d).replace(DEFAULT_HARNESS_RE, '$1'))).join(', ')}) answers to its id and sha — a plain run mints legacy-default, or use maf harness import`
+            : '[maf] no harnesses — run once to mint legacy-default, or use maf harness import',
+        );
         return;
       }
       const current = await store.current();

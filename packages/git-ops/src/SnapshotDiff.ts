@@ -56,6 +56,9 @@ export function runIsolatedGit(
 export const MAF_RUNTIME_STATE = [
   'runs', 'cache', 'memory.kuzu', 'lcm.db', 'lcm.db-wal', 'lcm.db-shm',
   'transcripts', 'attestations', 'harnesses', 'goldens/results', 'evolve',
+  // The headless approval gate's pending records: written by MAF when nobody can answer, never by
+  // the agent, and in a `--no-worktree` run they would otherwise land in the next writer's diff.
+  'approvals',
 ] as const;
 
 /** Top-relative `:(top,exclude)` pathspecs for `<cwd>/.maf/<state>`, wherever `cwd` is in the repo. */
