@@ -98,6 +98,68 @@ test('an error that is not a NodeFailure is recorded under its class; the task f
   assert.ok(!('runTitle' in byNode.get(makeNodeId('b'))!), 'no run title is invented');
 });
 
+test('a plain Error is recorded under the name it was given, not its class', async () => {
+  // F5: `constructor.name` is "Error" for every plain Error, which tells the planner nothing; code
+  // that wants such errors told apart sets `name`.
+  const recorder = capturing();
+
+  await new DagRunner().run({
+    dag: dagOf([
+      { id: 'named', label: 'named', retry: NO_WAIT },
+      { id: 'plain', label: 'plain', retry: NO_WAIT },
+      { id: 'anon', label: 'anon', retry: NO_WAIT },
+    ]),
+    board: new BlackboardStore(), failureRecorder: recorder, isWriter: () => false,
+    executor: async (node) => {
+      if (node.id === makeNodeId('named')) throw Object.assign(new Error('lockfile drifted'), { name: 'LockfileDrift' });
+      if (node.id === makeNodeId('plain')) throw new Error('something broke');
+      throw Object.assign(new (class extends Error {})('anonymous'), { name: 'Anonymous' });
+    },
+  });
+
+  const reasons = Object.fromEntries(recorder.records.map((r) => [r.nodeId, r.reason]));
+  assert.deepEqual(reasons, { named: 'LockfileDrift', plain: 'Error', anon: 'Anonymous' });
+});
+
+test('a recorder that never answers holds up the run for the bounded wait only', { timeout: 10_000 }, async (t) => {
+  // F2: the dispatch loop races every running node's promise, this one included, so an unbounded
+  // wait on the recorder stalled the whole run — the dependent's verdict, the queued writer, and
+  // the return of `run()` — not just the failed node.
+  const logged = t.mock.method(console, 'error', () => undefined);
+  const ran: string[] = [];
+  // A recorder that hangs in practice is waiting on I/O, which holds the process open; this
+  // interval stands in for that handle (the runner's own timer is unref'd and holds nothing).
+  let hung: ReturnType<typeof setInterval> | undefined;
+  t.after(() => clearInterval(hung));
+
+  const outcome = await new DagRunner().run({
+    dag: dagOf([
+      { id: 'a', label: 'a', retry: NO_WAIT },
+      { id: 'b', label: 'b', dependencies: ['a'], retry: NO_WAIT },
+      { id: 'c', label: 'c', retry: NO_WAIT },
+    ]),
+    // Every node a writer (the default), so `c` is queued behind `a`.
+    board: new BlackboardStore(),
+    failureRecorder: { recordFailure: () => new Promise<void>(() => { hung = setInterval(() => undefined, 1_000); }) },
+    failureRecordTimeoutMs: 20,
+    executor: async (node): Promise<Record<string, BlackboardValue>> => {
+      ran.push(node.id);
+      if (node.id === makeNodeId('a')) throw new NodeFailure('empty_output', 'the coder said nothing');
+      return {};
+    },
+  });
+
+  assert.equal(outcome.status, 'Failed');
+  assert.equal(nodeState(outcome, 'a')?.error, 'the coder said nothing');
+  assert.equal(nodeState(outcome, 'c')?.status, 'Succeeded', 'the queued writer still runs');
+  assert.deepEqual(outcome.unscheduled, ['b']);
+  assert.ok(ran.includes('c'));
+  const lines = logged.mock.calls.map((c) => c.arguments.map(String).join(' '));
+  assert.deepEqual(lines.filter((l) => l.includes('recording that failure')), [
+    '[dag] node a failed, and recording that failure did not finish within 20 ms; the run goes on without it.',
+  ]);
+});
+
 test('a node retried on transport failure is recorded once, after its last attempt', async () => {
   const recorder = capturing();
   let calls = 0;

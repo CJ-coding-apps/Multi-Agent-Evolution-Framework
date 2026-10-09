@@ -344,7 +344,7 @@ export interface NodeFailureRecord {
    */
   runTitle?: string;
   role:      RoleName;
-  /** `NodeFailure.reason` when the error was one; otherwise the error's class name. */
+  /** `NodeFailure.reason` when the error was one; otherwise the error's class name (a plain `Error`'s `name`). */
   reason:    string;
   message:   string;
   /** `NodeFailure.exitCode`, when the failure came from a CLI-tier invocation. */
