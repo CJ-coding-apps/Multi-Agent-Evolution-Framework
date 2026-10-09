@@ -183,6 +183,10 @@ gate would not pass. An unchanged tree is not sent. A diff that cannot be read f
 any reviewer is asked; the gate takes the diff itself, and an empty one handed to it is an error,
 never an approval.
 
+`maf run` constructs the gate only when the harness requires review or the operator asks for it with
+`--review`. Otherwise no gate is wired: nobody is asked, nothing is recorded, and no writer waits on a
+reviewer.
+
 Only an approval from a named reviewer is an approval. A denial, no answer within the gate's timeout
 (10 minutes by default, set where the gate is constructed), a reviewer that fails before deciding, and
 an answer that is not a decision are all non-approvals.
@@ -190,7 +194,8 @@ an answer that is not a decision are all non-approvals.
 - **Required** (`reviewGate: { required: true }`): the node waits for the decision, and anything but
   an approval fails it with `ReviewRefused` — a verdict, never retried. Like a security refusal, a
   denial of what a throwing backend left behind outranks the backend's error.
-- **Advisory** (the default): the node waits for the decision too, so the outcome is on the record
+- **Advisory** (the default, so what `--review` builds for a harness that does not require review):
+  the node waits for the decision too, bounded by the gate's timeout, so the outcome is on the record
   before the bundle is signed, but completes whatever the decision is.
 
 Either way the request and its outcome go into the bundle's `approvals`: the request id; the decision
