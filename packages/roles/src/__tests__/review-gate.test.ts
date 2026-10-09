@@ -145,6 +145,9 @@ function makeFixture(opts: {
 
   const dispatcher = new RoleDispatcher({
     adapter: opts.adapter ?? new CliOnlyAdapter(),
+    // The fixture's writer runs on the cli tier on purpose (the review path is the same on both
+    // tiers); since D-01 that needs the operator's opt-in.
+    allowUngoverned: true,
     baseTools: createDefaultRegistry() as ToolRegistry,
     roles,
     injector: { assemble: async () => ({ systemPromptPrefix: '' }) } as unknown as GraphAwareInjector,

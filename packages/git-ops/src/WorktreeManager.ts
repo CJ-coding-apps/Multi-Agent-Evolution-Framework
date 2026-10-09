@@ -1,6 +1,6 @@
 import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { RunId, TaskId } from '@maf/types';
+import type { RunId } from '@maf/types';
 import { resolveInside } from '@maf/types';
 import { MAF_RUNTIME_STATE, runIsolatedGit, snapshotDiff } from './SnapshotDiff.js';
 
@@ -244,18 +244,6 @@ export class WorktreeManager {
     this.runs.delete(runId);
   }
 
-  /**
-   * The run's whole change so far, committed or not. Kept only because `ReviewGate.review` calls
-   * it; WP-2.3 makes that take a diff, after which this goes. There is one worktree per run, so the
-   * task id no longer selects one.
-   */
-  async harvest(_taskId: TaskId): Promise<string> {
-    const [run, ...others] = this.runs.values();
-    if (!run || others.length > 0) {
-      throw new Error(`expected exactly one run worktree to harvest, but this manager holds ${this.runs.size}.`);
-    }
-    return snapshotDiff(run.cwd, run.baseCommit);
-  }
 
   private names(runId: RunId): { wtPath: string; branch: string } {
     if (!RUN_ID.test(runId)) {

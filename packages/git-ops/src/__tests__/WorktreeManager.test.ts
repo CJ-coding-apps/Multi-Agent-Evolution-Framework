@@ -286,19 +286,6 @@ test("remove() also deletes the run's task branches, but never a live run's bran
   assert.equal(await git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/maf/'], repo), 'maf/r1-live');
 });
 
-test("harvest() returns the run's whole change, committed or not (kept for ReviewGate, its one caller)", async (t) => {
-  const repo = await makeRepo();
-  t.after(() => rm(repo, { recursive: true, force: true }));
-  const mgr = new WorktreeManager(repo);
-  const wt = await mgr.createForRun(RUN);
-  await commitFile(wt.cwd, 'committed.ts', 'export const a = 1;\n', 'agent commit');
-  await writeFile(path.join(wt.cwd, 'loose.ts'), 'export const b = 2;\n', 'utf8');
-
-  const diff = await mgr.harvest(makeTaskId('any'));
-  assert.match(diff, /\+export const a = 1;/);
-  assert.match(diff, /\+export const b = 2;/);
-});
-
 test('the per-task worktree API is gone: one worktree per run (D-03)', () => {
   // Nothing called create(taskId, runId), get, getAll or pruneStale; the whole-repo typecheck is
   // what proves it, and this keeps them from coming back.

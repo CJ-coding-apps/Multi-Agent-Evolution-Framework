@@ -9,7 +9,7 @@ import type { ReviewDecision, ReviewRequest, ReviewSubject, Reviewer } from '../
 // named reviewer is an approval. A denial, silence past the timeout, a reviewer that fails and an
 // answer that is not a decision are all non-approvals, and a required gate turns each into a
 // ReviewRefused verdict. The gate this replaces read the diff itself and approved when it could
-// not (`harvest(...).catch(() => '')` then "No changes to review").
+// not (0.2.x swallowed a failed harvest as "No changes to review").
 
 const DIFF = 'diff --git a/hello.txt b/hello.txt\n-hello\n+hello, changed\n';
 const BASE = 'a'.repeat(40);
