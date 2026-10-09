@@ -145,6 +145,12 @@ export class ApprovalGate implements ApprovalGateHandle {
       return { status: 'TimedOut', reviewer: GATE, reason: `no decision within ${this.timeoutMs} ms, so the call is refused` };
     }
     if (answer instanceof Error) return refused(`the approval provider failed: ${answer.message}`);
+    // Typed as an answer, but it is whatever the provider resolved: reading fields off `undefined`
+    // would throw past the record, and the refusal would leave no trace in the bundle.
+    const given: unknown = answer;
+    if (typeof given !== 'object' || given === null) {
+      return refused(`the approval provider answered ${given === null ? 'null' : typeof given} instead of a decision`);
+    }
     if (answer.requestId !== pending.requestId) {
       const used = this.seen.has(answer.requestId) ? ', an id already used' : '';
       return refused(`the decision is for request "${answer.requestId}"${used}, not "${pending.requestId}"`);

@@ -241,6 +241,21 @@ test('a provider that fails, or answers anything but approved: true, has not app
   }
 });
 
+test('a provider answering nothing, or no object, is refused and attested: decide settles, it does not throw', async () => {
+  for (const nothing of [undefined, null, true, 'approved']) {
+    const sink = new SpySink();
+    const { provider } = scripted(() => nothing as unknown as ProviderAnswer);
+
+    const outcome = await new ApprovalGate({ provider, recorder: sink }).decide(ask());
+
+    assert.equal(outcome.approved, false, String(nothing));
+    assert.equal(outcome.status, 'Rejected');
+    assert.match(outcome.reason, /^the approval provider answered (undefined|null|boolean|string) instead of a decision$/);
+    assert.equal(sink.approvals.length, 1, 'the refusal is in the attestation');
+    assert.equal(sink.approvals[0]?.decision.reviewer, 'maf-approval-gate');
+  }
+});
+
 test('every decision reaches a real Attestor bundle as a ReviewAttestation, and the bundle verifies', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-approval-bundle-'));
   try {
