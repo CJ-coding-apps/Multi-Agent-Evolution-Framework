@@ -3,7 +3,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
 import { BaseTool } from '../ToolPlugin.js';
-import { makeToolId, resolveInside } from '@maf/types';
+import { makeToolId, resolveInside, PathConfinementError } from '@maf/types';
 
 /**
  * The single path a one-path tool declares, or `[]` when the model omitted it — a call with
@@ -45,12 +45,18 @@ export function namesGitDir(p: string): boolean {
   return p.split(/[\\/]+/).some((segment) => segment.toLowerCase() === '.git');
 }
 
-/** The refusal every write or delete tool gives for a path into `.git`; `why` says how it got there. */
-export function gitDirRefusal(tool: string, p: string, why: string): Error {
-  return new Error(
+/**
+ * The refusal every write or delete tool gives for a path into `.git`; `why` says how it got there.
+ * A `PathConfinementError`, which the gate records and reports as a `Deny` rather than letting it
+ * end the node.
+ */
+export function gitDirRefusal(tool: string, p: string, why: string): PathConfinementError {
+  return new PathConfinementError(
     `${tool} refuses ${JSON.stringify(p)}: ${why}. The run's tools never write or delete git's own ` +
     `data, because the worktree's .git is what keeps git — and every git tool — on the run's branch ` +
     `rather than on your repository.`,
+    p,
+    why,
   );
 }
 

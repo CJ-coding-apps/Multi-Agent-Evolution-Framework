@@ -267,6 +267,24 @@ export class VerdictError extends Error {
   }
 }
 
+/**
+ * A path a tool refuses whatever the policy says: confinement built into the tool, not a rule. The
+ * one case today is git's own data — `fs.write`, `fs.delete` and `patch.apply` refuse a path into
+ * `.git`, because the worktree's `.git` is what keeps every git tool on the run's branch. Thrown from
+ * `declaredPaths` (the spelling) and from `execute` (the resolved path); the gate turns it into an
+ * attested `Deny`, so the model is told why and the node goes on.
+ */
+export class PathConfinementError extends Error {
+  /**
+   * @param path   the path as the caller named it
+   * @param reason why it is refused, as a clause ("the path names git's own data (.git)")
+   */
+  constructor(message: string, readonly path: string, readonly reason: string) {
+    super(message);
+    this.name = 'PathConfinementError';
+  }
+}
+
 export interface DagNodeExecution {
   nodeId:      NodeId;
   runId:       RunId;

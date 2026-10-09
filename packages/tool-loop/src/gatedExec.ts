@@ -2,6 +2,7 @@ import type {
   ToolPlugin, ToolInput, ToolResult, ToolContext,
   PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalAsk, ApprovalGateHandle, ApprovalOutcome,
 } from '@maf/types';
+import { PathConfinementError } from '@maf/types';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
 
@@ -23,7 +24,9 @@ export interface GatedExecDeps {
  * Order is load-bearing: policy FIRST — anything but Allow (or an Escalate the
  * approval gate approves) is attested as a refusal and then thrown as
  * PolicyViolationError, and nothing executes — then tool.execute, then
- * attestation. Processor-mediated input edits happen upstream of this function —
+ * attestation. A tool's built-in confinement (`PathConfinementError`, from
+ * `declaredPaths` or from `execute` before it acts) is refused the same way, as a
+ * `Deny` under rule id `builtin:git-dir`. Processor-mediated input edits happen upstream of this function —
  * policy always sees the final input.
  *
  * Secret redaction (L1): policy evaluation and execution use the REAL input, but
@@ -48,8 +51,15 @@ export async function executeToolGated(
 
   // The tool's own declaration, computed before any rule is consulted. An error here (a tool
   // that does not declare, a declaration that throws) propagates: failing to evaluate policy
-  // is not permission to skip it.
-  const declaredPaths = tool.declaredPaths(input);
+  // is not permission to skip it. The one exception is the tool's built-in confinement refusing
+  // a path, which is a verdict, not a failure: it is refused on the record like a `Deny`.
+  let declaredPaths: string[];
+  try {
+    declaredPaths = tool.declaredPaths(input);
+  } catch (err: unknown) {
+    if (err instanceof PathConfinementError) return refuse(confinementDeny(err), undefined, tool, input, ctx, deps, new Date(), Date.now());
+    throw err;
+  }
 
   const policyDecision = await deps.policy.evaluate(tool.id, input, ctx, declaredPaths);
   const invokedAt = new Date();
@@ -67,25 +77,18 @@ export async function executeToolGated(
           request: policyDecision.approvalRequest, toolId: tool.id, input, declaredPaths,
         })
       : undefined;
-    if (!approves(policyDecision, approval)) {
-      // Attested before the throw: a bundle that lists only the calls that ran cannot show that the
-      // gate ever refused one.
-      await deps.attestor.record({
-        toolId:         tool.id,
-        agentId:        ctx.agentId,
-        runId:          ctx.runId,
-        taskId:         ctx.taskId,
-        input:          redactCredentialsRecord(input),
-        result:         refusedResult(policyDecision, approval),
-        invokedAt,
-        durationMs:     Date.now() - start,
-        policyDecision,
-      });
-      throw new PolicyViolationError(policyDecision);
-    }
+    if (!approves(policyDecision, approval)) return refuse(policyDecision, approval, tool, input, ctx, deps, invokedAt, start);
   }
 
-  const rawResult = await tool.execute(input, ctx);
+  // The same confinement, on the path the tool resolved as it ran (a link inside the root that leads
+  // into `.git`): the tool refuses before it touches anything, and the call is refused as above.
+  let rawResult: ToolResult;
+  try {
+    rawResult = await tool.execute(input, ctx);
+  } catch (err: unknown) {
+    if (err instanceof PathConfinementError) return refuse(confinementDeny(err), undefined, tool, input, ctx, deps, invokedAt, start);
+    throw err;
+  }
   const result: ToolResult = {
     ...rawResult,
     stdout:   redactSecrets(rawResult.stdout),
@@ -106,6 +109,43 @@ export async function executeToolGated(
   });
 
   return result;
+}
+
+/** The rule id a built-in confinement refusal is recorded under: it is no policy file's rule. */
+const BUILTIN_GIT_DIR_RULE = 'builtin:git-dir';
+
+/** A tool's own confinement refusal, as the `Deny` it is recorded and reported as. */
+function confinementDeny(err: PathConfinementError): Refusal {
+  return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_GIT_DIR_RULE };
+}
+
+/**
+ * Records a refused call, then throws it as a `PolicyViolationError` for the loop to hand back to the
+ * model. Attested before the throw: a bundle that lists only the calls that ran cannot show that the
+ * gate ever refused one.
+ */
+async function refuse(
+  decision: Refusal,
+  approval: ApprovalOutcome | undefined,
+  tool: ToolPlugin,
+  input: ToolInput,
+  ctx: ToolContext,
+  deps: GatedExecDeps,
+  invokedAt: Date,
+  start: number,
+): Promise<never> {
+  await deps.attestor.record({
+    toolId:         tool.id,
+    agentId:        ctx.agentId,
+    runId:          ctx.runId,
+    taskId:         ctx.taskId,
+    input:          redactCredentialsRecord(input),
+    result:         refusedResult(decision, approval),
+    invokedAt,
+    durationMs:     Date.now() - start,
+    policyDecision: decision,
+  });
+  throw new PolicyViolationError(decision);
 }
 
 type Refusal = Exclude<PolicyDecision, { verdict: 'Allow' }>;

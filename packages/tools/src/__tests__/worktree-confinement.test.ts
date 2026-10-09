@@ -7,11 +7,11 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolContext, ToolInput, ToolPlugin, PolicyDecision, PolicyEngineHandle, AttestorHandle } from '@maf/types';
-import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
+import { makeRunId, makeTaskId, makeAgentId, PathConfinementError } from '@maf/types';
 import { FsWriteTool, FsDeleteTool } from '../plugins/fs.js';
 import { PatchApplyTool } from '../plugins/patch.js';
 import {
-  GitStatusTool, GitDiffTool, GitAddTool, GitCommitTool, GitLogTool, GitResetTool,
+  GitStatusTool, GitDiffTool, GitAddTool, GitCommitTool, GitLogTool, GitResetTool, RepositoryRoots,
 } from '../plugins/git.js';
 import type { GitExec } from '../plugins/git.js';
 
@@ -23,8 +23,11 @@ import type { GitExec } from '../plugins/git.js';
 //
 //  - fs.write, fs.delete and patch.apply refuse a path naming `.git` from `declaredPaths`, which the
 //    gate evaluates before policy, and again on the resolved path when they run;
-//  - every git tool asks git which working tree it found, before every call, and refuses unless it is
-//    the project root; discovery is capped at the root's parent, so a tree without `.git` is no repository.
+//  - the git tools learn the project root's repository once (its top, which is the root itself or, for
+//    a run pointed at a subdirectory, above it), and every git tool asks git which repository it found
+//    before every call and refuses unless it is that one; discovery is capped at the top's parent, so a
+//    tree without `.git` is no repository. A root whose repository ignores it is never learned as part
+//    of it: a run worktree whose `.git` was gone before the first git call sits in `.maf/worktrees/`.
 //
 // The same attack through `WorktreeManager.createForRun` and the real registry is in
 // `cli/worktree-escape.test.ts`.
@@ -98,6 +101,10 @@ test('fs.write, fs.delete and patch.apply refuse every spelling of a .git path w
   for (const [tool, declare] of declares) {
     for (const p of GIT_DIR_SPELLINGS) {
       assert.throws(() => declare(p), (err: Error) => {
+        // The gate's cue to refuse it as a Deny rather than let it end the node.
+        assert.ok(err instanceof PathConfinementError, `${tool} ${p}: a PathConfinementError`);
+        assert.equal(err.path, p);
+        assert.equal(err.reason, 'the path names git\'s own data (.git)');
         assert.match(err.message, GIT_DIR_REFUSAL, `${tool} ${p}`);
         assert.ok(err.message.startsWith(`${tool} refuses `), `${tool} ${p}: the refusal names the tool`);
         return true;
@@ -133,7 +140,8 @@ test('a link inside the root that leads into .git is refused on its resolved pat
 
   await assert.rejects(
     () => new FsWriteTool().execute({ path: 'innocent/config', content: '[core]\n\tfsmonitor = ./x\n' }, ctxIn(root)),
-    /fs\.write refuses "innocent\/config": it resolves to "\.git\/config", which is git's own data/,
+    (err: unknown) => err instanceof PathConfinementError && err.path === 'innocent/config' &&
+      /fs\.write refuses "innocent\/config": it resolves to "\.git\/config", which is git's own data/.test(err.message),
   );
   await assert.rejects(() => new FsDeleteTool().execute({ path: 'innocent', recursive: true }, ctxIn(root)), /it resolves to "\.git"/);
   await assert.rejects(
@@ -178,23 +186,25 @@ function everyGitTool(exec?: GitExec): Array<[string, ToolPlugin, ToolInput]> {
   ];
 }
 
-test('a git tool refuses, and runs nothing, when the repository git finds is not the project root', async (t) => {
+test('a git tool refuses, and runs nothing, when the repository git finds at a call is not the one it learned', async (t) => {
   const root = await tmp(t, 'maf-git-probe-');
   const elsewhere = path.dirname(root);
   for (const [name, , input] of everyGitTool()) {
     const ran: string[][] = [];
-    const exec: GitExec = async (_file, args) => {
+    const exec: GitExec = async (_file, args, options) => {
       ran.push(args);
-      if (args.includes('rev-parse')) return { stdout: `${elsewhere}\n`, stderr: '' };
+      // Learning (no ceiling yet) finds the root itself; every later probe finds another repository.
+      if (args.includes('check-ignore')) throw Object.assign(new Error('exit 1'), { code: 1, stdout: '', stderr: '' });
+      if (args.includes('rev-parse')) return { stdout: `${options.env['GIT_CEILING_DIRECTORIES'] === undefined ? root : elsewhere}\n`, stderr: '' };
       return { stdout: '', stderr: '' };
     };
     const tool = everyGitTool(exec).find(([n]) => n === name)?.[1];
     assert.ok(tool);
     const r = await tool.execute(input, ctxIn(root));
     assert.equal(r.exitCode, 1, name);
-    assert.equal(r.stderr, `refusing to run git: the repository git found at ${elsewhere} is not the run's working tree ${root}.`, name);
+    assert.equal(r.stderr, `refusing to run git: the repository git found at ${elsewhere} is not the run's repository ${root}.`, name);
     // git.commit asks twice (its identity lookup, then the commit); every call refused at the probe.
-    assert.ok(ran.length > 0 && ran.every((a) => a.slice(-2).join(' ') === 'rev-parse --show-toplevel'), `${name}: only the probe ran`);
+    assert.ok(ran.length > 0 && ran.every((a) => ['rev-parse --show-toplevel', '-- .'].includes(a.slice(-2).join(' '))), `${name}: only the probe ran`);
   }
 });
 
@@ -206,7 +216,7 @@ test('a git tool refuses when git finds no repository at all', async (t) => {
   };
   const r = await new GitResetTool(exec).execute({ to: 'HEAD', hard: true }, ctxIn(root));
   assert.equal(r.exitCode, 1);
-  assert.match(r.stderr, new RegExp(`^refusing to run git: git found no repository from ${root} inside the run's working tree ${root} \\(git said: fatal: not a git repository`));
+  assert.match(r.stderr, new RegExp(`^refusing to run git: ${root} is not inside a git repository \\(git said: fatal: not a git repository`));
 });
 
 /**
@@ -242,38 +252,103 @@ async function snapshot(repo: string): Promise<{ index: string; head: string; st
   };
 }
 
-test('with the worktree\'s .git gone, no git tool reaches the user\'s repository around it', NEEDS_GIT, async (t) => {
+/** Every git tool, sharing one `RepositoryRoots` as the default registry's do. */
+function oneRegistry(roots = new RepositoryRoots()): Array<[string, ToolPlugin, ToolInput]> {
+  return [
+    ['git.status', new GitStatusTool(undefined, roots), {}],
+    ['git.diff',   new GitDiffTool(undefined, roots),   {}],
+    ['git.add',    new GitAddTool(undefined, roots),    { paths: ['a.txt'] }],
+    ['git.commit', new GitCommitTool(undefined, roots), { message: 'agent commit on your branch' }],
+    ['git.log',    new GitLogTool(undefined, roots),    { n: 1 }],
+    ['git.reset',  new GitResetTool(undefined, roots),  { to: 'HEAD', hard: true }],
+  ];
+}
+
+/**
+ * Removes the worktree's `.git` at `when` — before the tools learn the root, after they learned it at
+ * their first call, or after a registry built for the root learned it at construction — and checks
+ * that every git tool is then refused, from the worktree's top and from a subdirectory of it.
+ */
+for (const when of ['before the first git call', 'after the first git call', 'after construction for the root'] as const) {
+  for (const at of ['top', 'subdirectory'] as const) {
+    test(`with the worktree's .git removed ${when}, no git tool reaches the user's repository around it (project root: the worktree's ${at})`, NEEDS_GIT, async (t) => {
+      const { outer, inner } = await userRepoWithWorktree(t);
+      const projectRoot = at === 'top' ? inner : path.join(inner, 'sub');
+      if (at === 'subdirectory') {
+        await mkdir(projectRoot);
+        await writeFile(path.join(projectRoot, 'b.txt'), 'b\n', 'utf8');
+      }
+      const roots = when === 'after construction for the root' ? RepositoryRoots.bind(projectRoot) : new RepositoryRoots();
+      const tools = oneRegistry(roots);
+      if (when === 'after the first git call') {
+        const first = await tools[0]?.[1].execute({}, ctxIn(projectRoot));
+        assert.equal(first?.exitCode, 0, first?.stderr);
+      }
+      await rm(path.join(inner, '.git'));
+      // The control: git itself, run there, now finds the user's repository — the auditor's reset --hard.
+      assert.equal(realpathSync(must(projectRoot, ['rev-parse', '--show-toplevel']).trim()), outer, 'plain git walks up to the user\'s checkout');
+      const before = await snapshot(outer);
+
+      // Learned before the removal, the probe finds no repository under the ceiling; learned after it,
+      // the repository git finds is the user's, which ignores the worktree — `.maf/` is in its .gitignore.
+      const refusal = when === 'before the first git call'
+        ? new RegExp(`^refusing to run git: the repository git found around ${projectRoot} is ${outer}, which ignores ${projectRoot}`)
+        : new RegExp(`^refusing to run git: git found no repository from ${projectRoot} inside the run's repository ${inner} `);
+      for (const [name, tool, input] of tools) {
+        const r = await tool.execute(input, ctxIn(projectRoot));
+        assert.equal(r.exitCode, 1, `${name}: ${r.stdout}${r.stderr}`);
+        assert.match(r.stderr, refusal, name);
+        assert.deepEqual(await snapshot(outer), before, `${name} left the user's index, HEAD, status and files as they were`);
+      }
+    });
+  }
+}
+
+test('the git tools work in an intact worktree, from its top and with a subdirectory as the project root', NEEDS_GIT, async (t) => {
   const { outer, inner } = await userRepoWithWorktree(t);
-  await rm(path.join(inner, '.git'));
-  // The control: git itself, run there, now finds the user's repository — the auditor's reset --hard.
-  assert.equal(realpathSync(must(inner, ['rev-parse', '--show-toplevel']).trim()), outer, 'plain git walks up to the user\'s checkout');
+  const sub = path.join(inner, 'sub');
+  await mkdir(sub);
   const before = await snapshot(outer);
 
-  for (const [name, tool, input] of everyGitTool()) {
-    const r = await tool.execute(input, ctxIn(inner));
-    assert.equal(r.exitCode, 1, `${name}: ${r.stdout}${r.stderr}`);
-    assert.match(r.stderr, /refusing to run git: git found no repository from .* inside the run's working tree/, name);
-    assert.deepEqual(await snapshot(outer), before, `${name} left the user's index, HEAD, status and files as they were`);
+  // The project root is the subdirectory — a run pointed at <repo>/sub — and every call is made there.
+  for (const [i, roots] of [new RepositoryRoots(), RepositoryRoots.bind(sub)].entries()) {
+    const [status, diff, add, commit] = [new GitStatusTool(undefined, roots), new GitDiffTool(undefined, roots),
+      new GitAddTool(undefined, roots), new GitCommitTool(undefined, roots)];
+    await writeFile(path.join(sub, 'b.txt'), `work ${i}\n`, 'utf8');
+    const s = await status.execute({}, ctxIn(sub));
+    assert.equal(s.exitCode, 0, s.stderr);
+    assert.match(s.stdout, /# branch\.head maf\/run1/);
+    assert.match(s.stdout, i === 0 ? /^\? \.\/$/m : /^1 \.M .* b\.txt$/m, 'the change in the subdirectory, relative to it');
+    const a = await add.execute({ paths: ['b.txt'] }, ctxIn(sub));
+    assert.equal(a.exitCode, 0, a.stderr);
+    const d = await diff.execute({ staged: true, paths: ['b.txt'] }, ctxIn(sub));
+    assert.equal(d.exitCode, 0, d.stderr);
+    assert.match(d.stdout, /\+\+\+ b\/sub\/b\.txt/);
+    const c = await commit.execute({ message: 'agent work in sub' }, ctxIn(sub));
+    assert.equal(c.exitCode, 0, c.stderr);
+    assert.equal(must(inner, ['log', '-1', '--format=%s']).trim(), 'agent work in sub', 'committed on the run\'s branch');
   }
-});
+  assert.deepEqual(await snapshot(outer), before, 'and the user\'s checkout is untouched');
 
-test('the git tools still work in an intact worktree, and in a subdirectory of the root', NEEDS_GIT, async (t) => {
-  const { inner } = await userRepoWithWorktree(t);
-  await mkdir(path.join(inner, 'sub'));
-  const status = await new GitStatusTool().execute({}, ctxIn(inner, path.join(inner, 'sub')));
-  assert.equal(status.exitCode, 0, status.stderr);
-  assert.match(status.stdout, /# branch\.head maf\/run1/);
   const log = await new GitLogTool().execute({ n: 1 }, ctxIn(inner));
   assert.equal(log.exitCode, 0, log.stderr);
-  assert.match(log.stdout, /base/);
+  assert.match(log.stdout, /agent work in sub/);
 });
 
-test('a nested repository between the cwd and the root is not the run\'s working tree', NEEDS_GIT, async (t) => {
+test('a registry built for one project root refuses a call for another', NEEDS_GIT, async (t) => {
+  const { inner } = await userRepoWithWorktree(t);
+  const other = await tmp(t, 'maf-git-other-');
+  const r = await new GitStatusTool(undefined, RepositoryRoots.bind(inner)).execute({}, ctxIn(other));
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.stderr, `refusing to run git: these git tools were set up for the project root ${inner}, not ${other}.`);
+});
+
+test('a nested repository between the cwd and the root is not the run\'s repository', NEEDS_GIT, async (t) => {
   const { inner } = await userRepoWithWorktree(t);
   const nested = path.join(inner, 'vendor');
   await mkdir(nested);
   must(nested, ['init', '-q']);
   const r = await new GitStatusTool().execute({}, ctxIn(inner, nested));
   assert.equal(r.exitCode, 1);
-  assert.equal(r.stderr, `refusing to run git: the repository git found at ${nested} is not the run's working tree ${inner}.`);
+  assert.equal(r.stderr, `refusing to run git: the repository git found at ${nested} is not the run's repository ${inner}.`);
 });

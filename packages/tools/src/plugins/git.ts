@@ -1,4 +1,5 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -20,14 +21,6 @@ export type GitExec = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 const execGit: GitExec = (file, args, options) => execFileAsync(file, args, options);
-
-/**
- * The base every git tool extends, so that none of them can reach git except through `git`
- * below and the environment it sets.
- */
-export abstract class GitTool<I extends ToolInput> extends BaseTool<I> {
-  constructor(protected readonly exec: GitExec = execGit) { super(); }
-}
 
 /** A model-supplied value as an error message should show it: strings and objects as JSON. */
 function asWritten(value: unknown): string {
@@ -101,11 +94,12 @@ const HOST_REPOSITORY_ENV = new Set([
  * not depend on `git-ops` (the edge would change the lockfile), the tools must keep their injectable
  * `GitExec`, and the agent's git also needs the prompt, identity and confinement handling below.
  *
- * `root` is the run's working tree, symlink-resolved. `GIT_CEILING_DIRECTORIES` is its parent, so
- * repository discovery from anywhere in the tree stops at the tree's own top: a worktree whose `.git`
- * link is gone is no repository at all, rather than the user's checkout around it.
+ * `ceiling` is `GIT_CEILING_DIRECTORIES`: the parent of the run's repository root, so discovery from
+ * anywhere below that root stops at the root itself — a worktree whose `.git` link is gone is no
+ * repository at all, rather than the user's checkout around it. Without one (learning the root, below)
+ * discovery is git's own; the host's ceiling is dropped with the rest of its repository variables.
  */
-function isolatedEnv(root: string): NodeJS.ProcessEnv {
+function isolatedEnv(ceiling?: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!HOST_CONFIG_ENV.test(key) && !HOST_REPOSITORY_ENV.has(key)) env[key] = value;
@@ -119,11 +113,12 @@ function isolatedEnv(root: string): NodeJS.ProcessEnv {
     // Literal pathspecs: a path the model names is a file name to git, as it is to policy. With
     // pathspec magic on, a declared `*.env` matches no rule written for `.env` and stages `.env`.
     GIT_LITERAL_PATHSPECS: '1',
-    GIT_CEILING_DIRECTORIES: path.dirname(root),
+    ...(ceiling !== undefined ? { GIT_CEILING_DIRECTORIES: ceiling } : {}),
   };
 }
 
-type GitOutcome = { stdout: string; stderr: string; code: number };
+/** What one git command left: its output and its exit status. */
+export type GitOutcome = { stdout: string; stderr: string; code: number };
 
 async function run(args: string[], cwd: string, env: NodeJS.ProcessEnv, exec: GitExec): Promise<GitOutcome> {
   try {
@@ -135,36 +130,171 @@ async function run(args: string[], cwd: string, env: NodeJS.ProcessEnv, exec: Gi
   }
 }
 
+/** `run`, synchronously and always with the real git: for learning a root at construction. */
+function runSync(args: string[], cwd: string, env: NodeJS.ProcessEnv): GitOutcome {
+  const r = spawnSync('git', [...ISOLATION_ARGS, ...args], { cwd, env, encoding: 'utf8' });
+  if (r.error !== undefined) return { stdout: '', stderr: r.error.message, code: 127 };
+  return { stdout: r.stdout, stderr: r.stderr, code: r.status ?? 1 };
+}
+
+/** The repository a project root belongs to — its top, symlink-resolved — or why the git tools refuse it. */
+export type Learned = { readonly root: string } | { readonly refusal: string };
+
+const LEARN_TOP = ['rev-parse', '--show-toplevel'];
+/** Exit 0: the directory is ignored; exit 1: it is not. */
+const LEARN_IGNORED = ['check-ignore', '-q', '--', '.'];
+
 /**
- * Runs one git command for a tool, after proving that the repository git finds from `ctx.cwd` is the
- * run's working tree, `ctx.projectRoot`: its `--show-toplevel`, symlink-resolved, must be that root.
- * Asked before every call, in the environment the call itself gets, because the tree can change
- * between calls — an agent's `test.run` can delete `.git`, and the next `git.reset --hard` would
- * then act on whatever repository git found instead. A refusal is a failed result naming both
- * directories; git is not run.
+ * Where a root is learned: the tools' environment with git's own discovery, and without literal
+ * pathspecs, which `check-ignore` refuses outright. No path here comes from the model.
  */
-async function git(args: string[], ctx: ToolContext, exec: GitExec): Promise<GitOutcome> {
-  const refuse = (why: string): GitOutcome => ({ stdout: '', stderr: why, code: 1 });
+function learningEnv(): NodeJS.ProcessEnv {
+  return { ...isolatedEnv(), GIT_LITERAL_PATHSPECS: '0' };
+}
+
+function gitSaid(r: GitOutcome): string {
+  return r.stderr.trim() || `exit ${r.code}`;
+}
+
+function unresolved(projectRoot: string, e: unknown): Learned {
+  return { refusal: `the project root ${projectRoot} cannot be resolved (${e instanceof Error ? e.message : String(e)}).` };
+}
+
+function notARepository(root: string, top: GitOutcome): Learned {
+  return { refusal: `${root} is not inside a git repository (git said: ${gitSaid(top)}).` };
+}
+
+/**
+ * The top git found, unless that repository ignores the project root. A directory its repository
+ * ignores is not part of it: every run's worktree sits in `.maf/worktrees/`, which MAF's `.gitignore`
+ * there ignores whole, so a worktree whose `.git` link was gone before the root was learned is refused
+ * here rather than learned as the user's checkout around it.
+ */
+function judged(root: string, top: string, ignored: GitOutcome): Learned {
+  if (ignored.code === 1) return { root: top };
+  if (ignored.code === 0) {
+    return {
+      refusal: `the repository git found around ${root} is ${top}, which ignores ${root}, so it is not part of ` +
+        `that repository. A run's worktree whose .git link is gone looks like this from the checkout around it.`,
+    };
+  }
+  return { refusal: `cannot tell whether the repository at ${top} ignores ${root} (git said: ${gitSaid(ignored)}).` };
+}
+
+async function learnRoot(projectRoot: string, exec: GitExec): Promise<Learned> {
   let root: string;
   try {
-    root = await realpath(ctx.projectRoot);
+    root = await realpath(projectRoot);
   } catch (e: unknown) {
-    return refuse(`refusing to run git: the run's working tree ${ctx.projectRoot} cannot be resolved (${e instanceof Error ? e.message : String(e)}).`);
+    return unresolved(projectRoot, e);
   }
-  const env = isolatedEnv(root);
-  const probe = await run(['rev-parse', '--show-toplevel'], ctx.cwd, env, exec);
+  const env = learningEnv();
+  const top = await run(LEARN_TOP, root, env, exec);
+  const found = top.code === 0 ? await realpath(top.stdout.trim()).catch(() => undefined) : undefined;
+  if (found === undefined) return notARepository(root, top);
+  return judged(root, found, await run(LEARN_IGNORED, root, env, exec));
+}
+
+function learnRootSync(projectRoot: string): Learned {
+  let root: string;
+  try {
+    root = realpathSync(projectRoot);
+  } catch (e: unknown) {
+    return unresolved(projectRoot, e);
+  }
+  const env = learningEnv();
+  const top = runSync(LEARN_TOP, root, env);
+  let found: string | undefined;
+  try {
+    found = top.code === 0 ? realpathSync(top.stdout.trim()) : undefined;
+  } catch {
+    found = undefined;
+  }
+  if (found === undefined) return notARepository(root, top);
+  return judged(root, found, runSync(LEARN_IGNORED, root, env));
+}
+
+/**
+ * The repository the git tools are confined to, learned once per project root from the root itself:
+ * `git rev-parse --show-toplevel` there, symlink-resolved. A run pointed at `<repo>/<sub>` works in
+ * `<worktree>/<sub>`: that subdirectory stays the tools' project root — their working directory, and
+ * the file tools' confinement — while the git tools hold every call to the repository learned here.
+ *
+ * Learned before the agent acts: at construction for a registry built for one project root (`bind`),
+ * otherwise at the first git call for a root, shared by every git tool the registry holds. A root
+ * that is in no repository is recorded as such, and every git call for it is refused.
+ */
+export class RepositoryRoots {
+  private readonly learned = new Map<string, Promise<Learned>>();
+  private bound: string | undefined;
+
+  constructor(private readonly exec: GitExec = execGit) {}
+
+  /** Learns `projectRoot`'s repository now, synchronously; afterwards a call for any other root is refused. */
+  static bind(projectRoot: string): RepositoryRoots {
+    const roots = new RepositoryRoots();
+    roots.bound = path.resolve(projectRoot);
+    roots.learned.set(roots.bound, Promise.resolve(learnRootSync(roots.bound)));
+    return roots;
+  }
+
+  /** What is known about `projectRoot`'s repository, learned on first use. */
+  of(projectRoot: string): Promise<Learned> {
+    const key = path.resolve(projectRoot);
+    if (this.bound !== undefined && key !== this.bound) {
+      return Promise.resolve({ refusal: `these git tools were set up for the project root ${this.bound}, not ${key}.` });
+    }
+    let learned = this.learned.get(key);
+    if (learned === undefined) {
+      learned = learnRoot(key, this.exec);
+      this.learned.set(key, learned);
+    }
+    return learned;
+  }
+}
+
+/**
+ * Runs one git command for a tool, after proving that the repository git finds from `ctx.cwd` is the
+ * run's: its `--show-toplevel`, symlink-resolved, must be the root `repositories` learned for
+ * `ctx.projectRoot`. Asked before every call, in the environment the call itself gets, because the
+ * tree can change between calls — an agent's `test.run` can delete `.git`, and the next
+ * `git.reset --hard` would then act on whatever repository git found instead. A refusal is a failed
+ * result naming both directories; git is not run.
+ */
+async function git(args: string[], ctx: ToolContext, exec: GitExec, repositories: RepositoryRoots): Promise<GitOutcome> {
+  const refuse = (why: string): GitOutcome => ({ stdout: '', stderr: `refusing to run git: ${why}`, code: 1 });
+  const learned = await repositories.of(ctx.projectRoot);
+  if ('refusal' in learned) return refuse(learned.refusal);
+  const env = isolatedEnv(path.dirname(learned.root));
+  const probe = await run(LEARN_TOP, ctx.cwd, env, exec);
   const found = probe.code === 0 ? await realpath(probe.stdout.trim()).catch(() => undefined) : undefined;
   if (found === undefined) {
     return refuse(
-      `refusing to run git: git found no repository from ${ctx.cwd} inside the run's working tree ${root} ` +
-      `(git said: ${probe.stderr.trim() || `exit ${probe.code}`}). Either the tree's .git link is missing or broken, ` +
-      `or the tree is a subdirectory of its repository and git may not look above the tree for its top.`,
+      `git found no repository from ${ctx.cwd} inside the run's repository ${learned.root} ` +
+      `(git said: ${gitSaid(probe)}). Its .git link is missing or broken.`,
     );
   }
-  if (found !== root) {
-    return refuse(`refusing to run git: the repository git found at ${found} is not the run's working tree ${root}.`);
+  if (found !== learned.root) {
+    return refuse(`the repository git found at ${found} is not the run's repository ${learned.root}.`);
   }
   return run(args, ctx.cwd, env, exec);
+}
+
+/**
+ * The base every git tool extends, so that none of them can reach git except through `git`
+ * above and the environment it sets. `repositories` is what the tools know of the repository they
+ * are confined to; the default registry gives its six git tools one, so it is learned once.
+ */
+export abstract class GitTool<I extends ToolInput> extends BaseTool<I> {
+  constructor(
+    protected readonly exec: GitExec = execGit,
+    protected readonly repositories: RepositoryRoots = new RepositoryRoots(exec),
+  ) { super(); }
+
+  /** `git` for this tool: its exec, its repository. */
+  protected git(args: string[], ctx: ToolContext): Promise<GitOutcome> {
+    return git(args, ctx, this.exec, this.repositories);
+  }
 }
 
 // ── git.status ────────────────────────────────────────────────────────────────
@@ -180,7 +310,7 @@ export class GitStatusTool extends GitTool<Record<string, never>> {
 
   async execute(_: Record<string, never>, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const r = await git(['status', '--porcelain=v2', '--branch'], ctx, this.exec);
+    const r = await this.git(['status', '--porcelain=v2', '--branch'], ctx);
     return { stdout: r.stdout, stderr: r.stderr, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }
@@ -204,7 +334,7 @@ export class GitDiffTool extends GitTool<DiffInput> {
     if (input.staged) args.push('--staged');
     const paths = diffPaths(input);
     if (paths.length > 0) args.push('--', ...paths);
-    const r = await git(args, ctx, this.exec);
+    const r = await this.git(args, ctx);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }
@@ -223,7 +353,7 @@ export class GitAddTool extends GitTool<AddInput> {
 
   async execute(input: AddInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const r = await git(['add', '--', ...input.paths], ctx, this.exec);
+    const r = await this.git(['add', '--', ...input.paths], ctx);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }
@@ -242,9 +372,9 @@ const FALLBACK_IDENTITY = { 'user.name': 'maf', 'user.email': 'maf@maf.invalid' 
  * is left alone — the commit is made as the repository's identity, which is what the security
  * gate reviews — and the fallback is per call, never written to the repository's config.
  */
-async function fallbackIdentity(ctx: ToolContext, exec: GitExec): Promise<string[]> {
+async function fallbackIdentity(ask: (args: string[]) => Promise<GitOutcome>): Promise<string[]> {
   // `-z` records are `key\nvalue\0`; a valueless key has no `\n`. Exit 1 means none is set.
-  const r = await git(['config', '-z', '--get-regexp', '^user\\.(name|email)$'], ctx, exec);
+  const r = await ask(['config', '-z', '--get-regexp', '^user\\.(name|email)$']);
   const configured = new Map<string, string>();
   for (const record of r.stdout.split('\0')) {
     const nl = record.indexOf('\n');
@@ -266,9 +396,9 @@ export class GitCommitTool extends GitTool<CommitInput> {
 
   async execute(input: CommitInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const args = [...await fallbackIdentity(ctx, this.exec), 'commit', '-m', input.message];
+    const args = [...await fallbackIdentity((a) => this.git(a, ctx)), 'commit', '-m', input.message];
     if (input.allowEmpty) args.push('--allow-empty');
-    const r = await git(args, ctx, this.exec);
+    const r = await this.git(args, ctx);
     // Extract commit hash from output like "[branch abc1234]"
     const hashMatch = /\[[\w/]+ ([0-9a-f]+)\]/.exec(r.stdout);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: { hash: hashMatch?.[1] } };
@@ -297,7 +427,7 @@ export class GitLogTool extends GitTool<LogInput> {
     }
     const args = ['log', `-${n}`];
     if (input.oneline !== false) args.push('--oneline');
-    const r = await git(args, ctx, this.exec);
+    const r = await this.git(args, ctx);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }
@@ -336,7 +466,7 @@ export class GitResetTool extends GitTool<ResetInput> {
     // would say the same thing, but `git reset` only accepts it from 2.44; the separator works
     // on every git maf supports.)
     const args = ['reset', input.hard ? '--hard' : '--soft', to, '--'];
-    const r = await git(args, ctx, this.exec);
+    const r = await this.git(args, ctx);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }
