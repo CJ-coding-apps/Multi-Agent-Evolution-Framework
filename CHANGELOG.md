@@ -99,10 +99,14 @@ the README's Status table lists both as planned.
   agent could `fs.delete .git` and then `git.reset --hard`, which git — finding no repository in the
   worktree — ran on the user's checkout above it; or rewrite `.git` to `gitdir: <repo>/.git` and commit
   onto the user's branch. `fs.write`, `fs.delete` and `patch.apply` now refuse any path into `.git`, at any
-  depth and in any case, before policy and again on the resolved path; every git tool asks git which
-  working tree it found before each call and refuses unless it is the run's, with `GIT_CEILING_DIRECTORIES`
-  at the tree's parent and the host's `GIT_DIR`, `GIT_INDEX_FILE` and other repository variables dropped.
-  `test.run` runs the project's own command and is not confined; docs/SECURITY.md says so.
+  depth and in any case, before policy and again on the resolved path; the refusal is a `Deny` under rule
+  id `builtin:git-dir`, attested in the bundle and reported to the agent, whose node goes on. The git
+  tools learn the run's repository root once, from the project root, and every git tool asks git which
+  repository it found before each call and refuses unless it is that one, with `GIT_CEILING_DIRECTORIES`
+  at the root's parent and the host's `GIT_DIR`, `GIT_INDEX_FILE` and other repository variables dropped:
+  a run pointed at a subdirectory works there, its git confined to the repository root. MAF's own git
+  calls drop the same variables and pin `core.fsmonitor` too. `test.run` runs the project's own command
+  and is not confined; docs/SECURITY.md says so.
 - **The reviewed diff shows the change whatever `.gitattributes` says** (F2 of the release audit). An
   agent-written `*.js -diff` turned its change into "Binary files differ" in the diff the security gate and
   a human reviewer were shown, and the attestation signed that. `snapshotDiff` passes `--text

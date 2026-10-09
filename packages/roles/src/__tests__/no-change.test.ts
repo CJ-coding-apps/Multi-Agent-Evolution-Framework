@@ -279,6 +279,19 @@ test('a role with no write tool may not set expectsChange', () => {
     }, '/tmp/maf-no-change'),
     (err: unknown) => err instanceof RoleConfigError && /"reviewer" sets expectsChange: true.*holds none/.test(err.message),
   );
+  // And a role holding test.run alone may set it: test.run is a write tool to isWriterRole (F10), and
+  // the message names it among them.
+  RoleRegistry.fromSet({
+    version: 1, defaultRole: defineRoleName('tester'),
+    roles: [{ role: defineRoleName('tester'), systemPrompt: 'x', allowedTools: [makeToolId('test.run')], expectsChange: true }],
+  }, '/tmp/maf-no-change');
+  assert.throws(
+    () => RoleRegistry.fromSet({
+      version: 1, defaultRole: defineRoleName('reviewer'),
+      roles: [{ role: defineRoleName('reviewer'), systemPrompt: 'x', allowedTools: [makeToolId('grep')], expectsChange: true }],
+    }, '/tmp/maf-no-change'),
+    /\(fs\.write, fs\.delete, patch\.apply, git\.add, git\.commit, git\.reset or test\.run\)/,
+  );
 });
 
 test('roles.yaml: a non-boolean expectsChange is refused', async () => {

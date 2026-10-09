@@ -384,20 +384,25 @@ the host's git configuration does not apply. `git.commit` uses the repository's 
 `user.email` and fills in `maf` / `maf@maf.invalid` only for one the repository leaves unset. Paths are
 literal (`GIT_LITERAL_PATHSPECS=1`), and git never prompts.
 
-They act on the run's working tree and nothing else. Before every call, each tool asks git, in the
-environment the call will get, which working tree it found (`git rev-parse --show-toplevel`) and refuses
-— running nothing — unless that is the project root, symlinks resolved: "the repository git found at
-<x> is not the run's working tree <y>". `GIT_CEILING_DIRECTORIES` is set to the root's parent, so a tree
-whose `.git` link is gone is no repository at all rather than the user's checkout around it, and the
-host's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and git's other repository-locating variables are
-dropped, so MAF started from a git hook does not hand the agent the user's repository. The other half of
-the same confinement is in the file tools: `fs.write`, `fs.delete` and `patch.apply` refuse any path
-with a `.git` segment at any depth (any case), or that resolves into `.git`, from `declaredPaths` — before
-the policy engine is asked — and again when they run, so the agent cannot delete the worktree's `.git`
-link or point it at another repository. A refused `.git` path is an error that ends the node, not a policy
-verdict, and it is not in the bundle's tool calls. With the tree at a subdirectory of its repository —
-MAF pointed at `<repo>/<sub>` — the project root is that subdirectory, so the git tools refuse every call
-there.
+They act on the run's repository and nothing else. The tools learn that repository once, from the
+project root itself — its `git rev-parse --show-toplevel`, symlinks resolved — at registry construction
+when the registry is built for one root, otherwise at the first git call for the root. Before every call,
+each tool asks git again, in the environment the call will get, which repository it found, and refuses —
+running nothing — unless it is the one learned: "the repository git found at <x> is not the run's
+repository <y>". `GIT_CEILING_DIRECTORIES` is set to that repository's parent, so a worktree whose `.git`
+link is gone is no repository at all rather than the user's checkout around it; a root that is in no
+repository, or that the repository git finds ignores (every run worktree sits in `.maf/worktrees/`, which
+MAF's `.gitignore` there ignores, so a worktree whose `.git` was gone before the first git call looks like
+this), is refused at every call. The host's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and git's other
+repository-locating variables are dropped, so MAF started from a git hook does not hand the agent the
+user's repository. The other half of the same confinement is in the file tools: `fs.write`, `fs.delete`
+and `patch.apply` refuse any path with a `.git` segment at any depth (any case), or that resolves into
+`.git`, from `declaredPaths` — before the policy engine is asked — and again when they run, so the agent
+cannot delete the worktree's `.git` link or point it at another repository. A refused `.git` path is a
+`Deny` under rule id `builtin:git-dir`: in the bundle's tool calls like any refusal, and reported to the
+agent, whose node goes on. With MAF pointed at `<repo>/<sub>`, the project root — the tools' working
+directory and the file tools' confinement — is `<worktree>/<sub>`, and the git tools work there, held to
+the worktree's top.
 
 What this does not cover: repository configuration that names a program still runs it — `diff.external`
 or a diff driver's `textconv` on `git.diff`, a filter driver's `clean`/`process` (chosen by an
@@ -405,8 +410,9 @@ agent-writable `.gitattributes`) on `git.add`, and `gpg.program` with `log.showS
 `fs.write`, `fs.delete` and `patch.apply` refuse any path into `.git` whatever the policy says, so an
 agent cannot add such configuration itself; a relative program path that the repository's configuration
 already names is a file the agent can write. MAF's own git calls (`runIsolatedGit`: the security diff, the worktree, the
-hand-over) pin `core.hooksPath` and ignore the host's configuration files, but do not pin
-`core.fsmonitor`.
+hand-over) pin `core.hooksPath` and `core.fsmonitor`, ignore the host's configuration files, and drop
+the host's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, object-store, namespace and exported-config
+variables.
 
 ### Path confinement
 
