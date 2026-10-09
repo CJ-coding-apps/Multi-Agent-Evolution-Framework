@@ -162,7 +162,7 @@ jobs:
   diag:
     name: TEMP diag (reverted)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -179,18 +179,22 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build (tsc, leaf-first)
         run: pnpm build
-      - name: Run tests and annotate failures
+      - name: Run tests until one fails, and annotate it
         run: |
           set +e +o pipefail
-          start=$(date +%s)
-          pnpm -r test > "$RUNNER_TEMP/test.log" 2>&1
-          code=$?
-          end=$(date +%s)
           log="$RUNNER_TEMP/test.log"
           annotate() { local t=$1; shift; local m; m=$(sed -e 's/%/%25/g' | cut -c1-220 | awk '{printf "%s%%0A", $0}' | cut -c1-2300); echo "::warning title=${t}::${m}"; }
-          { echo "exit=$code in $((end - start))s nproc=$(nproc) node=$(node --version)"; grep -nE 'not ok|Failed|ELIFECYCLE|# fail [1-9]|# cancelled [1-9]' "$log" | head -25; } | annotate diag-summary
+          for run in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            start=$(date +%s)
+            pnpm -r test > "$log" 2>&1
+            code=$?
+            end=$(date +%s)
+            echo "run $run: exit=$code in $((end - start))s"
+            [ "$code" -ne 0 ] && break
+          done
+          { echo "run=$run exit=$code in $((end - start))s nproc=$(nproc) node=$(node --version)"; grep -nE ': *not ok|ELIFECYCLE| test: Failed|# fail [1-9]|# cancelled [1-9]|duration_ms [0-9]{5,}' "$log" | head -25; } | annotate diag-summary
           n=0
-          for first in $(grep -n -E 'not ok' "$log" | cut -d: -f1 | head -4); do
+          for first in $(grep -n -E ': *not ok' "$log" | cut -d: -f1 | head -4); do
             n=$((n + 1))
             sed -n "$((first > 12 ? first - 12 : 1)),$((first + 18))p" "$log" | annotate "diag-ctx-$n-line-$first"
           done
