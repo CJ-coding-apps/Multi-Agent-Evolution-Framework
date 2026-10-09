@@ -23,7 +23,7 @@ The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four ro
 
 ## `.maf/roles.yaml`
 
-The file is YAML, read by the same parser as `.maf/policy.yaml`. JSON is YAML, so the JSON form below — with `#` comment lines, as roles files have always been written — loads unchanged; block-style YAML loads too. One JSON file that loaded before no longer does: one that repeats a key within a mapping, where the last value used to win silently.
+The file is YAML, read by the same parser as `.maf/policy.yaml`. JSON is YAML, so the JSON form below — with `#` comment lines, as roles files have always been written — loads unchanged; block-style YAML loads too. Two kinds of JSON file that loaded before no longer do: one that repeats a key within a mapping, where the last value used to win silently, and one whose lines end in a bare carriage return (classic Mac OS line endings), which the parser does not read as line breaks — save it with LF or CRLF endings.
 
 ```json
 {
@@ -68,7 +68,7 @@ Fields:
 
 ### YAML or JSON?
 
-JSON, despite the extension. The parser removes lines whose first non-blank character is `#` and passes the rest to `JSON.parse`, so a JSON document with `#` comment lines loads and real YAML does not: a file in YAML syntax is a `RoleConfigError`, and the run stops. Policy files moved to a real YAML loader in 0.2.1; the roles file has not (it is on the README's Status table).
+Either: the parser reads YAML, and the JSON form above is YAML, so it and its block-style equivalent load to the same role set. The parser refuses rather than guesses — a key repeated within a mapping, a second document, a tag it cannot resolve and a `<<` merge key each stop the run with a `RoleConfigError` naming the line. Merge keys are not part of YAML 1.2, the parser's default, so `<<: *base` would otherwise load as a field named `<<` and the fields it was meant to bring in would be missing: write them out in full.
 
 ## How dispatch flows
 

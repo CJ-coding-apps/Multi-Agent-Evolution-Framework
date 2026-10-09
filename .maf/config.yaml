@@ -1,6 +1,8 @@
 # MAF run settings. Every key is optional and the values below are the built-in defaults.
 # A command-line flag overrides the key it names; a key left out takes its default.
-# The file is validated when a run starts: an unknown key or a bad value stops the run.
+# The file is validated when a run starts (0.3.0): an unknown key or a bad value stops the run.
+# A section whose keys are all commented out is empty, and that stops the run too: delete the
+# section's name as well, or leave it at least one key.
 
 adapter: claude            # -a, --adapter
 worktree: true             # --no-worktree sets false
