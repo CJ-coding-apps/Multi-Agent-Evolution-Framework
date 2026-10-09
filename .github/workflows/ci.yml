@@ -157,3 +157,43 @@ jobs:
             exit 1
           fi
           node scripts/compare-goldens.mjs tests/goldens/baseline.json "${results[0]}"
+
+  # TEMPORARY diagnostic for the red `build · typecheck · test` on this branch; reverted next commit.
+  diag:
+    name: TEMP diag (reverted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+      - name: Build (tsc, leaf-first)
+        run: pnpm build
+      - name: Run tests and annotate failures
+        run: |
+          set +e +o pipefail
+          start=$(date +%s)
+          pnpm -r test > "$RUNNER_TEMP/test.log" 2>&1
+          code=$?
+          end=$(date +%s)
+          first=$(grep -n -m1 -E '^not ok|^ *not ok' "$RUNNER_TEMP/test.log" | cut -d: -f1)
+          {
+            echo "pnpm -r test exit=$code in $((end - start))s; nproc=$(nproc); node=$(node --version)"
+            grep -nE 'not ok|failureType|signal:|error:|malloc|corrupt|timed out|Failed|ELIFECYCLE|# (tests|pass|fail|cancelled|skipped) ' "$RUNNER_TEMP/test.log" | head -60
+            if [ -n "$first" ]; then
+              echo "---- context around line $first ----"
+              sed -n "$((first > 40 ? first - 40 : 1)),$((first + 30))p" "$RUNNER_TEMP/test.log"
+            fi
+          } > "$RUNNER_TEMP/summary.txt"
+          msg=$(sed -e 's/%/%25/g' "$RUNNER_TEMP/summary.txt" | awk '{printf "%s%%0A", $0}' | cut -c1-60000)
+          echo "::warning title=diag::${msg}"
