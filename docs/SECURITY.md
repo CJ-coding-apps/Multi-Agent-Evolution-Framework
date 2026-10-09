@@ -84,8 +84,9 @@ How a bundle is signed, and what a signature does **not** establish today, state
   with the development key.
 - **The key is not hidden from the agent.** The backend CLIs and every tool that starts a process —
   `test.run`, the `git.*` tools, `grep` (rg or grep) and `patch.apply` — inherit MAF's whole environment,
-  `MAF_SIGNING_KEY` included. `test.run` runs project code with it, and `git.commit` runs the
-  repository's own hooks with it. So an agent that can run a command — directly, through a test it
+  `MAF_SIGNING_KEY` included. `test.run` runs project code with it. The `git.*` tools run git with hooks
+  off (`core.hooksPath` and `core.fsmonitor` pinned) and the host's git configuration ignored, so they
+  never run a hook, even one the agent wrote. So an agent that can run a command — directly, through a test it
   wrote, or through a hook — can read the key and sign a bundle of its own. A signature shows that whoever made the bundle held the
   key; on a run whose agent could run commands, that includes the agent.
 - **It is signed, not sealed.** Anyone who can write to the bundle's directory can replace it with one

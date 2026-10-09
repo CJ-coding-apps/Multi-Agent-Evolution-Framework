@@ -56,11 +56,54 @@ function diffPaths(input: DiffInput): string[] {
   return [...new Set(named.filter((p): p is string => typeof p === 'string' && p !== ''))];
 }
 
-async function git(args: string[], cwd: string, exec: GitExec): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
+/**
+ * Config pinned on git's command line ahead of every subcommand. Command-line config outranks
+ * the repository's own and anything a parent exported, so a repository cannot turn these back on.
+ *
+ * - `core.hooksPath=/dev/null`: every hook git looks up becomes `/dev/null/<hook>`, which cannot
+ *   exist, so none runs and git says nothing. A relative hooksPath in the user's config (husky's
+ *   `.husky`) resolves in the working tree, where the agent writes — code it wrote would run
+ *   outside every gate (F12).
+ * - `core.fsmonitor=`: the fsmonitor hook is chosen by this key, not by hooksPath, and runs on
+ *   status, add, diff and commit. Empty rather than `false`: before git 2.36 the value is a
+ *   program to run, and `false` would be one.
+ * - `commit.gpgsign=false`: the agent's commit is not the user's to sign, and signing would run
+ *   whatever `gpg.program` names.
+ */
+const ISOLATION_ARGS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', '-c', 'commit.gpgsign=false'] as const;
+
+/**
+ * Host git config that arrives through the environment rather than a file: what `git -c` exports
+ * to its children, the counted form of the same, and `GIT_CONFIG`, which points `git config` —
+ * the identity lookup below — at a file of the host's choosing.
+ */
+const HOST_CONFIG_ENV = /^GIT_CONFIG(?:_PARAMETERS|_COUNT|_KEY_\d+|_VALUE_\d+)?$/;
+
+/**
+ * The environment every tool's git runs in: the host's, minus its git configuration. The same
+ * policy as `runIsolatedGit` in `@maf/git-ops`, which MAF's own git calls use; restated rather than
+ * imported because `tools` does not depend on `git-ops` (the edge would change the lockfile), the
+ * tools must keep their injectable `GitExec`, and the agent's git also needs the prompt and
+ * identity handling below.
+ */
+function isolatedEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) if (!HOST_CONFIG_ENV.test(key)) env[key] = value;
+  return {
+    ...env,
+    GIT_CONFIG_GLOBAL:     '/dev/null',
+    GIT_CONFIG_NOSYSTEM:   '1',
+    // Nothing here can answer a prompt; a credential or passphrase request fails instead of hanging.
+    GIT_TERMINAL_PROMPT:   '0',
     // Literal pathspecs: a path the model names is a file name to git, as it is to policy. With
     // pathspec magic on, a declared `*.env` matches no rule written for `.env` and stages `.env`.
-    const r = await exec('git', args, { cwd, env: { ...process.env, GIT_LITERAL_PATHSPECS: '1' } });
+    GIT_LITERAL_PATHSPECS: '1',
+  };
+}
+
+async function git(args: string[], cwd: string, exec: GitExec): Promise<{ stdout: string; stderr: string; code: number }> {
+  try {
+    const r = await exec('git', [...ISOLATION_ARGS, ...args], { cwd, env: isolatedEnv() });
     return { stdout: r.stdout, stderr: r.stderr, code: 0 };
   } catch (e: unknown) {
     const err = e as { stdout?: string; stderr?: string; code?: number };
@@ -133,6 +176,29 @@ export class GitAddTool extends GitTool<AddInput> {
 
 interface CommitInput { message: string; allowEmpty?: boolean; [k: string]: unknown }
 
+/** Who commits where the repository does not say: the identity `@maf/git-ops` commits a run as. */
+const FALLBACK_IDENTITY = { 'user.name': 'maf', 'user.email': 'maf@maf.invalid' } as const;
+
+/**
+ * `-c` pairs naming maf for each of `user.name` and `user.email` the repository leaves unset.
+ * With the host's config off, a repository that relied on the user's global identity has none,
+ * and git would refuse the commit or invent one from the hostname. A key the repository does set
+ * is left alone — the commit is made as the repository's identity, which is what the security
+ * gate reviews — and the fallback is per call, never written to the repository's config.
+ */
+async function fallbackIdentity(cwd: string, exec: GitExec): Promise<string[]> {
+  // `-z` records are `key\nvalue\0`; a valueless key has no `\n`. Exit 1 means none is set.
+  const r = await git(['config', '-z', '--get-regexp', '^user\\.(name|email)$'], cwd, exec);
+  const configured = new Map<string, string>();
+  for (const record of r.stdout.split('\0')) {
+    const nl = record.indexOf('\n');
+    // Later records overwrite earlier ones: git uses a key's last value.
+    if (nl > 0) configured.set(record.slice(0, nl), record.slice(nl + 1));
+  }
+  return Object.entries(FALLBACK_IDENTITY)
+    .flatMap(([key, value]) => (configured.get(key) ? [] : ['-c', `${key}=${value}`]));
+}
+
 export class GitCommitTool extends GitTool<CommitInput> {
   readonly id: ToolId = makeToolId('git.commit');
   readonly name = 'git.commit';
@@ -144,7 +210,7 @@ export class GitCommitTool extends GitTool<CommitInput> {
 
   async execute(input: CommitInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const args = ['commit', '-m', input.message];
+    const args = [...await fallbackIdentity(ctx.cwd, this.exec), 'commit', '-m', input.message];
     if (input.allowEmpty) args.push('--allow-empty');
     const r = await git(args, ctx.cwd, this.exec);
     // Extract commit hash from output like "[branch abc1234]"
