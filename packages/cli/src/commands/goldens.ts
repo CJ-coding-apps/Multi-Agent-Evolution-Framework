@@ -125,10 +125,12 @@ export interface GoldenSuiteOptions {
  * Runs the corpus isolated from every past run (D-14). The dispatch stack — memory graph, LCM,
  * transcripts — lives in a temporary directory, never the project's `.maf/`, and its graph is
  * emptied before each attempt, so neither a past run nor an earlier attempt reaches a prompt.
- * One graph for the suite rather than one per attempt: each Kùzu database reserves 8 TB of
- * address space and `MemoryGraph.close()` does not release it, so a process cannot open more
- * than a handful. The signed bundle, holding every evaluation's tool calls, is copied into the
- * project's attestations before the directory is removed.
+ * One graph for the suite rather than one per attempt: each open Kùzu database reserves 8 TB of
+ * address space (returned only by `close()`, WP-2.15), so a process can hold only a handful at
+ * once, and emptying one costs less than opening and checkpointing another. The stack is closed
+ * before the directory is removed, so its database is checkpointed into a directory that still
+ * exists. The signed bundle, holding every evaluation's tool calls, is copied into the project's
+ * attestations before the directory is removed.
  */
 export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: GoldenSuiteResult; bundlePath: string }> {
   const mafDir = path.join(o.cwd, '.maf');
