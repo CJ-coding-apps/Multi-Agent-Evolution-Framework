@@ -2,7 +2,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { Command } from 'commander';
 import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
-import type { AdapterName, CliAdapter } from '@maf/types';
+import type { AdapterName, CliAdapter, DagNode } from '@maf/types';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
@@ -16,7 +16,8 @@ import { GraphAwareInjector } from '@maf/prompt-injector';
 import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
 import { TranscriptLogger } from '@maf/transcript';
 import { createDefaultRegistry } from '@maf/tools';
-import { RoleRegistry, RoleDispatcher, roleSetFromHarness } from '@maf/roles';
+import type { ToolRegistry } from '@maf/tools';
+import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterRole, roleSetFromHarness } from '@maf/roles';
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
@@ -43,6 +44,8 @@ export interface RunOptions {
   policy:   string;
   roles:    string;
   harness?: string;
+  /** Let a writer role run on the cli tier, outside MAF's gates (D-01). */
+  allowUngoverned?: boolean;
 }
 
 /** The flags whose commander default must be told apart from the same value typed. */
@@ -76,6 +79,7 @@ export function registerRunCommand(program: Command, deps: RunDeps = {}): void {
     .option('--policy <path>', 'Path to policy YAML file', '.maf/policy.yaml')
     .option('--roles <path>', 'Path to roles YAML file', '.maf/roles.yaml')
     .option('--harness <ref>', 'Harness id, sha, or "current" (default: CURRENT if set, else legacy-default from --roles (overrides --roles when given))')
+    .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .action(async (taskDescription: string, opts: RunOptions, cmd: Command) => {
       await runTask(taskDescription, opts, { ...deps, given: (flag) => cmd.getOptionValueSource(flag) === 'cli' });
     });
@@ -134,6 +138,20 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   // Dispatched FROM the harness, so the sha the attestation names is the content that ran.
   const roles = RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), mafDir, baseTools);
   say(`[maf] harness: ${harness.id} (${shortSha(harness.sha)}) [${harnessSource}]`);
+
+  // ── Tiers (D-01): the dispatcher refuses an ungoverned writer when its node comes up; refusing
+  // here, before planning, saves the planner's tokens and the worktree.
+  const ungoverned = roles.list().filter((r) => isWriterRole(r) && effectiveTier(r, adapter) === 'cli');
+  if (ungoverned.length > 0 && opts.allowUngoverned !== true) {
+    const why = ungoverned.map((r) => `${r.role} (${r.execution === 'cli'
+      ? 'its execution is cli'
+      : `adapter ${adapter.name} cannot run the in-process loop`})`);
+    throw new Error(
+      `writer role(s) ${why.join(', ')} would run on the cli tier, outside MAF's policy, redaction, ` +
+      'attestation and processor hooks (D-01). Pass --allow-ungoverned to run them there anyway, or ' +
+      'give them execution: in-process on an adapter that can run the loop.',
+    );
+  }
 
   // ── Worktree (D-03): one manager for the whole run — `finish` reads the base commit from it.
   // A directory with no committed files is refused here, before any agent work.
@@ -224,6 +242,8 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       sessionId,
       runId,
       harness,
+      ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
+      stderr,
       ...(cfg.model !== undefined ? { modelOverride: cfg.model } : {}),
     });
 
@@ -246,11 +266,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       dag,
       board,
       executor: (node) => dispatcher.runNode(node),
-      // The scheduler serializes writers against each other because two agents editing one
-      // tree corrupt it. Deciding that from the role config — rather than treating every
-      // node as a writer — is what lets two readers overlap; treating a reader as a writer
-      // only costs concurrency, but treating a writer as a reader costs the tree.
-      isWriter: (node) => roles.writesToWorkingTree(node.agentRole, baseTools),
+      isWriter: writerLock(roles, adapter, baseTools),
       onNodeStart: (id) => say(`[maf] → node ${id} started`),
       onNodeEnd:   (id, status) => {
         // The baseline commit captured for a writer node is held until the node ends, so a
@@ -312,6 +328,17 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   }
   // Only a run that succeeded can be refused a merge; the paths are printed above.
   if (refusal !== undefined) throw new Error(refusal);
+}
+
+/**
+ * The scheduler's writer predicate. It serializes writers against each other because two agents
+ * editing one tree corrupt it, and decides by the tier a role will actually run on (D-01): a role
+ * on the cli tier holds the lock whatever its allowlist, because the backend brings file tools of
+ * its own. Treating a reader as a writer only costs concurrency; the reverse costs the tree, so a
+ * role the registry does not know is a writer.
+ */
+export function writerLock(roles: RoleRegistry, adapter: CliAdapter, baseTools: ToolRegistry): (node: DagNode) => boolean {
+  return (node) => roles.hasRole(node.agentRole) ? isWriterForLock(roles.getRole(node.agentRole), adapter, baseTools) : true;
 }
 
 /**

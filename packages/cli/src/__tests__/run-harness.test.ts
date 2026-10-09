@@ -7,6 +7,7 @@ import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import { createDefaultRegistry } from '@maf/tools';
 import { resolveRunHarness } from '../wiring.js';
 import { resolveGoldensHarness } from '../commands/goldens.js';
+import { cliOnlyAdapter, driveRun, registryOf } from './runFixture.js';
 
 // ORACLE: WP-2.9 + WP-2.7 integration (rule 3) — `run`, `goldens` and `evolve` pick their harness
 // by one path: a stored ref or a committed default by id or sha prefix, else an operator-set
@@ -122,5 +123,29 @@ test('a stored harness whose prompt lives in a file outside its sha is refused b
     await store.save(loose);
     await assert.rejects(resolve(mafDir, rolesPath, 'loose'), /does not carry its text/);
     await assert.rejects(resolveGoldensHarness(mafDir, 'loose'), /does not carry its text/);
+  });
+});
+
+test('run: a typed --roles is that file even when the operator set CURRENT; a plain run is CURRENT', async () => {
+  await withMafDir(async (mafDir) => {
+    const store = new HarnessStore(mafDir);
+    const chosen = mintHarnessConfig({
+      id: 'chosen', processorBundles: [],
+      roleSet: { version: 1, defaultRole: 'coder', roles: [{ role: 'coder', systemPrompt: 'chosen', allowedTools: ['fs.read'] }] },
+    });
+    await store.save(chosen);
+    await store.setCurrent(chosen.sha);
+    const root = path.dirname(mafDir);
+    // The cli-only adapter stops each run right after the harness line (at the tier check or the
+    // worktree), before any model call.
+    const adapters = registryOf(cliOnlyAdapter('cli-only'));
+
+    const plain = await driveRun(['t', '--dir', root, '--adapter', 'cli-only'], { adapters });
+    assert.match(plain.out, new RegExp(`\\[maf\\] harness: chosen \\(${chosen.sha.slice(0, 8)}\\) \\[current\\]`));
+
+    // The same value commander would default to, typed: only the flag's source tells them apart.
+    const typed = await driveRun(['t', '--dir', root, '--adapter', 'cli-only', '--roles', '.maf/roles.yaml'], { adapters });
+    assert.match(typed.out, /\[maf\] harness: legacy-default \([0-9a-f]{8}\) \[legacy\]/);
+    assert.equal((await store.current())?.sha, chosen.sha, 'CURRENT is still the operator\'s');
   });
 });

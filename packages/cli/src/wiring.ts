@@ -48,6 +48,8 @@ export async function buildRunStack(cfg: {
   model?: string;
   runId: RunId;
   harnessSha: string;
+  /** `--allow-ungoverned`: a writer role may run on the cli tier (D-01). */
+  allowUngoverned?: boolean;
 }): Promise<RunStack> {
   const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
   const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
@@ -97,6 +99,7 @@ export async function buildRunStack(cfg: {
         adapter: cfg.adapter, baseTools, roles, injector, policy,
         attestor, graph, transcript, lcmBridge, securityGate: gate,
         cwd: workDir, sessionId: cfg.runId, runId: cfg.runId, harness,
+        ...(cfg.allowUngoverned === true ? { allowUngoverned: true } : {}),
         ...(cfg.model ? { modelOverride: cfg.model } : {}),
         ...(temperature !== undefined ? { temperature } : {}),
       });

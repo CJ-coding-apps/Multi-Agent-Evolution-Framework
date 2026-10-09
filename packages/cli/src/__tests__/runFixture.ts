@@ -48,6 +48,14 @@ export function unavailableAdapter(name: AdapterName): CliAdapter {
   };
 }
 
+/**
+ * An available adapter that cannot run the in-process loop — every writer lands on the cli tier
+ * (D-01) — and that fails the test if anything asks it a thing.
+ */
+export function cliOnlyAdapter(name: AdapterName): CliAdapter {
+  return { ...unavailableAdapter(name), isAvailable: async () => true };
+}
+
 export function registryOf(...adapters: CliAdapter[]): () => Map<AdapterName, CliAdapter> {
   return () => new Map(adapters.map((a) => [a.name, a]));
 }
