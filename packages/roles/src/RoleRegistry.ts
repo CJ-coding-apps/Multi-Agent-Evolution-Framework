@@ -172,7 +172,9 @@ export class RoleRegistry implements RoleResolver {
   }
 
   async loadPrompt(role: RoleConfig): Promise<string> {
-    if (role.systemPrompt) return role.systemPrompt;
+    // `!== undefined`, not truthiness: a harness inlines an empty prompt file as '' beside its
+    // path, and re-reading the file would dispatch text the harness sha does not cover.
+    if (role.systemPrompt !== undefined) return role.systemPrompt;
     if (!role.promptFile) {
       throw new RoleConfigError(`Role "${role.role}" has neither systemPrompt nor promptFile`);
     }
@@ -214,6 +216,16 @@ function parseRoleSet(text: string, source: string): RoleSet {
       `Roles file ${JSON.stringify(source)} does not match the role-set shape: expected version: 1, ` +
       'a defaultRole, and a roles list whose entries each have a role name and an allowedTools list.',
     );
+  }
+  // An empty inline prompt is the prompt (`loadPrompt` checks `!== undefined`, so a harness can
+  // carry an empty prompt file's text). Written by hand in a roles file, it would dispatch "" and
+  // hide any promptFile beside it, so it is refused here rather than run.
+  for (const r of parsed.roles) {
+    if (r.systemPrompt === '')
+      throw new RoleConfigError(
+        `Role "${r.role}" has an empty systemPrompt; give it text or a promptFile` +
+        (r.promptFile !== undefined ? ` (remove the empty systemPrompt to use promptFile "${r.promptFile}")` : ''),
+      );
   }
   // `isRoleSet` checked that every name is a string; this is where those strings become
   // `RoleName`s. A role set is the *definition* of which names exist, so a file that
