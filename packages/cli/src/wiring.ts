@@ -26,28 +26,6 @@ import type { TaskDispatcher } from '@maf/eval-harness';
 export const SECURITY_REVIEW_FALLBACK_PROMPT = `You are a security auditor. Review the supplied diff for vulnerabilities. Respond with a strict JSON block:
 { "findings": [ { "severity": "critical|high|medium|low|info", "category": "t", "file": "f", "line": 0, "rationale": "r", "remediation": "x" } ], "summary": "s", "passed": true }`;
 
-export const JUDGE_SYSTEM_PROMPT = `You are a strict evaluation judge. You are given a RUBRIC and a SUBJECT (an agent's output).
-Decide whether the subject satisfies the rubric. Respond with ONLY a fenced JSON block:
-\`\`\`json
-{ "passed": true, "rationale": "one concise sentence" }
-\`\`\`
-Be conservative: if the subject does not clearly meet the rubric, "passed" is false.`;
-
-/** Extract {passed, rationale} from a judge model response (fenced JSON or bare). */
-export function parseJudgeVerdict(output: string): { passed: boolean; rationale: string } {
-  const m = /```(?:json)?\s*\n([\s\S]*?)\n```/.exec(output);
-  const candidate = m ? m[1]! : output.trim();
-  try {
-    const parsed = JSON.parse(candidate) as { passed?: unknown; rationale?: unknown };
-    return {
-      passed: parsed.passed === true,
-      rationale: typeof parsed.rationale === 'string' ? parsed.rationale : '',
-    };
-  } catch {
-    return { passed: false, rationale: 'unparseable judge response — fail closed' };
-  }
-}
-
 export interface RunStack {
   adapter: CliAdapter;
   graph: MemoryGraph;
@@ -56,8 +34,6 @@ export interface RunStack {
   securityPrompt: string;
   rolesFor(harness: HarnessConfig): RoleRegistry;
   dispatchTask(harness: HarnessConfig, role: string, prompt: string, workDir: string, timeoutMs: number, temperature?: number): Promise<string>;
-  /** LLM judge for llm-judge verifiers (M4): rubric + subject → pass/fail. */
-  judge(rubric: string, subject: string): Promise<{ passed: boolean; rationale: string }>;
   close(): void;
 }
 
@@ -129,16 +105,6 @@ export async function buildRunStack(cfg: {
       const out = await dispatcher.runNode(node);
       const value = out['output'];
       return value && value.kind === 'string' ? value.value : '';
-    },
-    async judge(rubric, subject) {
-      const result = await cfg.adapter.invoke({
-        prompt: `RUBRIC:\n${rubric}\n\nSUBJECT:\n${subject}`,
-        systemPrompt: JUDGE_SYSTEM_PROMPT,
-        workingDir: cfg.cwd, timeoutMs: 120_000, maxOutputBytes: 64 * 1024,
-        temperature: 0,
-        ...(cfg.model ? { model: cfg.model } : {}),
-      });
-      return parseJudgeVerdict(result.output);
     },
     close() {
       graph.close();
