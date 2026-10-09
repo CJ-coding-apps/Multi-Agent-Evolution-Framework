@@ -55,7 +55,7 @@ export function runIsolatedGit(
  */
 export const MAF_RUNTIME_STATE = [
   'runs', 'cache', 'memory.kuzu', 'lcm.db', 'lcm.db-wal', 'lcm.db-shm',
-  'transcripts', 'attestations', 'harnesses', 'goldens/results', 'evolve', 'worktrees',
+  'transcripts', 'attestations', 'harnesses', 'goldens/results', 'evolve',
 ] as const;
 
 /** Top-relative `:(top,exclude)` pathspecs for `<cwd>/.maf/<state>`, wherever `cwd` is in the repo. */
