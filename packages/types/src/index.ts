@@ -330,6 +330,40 @@ export interface PartialNodeOutcome {
   detail: string;
 }
 
+/**
+ * What the scheduler knows about a node once it has judged it failed (D-16): enough for the
+ * planner to recognise the task next time. Plain values, so a recorder needs nothing from the
+ * scheduler and the scheduler nothing from the graph.
+ */
+export interface NodeFailureRecord {
+  runId:     RunId;
+  nodeId:    NodeId;
+  /** The node's own short label. */
+  label:     string;
+  /** What the node was asked to do: its `metadata.taskDescription`, or its label without one. */
+  task:      string;
+  /**
+   * The title of the run the node was planned for (its `metadata.runTitle`), when the planner set
+   * one. A planned node's instruction is its own step, so the run's title is what the next plan
+   * for the same task can recognise.
+   */
+  runTitle?: string;
+  role:      RoleName;
+  /** `NodeFailure.reason` when the error was one; otherwise the error's class name (a plain `Error`'s `name`). */
+  reason:    string;
+  message:   string;
+  /** `NodeFailure.exitCode`, when the failure came from a CLI-tier invocation. */
+  exitCode?: number;
+}
+
+/**
+ * Where a failed node is written down so the planner can recall it (D-16). The scheduler calls
+ * it once per node, after the node's retries are spent; the memory graph implements it.
+ */
+export interface FailureRecorder {
+  recordFailure(input: NodeFailureRecord): Promise<void>;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BLACKBOARD
 // ─────────────────────────────────────────────────────────────────────────────
