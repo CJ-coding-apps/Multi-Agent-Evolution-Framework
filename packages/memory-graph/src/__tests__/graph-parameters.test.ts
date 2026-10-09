@@ -24,14 +24,11 @@ const PAYLOAD = `x'}) DETACH DELETE n //`;
 /**
  * One database for the whole file, deliberately.
  *
- * Kùzu 0.7.1 does not tolerate a process that opens many of them: measured, four tests that each
- * open their own `Database` all pass and the fifth never reports — the process is gone, with no
- * error, and `node --test` blames the file. Nor can the abandoned ones be reclaimed: a `close()`
- * followed by GC of the `Database` is the crash, so "one per test" cannot be made to work by
- * tidying up harder.
- *
- * Sharing costs nothing here. Each test scopes its assertions to its own `run_id`, so they do not
- * need to be isolated from each other — and the whole file runs in ~50 ms rather than ~400.
+ * This was once forced: the driver left kuzu query results for GC, and a `Database` collected
+ * before its results took the process down (WP-2.15; native-lifetime.test.ts). It closes them now,
+ * so one per test would work — but sharing costs nothing here. Each test scopes its assertions to
+ * its own `run_id`, so they do not need to be isolated from each other — and the whole file runs
+ * in ~50 ms rather than ~400.
  */
 let graph: MemoryGraph;
 let dir: string;
