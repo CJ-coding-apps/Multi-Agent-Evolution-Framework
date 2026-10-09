@@ -1,7 +1,7 @@
 import path from 'node:path';
 import tty from 'node:tty';
 import type {
-  ApprovalAsk, ApprovalGateHandle, ApprovalOutcome, ApprovalRequest, ApprovalStatus,
+  ApprovalAsk, ApprovalGateHandle, ApprovalOutcome, ApprovalRequest, ApprovalStatus, ToolInput,
 } from '@maf/types';
 import { AttestationRecorder } from './AttestationRecorder.js';
 import type { ApprovalSink } from './AttestationRecorder.js';
@@ -23,6 +23,8 @@ export interface PendingApproval {
   readonly requestHash:   string;
   readonly request:       ApprovalRequest;
   readonly toolId:        string;
+  /** What the call will run on; a terminal shows a bounded preview of it. */
+  readonly input:         ToolInput;
   readonly declaredPaths: readonly string[];
   readonly timeoutMs:     number;
 }
@@ -37,7 +39,13 @@ export interface ProviderAnswer {
 
 /** A way of asking a human. `signal` aborts when the gate stops waiting (timeout). */
 export interface ApprovalProvider {
-  ask(pending: PendingApproval, signal: AbortSignal): Promise<ProviderAnswer>;
+  /**
+   * True when the provider may hold a request back before asking — one prompt at a time on a
+   * terminal. It then calls `asking` when it shows the request, and the timeout runs from there:
+   * the prompt promises the operator the whole timeout. Otherwise the clock starts at `ask`.
+   */
+  readonly queues?: boolean;
+  ask(pending: PendingApproval, signal: AbortSignal, asking: () => void): Promise<ProviderAnswer>;
 }
 
 export interface ApprovalGateConfig {
@@ -108,7 +116,7 @@ export class ApprovalGate implements ApprovalGateHandle {
     }
 
     const pending: PendingApproval = {
-      requestId: id, requestHash, request: ask.request, toolId: ask.toolId,
+      requestId: id, requestHash, request: ask.request, toolId: ask.toolId, input: ask.input,
       declaredPaths: [...ask.declaredPaths], timeoutMs: this.timeoutMs,
     };
     this.pending.set(id, pending);
@@ -124,16 +132,23 @@ export class ApprovalGate implements ApprovalGateHandle {
   private async waitForAnswer(pending: PendingApproval): Promise<ProviderAnswer | typeof TIMED_OUT | Error> {
     const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
+    let done = false;
+    let startClock = (): void => undefined;
     const timedOut = new Promise<typeof TIMED_OUT>((resolve) => {
-      timer = setTimeout(() => resolve(TIMED_OUT), this.timeoutMs);
+      // Once, and never after the wait is over: a timer set then would hold the process open.
+      startClock = (): void => {
+        if (!done) timer ??= setTimeout(() => resolve(TIMED_OUT), this.timeoutMs);
+      };
     });
+    if (this.config.provider.queues !== true) startClock();
     try {
       // `then` so a provider that throws synchronously is a refusal like one that rejects.
-      const asked = Promise.resolve().then(() => this.config.provider.ask(pending, controller.signal));
+      const asked = Promise.resolve().then(() => this.config.provider.ask(pending, controller.signal, startClock));
       return await Promise.race([asked, timedOut]);
     } catch (err) {
       return err instanceof Error ? err : new Error(String(err));
     } finally {
+      done = true;
       clearTimeout(timer);
       // Tells the provider to stop listening; a late answer then has nowhere to land.
       controller.abort();

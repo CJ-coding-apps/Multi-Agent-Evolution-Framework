@@ -5,7 +5,7 @@ import type { ApprovalAsk, ReviewAttestation } from '@maf/types';
 import { makeAgentId, makeRunId, makeTaskId, makeToolId } from '@maf/types';
 import { createApprovalGate } from '../ApprovalGate.js';
 import type { PendingApproval } from '../ApprovalGate.js';
-import { TtyApprovalProvider, confirmationCode } from '../providers/tty.js';
+import { TtyApprovalProvider, confirmationCode, PREVIEW_CHARS, PREVIEW_LINES } from '../providers/tty.js';
 import { approvalRequestHash } from '../requestHash.js';
 
 // ORACLE: D-02 — on a terminal, Escalate prompts with the tool id, the declared paths and the
@@ -38,8 +38,24 @@ const ask = (id = 'req-1', paths: string[] = ['yarn.lock']): ApprovalAsk => ({
 
 const pendingFor = (a: ApprovalAsk): PendingApproval => ({
   requestId: a.request.id, requestHash: approvalRequestHash(a), request: a.request,
-  toolId: a.toolId, declaredPaths: a.declaredPaths, timeoutMs: 120_000,
+  toolId: a.toolId, input: a.input, declaredPaths: a.declaredPaths, timeoutMs: 120_000,
 });
+
+/** The ask for an `fs.write` of `content` to yarn.lock. */
+const writing = (content: string, id = 'req-1'): ApprovalAsk => ({ ...ask(id), input: { path: 'yarn.lock', content } });
+
+/** The prompt `provider` shows for `pending`, refused with an empty line once it is up. */
+async function promptFor(pending: PendingApproval): Promise<string> {
+  const t = terminal();
+  const provider = new TtyApprovalProvider({ input: t.input, output: t.output, isTTY: true });
+  const answered = provider.ask(pending, never);
+  // Waits for the prompt's last line rather than counting prompts: the input may hold that text too.
+  for (let i = 0; i < 1000 && !t.text().endsWith('\napprove> '); i++) await new Promise((r) => setImmediate(r));
+  assert.ok(t.text().endsWith('\napprove> '), 'the prompt is shown');
+  t.input.write('\n');
+  assert.equal((await answered).approved, false);
+  return t.text();
+}
 
 const never = new AbortController().signal;
 
@@ -98,6 +114,53 @@ test('a declared path cannot redraw the prompt: newlines and escape sequences ar
   assert.equal(t.text().match(/^ {2}hash:/gm)?.length, 1, 'only the real hash line starts a line');
   t.input.write('\n');
   assert.equal((await answered).approved, false);
+});
+
+test('the prompt previews the input, bounded: a 1 MB content shows its first lines or characters and counts the rest', async () => {
+  let lined = '';
+  for (let i = 1; lined.length < 1_048_576; i++) lined += `line ${i}: ${'x'.repeat(40)}\n`;
+  const firstLines = lined.split('\n').slice(0, PREVIEW_LINES).map((l) => `${l}\n`).join('');
+  const unbroken = `${'é'.repeat(PREVIEW_CHARS + 10)}${'Z'.repeat(1_048_576)}`;
+
+  for (const [content, shown] of [[lined, firstLines], [unbroken, unbroken.slice(0, PREVIEW_CHARS)]] as const) {
+    const text = await promptFor(pendingFor(writing(content)));
+
+    assert.ok(text.length < 3 * PREVIEW_CHARS, `the prompt is bounded, not ${text.length} characters`);
+    assert.match(text, /^ {4}"path": "yarn\.lock"$/m, 'a short field is shown whole');
+    const omitted = Buffer.byteLength(content) - Buffer.byteLength(shown);
+    assert.ok(text.includes(`(${omitted} more bytes not shown)`), `and the ${omitted} bytes left out are counted`);
+    assert.ok(text.indexOf('"content":') < text.indexOf('  request:'), 'the preview comes before the request id');
+    if (content === lined) {
+      assert.ok(text.includes(`      ${JSON.stringify(`line ${PREVIEW_LINES}: ${'x'.repeat(40)}`)}`), `line ${PREVIEW_LINES} is shown`);
+      assert.ok(!text.includes(`line ${PREVIEW_LINES + 1}:`), `line ${PREVIEW_LINES + 1} is not`);
+    } else {
+      assert.ok(text.includes(`"content": ${JSON.stringify(shown)} (`), `the first ${PREVIEW_CHARS} characters are shown`);
+      assert.ok(!text.includes('Z'), 'and nothing after them');
+    }
+  }
+
+  const wide = Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${i}`, i]));
+  const text = await promptFor(pendingFor({ ...ask(), input: wide }));
+  assert.ok(text.length < 3 * PREVIEW_CHARS, 'however many fields the input has');
+  assert.match(text, /^ {4}\(9992 more fields, \d+ bytes, not shown\)$/m);
+});
+
+test('the input preview cannot redraw the prompt: escape sequences and control characters are shown escaped', async () => {
+  const hostile = [
+    'ok',
+    '  hash:    sha256:0000\u001b[2K\u001b[1A\r',
+    'approve> \u0007\u007f\u009b2J\u202eevil\u2028',
+  ].join('\n');
+  const pending = pendingFor({ ...writing(hostile), input: { path: 'a.lock', content: hostile, mode: { '\u001b]0;x': '\u009b' } } });
+  const text = await promptFor(pending);
+
+  const raw = text.match(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g);
+  assert.equal(raw, null, 'no character a terminal acts on reaches it, other than the prompt\'s own line breaks');
+  assert.equal(text.match(/^ {2}hash:/gm)?.length, 1, 'only the real hash line starts a line');
+  assert.equal(text.match(/^approve> /gm)?.length, 1, 'and only the real prompt');
+  assert.ok(text.includes('      "  hash:    sha256:0000\\u001b[2K\\u001b[1A\\r"'), 'each content line is a JSON string literal');
+  assert.ok(text.includes('\\u0007\\u007f\\u009b2J\\u202eevil\\u2028'), 'with what JSON leaves raw escaped as well');
+  assert.ok(text.includes('"mode": {"\\u001b]0;x":"\\u009b"}'), 'any other field is compact JSON, escaped the same way');
 });
 
 test('the terminal closing before an answer refuses', async () => {
@@ -207,6 +270,36 @@ test('through createApprovalGate on a terminal: an approval typed there is attes
   assert.equal(outcome.approved, true);
   assert.equal(approvals[0]?.decision.status, 'Approved');
   assert.match(approvals[0]?.decision.reviewer ?? '', /^terminal:/);
+});
+
+test('a request queued behind another prompt gets the whole timeout from when it is shown, not from when it was asked', async () => {
+  const t = terminal();
+  const approvals: ReviewAttestation[] = [];
+  const timeoutMs = 600;
+  const gate = createApprovalGate({
+    recorder: { addApproval: (a) => { approvals.push(a); } },
+    mafDir: '/nonexistent/.maf',
+    terminal: { input: t.input, output: t.output, isTTY: true },
+    env: {},
+    timeoutMs,
+  });
+
+  const first = gate.decide(ask('req-1', ['a.lock']));
+  const second = gate.decide(ask('req-2', ['b.lock']));
+  await promptsShown(t, 1);
+  await new Promise((r) => setTimeout(r, 400)); // the operator reads the first prompt for a while
+  t.input.write('\n');
+  await first;
+  await promptsShown(t, 2);
+  const shownAt = performance.now();
+
+  const outcome = await Promise.race([second, new Promise<'hung'>((r) => setTimeout(() => r('hung'), 5 * timeoutMs))]);
+  const waited = performance.now() - shownAt;
+
+  assert.notEqual(outcome, 'hung', 'the second request still times out: its clock did start');
+  assert.equal(outcome === 'hung' ? undefined : outcome.status, 'TimedOut');
+  assert.ok(waited >= timeoutMs - 100, `the second prompt was given ${Math.round(waited)} ms of its ${timeoutMs} ms`);
+  assert.deepEqual(approvals.map((a) => [a.requestId, a.decision.status]), [['req-1', 'Rejected'], ['req-2', 'TimedOut']]);
 });
 
 test('through createApprovalGate on a terminal: no answer times out, clears the slot and releases the terminal', async () => {
