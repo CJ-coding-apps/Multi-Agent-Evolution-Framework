@@ -137,10 +137,39 @@ function runSync(args: string[], cwd: string, env: NodeJS.ProcessEnv): GitOutcom
   return { stdout: r.stdout, stderr: r.stderr, code: r.status ?? 1 };
 }
 
-/** The repository a project root belongs to — its top, symlink-resolved — or why the git tools refuse it. */
-export type Learned = { readonly root: string } | { readonly refusal: string };
+/**
+ * The repository a project root belongs to — its top and its git directory, both symlink-resolved —
+ * or why the git tools refuse it. The git directory is part of the identity because a worktree's
+ * `.git` is a file an agent's `test.run` can rewrite to `gitdir: <the user's .git>`: the top stays
+ * the worktree while every command then acts on the user's repository.
+ */
+export type Learned = { readonly root: string; readonly gitDir: string } | { readonly refusal: string };
 
-const LEARN_TOP = ['rev-parse', '--show-toplevel'];
+/** Two lines: the top, then the git directory. */
+const LEARN_TOP = ['rev-parse', '--show-toplevel', '--absolute-git-dir'];
+
+/** Both lines of LEARN_TOP, symlink-resolved, or undefined when either is missing or unresolvable. */
+async function identity(out: GitOutcome): Promise<{ top: string; gitDir: string } | undefined> {
+  if (out.code !== 0) return undefined;
+  const [top, gitDir] = out.stdout.trim().split('\n');
+  if (!top || !gitDir) return undefined;
+  try {
+    return { top: await realpath(top), gitDir: await realpath(gitDir) };
+  } catch {
+    return undefined;
+  }
+}
+
+function identitySync(out: GitOutcome): { top: string; gitDir: string } | undefined {
+  if (out.code !== 0) return undefined;
+  const [top, gitDir] = out.stdout.trim().split('\n');
+  if (!top || !gitDir) return undefined;
+  try {
+    return { top: realpathSync(top), gitDir: realpathSync(gitDir) };
+  } catch {
+    return undefined;
+  }
+}
 /** Exit 0: the directory is ignored; exit 1: it is not. */
 const LEARN_IGNORED = ['check-ignore', '-q', '--', '.'];
 
@@ -170,8 +199,9 @@ function notARepository(root: string, top: GitOutcome): Learned {
  * there ignores whole, so a worktree whose `.git` link was gone before the root was learned is refused
  * here rather than learned as the user's checkout around it.
  */
-function judged(root: string, top: string, ignored: GitOutcome): Learned {
-  if (ignored.code === 1) return { root: top };
+function judged(root: string, found: { top: string; gitDir: string }, ignored: GitOutcome): Learned {
+  const top = found.top;
+  if (ignored.code === 1) return { root: top, gitDir: found.gitDir };
   if (ignored.code === 0) {
     return {
       refusal: `the repository git found around ${root} is ${top}, which ignores ${root}, so it is not part of ` +
@@ -190,7 +220,7 @@ async function learnRoot(projectRoot: string, exec: GitExec): Promise<Learned> {
   }
   const env = learningEnv();
   const top = await run(LEARN_TOP, root, env, exec);
-  const found = top.code === 0 ? await realpath(top.stdout.trim()).catch(() => undefined) : undefined;
+  const found = await identity(top);
   if (found === undefined) return notARepository(root, top);
   return judged(root, found, await run(LEARN_IGNORED, root, env, exec));
 }
@@ -204,12 +234,7 @@ function learnRootSync(projectRoot: string): Learned {
   }
   const env = learningEnv();
   const top = runSync(LEARN_TOP, root, env);
-  let found: string | undefined;
-  try {
-    found = top.code === 0 ? realpathSync(top.stdout.trim()) : undefined;
-  } catch {
-    found = undefined;
-  }
+  const found = identitySync(top);
   if (found === undefined) return notARepository(root, top);
   return judged(root, found, runSync(LEARN_IGNORED, root, env));
 }
@@ -255,8 +280,8 @@ export class RepositoryRoots {
 
 /**
  * Runs one git command for a tool, after proving that the repository git finds from `ctx.cwd` is the
- * run's: its `--show-toplevel`, symlink-resolved, must be the root `repositories` learned for
- * `ctx.projectRoot`. Asked before every call, in the environment the call itself gets, because the
+ * run's: its `--show-toplevel` and `--absolute-git-dir`, symlink-resolved, must be the root and the
+ * git directory `repositories` learned for `ctx.projectRoot`. Asked before every call, in the environment the call itself gets, because the
  * tree can change between calls — an agent's `test.run` can delete `.git`, and the next
  * `git.reset --hard` would then act on whatever repository git found instead. A refusal is a failed
  * result naming both directories; git is not run.
@@ -267,15 +292,21 @@ async function git(args: string[], ctx: ToolContext, exec: GitExec, repositories
   if ('refusal' in learned) return refuse(learned.refusal);
   const env = isolatedEnv(path.dirname(learned.root));
   const probe = await run(LEARN_TOP, ctx.cwd, env, exec);
-  const found = probe.code === 0 ? await realpath(probe.stdout.trim()).catch(() => undefined) : undefined;
+  const found = await identity(probe);
   if (found === undefined) {
     return refuse(
       `git found no repository from ${ctx.cwd} inside the run's repository ${learned.root} ` +
       `(git said: ${gitSaid(probe)}). Its .git link is missing or broken.`,
     );
   }
-  if (found !== learned.root) {
-    return refuse(`the repository git found at ${found} is not the run's repository ${learned.root}.`);
+  if (found.top !== learned.root) {
+    return refuse(`the repository git found at ${found.top} is not the run's repository ${learned.root}.`);
+  }
+  if (found.gitDir !== learned.gitDir) {
+    return refuse(
+      `the git directory behind ${found.top} is now ${found.gitDir}, not the run's ${learned.gitDir}: ` +
+      `the worktree's .git link was rewritten.`,
+    );
   }
   return run(args, ctx.cwd, env, exec);
 }

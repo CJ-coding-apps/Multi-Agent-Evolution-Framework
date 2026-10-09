@@ -102,8 +102,9 @@ the README's Status table lists both as planned.
   depth and in any case, before policy and again on the resolved path; the refusal is a `Deny` under rule
   id `builtin:git-dir`, attested in the bundle and reported to the agent, whose node goes on. The git
   tools learn the run's repository root once, from the project root, and every git tool asks git which
-  repository it found before each call and refuses unless it is that one, with `GIT_CEILING_DIRECTORIES`
-  at the root's parent and the host's `GIT_DIR`, `GIT_INDEX_FILE` and other repository variables dropped:
+  repository it found before each call — its top and its git directory, so a `.git` link that `test.run`
+  rewrote to your `.git` is caught even though the top stays the worktree — and refuses unless both are
+  the ones it learned, with `GIT_CEILING_DIRECTORIES` at the root's parent and the host's `GIT_DIR`, `GIT_INDEX_FILE` and other repository variables dropped:
   a run pointed at a subdirectory works there, its git confined to the repository root. MAF's own git
   calls drop the same variables and pin `core.fsmonitor` too. `test.run` runs the project's own command
   and is not confined; docs/SECURITY.md says so.

@@ -57,8 +57,10 @@ const ISOLATION = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', '-
  */
 interface ExecCall { file: string; argv: string[]; args: string[]; cwd: string; env: NodeJS.ProcessEnv }
 
-/** The question each tool asks git before every call: which repository is this? */
-const PROBE = ['rev-parse', '--show-toplevel'];
+/** The question each tool asks git before every call: which repository, and which git directory, is this? */
+const PROBE = ['rev-parse', '--show-toplevel', '--absolute-git-dir'];
+/** The spy's repository: the top is the directory asked from; its git directory sits beside it. */
+const answer = (top: string): string => `${top}\n${top}\n`; // the spy has no real .git; the top itself stands in as a resolvable git dir
 /** Asked once per project root, with the probe, when the tools learn its repository: is the root ignored there? */
 const IGNORED = ['check-ignore', '-q', '--', '.'];
 
@@ -101,7 +103,7 @@ function spy(): { exec: GitExec; calls: ExecCall[]; probes: ExecCall[]; learning
     };
     (isLearning(args, options.env) ? learning : isProbe(args) ? probes : calls).push(call);
     if (isIgnoredCheck(args)) throw notIgnored();
-    return { stdout: isProbe(args) ? `${options.cwd}\n` : '', stderr: '' };
+    return { stdout: isProbe(args) ? answer(options.cwd) : '', stderr: '' };
   };
   return { exec, calls, probes, learning };
 }
@@ -340,7 +342,7 @@ test('tools sharing one RepositoryRoots learn a project root once, and every cal
       } else {
         ran.push({ args: rest, cwd: options.cwd, ceiling: options.env['GIT_CEILING_DIRECTORIES'] });
       }
-      return { stdout: isProbe(args) ? `${top}\n` : '', stderr: '' };
+      return { stdout: isProbe(args) ? answer(top) : '', stderr: '' };
     };
     const roots = new RepositoryRoots(exec);
     const tools: Array<[ToolPlugin, ToolInput]> = [
@@ -371,7 +373,7 @@ test('a project root git finds in no repository, or that its repository ignores,
       throw new Error('git must not run for a root that is in no repository');
     }, new RegExp(`^refusing to run git: ${CWD} is not inside a git repository \\(git said: fatal: not a git repository`)],
     ['ignored', async (_file, args) => {
-      if (isProbe(args)) return { stdout: `${path.dirname(CWD)}\n`, stderr: '' };
+      if (isProbe(args)) return { stdout: answer(path.dirname(CWD)), stderr: '' };
       if (isIgnoredCheck(args)) return { stdout: '', stderr: '' };
       throw new Error('git must not run for a root its repository ignores');
     }, new RegExp(`^refusing to run git: the repository git found around ${CWD} is ${path.dirname(CWD)}, which ignores ${CWD}`)],
@@ -401,7 +403,7 @@ test('git.commit keeps whichever of user.name and user.email the repository sets
     const calls: ExecCall[] = [];
     const exec: GitExec = async (file, args, options) => {
       if (isIgnoredCheck(args)) throw notIgnored();
-      if (isProbe(args)) return { stdout: `${options.cwd}\n`, stderr: '' };
+      if (isProbe(args)) return { stdout: answer(options.cwd), stderr: '' };
       calls.push({ file, argv: [...args], args: args.slice(ISOLATION.length), cwd: options.cwd, env: options.env });
       return { stdout: args.includes('config') ? configured : '', stderr: '' };
     };

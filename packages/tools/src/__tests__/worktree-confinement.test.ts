@@ -195,7 +195,7 @@ test('a git tool refuses, and runs nothing, when the repository git finds at a c
       ran.push(args);
       // Learning (no ceiling yet) finds the root itself; every later probe finds another repository.
       if (args.includes('check-ignore')) throw Object.assign(new Error('exit 1'), { code: 1, stdout: '', stderr: '' });
-      if (args.includes('rev-parse')) return { stdout: `${options.env['GIT_CEILING_DIRECTORIES'] === undefined ? root : elsewhere}\n`, stderr: '' };
+      if (args.includes('rev-parse')) { const top = options.env['GIT_CEILING_DIRECTORIES'] === undefined ? root : elsewhere; return { stdout: `${top}\n${top}\n`, stderr: '' }; }
       return { stdout: '', stderr: '' };
     };
     const tool = everyGitTool(exec).find(([n]) => n === name)?.[1];
@@ -204,7 +204,7 @@ test('a git tool refuses, and runs nothing, when the repository git finds at a c
     assert.equal(r.exitCode, 1, name);
     assert.equal(r.stderr, `refusing to run git: the repository git found at ${elsewhere} is not the run's repository ${root}.`, name);
     // git.commit asks twice (its identity lookup, then the commit); every call refused at the probe.
-    assert.ok(ran.length > 0 && ran.every((a) => ['rev-parse --show-toplevel', '-- .'].includes(a.slice(-2).join(' '))), `${name}: only the probe ran`);
+    assert.ok(ran.length > 0 && ran.every((a) => ['--show-toplevel --absolute-git-dir', '-- .'].includes(a.slice(-2).join(' '))), `${name}: only the probe ran`);
   }
 });
 
@@ -298,6 +298,40 @@ for (const when of ['before the first git call', 'after the first git call', 'af
         const r = await tool.execute(input, ctxIn(projectRoot));
         assert.equal(r.exitCode, 1, `${name}: ${r.stdout}${r.stderr}`);
         assert.match(r.stderr, refusal, name);
+        assert.deepEqual(await snapshot(outer), before, `${name} left the user's index, HEAD, status and files as they were`);
+      }
+    });
+  }
+}
+
+/**
+ * The re-audit's N1: `test.run`, which is not confined, rewrites the worktree's `.git` link to
+ * `gitdir: <the user's .git>`. The top git reports stays the worktree, so a top-only check passes
+ * while every command acts on the user's repository. The git directory is part of the identity the
+ * tools learned, so the rewrite is refused.
+ */
+for (const when of ['after the first git call', 'after construction for the root'] as const) {
+  for (const at of ['top', 'subdirectory'] as const) {
+    test(`a worktree whose .git link was rewritten to the user's repository ${when} is refused by every git tool (project root: the worktree's ${at})`, NEEDS_GIT, async (t) => {
+      const { outer, inner } = await userRepoWithWorktree(t);
+      const projectRoot = at === 'top' ? inner : path.join(inner, 'sub');
+      if (at === 'subdirectory') await mkdir(projectRoot);
+      const roots = when === 'after construction for the root' ? RepositoryRoots.bind(projectRoot) : new RepositoryRoots();
+      const tools = oneRegistry(roots);
+      if (when === 'after the first git call') {
+        const first = await tools[0]?.[1].execute({}, ctxIn(projectRoot));
+        assert.equal(first?.exitCode, 0, first?.stderr);
+      }
+      await writeFile(path.join(inner, '.git'), `gitdir: ${path.join(outer, '.git')}\n`, 'utf8');
+      // The control: git itself now reports the worktree as its top but the user's .git as its git dir.
+      assert.equal(realpathSync(must(projectRoot, ['rev-parse', '--show-toplevel']).trim()), realpathSync(inner), 'the top is still the worktree');
+      assert.equal(realpathSync(must(projectRoot, ['rev-parse', '--absolute-git-dir']).trim()), realpathSync(path.join(outer, '.git')), 'the git dir is now the user\'s');
+      const before = await snapshot(outer);
+
+      for (const [name, tool, input] of tools) {
+        const r = await tool.execute(input, ctxIn(projectRoot));
+        assert.equal(r.exitCode, 1, `${name}: ${r.stdout}${r.stderr}`);
+        assert.match(r.stderr, /^refusing to run git: the git directory behind .* was rewritten\.$/m, name);
         assert.deepEqual(await snapshot(outer), before, `${name} left the user's index, HEAD, status and files as they were`);
       }
     });

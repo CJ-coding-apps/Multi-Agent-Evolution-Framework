@@ -336,9 +336,11 @@ What that separates, and what it does not:
   a run (`cli/run-acceptance.test.ts` and `git-ops/WorktreeManager.isolation.test.ts` check exactly
   that, on a checkout with staged, unstaged and untracked work). The agent's tools cannot reach it
   either: `fs.write`, `fs.delete` and `patch.apply` refuse any path into `.git`, before policy and
-  whatever the rules say, and every git tool refuses unless the repository git finds is the run's
-  worktree (see *The agent's git tools*; `cli/worktree-escape.test.ts` replays deleting or rewriting the
-  worktree's `.git` and then resetting or committing, with no policy file). MAF reads your status with
+  whatever the rules say, and every git tool refuses unless both the top and the git directory git
+  finds are the ones it learned for the run's worktree — a `.git` link rewritten to your `.git`, by any
+  route including `test.run`, keeps the worktree as the top and is caught by the git directory (see
+  *The agent's git tools*; `cli/worktree-escape.test.ts` and `tools/worktree-confinement.test.ts` replay
+  deleting or rewriting the worktree's `.git` and then resetting or committing, with no policy file). MAF reads your status with
   `GIT_OPTIONAL_LOCKS=0` so git does not refresh your index. What a run adds to the repository is the
   branch `maf/<runId>`, git's record of the worktree, and the run's state under `.maf/`. A run never
   deletes its worktree or its branch.
@@ -364,7 +366,8 @@ What that separates, and what it does not:
 - **Rollbacks are not on the run path.** `RollbackManager`, which refuses any reset outside a run's
   worktree, is not used by `maf run` in 0.3.0. The coder's own `git.reset` tool can reset `--hard`, and it
   acts on whatever the run works in: in a worktree, the run's branch — and only there, because every git
-  tool refuses to run when the repository git finds is not the run's worktree.
+  tool refuses to run when the repository git finds — its top or its git directory — is not the run's
+  worktree.
 
 With isolation off — `--no-worktree`, or `worktree: false` in `.maf/config.yaml` — the run works in the
 target directory itself, on its checked-out branch, after a warning. Then the security gate and any
