@@ -43,6 +43,11 @@ export interface HarnessConfig {
   processorBundles: ProcessorRef[];
   /** Planner-side knobs worth evolving (Phase 3 mutation surface). */
   plannerRecall?: PlannerRecallConfig;
+  /**
+   * The human review of writer changes. Absent means `{ required: false }`. Hashed with the rest,
+   * so a run's harness sha says whether its writers' changes needed an approval.
+   */
+  reviewGate?: { required: boolean };
 }
 
 export interface ProcessorRef {
@@ -109,5 +114,13 @@ export function assertHarnessConfig(x: unknown): asserts x is HarnessConfig {
       if (pr[k] !== undefined && (typeof pr[k] !== 'number' || (pr[k] as number) < 0))
         throw new HarnessConfigError(`plannerRecall.${k} must be a non-negative number`);
     }
+  }
+  if (o['reviewGate'] !== undefined) {
+    const rg = o['reviewGate'] as Record<string, unknown> | null;
+    // Exactly a boolean: the string "false" is truthy, and a loose read would make it a requirement.
+    if (typeof rg !== 'object' || rg === null || typeof rg['required'] !== 'boolean')
+      throw new HarnessConfigError(
+        `HarnessConfig.reviewGate must be { required: true | false }; got ${JSON.stringify(o['reviewGate'])}`,
+      );
   }
 }
