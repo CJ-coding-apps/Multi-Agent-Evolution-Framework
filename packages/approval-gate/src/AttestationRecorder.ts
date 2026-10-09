@@ -1,44 +1,59 @@
-import type { ReviewAttestation, ApprovalRequest } from '@maf/types';
-import type { MemoryGraph } from '@maf/memory-graph';
+import type { ApprovalStatus, ReviewAttestation } from '@maf/types';
+import { makeCommitHash } from '@maf/types';
+import { buildInTotoStatement } from '@maf/attestation';
 
+/** Where decisions go: `Attestor` satisfies it with its existing `addApproval`. */
+export interface ApprovalSink {
+  addApproval(attestation: ReviewAttestation): void;
+}
+
+export interface SettledApproval {
+  requestId:     string;
+  requestHash:   string;
+  status:        ApprovalStatus;
+  reviewer:      string;
+  reason:        string;
+  toolId:        string;
+  policyRuleId:  string;
+  declaredPaths: readonly string[];
+  decidedAt:     Date;
+}
+
+// An approval binds one tool call, not a commit; the request hash is its subject, so no commit is
+// claimed. All zeros is the `ReviewAttestation` shape's way of saying so (WP-2.8 owns the shape).
+const NO_COMMIT = makeCommitHash('0'.repeat(40));
+
+/**
+ * Turns every settled request — approved, refused, timed out or refused headless — into a
+ * `ReviewAttestation` in the run's bundle. `diffHash` carries the request hash: it is the digest
+ * of the change the decision was about, and what a reader matches against the call's input.
+ */
 export class AttestationRecorder {
-  constructor(private readonly graph: MemoryGraph) {}
+  constructor(private readonly sink: ApprovalSink) {}
 
-  async record(attestation: ReviewAttestation, request: ApprovalRequest): Promise<string> {
-    const nodeId = await this.graph.addNode({
-      kind:  'Approval',
-      label: `approval:${attestation.requestId}`,
-      properties: {
-        requestId:  attestation.requestId,
-        reviewer:   attestation.decision.reviewer,
-        status:     attestation.decision.status,
-        diffHash:   attestation.diffHash,
-        commitHash: attestation.commitHash,
-        taskId:     request.taskId,
-        policyRule: request.policyRuleId,
-        decidedAt:  attestation.decision.decidedAt.toISOString(),
+  record(settled: SettledApproval): ReviewAttestation {
+    const attestation: ReviewAttestation = {
+      requestId:  settled.requestId,
+      decision: {
+        requestId: settled.requestId,
+        status:    settled.status,
+        reviewer:  settled.reviewer,
+        comment:   settled.reason,
+        decidedAt: settled.decidedAt,
       },
-      runId: request.runId,
-    });
-
-    // Link approval → run
-    const runRows = await this.graph.run({
-      cypher: `MATCH (n:MemoryNode {kind: 'Run', run_id: $runId}) RETURN n.id LIMIT 1`,
-      params: { runId: request.runId },
-    });
-
-    if (runRows[0]) {
-      const runNodeId = String(runRows[0]['n.id'] ?? '');
-      await this.graph.addEdge({ fromId: runNodeId, toId: nodeId, relation: 'APPROVED_BY', weight: 1, metadata: {} });
-    }
-
-    return nodeId;
-  }
-
-  async getApprovals(runId: string): Promise<Array<Record<string, unknown>>> {
-    return this.graph.run({
-      cypher: `MATCH (n:MemoryNode {kind: 'Approval', run_id: $runId}) RETURN n LIMIT 100`,
-      params: { runId },
-    });
+      commitHash: NO_COMMIT,
+      diffHash:   settled.requestHash,
+      intotoStmt: buildInTotoStatement(
+        { [`tool-call:${settled.requestId}`]: settled.requestHash },
+        { id: 'maf-approval-gate', modelVersion: settled.reviewer },
+        {
+          configSource: { uri: `policy-rule:${settled.policyRuleId}`, digest: { sha256: settled.requestHash } },
+          parameters:   { toolId: settled.toolId, declaredPaths: [...settled.declaredPaths], status: settled.status },
+          environment:  {},
+        },
+      ),
+    };
+    this.sink.addApproval(attestation);
+    return attestation;
   }
 }

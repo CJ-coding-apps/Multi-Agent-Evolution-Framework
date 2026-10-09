@@ -622,6 +622,38 @@ export interface ApprovalDecision {
   signature?: string;
 }
 
+/**
+ * The call an `Escalate` verdict is about, as `executeToolGated` holds it: the input the tool will
+ * run on and the paths it declared. The gate binds its decision to these, not to the request's
+ * description, which is prose.
+ */
+export interface ApprovalAsk {
+  request:       ApprovalRequest;
+  toolId:        ToolId;
+  input:         ToolInput;
+  declaredPaths: readonly string[];
+}
+
+export interface ApprovalOutcome {
+  /** Only `true` runs the call; it is good for the one call it was asked about. */
+  approved:    boolean;
+  status:      ApprovalStatus;
+  requestId:   string;
+  /** sha256 of the canonical request; empty when the request could not be hashed (and was refused). */
+  requestHash: string;
+  reason:      string;
+}
+
+/**
+ * Asked by `executeToolGated` on an `Escalate` verdict. Lives here rather than in
+ * `@maf/approval-gate` so `@maf/tool-loop` needs no dependency on the gate's implementation.
+ * `decide` settles every request it is given and records the decision in the attestation; it does
+ * not throw for a refusal.
+ */
+export interface ApprovalGateHandle {
+  decide(ask: ApprovalAsk): Promise<ApprovalOutcome>;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ATTESTATION — SLSA-style
 // ─────────────────────────────────────────────────────────────────────────────

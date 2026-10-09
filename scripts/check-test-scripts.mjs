@@ -61,7 +61,7 @@ async function testFiles(dir) {
 // it gains tests; remove one only with a decision that it may be untested again.
 const REQUIRED_TESTED = new Set([
   '@maf/adapter-base', '@maf/adapter-claude', '@maf/adapter-codex', '@maf/adapter-gemini',
-  '@maf/adapter-ollama', '@maf/adapter-openrouter', '@maf/attestation', '@maf/cli', '@maf/dag-runner',
+  '@maf/adapter-ollama', '@maf/adapter-openrouter', '@maf/approval-gate', '@maf/attestation', '@maf/cli', '@maf/dag-runner',
   '@maf/eval-harness', '@maf/evolver', '@maf/git-ops', '@maf/harness-config', '@maf/memory-graph',
   '@maf/planning-agent', '@maf/policy-engine', '@maf/processors', '@maf/roles', '@maf/tool-loop',
   '@maf/tools', '@maf/types',
