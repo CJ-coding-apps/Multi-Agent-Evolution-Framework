@@ -171,6 +171,41 @@ test('an outcome that is not for this request, or not strictly approved, does no
   }
 });
 
+test('a gate that throws, or answers no outcome, is a refusal: attested first, then PolicyViolationError', async () => {
+  const broken: Array<[string, ApprovalGateHandle]> = [
+    ['throws', { decide: async () => { throw new Error('terminal vanished'); } }],
+    ['throws synchronously', { decide: () => { throw new Error('terminal vanished'); } }],
+    ['answers null', { decide: async () => null as unknown as ApprovalOutcome }],
+  ];
+  for (const [label, gate] of broken) {
+    const attestor = new SpyAttestor();
+    const policy = escalating();
+    const { tool, inputs } = countingTool();
+    let recordedWhenThrown = -1;
+
+    await assert.rejects(
+      async () => {
+        try {
+          await executeToolGated(tool, { path: 'yarn.lock', content: 'x' }, ctxWith(attestor, policy), { policy, attestor, approvalGate: gate });
+        } catch (err) {
+          recordedWhenThrown = attestor.records.length;
+          throw err;
+        }
+      },
+      (err: unknown) => err instanceof PolicyViolationError && err.decision.verdict === 'Escalate',
+      label,
+    );
+
+    assert.equal(inputs.length, 0, label);
+    assert.equal(recordedWhenThrown, 1, `${label}: the refusal is attested before the throw`);
+    const record = attestor.records[0];
+    assert.ok(record);
+    assert.equal(record.result.metadata['refused'], true);
+    assert.equal(record.result.metadata['approval'], 'Rejected');
+    assert.match(record.result.stderr, /— approval Rejected: the approval gate failed: (terminal vanished|it answered null instead of an outcome)$/, label);
+  }
+});
+
 test('Deny and Indeterminate never reach the gate: they are not questions for a human', async () => {
   for (const decision of [
     { verdict: 'Deny', reason: 'writes are off', ruleId: 'deny-env-files' },

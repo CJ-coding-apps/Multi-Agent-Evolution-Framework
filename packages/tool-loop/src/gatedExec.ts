@@ -1,6 +1,6 @@
 import type {
   ToolPlugin, ToolInput, ToolResult, ToolContext,
-  PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalGateHandle, ApprovalOutcome,
+  PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalAsk, ApprovalGateHandle, ApprovalOutcome,
 } from '@maf/types';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
@@ -63,7 +63,7 @@ export async function executeToolGated(
     // Escalate is the one refusal a human may lift, for this call only: the gate binds its decision
     // to this tool, this frozen input and these declared paths, and records it either way.
     const approval = policyDecision.verdict === 'Escalate' && deps.approvalGate
-      ? await deps.approvalGate.decide({
+      ? await askGate(deps.approvalGate, {
           request: policyDecision.approvalRequest, toolId: tool.id, input, declaredPaths,
         })
       : undefined;
@@ -109,6 +109,28 @@ export async function executeToolGated(
 }
 
 type Refusal = Exclude<PolicyDecision, { verdict: 'Allow' }>;
+
+/**
+ * The gate's outcome, or a refusal when the gate throws or answers no outcome at all. The handle
+ * promises neither, but a gate that breaks it has decided nothing, and the call is still refused
+ * on the record — a raw error here would end the node with no trace of the escalation.
+ */
+async function askGate(gate: ApprovalGateHandle, ask: ApprovalAsk): Promise<ApprovalOutcome> {
+  let failure: string;
+  try {
+    const outcome = await gate.decide(ask);
+    const given: unknown = outcome;
+    if (typeof given === 'object' && given !== null) return outcome;
+    failure = `it answered ${given === null ? 'null' : typeof given} instead of an outcome`;
+  } catch (err) {
+    failure = err instanceof Error ? err.message : String(err);
+  }
+  const requestId: unknown = ask.request?.id;
+  return {
+    approved: false, status: 'Rejected', requestId: typeof requestId === 'string' ? requestId : '',
+    requestHash: '', reason: `the approval gate failed: ${failure}`,
+  };
+}
 
 /**
  * Strictly `true`, and for the request this verdict carries: an outcome for another request, or a
