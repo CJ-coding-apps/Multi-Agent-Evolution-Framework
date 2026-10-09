@@ -8,6 +8,7 @@ import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor, componentId } from '@maf/attestation';
+import { createApprovalGate } from '@maf/approval-gate';
 import { PolicyLoader } from '@maf/policy-engine';
 import { RollbackManager, SecurityReviewGate, WorktreeManager, resolveWorkingDir, runIsolatedGit } from '@maf/git-ops';
 import type { FinishResult, RunWorktree } from '@maf/git-ops';
@@ -54,7 +55,14 @@ export type GivenFlag = 'adapter' | 'worktree' | 'roles';
 /** What `run` takes from the process. A test replaces any of it. */
 export interface RunIo {
   stdout: { write(text: string): unknown };
-  stderr: { write(text: string): unknown };
+  /** Warnings, and the prompts of the approval gate and the review gate. */
+  stderr: NodeJS.WritableStream;
+  /** Read only when someone can answer at it (`isTTY`, and not MAF_HEADLESS=1). */
+  stdin:  NodeJS.ReadableStream;
+  /** Whether stdin is a terminal; `tty.isatty(0)` when unset. */
+  isTTY:  boolean;
+  /** MAF_SIGNING_KEY and MAF_HEADLESS are read from here. */
+  env:    NodeJS.ProcessEnv;
 }
 
 export interface RunDeps {
@@ -92,6 +100,12 @@ export function registerRunCommand(program: Command, deps: RunDeps = {}): void {
 export async function runTask(taskDescription: string, opts: RunOptions, ctx: RunContext): Promise<void> {
   const stdout = ctx.io?.stdout ?? process.stdout;
   const stderr = ctx.io?.stderr ?? process.stderr;
+  const env    = ctx.io?.env ?? process.env;
+  // A test that says whether stdin is a terminal hands the gates its streams; otherwise
+  // createApprovalGate asks isatty(0) itself, so a headless run never touches process.stdin.
+  const terminal = ctx.io?.isTTY !== undefined
+    ? { input: ctx.io.stdin ?? process.stdin, output: stderr, isTTY: ctx.io.isTTY }
+    : undefined;
   const say  = (line: string): void => { stdout.write(`${line}\n`); };
   const warn = (line: string): void => { stderr.write(`${line}\n`); };
 
@@ -189,7 +203,10 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     await transcript.init();
     const lcmBridge = new BlackboardToLcmAdapter(board, lcm, sessionId, runId);
-    const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), harness.sha);
+    const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
+    // One gate for the run (D-02): an escalated tool call is put to the operator at the terminal,
+    // or refused and left as a pending record when no one can answer; either way it is attested.
+    const approvalGate = createApprovalGate({ recorder: attestor, mafDir, env, ...(terminal ? { terminal } : {}) });
 
     // `security` may or may not be one of this set's roles; `resolve` answers that without
     // minting the name. The old `hasRole` + `getRole` pair asked twice, and `getRole` answered
@@ -234,6 +251,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       injector,
       policy,
       attestor,
+      approvalGate,
       graph,
       transcript,
       lcmBridge,

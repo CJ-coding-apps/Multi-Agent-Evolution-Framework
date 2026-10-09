@@ -58,7 +58,7 @@ export function registerEvolveCommand(program: Command): void {
       const adapter = await resolveAdapter(opts.adapter, createAdapterRegistry());
       const stack = await buildRunStack({
         cwd, mafDir, policyPath: path.resolve(cwd, opts.policy), adapter, runId,
-        harnessSha: base.sha, ...(opts.model ? { model: opts.model } : {}),
+        harnessSha: base.sha, headless: true, ...(opts.model ? { model: opts.model } : {}),
       });
 
       const corpus: GoldenTask[] = JSON.parse(await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'));

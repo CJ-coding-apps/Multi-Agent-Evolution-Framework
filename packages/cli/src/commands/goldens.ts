@@ -138,7 +138,7 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
     await stagePromptFiles(o.harness, mafDir, evalDir);
     const stack = await buildRunStack({
       cwd: o.cwd, mafDir: evalDir, policyPath: o.policyPath, adapter: o.agent, runId: o.runId,
-      harnessSha: o.harness.sha, ...model,
+      harnessSha: o.harness.sha, headless: true, ...model,
     });
     let result: GoldenSuiteResult;
     try {

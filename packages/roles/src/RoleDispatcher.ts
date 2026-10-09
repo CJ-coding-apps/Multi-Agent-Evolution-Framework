@@ -1,6 +1,6 @@
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
-  AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult,
+  AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle,
 } from '@maf/types';
 import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
@@ -50,6 +50,8 @@ export interface RoleDispatcherConfig {
   allowUngoverned?: boolean;
   /** Where the ungoverned-run banner goes; `process.stderr` when unset. */
   stderr?:        { write(text: string): unknown };
+  /** Asked when the policy escalates an in-process tool call (D-02); absent, Escalate is refused. */
+  approvalGate?:  ApprovalGateHandle | undefined;
 }
 
 export interface RoleNodeOutput {
@@ -459,6 +461,7 @@ export class RoleDispatcher {
         adapter,
         policy:    this.config.policy,
         attestor:  this.config.attestor,
+        approvalGate: this.config.approvalGate,
         runId:     this.config.runId,
         taskId,
         pipeline,

@@ -8,6 +8,7 @@ import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor } from '@maf/attestation';
+import { createApprovalGate } from '@maf/approval-gate';
 import { PolicyLoader } from '@maf/policy-engine';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { GraphAwareInjector } from '@maf/prompt-injector';
@@ -50,10 +51,17 @@ export async function buildRunStack(cfg: {
   harnessSha: string;
   /** `--allow-ungoverned`: a writer role may run on the cli tier (D-01). */
   allowUngoverned?: boolean;
+  /** No one is asked anything: an escalated tool call is refused (D-02). goldens and evolve run so. */
+  headless?: boolean;
 }): Promise<RunStack> {
   const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
   const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
   const policy = await PolicyLoader.loadEngine(cfg.policyPath, graph);
+  // One gate for every task of the stack, outside dispatchTask, so request ids are unique across them.
+  const approvalGate = createApprovalGate({
+    recorder: attestor, mafDir: cfg.mafDir,
+    env: cfg.headless === true ? { ...process.env, MAF_HEADLESS: '1' } : process.env,
+  });
   const baseTools = createDefaultRegistry();
   const board = new BlackboardStore();
   const lcm = new LcmEngine({
@@ -97,7 +105,7 @@ export async function buildRunStack(cfg: {
       });
       const dispatcher = new RoleDispatcher({
         adapter: cfg.adapter, baseTools, roles, injector, policy,
-        attestor, graph, transcript, lcmBridge, securityGate: gate,
+        attestor, approvalGate, graph, transcript, lcmBridge, securityGate: gate,
         cwd: workDir, sessionId: cfg.runId, runId: cfg.runId, harness,
         ...(cfg.allowUngoverned === true ? { allowUngoverned: true } : {}),
         ...(cfg.model ? { modelOverride: cfg.model } : {}),

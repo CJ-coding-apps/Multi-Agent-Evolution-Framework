@@ -1,6 +1,6 @@
 import type {
   RunId, TaskId, AgentId, ToolPlugin, ToolContext, ToolInput, ToolResult,
-  PolicyEngineHandle, AttestorHandle, LoopState, LoopPhase, CircuitBreakerConfig,
+  PolicyEngineHandle, AttestorHandle, LoopState, LoopPhase, CircuitBreakerConfig, ApprovalGateHandle,
 } from '@maf/types';
 import { makeAgentId } from '@maf/types';
 import type { RollbackManager } from '@maf/git-ops';
@@ -20,6 +20,8 @@ export interface ToolLoopConfig {
   policy:         PolicyEngineHandle;
   attestor:       AttestorHandle;
   rollback:       RollbackManager;
+  /** Asked when the policy escalates a call (D-02); reaches executeToolGated with this config. */
+  approvalGate?:  ApprovalGateHandle | undefined;
 }
 
 export type ToolDispatch = (

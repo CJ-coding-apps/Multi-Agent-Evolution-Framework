@@ -1,5 +1,7 @@
+import { PassThrough } from 'node:stream';
 import { Command } from 'commander';
 import type { AdapterName, CliAdapter } from '@maf/types';
+import { LcmEngine } from '@maf/lcm';
 import { registerRunCommand } from '../commands/run.js';
 import type { RunDeps } from '../commands/run.js';
 
@@ -10,10 +12,12 @@ export interface DrivenRun {
   error?: unknown;
 }
 
-/** Writes into a string, so a test reads what `run` printed. */
-export function collector(): { write(text: string): boolean; text(): string } {
+/** A stream that keeps what is written to it, so a test reads what `run` printed. */
+export function collector(): PassThrough & { text(): string } {
   let buf = '';
-  return { write: (text: string) => { buf += text; return true; }, text: () => buf };
+  const stream = new PassThrough();
+  stream.on('data', (chunk: Buffer) => { buf += chunk.toString('utf8'); });
+  return Object.assign(stream, { text: () => buf });
 }
 
 /**
@@ -26,12 +30,15 @@ export async function driveRun(args: readonly string[], deps: RunDeps = {}): Pro
   const program = new Command();
   program.exitOverride();
   registerRunCommand(program, { ...deps, io: { stdout, stderr, ...deps.io } });
+  let error: unknown;
   try {
     await program.parseAsync(['run', ...args], { from: 'user' });
-    return { out: stdout.text(), err: stderr.text() };
-  } catch (error: unknown) {
-    return { out: stdout.text(), err: stderr.text(), error };
+  } catch (err: unknown) {
+    error = err;
   }
+  // Let the streams hand over what was written last.
+  await new Promise((resolve) => setImmediate(resolve));
+  return { out: stdout.text(), err: stderr.text(), ...(error !== undefined ? { error } : {}) };
 }
 
 /** An adapter that is never available: a run that picks it stops at adapter resolution, naming it. */
@@ -62,4 +69,23 @@ export function registryOf(...adapters: CliAdapter[]): () => Map<AdapterName, Cl
 
 export function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * A run opens an LCM store (better-sqlite3). A host whose native build does not load skips the
+ * tests that run one, as goldens-offline does — never under CI, where the skip would leave the
+ * claim proved by nothing.
+ */
+export const needsLcm = {
+  skip: lcmLoads() || process.env['CI'] ? false : 'better-sqlite3 does not load on this host (CI runs this)',
+  timeout: 120_000,
+};
+
+function lcmLoads(): boolean {
+  try {
+    new LcmEngine({ dbPath: ':memory:', contextThreshold: 0.75, freshTailCount: 64, mode: 'Upward', summarize: async () => '' }).close();
+    return true;
+  } catch {
+    return false;
+  }
 }
