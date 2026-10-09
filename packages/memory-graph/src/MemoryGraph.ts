@@ -120,7 +120,10 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
       params: {
         taskId: crypto.randomUUID(), edgeId: crypto.randomUUID(), failureId: crypto.randomUUID(),
         task: input.task, nodeId: input.nodeId, runId: input.runId, now,
-        taskProps: JSON.stringify({ nodeId: input.nodeId, nodeLabel: input.label, role: input.role }),
+        taskProps: JSON.stringify({
+          nodeId: input.nodeId, nodeLabel: input.label, role: input.role,
+          ...(input.runTitle === undefined ? {} : { runTitle: input.runTitle }),
+        }),
         failureProps: JSON.stringify({
           nodeId: input.nodeId, role: input.role, reason: input.reason, message: input.message,
           ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }),
@@ -183,8 +186,9 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
 /** What `recallFailures` matches. Every filter given must hold; with none, the latest failures. */
 export interface FailureRecallFilter {
   /**
-   * A task title. Its first three words, as one phrase, must appear in the failed task's text,
-   * ignoring case: the planner's notion of "a similar task".
+   * A task title. Its first three words, as one phrase, must appear in the failed task's text or
+   * in the title of the run it was planned for, ignoring case: the planner's notion of "a similar
+   * task".
    */
   title?: string;
   /** A file the failed task `MODIFIED` (the label of a `File` node). */
@@ -226,7 +230,10 @@ export async function recallFailures(
     // A blank title is contained in every task, which is no recall at all.
     if (phrase === '') return [];
     params['phrase'] = phrase;
-    where = 'WHERE lower(t.label) CONTAINS $phrase';
+    // A planned node's label is its own step; the run's title is in its properties, which are
+    // JSON text, so there the phrase is looked for as JSON writes it (a `"` or `\` escaped).
+    params['phraseInJson'] = JSON.stringify(phrase).slice(1, -1);
+    where = 'WHERE lower(t.label) CONTAINS $phrase OR lower(t.properties) CONTAINS $phraseInJson';
   }
 
   const rows = await graph.run({

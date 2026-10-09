@@ -135,7 +135,7 @@ export class RetrievalAugmentedPlanner {
         timeoutMs:    300_000,
         inputs:       {},
         outputs:      {},
-        metadata:     { taskDescription, planText },
+        metadata:     { taskDescription, planText, ...runTitleOf(task) },
       }]]),
       edges:  [],
       config: DEFAULT_DAG_CONFIG,
@@ -171,7 +171,7 @@ function specToDag(
       timeoutMs:    n.timeoutMs ?? 300_000,
       inputs:       {},
       outputs:      {},
-      metadata:     { taskDescription: n.description ?? task?.description ?? task?.title ?? n.label },
+      metadata:     { taskDescription: n.description ?? task?.description ?? task?.title ?? n.label, ...runTitleOf(task) },
     });
   }
   const edges: DagEdge[] = (spec.edges ?? []).map((e) => ({
@@ -206,6 +206,14 @@ function resolveRole(
     );
   }
   return resolved.value;
+}
+
+/**
+ * The run's title, carried on every node it plans (D-16). A node's `taskDescription` is its own
+ * step; recall matches the next run's title, so a failure must remember the title it was planned for.
+ */
+function runTitleOf(task: TaskDescription | undefined): { runTitle?: string } {
+  return task === undefined ? {} : { runTitle: task.title };
 }
 
 /**

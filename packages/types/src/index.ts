@@ -337,6 +337,12 @@ export interface NodeFailureRecord {
   label:     string;
   /** What the node was asked to do: its `metadata.taskDescription`, or its label without one. */
   task:      string;
+  /**
+   * The title of the run the node was planned for (its `metadata.runTitle`), when the planner set
+   * one. A planned node's instruction is its own step, so the run's title is what the next plan
+   * for the same task can recognise.
+   */
+  runTitle?: string;
   role:      RoleName;
   /** `NodeFailure.reason` when the error was one; otherwise the error's class name. */
   reason:    string;

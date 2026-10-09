@@ -40,7 +40,8 @@ test('a failed node is recorded once, with its task, role, reason and run', asyn
     { id: 'impl', label: 'implement', agentRole: 'coder', retry: NO_WAIT },
     { id: 'ok', label: 'fine', agentRole: 'tester', retry: NO_WAIT },
   ]);
-  dag.nodes.get(makeNodeId('impl'))!.metadata['taskDescription'] = 'Add rate limiting to the login endpoint';
+  dag.nodes.get(makeNodeId('impl'))!.metadata['taskDescription'] = 'Implement a token bucket in src/auth/login.ts';
+  dag.nodes.get(makeNodeId('impl'))!.metadata['runTitle'] = 'Add rate limiting to the login endpoint';
   const recorder = capturing();
 
   const outcome = await new DagRunner().run({
@@ -58,7 +59,8 @@ test('a failed node is recorded once, with its task, role, reason and run', asyn
     runId:    RUN_ID,
     nodeId:   makeNodeId('impl'),
     label:    'implement',
-    task:     'Add rate limiting to the login endpoint',
+    task:     'Implement a token bucket in src/auth/login.ts',
+    runTitle: 'Add rate limiting to the login endpoint',
     role:     'coder',
     reason:   'adapter_failed',
     message:  'claude exited 1: not logged in',
@@ -93,6 +95,7 @@ test('an error that is not a NodeFailure is recorded under its class; the task f
   assert.equal(byNode.get(makeNodeId('c'))?.reason, 'non_error');
   assert.equal(byNode.get(makeNodeId('c'))?.message, 'not an error');
   assert.ok(!('exitCode' in byNode.get(makeNodeId('b'))!), 'no exit code is invented');
+  assert.ok(!('runTitle' in byNode.get(makeNodeId('b'))!), 'no run title is invented');
 });
 
 test('a node retried on transport failure is recorded once, after its last attempt', async () => {

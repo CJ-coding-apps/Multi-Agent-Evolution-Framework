@@ -94,6 +94,30 @@ test('recall finds a recorded failure by the first words of a similar title, ign
     'the phrase must match, not any one of its words');
 });
 
+test('recall finds a planned step by the title of the run it was planned for', async () => {
+  // F1: a planned node's label is its own step ("Implement a token bucket…"), so matching the next
+  // run's title against the label alone found nothing for any real JSON plan. The run's title is
+  // kept in the Task's properties; the label stays the instruction.
+  const runId = makeRunId('run-recall-title');
+  await graph.recordFailure(record({
+    runId, nodeId: makeNodeId('bucket'), task: 'Implement a token bucket in src/auth/login.ts',
+    runTitle: 'Throttle the "login" endpoint (C:\\auth)',
+  }));
+
+  const [stored] = await graph.run({
+    cypher: `MATCH (t:MemoryNode {kind: 'Task', run_id: $runId}) RETURN t.label AS label, t.properties AS props`,
+    params: { runId },
+  });
+  assert.equal(stored?.['label'], 'Implement a token bucket in src/auth/login.ts', 'the label stays the instruction');
+  assert.equal(JSON.parse(String(stored?.['props']))['runTitle'], 'Throttle the "login" endpoint (C:\\auth)');
+
+  for (const title of ['Throttle the "login" endpoint (C:\\auth)', 'throttle THE "LOGIN" again', '"LOGIN" endpoint (c:\\auth)']) {
+    assert.deepEqual((await recallFailures(graph, { title, limit: 5 })).map((f) => f.nodeId), ['bucket'],
+      `the run title is matched, ignoring case, quotes and backslashes included: ${title}`);
+  }
+  assert.deepEqual(await recallFailures(graph, { title: 'Throttle the signup endpoint', limit: 5 }), []);
+});
+
 test('recall returns the most recent failures first, up to the limit', async () => {
   const runId = makeRunId('run-recency');
   for (const n of [1, 2, 3]) {

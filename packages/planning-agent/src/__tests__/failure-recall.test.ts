@@ -59,6 +59,29 @@ test('the planner recalls a recorded failure on a similar task into its prompt',
   assert.match(prompt, /Task "Add rate limiting to the login endpoint" \(coder\) → GateRefused: Security review refused the change from node n1/);
 });
 
+test('every planned node carries the run title, on the JSON plan and on the fallback plan', async () => {
+  // F1: the node's `taskDescription` is its own step; the title is what the next plan recalls by.
+  const planWith = (planText: string) => new RetrievalAugmentedPlanner({
+    graph, lcm: noopLcm, injector: noopInjector, roles: rolesOf(['coder']),
+    generatePlan: async () => planText,
+  }).plan({ title: 'Add rate limiting to the login endpoint', description: 'details', runId: makeRunId('run-title'), sessionId: 's' });
+  const spec = {
+    nodes: [
+      { id: 'n1', label: 'bucket', description: 'Implement a token bucket in src/auth/login.ts' },
+      { id: 'n2', label: 'test', description: 'Test the bucket', dependencies: ['n1'] },
+    ],
+  };
+
+  const json = await planWith('```json\n' + JSON.stringify(spec) + '\n```');
+  const fallback = await planWith('no plan');
+
+  assert.deepEqual([...json.nodes.values()].map((n) => [n.metadata['taskDescription'], n.metadata['runTitle']]), [
+    ['Implement a token bucket in src/auth/login.ts', 'Add rate limiting to the login endpoint'],
+    ['Test the bucket', 'Add rate limiting to the login endpoint'],
+  ]);
+  assert.deepEqual([...fallback.nodes.values()].map((n) => n.metadata['runTitle']), ['Add rate limiting to the login endpoint']);
+});
+
 test('the planner recalls nothing for an unrelated task', async () => {
   const prompt = await systemPromptFor('Write the release notes');
 

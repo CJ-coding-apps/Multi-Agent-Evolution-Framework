@@ -197,11 +197,13 @@ async function recordFailure(
 
 function failureRecord(node: DagNode, runId: RunId, err: unknown, message: string): NodeFailureRecord {
   const description = node.metadata['taskDescription'];
+  const runTitle = node.metadata['runTitle'];
   return {
     runId,
     nodeId:  node.id,
     label:   node.label,
     task:    typeof description === 'string' && description.trim() !== '' ? description : node.label,
+    ...(typeof runTitle === 'string' && runTitle.trim() !== '' ? { runTitle } : {}),
     role:    node.agentRole,
     reason:  failureReason(err),
     message,
