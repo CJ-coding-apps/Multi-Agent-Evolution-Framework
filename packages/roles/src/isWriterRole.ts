@@ -4,18 +4,21 @@ import type { ToolRegistry } from '@maf/tools';
 import type { RoleConfig } from './RoleConfig.js';
 
 /**
- * The tools that change the working tree or the repository's history: every tool the default
- * registry rates `write` or `dangerous`. A new tool of either kind belongs here too.
+ * The tools that can change the working tree or the repository's history: every tool the default
+ * registry rates `write`, `dangerous` or `execute`. `test.run` is here because it runs the project's
+ * own code, which can write anything. A new tool of any of these kinds belongs here too.
  */
 const WRITE_TOOLS: ReadonlySet<string> = new Set([
-  'fs.write', 'fs.delete', 'patch.apply', 'git.commit', 'git.reset', 'git.add',
+  'fs.write', 'fs.delete', 'patch.apply', 'git.commit', 'git.reset', 'git.add', 'test.run',
 ]);
 
 /**
  * Whether a role can change the code, and so must have its diff security-reviewed.
  *
  * Decided by the tools the role holds, never by its name (D-07). Keying on `role === 'coder'`
- * left a tester holding `patch.apply`, or any custom writer role, unreviewed.
+ * left a tester holding `patch.apply`, or any custom writer role, unreviewed. The in-process
+ * `security-gate` processor reviews exactly these roles too: the dispatcher hands it a runner only
+ * for a role this answers true for.
  */
 export function isWriterRole(role: { readonly allowedTools: readonly ToolId[] }): boolean {
   return role.allowedTools.some((id) => WRITE_TOOLS.has(id));

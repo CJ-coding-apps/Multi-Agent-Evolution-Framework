@@ -93,6 +93,9 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       ? `${options.systemPrompt}\n\n${options.prompt}`
       : options.prompt;
 
+    // `--full-auto` is Codex's sandboxed automatic mode, on every cli-tier call: the planner's and the
+    // reviewer's too. It is documented (README.md, docs/SECURITY.md) and named in the UNGOVERNED banner.
+    // nativeTools: false — no Codex CLI flag is known to withhold its own tools, so none is passed.
     const args: string[] = ['--full-auto'];
     if (options.model) args.push('--model', options.model);
 

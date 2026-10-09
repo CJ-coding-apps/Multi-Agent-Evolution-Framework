@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolInput, ToolResult } from '@maf/types';
@@ -80,15 +82,34 @@ const ISOLATION_ARGS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=
 const HOST_CONFIG_ENV = /^GIT_CONFIG(?:_PARAMETERS|_COUNT|_KEY_\d+|_VALUE_\d+)?$/;
 
 /**
- * The environment every tool's git runs in: the host's, minus its git configuration. The same
- * policy as `runIsolatedGit` in `@maf/git-ops`, which MAF's own git calls use; restated rather than
- * imported because `tools` does not depend on `git-ops` (the edge would change the lockfile), the
- * tools must keep their injectable `GitExec`, and the agent's git also needs the prompt and
- * identity handling below.
+ * Host variables that say which repository, index or object store git works on, so that git never
+ * looks for one itself: git's own list of repository-local variables (`git rev-parse
+ * --local-env-vars`), plus the discovery switches. MAF started from a git hook inherits `GIT_DIR` or
+ * `GIT_INDEX_FILE` naming the user's repository, and the agent's `git.add` would write the user's index.
  */
-function isolatedEnv(): NodeJS.ProcessEnv {
+const HOST_REPOSITORY_ENV = new Set([
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_SHALLOW_FILE',
+  'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE',
+  'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+]);
+
+/**
+ * The environment every tool's git runs in: the host's, minus its git configuration and any
+ * variable that names a repository. The same configuration policy as `runIsolatedGit` in
+ * `@maf/git-ops`, which MAF's own git calls use; restated rather than imported because `tools` does
+ * not depend on `git-ops` (the edge would change the lockfile), the tools must keep their injectable
+ * `GitExec`, and the agent's git also needs the prompt, identity and confinement handling below.
+ *
+ * `root` is the run's working tree, symlink-resolved. `GIT_CEILING_DIRECTORIES` is its parent, so
+ * repository discovery from anywhere in the tree stops at the tree's own top: a worktree whose `.git`
+ * link is gone is no repository at all, rather than the user's checkout around it.
+ */
+function isolatedEnv(root: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) if (!HOST_CONFIG_ENV.test(key)) env[key] = value;
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!HOST_CONFIG_ENV.test(key) && !HOST_REPOSITORY_ENV.has(key)) env[key] = value;
+  }
   return {
     ...env,
     GIT_CONFIG_GLOBAL:     '/dev/null',
@@ -98,17 +119,52 @@ function isolatedEnv(): NodeJS.ProcessEnv {
     // Literal pathspecs: a path the model names is a file name to git, as it is to policy. With
     // pathspec magic on, a declared `*.env` matches no rule written for `.env` and stages `.env`.
     GIT_LITERAL_PATHSPECS: '1',
+    GIT_CEILING_DIRECTORIES: path.dirname(root),
   };
 }
 
-async function git(args: string[], cwd: string, exec: GitExec): Promise<{ stdout: string; stderr: string; code: number }> {
+type GitOutcome = { stdout: string; stderr: string; code: number };
+
+async function run(args: string[], cwd: string, env: NodeJS.ProcessEnv, exec: GitExec): Promise<GitOutcome> {
   try {
-    const r = await exec('git', [...ISOLATION_ARGS, ...args], { cwd, env: isolatedEnv() });
+    const r = await exec('git', [...ISOLATION_ARGS, ...args], { cwd, env });
     return { stdout: r.stdout, stderr: r.stderr, code: 0 };
   } catch (e: unknown) {
     const err = e as { stdout?: string; stderr?: string; code?: number };
     return { stdout: err.stdout ?? '', stderr: err.stderr ?? '', code: err.code ?? 1 };
   }
+}
+
+/**
+ * Runs one git command for a tool, after proving that the repository git finds from `ctx.cwd` is the
+ * run's working tree, `ctx.projectRoot`: its `--show-toplevel`, symlink-resolved, must be that root.
+ * Asked before every call, in the environment the call itself gets, because the tree can change
+ * between calls — an agent's `test.run` can delete `.git`, and the next `git.reset --hard` would
+ * then act on whatever repository git found instead. A refusal is a failed result naming both
+ * directories; git is not run.
+ */
+async function git(args: string[], ctx: ToolContext, exec: GitExec): Promise<GitOutcome> {
+  const refuse = (why: string): GitOutcome => ({ stdout: '', stderr: why, code: 1 });
+  let root: string;
+  try {
+    root = await realpath(ctx.projectRoot);
+  } catch (e: unknown) {
+    return refuse(`refusing to run git: the run's working tree ${ctx.projectRoot} cannot be resolved (${e instanceof Error ? e.message : String(e)}).`);
+  }
+  const env = isolatedEnv(root);
+  const probe = await run(['rev-parse', '--show-toplevel'], ctx.cwd, env, exec);
+  const found = probe.code === 0 ? await realpath(probe.stdout.trim()).catch(() => undefined) : undefined;
+  if (found === undefined) {
+    return refuse(
+      `refusing to run git: git found no repository from ${ctx.cwd} inside the run's working tree ${root} ` +
+      `(git said: ${probe.stderr.trim() || `exit ${probe.code}`}). Either the tree's .git link is missing or broken, ` +
+      `or the tree is a subdirectory of its repository and git may not look above the tree for its top.`,
+    );
+  }
+  if (found !== root) {
+    return refuse(`refusing to run git: the repository git found at ${found} is not the run's working tree ${root}.`);
+  }
+  return run(args, ctx.cwd, env, exec);
 }
 
 // ── git.status ────────────────────────────────────────────────────────────────
@@ -124,7 +180,7 @@ export class GitStatusTool extends GitTool<Record<string, never>> {
 
   async execute(_: Record<string, never>, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const r = await git(['status', '--porcelain=v2', '--branch'], ctx.cwd, this.exec);
+    const r = await git(['status', '--porcelain=v2', '--branch'], ctx, this.exec);
     return { stdout: r.stdout, stderr: r.stderr, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }
@@ -148,7 +204,7 @@ export class GitDiffTool extends GitTool<DiffInput> {
     if (input.staged) args.push('--staged');
     const paths = diffPaths(input);
     if (paths.length > 0) args.push('--', ...paths);
-    const r = await git(args, ctx.cwd, this.exec);
+    const r = await git(args, ctx, this.exec);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }
@@ -167,7 +223,7 @@ export class GitAddTool extends GitTool<AddInput> {
 
   async execute(input: AddInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const r = await git(['add', '--', ...input.paths], ctx.cwd, this.exec);
+    const r = await git(['add', '--', ...input.paths], ctx, this.exec);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }
@@ -186,9 +242,9 @@ const FALLBACK_IDENTITY = { 'user.name': 'maf', 'user.email': 'maf@maf.invalid' 
  * is left alone — the commit is made as the repository's identity, which is what the security
  * gate reviews — and the fallback is per call, never written to the repository's config.
  */
-async function fallbackIdentity(cwd: string, exec: GitExec): Promise<string[]> {
+async function fallbackIdentity(ctx: ToolContext, exec: GitExec): Promise<string[]> {
   // `-z` records are `key\nvalue\0`; a valueless key has no `\n`. Exit 1 means none is set.
-  const r = await git(['config', '-z', '--get-regexp', '^user\\.(name|email)$'], cwd, exec);
+  const r = await git(['config', '-z', '--get-regexp', '^user\\.(name|email)$'], ctx, exec);
   const configured = new Map<string, string>();
   for (const record of r.stdout.split('\0')) {
     const nl = record.indexOf('\n');
@@ -210,9 +266,9 @@ export class GitCommitTool extends GitTool<CommitInput> {
 
   async execute(input: CommitInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const args = [...await fallbackIdentity(ctx.cwd, this.exec), 'commit', '-m', input.message];
+    const args = [...await fallbackIdentity(ctx, this.exec), 'commit', '-m', input.message];
     if (input.allowEmpty) args.push('--allow-empty');
-    const r = await git(args, ctx.cwd, this.exec);
+    const r = await git(args, ctx, this.exec);
     // Extract commit hash from output like "[branch abc1234]"
     const hashMatch = /\[[\w/]+ ([0-9a-f]+)\]/.exec(r.stdout);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: { hash: hashMatch?.[1] } };
@@ -241,7 +297,7 @@ export class GitLogTool extends GitTool<LogInput> {
     }
     const args = ['log', `-${n}`];
     if (input.oneline !== false) args.push('--oneline');
-    const r = await git(args, ctx.cwd, this.exec);
+    const r = await git(args, ctx, this.exec);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }
@@ -280,7 +336,7 @@ export class GitResetTool extends GitTool<ResetInput> {
     // would say the same thing, but `git reset` only accepts it from 2.44; the separator works
     // on every git maf supports.)
     const args = ['reset', input.hard ? '--hard' : '--soft', to, '--'];
-    const r = await git(args, ctx.cwd, this.exec);
+    const r = await git(args, ctx, this.exec);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
 }

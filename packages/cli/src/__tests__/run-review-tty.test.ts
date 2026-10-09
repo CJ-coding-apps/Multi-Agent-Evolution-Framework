@@ -9,7 +9,7 @@ import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { runIsolatedGit } from '@maf/git-ops';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
-import { FIXED_SUM, collector, driveRun, lockFilePolicy, messageOf, needsLcm, registryOf } from './runFixture.js';
+import { onePlannedNode, FIXED_SUM, collector, driveRun, lockFilePolicy, messageOf, needsLcm, registryOf } from './runFixture.js';
 
 // ORACLE: verifier F1 (D-34, rule 6) — on a terminal, `run` asks the terminal reviewer, and a
 // harness that requires review hands the gate `required: true`: the prompt says so, a typed `deny`
@@ -33,7 +33,7 @@ async function reviewedRun(answer: string, body: (r: {
         role: 'coder', systemPrompt: 'Fix the code.', allowedTools: ['fs.read', 'fs.write'], execution: 'in-process',
       }] },
     }));
-    const scripted = new ScriptedAdapter([{ prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), { prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
     const stdin = new PassThrough();
     const stderr = collector();
     let prompts = 0;

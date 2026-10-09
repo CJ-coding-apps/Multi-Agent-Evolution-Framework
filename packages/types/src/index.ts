@@ -853,6 +853,13 @@ export interface AdapterInvokeOptions {
   /** Pinned sampling temperature when the backend supports it (golden determinism).
    *  Adapters that cannot control temperature MUST ignore it, never error. */
   temperature?:     number;
+  /**
+   * Whether the backend may use tools of its own — a CLI's file, shell and edit tools. Default `true`.
+   * `false` means the backend must not be given its own tools: the call needs only text (a plan, a
+   * review verdict), and whatever a tool did would happen outside MAF's gates — after the security
+   * review, for the reviewer. An adapter that knows no flag for it says so where it builds its argv.
+   */
+  nativeTools?:     boolean;
 }
 
 export interface AdapterInvokeResult {

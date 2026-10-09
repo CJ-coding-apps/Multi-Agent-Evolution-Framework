@@ -115,8 +115,9 @@ boundaries are implemented; anything not written here is not a guarantee.
 ### The post-task security gate: what it reads
 
 Every writer role's change is reviewed by `SecurityReviewGate` before the node completes. A writer is a
-role that holds `fs.write`, `fs.delete`, `patch.apply`, `git.commit`, `git.reset` or `git.add`; the role's
-name plays no part, so a tester holding `patch.apply` is reviewed like a coder. The review runs once per
+role that holds `fs.write`, `fs.delete`, `patch.apply`, `git.commit`, `git.reset`, `git.add` or
+`test.run` (which runs the project's own code); the role's name plays no part, so a tester holding
+`patch.apply` is reviewed like a coder. The review runs once per
 attempt, at the first of these that reaches it:
 
 - **`cli` tier:** `RoleDispatcher` runs it after the backend returns, whether the result was a success, a
@@ -132,8 +133,10 @@ attempt, at the first of these that reaches it:
   so the processor's review runs there.
 
 The reviewer is the run's backend, called on the `cli` tier (one prompt, one answer) in the directory
-the run works in; with `claude`, that call keeps Claude Code's own tools (see *The execution-tier
-boundary*).
+the run works in. The diff is in the prompt, so the call asks for no tools of the backend's own
+(`nativeTools: false`): `claude` gets `--tools ""`, and cannot edit the tree it is reviewing after the
+review passes it; `codex` and `gemini` have no known flag for that and keep their tools (see *The
+execution-tier boundary*).
 
 The gate reviews **a diff of the whole repository's working tree against the commit the node started
 from**, computed by `snapshotDiff` (`packages/git-ops/src/SnapshotDiff.ts`) with the `:(top)` pathspec,
@@ -153,6 +156,7 @@ What the diff therefore contains:
 | New file, staged | yes |
 | Work the agent committed during the node | yes — the base is not `HEAD` |
 | Deleted file | yes |
+| A file an agent-written `.gitattributes` marks `-diff` or `binary`, or hands to a diff driver (`textconv`, an external command) | yes, as text — the diff is taken with `--text --no-ext-diff --no-textconv`; a genuinely binary file prints as bytes, so one too large to review whole is refused by the cap below |
 | **File matched by `.gitignore`** | **no** |
 | A change elsewhere in the repository than the directory MAF was pointed at | yes — the pathspec is the whole repository |
 | MAF's configuration under `.maf/`: `policy.yaml`, `roles.yaml`, `config.yaml`, `prompts/` | yes — an agent could rewrite it to shape the next run |
@@ -172,6 +176,11 @@ instead: not by this diff, and no longer by a policy rule alone — every path a
 to the project root before any rule is read, so a write outside the root is refused whatever the rule set
 says (see *Path confinement* below). When the write comes from a CLI-tier agent's own file tools, it is
 not visible to maf at all. See the tier boundary below.
+
+**A filter driver changes what is staged.** `git add -A` runs the `clean` command of any filter the
+repository's own configuration defines (`filter.<name>.clean`, as git-lfs or git-crypt set up), and an
+agent-written `.gitattributes` can select one for any file, so the diff shows what the filter produced
+rather than the file. MAF does not override attributes when it stages the tree.
 
 **This run's runtime state under `.maf/` is outside the diff**, by name, for the reason in the table;
 the rest of `.maf/` — the configuration — is reviewed. Tool writes anywhere under `.maf/` are denied by
@@ -280,15 +289,19 @@ A role runs in one of two tiers:
   ([D-33](DECISIONS.md)).
 - **`cli`** — maf hands the backend CLI one prompt and reads back one result. The agent
   runs its own tools, so maf sees **no individual tool call**: not the arguments, not the policy verdict,
-  not the path. MAF passes no permission or hook flags, so the backend acts under its own permission
-  settings. `claude` is still given the empty, strict MCP configuration; `gemini` an MCP allowlist that
-  names no configured server; `codex` nothing.
+  not the path. MAF passes no hook flags, and no permission flags but one: Codex is invoked with
+  `--full-auto`, its sandboxed automatic mode, on every `cli`-tier call — the planner's and the
+  reviewer's included — and the `UNGOVERNED` banner says so when the backend is `codex`. Otherwise the
+  backend acts under its own permission settings. `claude` is still given the empty, strict MCP
+  configuration; `gemini` an MCP allowlist that names no configured server; `codex` no MCP flag.
 
 The writer-role diff above is the one thing maf still observes on the `cli` tier, and it observes it only
 *after* the node finishes — and only for a role that holds a write tool. Policy refusals, approved
 escalations, redaction and tool-call records exist on the `in-process` tier alone; the human review gate
 reviews a writer's diff on either tier. The planner's call and the security
-reviewer's call are `cli`-tier calls in this sense, whatever tier the roles run on.
+reviewer's call are `cli`-tier calls in this sense, whatever tier the roles run on, with one difference:
+they need only text, so `claude` is spawned for them with `--tools ""`, its own tools off, as for an
+in-process turn. `codex` and `gemini` have no known flag for that, and keep their tools on these calls.
 
 A role's `execution` field defaults by the tools it holds ([D-01](DECISIONS.md)): `in-process` for a role
 that holds a write tool, `cli` for any other. A writer lands on the `cli` tier only by its own
@@ -302,6 +315,16 @@ says what a run produced but not how each node was executed. The harness it name
 `execution` setting, if any, and the builder id names the adapter; together they say which tier each role
 was meant to get.
 
+### Recalled history is untrusted text
+
+Recalled failure output and LCM excerpts are agent output from earlier runs and enter later planner
+prompts as untrusted text. The planner's prompt carries a `<past-failures>` block — up to five failures
+recalled from the memory graph, each with the error a failed node left, which can quote a backend's own
+output tail — and `<past-context>` excerpts from LCM. Agents wrote them, or wrote what they quote; MAF
+does not filter them or tell the model they are untrusted, so text planted in one run can steer a later plan.
+What it cannot do is widen a plan's privileges: every role name the planner emits is checked against the
+role set, and every node runs under its role's tier, policy and gates.
+
 ### Worktree isolation
 
 `maf run` works in a git worktree of its own ([D-03](DECISIONS.md)): `createForRun` checks out the
@@ -311,7 +334,11 @@ What that separates, and what it does not:
 
 - **Your checkout is not touched.** Your files, index, `HEAD` and `.git/config` are byte-identical after
   a run (`cli/run-acceptance.test.ts` and `git-ops/WorktreeManager.isolation.test.ts` check exactly
-  that, on a checkout with staged, unstaged and untracked work); MAF reads your status with
+  that, on a checkout with staged, unstaged and untracked work). The agent's tools cannot reach it
+  either: `fs.write`, `fs.delete` and `patch.apply` refuse any path into `.git`, before policy and
+  whatever the rules say, and every git tool refuses unless the repository git finds is the run's
+  worktree (see *The agent's git tools*; `cli/worktree-escape.test.ts` replays deleting or rewriting the
+  worktree's `.git` and then resetting or committing, with no policy file). MAF reads your status with
   `GIT_OPTIONAL_LOCKS=0` so git does not refresh your index. What a run adds to the repository is the
   branch `maf/<runId>`, git's record of the worktree, and the run's state under `.maf/`. A run never
   deletes its worktree or its branch.
@@ -320,7 +347,8 @@ What that separates, and what it does not:
 - **MAF's configuration and state stay in the target directory.** The policy, roles, config, prompts,
   harnesses, memory graph, transcripts, attestations and pending approvals are read and written under
   the target directory's `.maf/`, not the worktree's. In-process tools are confined to the worktree (it is
-  their project root), so they cannot reach any of it.
+  their project root), so they cannot reach any of it. `test.run` is not: it runs the project's own test
+  command, which can read and write anything the user running MAF can (see *`test.run` executes project code*).
 - **Confinement is MAF's, not the operating system's.** A `cli`-tier backend acts with its own tools
   wherever its permission settings let it, inside or outside the worktree, and the worktree shares the
   repository's objects and refs with your checkout.
@@ -335,7 +363,8 @@ What that separates, and what it does not:
   role, which is never reviewed — reaches the branch too.
 - **Rollbacks are not on the run path.** `RollbackManager`, which refuses any reset outside a run's
   worktree, is not used by `maf run` in 0.3.0. The coder's own `git.reset` tool can reset `--hard`, and it
-  acts on whatever the run works in: in a worktree, the run's branch.
+  acts on whatever the run works in: in a worktree, the run's branch — and only there, because every git
+  tool refuses to run when the repository git finds is not the run's worktree.
 
 With isolation off — `--no-worktree`, or `worktree: false` in `.maf/config.yaml` — the run works in the
 target directory itself, on its checked-out branch, after a warning. Then the security gate and any
@@ -355,12 +384,27 @@ the host's git configuration does not apply. `git.commit` uses the repository's 
 `user.email` and fills in `maf` / `maf@maf.invalid` only for one the repository leaves unset. Paths are
 literal (`GIT_LITERAL_PATHSPECS=1`), and git never prompts.
 
+They act on the run's working tree and nothing else. Before every call, each tool asks git, in the
+environment the call will get, which working tree it found (`git rev-parse --show-toplevel`) and refuses
+— running nothing — unless that is the project root, symlinks resolved: "the repository git found at
+<x> is not the run's working tree <y>". `GIT_CEILING_DIRECTORIES` is set to the root's parent, so a tree
+whose `.git` link is gone is no repository at all rather than the user's checkout around it, and the
+host's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and git's other repository-locating variables are
+dropped, so MAF started from a git hook does not hand the agent the user's repository. The other half of
+the same confinement is in the file tools: `fs.write`, `fs.delete` and `patch.apply` refuse any path
+with a `.git` segment at any depth (any case), or that resolves into `.git`, from `declaredPaths` — before
+the policy engine is asked — and again when they run, so the agent cannot delete the worktree's `.git`
+link or point it at another repository. A refused `.git` path is an error that ends the node, not a policy
+verdict, and it is not in the bundle's tool calls. With the tree at a subdirectory of its repository —
+MAF pointed at `<repo>/<sub>` — the project root is that subdirectory, so the git tools refuse every call
+there.
+
 What this does not cover: repository configuration that names a program still runs it — `diff.external`
 or a diff driver's `textconv` on `git.diff`, a filter driver's `clean`/`process` (chosen by an
 agent-writable `.gitattributes`) on `git.add`, and `gpg.program` with `log.showSignature` on `git.log`.
-On the in-process tier the shipped policy denies tool writes under `.git/`, so an agent cannot add such
-configuration itself; a relative program path that the repository's configuration already names is a
-file the agent can write. MAF's own git calls (`runIsolatedGit`: the security diff, the worktree, the
+`fs.write`, `fs.delete` and `patch.apply` refuse any path into `.git` whatever the policy says, so an
+agent cannot add such configuration itself; a relative program path that the repository's configuration
+already names is a file the agent can write. MAF's own git calls (`runIsolatedGit`: the security diff, the worktree, the
 hand-over) pin `core.hooksPath` and ignore the host's configuration files, but do not pin
 `core.fsmonitor`.
 

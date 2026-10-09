@@ -7,6 +7,7 @@ import path from 'node:path';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { runIsolatedGit } from '@maf/git-ops';
 import {
+  onePlannedNode,
   FIXED_SUM, dirtyUserRepo, driveRun, lockFilePolicy, messageOf, needsLcm, registryOf, userState,
 } from './runFixture.js';
 
@@ -34,7 +35,7 @@ async function withDirtyRepo(body: (root: string, repo: string) => Promise<void>
 
 test('a typed --no-worktree beats worktree: true in config.yaml; on a dirty tree the run warns once what the gate will see', needsLcm, async () => {
   await withDirtyRepo(async (root, repo) => {
-    const scripted = new ScriptedAdapter([{ prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), { prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
     const run = await driveRun([TASK, '--dir', repo, '--adapter', 'scripted', '--no-worktree', '--policy', await lockFilePolicy(root)],
       { adapters: registryOf(scripted), io: headless() });
     assert.equal(run.error, undefined, `${run.out}\n${run.err}`);

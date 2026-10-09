@@ -9,6 +9,7 @@ import { ScriptedAdapter } from '@maf/eval-harness';
 import { MemoryGraph, recallFailures } from '@maf/memory-graph';
 import { runIsolatedGit } from '@maf/git-ops';
 import {
+  onePlannedNode,
   FIXED_SUM, dirtyUserRepo, driveRun, lockFilePolicy, messageOf, needsLcm, registryOf, userState,
 } from './runFixture.js';
 
@@ -34,7 +35,7 @@ test('a required review with no reviewer fails closed; the worktree is kept, the
       }] },
     }));
     const before = await userState(repo);
-    const scripted = new ScriptedAdapter([{ prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), { prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
 
     const run = await driveRun([TASK, '--dir', repo, '--adapter', 'scripted', '--harness', 'strict', '--policy', policy], {
       adapters: registryOf(scripted), io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: 'failure-key' } },

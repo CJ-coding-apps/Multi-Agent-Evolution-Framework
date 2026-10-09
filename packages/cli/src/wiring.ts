@@ -112,7 +112,7 @@ export async function buildRunStack(cfg: {
         ...(temperature !== undefined ? { temperature } : {}),
       });
       const node: DagNode = {
-        id: makeNodeId(`evolve-${taskId}`), label: prompt, agentRole: resolvedRole.value,
+        id: makeNodeId(`task-${taskId}`), label: prompt, agentRole: resolvedRole.value,
         dependencies: [], retryPolicy: { maxAttempts: 1, backoffMs: 0, backoffFactor: 1, jitterMs: 0 },
         timeoutMs, inputs: {}, outputs: {}, metadata: { taskDescription: prompt },
       };

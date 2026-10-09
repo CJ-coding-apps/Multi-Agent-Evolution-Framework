@@ -95,6 +95,28 @@ the README's Status table lists both as planned.
   `cli` or `in-process` — `inprocess`, say — is refused; it ran on the `cli` tier. A YAML merge key (`<<`)
   in `roles.yaml` or `config.yaml` is refused at any depth, naming the file and line (D-40): YAML 1.2 has no
   merge, so it loaded as a literal key and the fields it was meant to bring in were silently missing.
+- **The agent's tools cannot leave the run's worktree** (F1 of the release audit). With no policy file, an
+  agent could `fs.delete .git` and then `git.reset --hard`, which git — finding no repository in the
+  worktree — ran on the user's checkout above it; or rewrite `.git` to `gitdir: <repo>/.git` and commit
+  onto the user's branch. `fs.write`, `fs.delete` and `patch.apply` now refuse any path into `.git`, at any
+  depth and in any case, before policy and again on the resolved path; every git tool asks git which
+  working tree it found before each call and refuses unless it is the run's, with `GIT_CEILING_DIRECTORIES`
+  at the tree's parent and the host's `GIT_DIR`, `GIT_INDEX_FILE` and other repository variables dropped.
+  `test.run` runs the project's own command and is not confined; docs/SECURITY.md says so.
+- **The reviewed diff shows the change whatever `.gitattributes` says** (F2 of the release audit). An
+  agent-written `*.js -diff` turned its change into "Binary files differ" in the diff the security gate and
+  a human reviewer were shown, and the attestation signed that. `snapshotDiff` passes `--text
+  --no-ext-diff --no-textconv`; a genuinely binary file prints as bytes and is refused by the gate's cap
+  when it cannot be reviewed whole. A filter driver the repository configures still shapes what is staged.
+- **The planner's and the security reviewer's calls run without the backend's own tools** (F4 of the
+  release audit). Both are `cli`-tier calls that need only text, yet `claude` kept its built-in tools, so
+  the reviewer could edit the tree it had just passed. `AdapterInvokeOptions.nativeTools: false` gives
+  `claude` `--tools ""` on `invoke` and `stream`; `codex` and `gemini` know no such flag and keep theirs.
+- **A prompt is never read as an option** (F5 of the release audit). The prompt followed `-p`, which is
+  `claude`'s boolean `--print`, so one starting with `-` — a node description the planner wrote — was
+  parsed as options such as `--settings=<json>`. `claude` now gets `--` before the prompt; `gemini`, whose
+  `-p` takes the prompt as its value, gets `--prompt=<text>`. Checked against a stand-in spawner, not yet
+  against live binaries.
 
 ### Added
 
@@ -225,6 +247,9 @@ Behaviour you may notice:
   `legacy-default` snapshot that is not the newest mint (run that one with `--harness <sha>`), and imports a
   committed default before pointing CURRENT at it. A typed `--roles` without `--harness` means that file
   even when CURRENT is set.
+- **A role holding `test.run` is a writer** (F10 of the release audit). `test.run` runs the project's own
+  code, so a role holding it with only read tools now runs in-process by default and has its diff
+  security-reviewed, like any writer; on an adapter that cannot run the loop it needs `--allow-ungoverned`.
 - **A CURRENT set before 0.3.0** to a harness other than `legacy-default` names its prompt files without
   their text, so its sha does not cover the prompts that would run. Every plain run is refused while
   CURRENT names it; run `maf harness set-current legacy-default` to hand plain runs back to the roles file,

@@ -302,3 +302,28 @@ test('a CURRENT naming a tampered or missing harness fails closed, saying CURREN
     assert.equal((await plain()).harness.sha, legacyNow.sha);
   });
 });
+
+test('a CURRENT that is not a 64-hex sha is refused, naming the file and set-current — never replaced', async () => {
+  // Regression (F7 of the 0.3.0 release audit): a CURRENT holding an id typed by hand was read as
+  // absent, so a plain run minted legacy-default and overwrote it without a word — dropping, say, a
+  // harness the operator chose because it requires review.
+  await withStore(async (store) => {
+    const chosen = await saved(store, 'reviewed', ROLES_V1);
+    await store.setCurrent(chosen.sha);
+    const file = path.join(store.dir, 'CURRENT');
+    const plain = () => resolveHarnessRef({ legacyRoleSet: legacy(ROLES_V2).legacyRoleSet }, store);
+    for (const written of ['reviewed', chosen.sha.slice(0, 12), `${chosen.sha.toUpperCase()}`, '', 'x'.repeat(200)]) {
+      await writeFile(file, written, 'utf8');
+      await assert.rejects(plain, (err: unknown) => {
+        assert.ok(err instanceof HarnessIntegrityError);
+        assert.ok(err.message.startsWith(`CURRENT at ${file} was expected to hold a harness's 64-hex sha, but it holds `), err.message);
+        assert.match(err.message, /`maf harness set-current legacy-default` \(or another id or sha\)/);
+        return true;
+      }, JSON.stringify(written));
+      assert.equal(await readFile(file, 'utf8'), written, 'CURRENT is left as it was');
+    }
+    // A CURRENT that is not there is the one absence: the roles file is adopted.
+    await rm(file);
+    assert.equal((await plain()).source, 'legacy');
+  });
+});

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { Command } from 'commander';
 import type { AdapterInvokeOptions, AdapterName, CliAdapter, TurnAdapter } from '@maf/types';
-import type { ScriptedAdapter } from '@maf/eval-harness';
+import type { ScriptedAdapter, ScriptedTask } from '@maf/eval-harness';
 import { LcmEngine } from '@maf/lcm';
 import { runIsolatedGit } from '@maf/git-ops';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
@@ -75,6 +75,19 @@ export interface AdapterCall {
   timeoutMs:  number;
   /** Its entry in the inner adapter's `exchanges`, which says what the request was. */
   exchange:   number;
+  /** `false` when the caller asked for no backend tools of its own (the planner, the security review). */
+  nativeTools?: boolean;
+}
+
+/**
+ * The scripted planner's answer for `task`, which `maf run` plans as its title and its description:
+ * text with no JSON plan block, so the planner makes one node of the role set's default role. The
+ * runs these tests drive are about that node. Until F6 of the 0.3.0 release audit they got the same
+ * node from the scripted adapter's *failure* to answer the planner, read as plan text; a failed
+ * planner call now stops the run, so the plan is scripted.
+ */
+export function onePlannedNode(task: string): ScriptedTask {
+  return { prompt: `Create a task execution DAG for: ${task}\n\n${task}`, steps: [], final: 'One node of the default role does the whole task.' };
 }
 
 /**
@@ -85,7 +98,10 @@ export interface AdapterCall {
 export function recording(inner: ScriptedAdapter): { adapter: TurnAdapter; calls: AdapterCall[] } {
   const calls: AdapterCall[] = [];
   const note = (via: AdapterCall['via'], o: AdapterInvokeOptions): void => {
-    calls.push({ via, workingDir: o.workingDir, timeoutMs: o.timeoutMs, exchange: inner.exchanges.length });
+    calls.push({
+      via, workingDir: o.workingDir, timeoutMs: o.timeoutMs, exchange: inner.exchanges.length,
+      ...(o.nativeTools !== undefined ? { nativeTools: o.nativeTools } : {}),
+    });
   };
   return {
     calls,

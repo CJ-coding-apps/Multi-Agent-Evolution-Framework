@@ -8,6 +8,7 @@ import { ScriptedAdapter } from '@maf/eval-harness';
 import { WorktreeManager, runIsolatedGit } from '@maf/git-ops';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import {
+  onePlannedNode,
   FIXED_SUM, driveRun, lockFilePolicy, messageOf, needsLcm, registryOf, userState,
 } from './runFixture.js';
 
@@ -37,7 +38,7 @@ test('worktree: false in config.yaml runs in place after a warning, and offers n
     // Committed, so the tree is clean and the run has nothing of the user's to warn about.
     await runIsolatedGit(repo, ['add', '.maf/config.yaml']);
     await runIsolatedGit(repo, ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'config']);
-    const scripted = new ScriptedAdapter([{ prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), { prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
     const run = await driveRun([TASK, '--dir', repo, '--adapter', 'scripted', '--policy', await lockFilePolicy(root)],
       { adapters: registryOf(scripted), io: headless() });
     assert.equal(run.error, undefined, `${run.out}\n${run.err}`);
@@ -59,7 +60,7 @@ test('a run branch that commits MAF runtime state is refused a merge, naming the
     await runIsolatedGit(repo, ['add', '.maf/NOTES.md']);
     await runIsolatedGit(repo, ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'notes']);
     const before = await userState(repo);
-    const scripted = new ScriptedAdapter([{ prompt: TASK, final: 'done', steps: [
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), { prompt: TASK, final: 'done', steps: [
       { tool: 'fs.write', input: { path: '.maf/lcm.db', content: 'not a database: whatever the next run loads from here\n' } },
       { tool: 'git.add', input: { paths: ['.maf/lcm.db'] } },
       { tool: 'git.commit', input: { message: 'add state' } },
@@ -82,7 +83,7 @@ test('a successful run whose worktree cannot be finished exits non-zero, saying 
     t.mock.method(WorktreeManager.prototype, 'finish', async () => {
       throw new Error('simulated: the worktree\'s HEAD is detached');
     });
-    const scripted = new ScriptedAdapter([{ prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), { prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
     const run = await driveRun([TASK, '--dir', repo, '--adapter', 'scripted', '--policy', await lockFilePolicy(root)],
       { adapters: registryOf(scripted), io: headless() });
     const runId = /\[maf\] run (\S+) \|/.exec(run.out)?.[1];

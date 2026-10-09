@@ -269,7 +269,8 @@ export class RoleDispatcher {
       `[maf] UNGOVERNED: --allow-ungoverned lets writer role "${role.role}" run on the cli tier ` +
       `(${why}). There MAF applies no policy verdicts, secret redaction, attested tool calls or ` +
       `processor hooks, and reviews only the diff the node leaves. A CLI backend (claude, codex, ` +
-      `gemini) edits the tree with its own tools under its own permission settings; an HTTP ` +
+      `gemini) edits the tree with its own tools under its own permission settings` +
+      `${this.config.adapter.name === 'codex' ? ' — codex is invoked with --full-auto, its sandboxed automatic mode, so it runs its own commands and edits without asking' : ''}; an HTTP ` +
       `backend (ollama, openrouter) has no file tools and cannot change the tree at all, so a role ` +
       `that expects a change fails with no_change there. Shown once per run; the transcript ` +
       `records each ungoverned node.\n`,

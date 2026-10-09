@@ -61,12 +61,32 @@ export const MAF_RUNTIME_STATE = [
   'approvals',
 ] as const;
 
-/** Top-relative `:(top,exclude)` pathspecs for `<cwd>/.maf/<state>`, wherever `cwd` is in the repo. */
+/**
+ * Top-relative `:(top,exclude)` pathspecs for `<cwd>/.maf/<state>`, wherever `cwd` is in the repo —
+ * for each entry a `.gitignore` does not already ignore. `git add` refuses a pathspec item naming an
+ * ignored path, an exclusion included ("The following paths are ignored…", exit 1), and `add -A`
+ * passes ignored paths over anyway. The `.maf/.gitignore` maf writes ignores every entry, so without
+ * this an in-place run's review failed on the state it was excluding.
+ */
 async function runtimeStateExcludes(cwd: string, env: NodeJS.ProcessEnv): Promise<string[]> {
   // `--show-prefix` is cwd relative to the repository top ('' at the top, 'sub/dir/' below it).
   const { stdout } = await runIsolatedGit(cwd, ['rev-parse', '--show-prefix'], { env });
   const prefix = stdout.trim();
-  return MAF_RUNTIME_STATE.map((entry) => `:(top,exclude)${prefix}.maf/${entry}`);
+  const local = MAF_RUNTIME_STATE.map((entry) => `.maf/${entry}`);
+  const ignored = await ignoredOf(cwd, local, env);
+  return local.filter((p) => !ignored.has(p)).map((p) => `:(top,exclude)${prefix}${p}`);
+}
+
+/** Which of `paths` (relative to `cwd`) a `.gitignore` ignores, as `git check-ignore` prints them. */
+async function ignoredOf(cwd: string, paths: readonly string[], env: NodeJS.ProcessEnv): Promise<Set<string>> {
+  try {
+    const { stdout } = await runIsolatedGit(cwd, ['check-ignore', '--', ...paths], { env });
+    return new Set(stdout.split('\n').filter(Boolean));
+  } catch (err: unknown) {
+    // Exit 1: none of them is ignored.
+    if ((err as { code?: unknown }).code === 1) return new Set();
+    throw err;
+  }
 }
 
 /**
@@ -118,7 +138,11 @@ export async function snapshotDiff(cwd: string, startCommit: string): Promise<st
     const magicEnv = { ...env, GIT_LITERAL_PATHSPECS: '0' };
     const pathspec = ['--', ':(top)', ...(await runtimeStateExcludes(cwd, magicEnv))];
     await runIsolatedGit(cwd, ['add', '-A', ...pathspec], { env: magicEnv });
-    const { stdout } = await runIsolatedGit(cwd, ['diff', '--cached', startCommit, ...pathspec], {
+    // The content as text, whatever the attributes say: an agent-written `.gitattributes` could
+    // otherwise turn its change into "Binary files differ" (`-diff`), or hand it to a diff driver the
+    // repository configures (`textconv`, an external command) that prints something else. A genuinely
+    // binary file then prints as bytes, and the gate's cap refuses what it cannot review whole (D-07).
+    const { stdout } = await runIsolatedGit(cwd, ['diff', '--cached', '--text', '--no-ext-diff', '--no-textconv', startCommit, ...pathspec], {
       env: magicEnv,
       maxBuffer: MAX_DIFF_BYTES,
     });

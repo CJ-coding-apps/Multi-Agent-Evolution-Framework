@@ -13,7 +13,7 @@ const program = new Command();
 
 program
   .name('maf')
-  .description('Multi-Agent Framework — CLI-agnostic orchestration with LCM memory')
+  .description('Multi-Agent Framework — CLI-agnostic orchestration for code-modifying agents')
   .version(mafVersion());
 
 registerRunCommand(program);

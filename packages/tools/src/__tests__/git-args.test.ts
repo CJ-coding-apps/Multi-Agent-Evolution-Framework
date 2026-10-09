@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -25,8 +26,11 @@ const ALLOW: PolicyEngineHandle = {
 };
 const NO_ATTESTOR: AttestorHandle = { async record(): Promise<void> {} };
 
-/** Never touched by the spy cases — the exec is a spy — so it only has to be absolute. */
-const CWD = path.resolve('/repo');
+/**
+ * Never written by the spy cases — the exec is a spy — but it must exist: every tool resolves its
+ * project root before it asks git anything (F1 of the 0.3.0 audit).
+ */
+const CWD = realpathSync(tmpdir());
 
 function ctxIn(cwd: string): ToolContext {
   return {
@@ -53,18 +57,30 @@ const ISOLATION = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', '-
  */
 interface ExecCall { file: string; argv: string[]; args: string[]; cwd: string; env: NodeJS.ProcessEnv }
 
-/** An exec that records every call and succeeds with no output, so no git runs. */
-function spy(): { exec: GitExec; calls: ExecCall[] } {
+/** The question each tool asks git before every call: which working tree is this? */
+const PROBE = ['rev-parse', '--show-toplevel'];
+
+function isProbe(args: readonly string[]): boolean {
+  return args.length === ISOLATION.length + PROBE.length && PROBE.every((a, i) => args[ISOLATION.length + i] === a);
+}
+
+/**
+ * An exec that records every call and succeeds with no output, so no git runs. The working-tree
+ * probe is answered with the call's own directory — the tree is the project root — and recorded
+ * apart, so `calls` is what the tool asked git to do.
+ */
+function spy(): { exec: GitExec; calls: ExecCall[]; probes: ExecCall[] } {
   const calls: ExecCall[] = [];
+  const probes: ExecCall[] = [];
   const exec: GitExec = async (file, args, options) => {
     const isolated = ISOLATION.every((a, i) => args[i] === a);
-    calls.push({
+    (isProbe(args) ? probes : calls).push({
       file, argv: [...args], args: isolated ? args.slice(ISOLATION.length) : [...args],
       cwd: options.cwd, env: options.env,
     });
-    return { stdout: '', stderr: '' };
+    return { stdout: isProbe(args) ? `${options.cwd}\n` : '', stderr: '' };
   };
-  return { exec, calls };
+  return { exec, calls, probes };
 }
 
 function onPath(binary: string): boolean {
@@ -197,15 +213,30 @@ const HOST_PINNED_VARS = {
   GIT_CONFIG_NOSYSTEM:   '0',
   GIT_TERMINAL_PROMPT:   '1',
   GIT_LITERAL_PATHSPECS: '0',
+  GIT_CEILING_DIRECTORIES: '/tmp/host-ceiling',
 };
 
-test('every git tool runs isolated: hooks, fsmonitor and signing pinned off, host config ignored, no prompt, literal pathspecs', async () => {
+/**
+ * Variables through which a host names the repository git works on — what a git hook that starts
+ * MAF passes down (F1 of the 0.3.0 audit). Each would point the agent's git at the user's checkout.
+ */
+const HOST_REPOSITORY_VARS = {
+  GIT_DIR:                          '/tmp/host-repo/.git',
+  GIT_WORK_TREE:                    '/tmp/host-repo',
+  GIT_INDEX_FILE:                   '/tmp/host-repo/.git/index',
+  GIT_COMMON_DIR:                   '/tmp/host-repo/.git',
+  GIT_OBJECT_DIRECTORY:             '/tmp/host-repo/.git/objects',
+  GIT_ALTERNATE_OBJECT_DIRECTORIES: '/tmp/host-alternates',
+  GIT_DISCOVERY_ACROSS_FILESYSTEM:  '1',
+};
+
+test('every git tool runs isolated: hooks, fsmonitor and signing pinned off, host config and repository ignored, no prompt, literal pathspecs, discovery ceiling at the tree', async () => {
   // The variables are set on this process for the length of the test because the tools read
   // process.env, as they would in a shell that exported them.
-  const host = { ...HOST_CONFIG_VARS, ...HOST_PINNED_VARS };
+  const host = { ...HOST_CONFIG_VARS, ...HOST_PINNED_VARS, ...HOST_REPOSITORY_VARS };
   const saved = Object.keys(host).map((k) => [k, process.env[k]] as const);
   Object.assign(process.env, host);
-  const { exec, calls } = spy();
+  const { exec, calls, probes } = spy();
   try {
     const runs: Array<[ToolPlugin, ToolInput]> = [
       [new GitStatusTool(exec), {}],
@@ -221,10 +252,11 @@ test('every git tool runs isolated: hooks, fsmonitor and signing pinned off, hos
     // counted form is dropped whole — every KEY_n/VALUE_n the host has, not only the ones set here.
     const expected: NodeJS.ProcessEnv = { ...process.env };
     for (const k of Object.keys(expected)) {
-      if (k in HOST_CONFIG_VARS || /^GIT_CONFIG_(?:KEY|VALUE)_[0-9]+$/.test(k)) delete expected[k];
+      if (k in HOST_CONFIG_VARS || k in HOST_REPOSITORY_VARS || /^GIT_CONFIG_(?:KEY|VALUE)_[0-9]+$/.test(k)) delete expected[k];
     }
     Object.assign(expected, {
       GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_LITERAL_PATHSPECS: '1',
+      GIT_CEILING_DIRECTORIES: path.dirname(CWD),
     });
 
     // git.commit asks the repository for its identity first; the spy's empty answer is "none".
@@ -243,6 +275,13 @@ test('every git tool runs isolated: hooks, fsmonitor and signing pinned off, hos
       assert.equal(call.cwd, CWD, what);
       assert.deepEqual(call.argv.slice(0, ISOLATION.length), ISOLATION, `${what}: the isolation prefix comes first`);
       assert.deepEqual(call.env, expected, what);
+    }
+    // Every call was preceded by the working-tree probe, run where and how the call itself ran.
+    assert.equal(probes.length, calls.length, 'one probe per git call');
+    for (const probe of probes) {
+      assert.equal(probe.cwd, CWD);
+      assert.deepEqual(probe.argv.slice(0, ISOLATION.length), ISOLATION);
+      assert.deepEqual(probe.env, expected);
     }
   } finally {
     for (const [k, v] of saved) {
@@ -265,6 +304,7 @@ test('git.commit keeps whichever of user.name and user.email the repository sets
   for (const [what, configured, identity] of cases) {
     const calls: ExecCall[] = [];
     const exec: GitExec = async (file, args, options) => {
+      if (isProbe(args)) return { stdout: `${options.cwd}\n`, stderr: '' };
       calls.push({ file, argv: [...args], args: args.slice(ISOLATION.length), cwd: options.cwd, env: options.env });
       return { stdout: args.includes('config') ? configured : '', stderr: '' };
     };

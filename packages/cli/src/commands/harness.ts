@@ -98,7 +98,11 @@ export async function locateStoredHarness(store: HarnessStore, ref: string): Pro
     throw new HarnessConfigError(`Harness id ${JSON.stringify(ref)} is ambiguous: ${byId.map((f) => path.basename(f)).join(', ')} all declare it. Give the sha instead.`);
   }
   if (byId[0] !== undefined) return { harness: await loadHarnessFile(byId[0]), source: byId[0] };
-  throw new HarnessConfigError(`No harness found for ref ${JSON.stringify(ref)} in ${store.dir}.`);
+  // Hex too short to be a prefix was looked up as an id; say why it was not tried as a sha.
+  const short = /^[0-9a-f]{1,3}$/.test(ref)
+    ? ` A sha prefix needs four or more hex digits, and ${JSON.stringify(ref)} has ${['one', 'two', 'three'][ref.length - 1]}.`
+    : '';
+  throw new HarnessConfigError(`No harness found for ref ${JSON.stringify(ref)} in ${store.dir}.${short}`);
 }
 
 /** Looks a harness up by id, sha, "current", or a sha prefix of 4+ hex digits that names exactly one. */

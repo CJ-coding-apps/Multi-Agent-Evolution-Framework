@@ -150,3 +150,27 @@ test('the exclusion still applies when the parent process runs with literal path
     await rm(repo, { recursive: true, force: true });
   }
 });
+
+test('runtime state a .gitignore already ignores — the .maf/.gitignore maf writes — does not break the diff', async () => {
+  // Regression (F9 of the 0.3.0 release audit): `git add` refuses a pathspec item naming an ignored
+  // path, an exclusion included, so once `.maf/.gitignore` ignored the runtime state, an in-place
+  // run's review failed with "The following paths are ignored".
+  const repo = await makeRepo('maf-snapshot-ignored-state-');
+  try {
+    const base = await git(['rev-parse', 'HEAD'], repo);
+    await mkdir(path.join(repo, '.maf', 'transcripts'), { recursive: true });
+    await writeFile(path.join(repo, '.maf', '.gitignore'), '/.gitignore\n/lcm.db\n/transcripts\n', 'utf8');
+    await writeFile(path.join(repo, '.maf', 'lcm.db'), 'database bytes', 'utf8');
+    await writeFile(path.join(repo, '.maf', 'transcripts', 't.jsonl'), '{}', 'utf8');
+    await writeFile(path.join(repo, '.maf', 'memory.kuzu'), 'graph bytes, not ignored', 'utf8');
+    await writeFile(path.join(repo, '.maf', 'policy.yaml'), 'rules: []\n', 'utf8');
+    await writeFile(path.join(repo, 'change.txt'), 'the agent\'s change', 'utf8');
+
+    const diff = await snapshotDiff(repo, base);
+    assert.match(diff, /change\.txt/);
+    assert.match(diff, /\.maf\/policy\.yaml/, 'configuration is reviewed');
+    assert.doesNotMatch(diff, /lcm\.db|transcripts|memory\.kuzu/, 'runtime state is not, ignored or not');
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});

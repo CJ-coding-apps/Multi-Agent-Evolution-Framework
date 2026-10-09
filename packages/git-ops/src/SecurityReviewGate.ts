@@ -55,7 +55,9 @@ export class SecurityReviewGate {
     const userPrompt =
       `Audit this diff for security issues. Respond with the strict JSON schema in your system prompt.\n` +
       `\`\`\`diff\n${diff}\n\`\`\``;
-    return this.invoke(userPrompt);
+    // Everything the reviewer needs is in the prompt. With its own tools it could edit the tree it
+    // is reviewing, and that edit would reach the branch after the review that passed it.
+    return this.invoke(userPrompt, false);
   }
 
   async reviewPaths(paths: string[], cwd: string): Promise<SecurityReviewResult> {
@@ -67,16 +69,18 @@ export class SecurityReviewGate {
       `Respond with the strict JSON schema in your system prompt.\n` +
       `Working directory: ${cwd}\n` +
       `Files:\n${paths.map((p) => ` - ${p}`).join('\n')}`;
-    return this.invoke(userPrompt);
+    // This review reads the files itself, so the reviewer keeps its tools.
+    return this.invoke(userPrompt, true);
   }
 
-  private async invoke(prompt: string): Promise<SecurityReviewResult> {
+  private async invoke(prompt: string, nativeTools: boolean): Promise<SecurityReviewResult> {
     const opts: AdapterInvokeOptions = {
       prompt,
       systemPrompt: this.config.securityPrompt,
       workingDir:   this.config.projectRoot,
       timeoutMs:    this.config.timeoutMs ?? 120_000,
       ...(this.config.model ? { model: this.config.model } : {}),
+      ...(nativeTools ? {} : { nativeTools: false }),
     };
     const result = await this.config.adapter.invoke(opts);
     // A reviewer that timed out or never started has not judged anything: that is a transport

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeToolId } from '@maf/types';
+import { createDefaultRegistry } from '@maf/tools';
 import { isWriterRole } from '../isWriterRole.js';
 import { DEFAULT_ROLE_SET } from '../defaults.js';
 
@@ -13,7 +14,9 @@ const tools = (ids: string[]) => ({ allowedTools: ids.map((id) => makeToolId(id)
 const TABLE: Array<{ name: string; allowedTools: string[]; writer: boolean }> = [
   { name: 'no tools',                    allowedTools: [],                                   writer: false },
   { name: 'every read tool',             allowedTools: ['fs.read', 'fs.list', 'fs.stat', 'grep', 'git.status', 'git.diff', 'git.log'], writer: false },
-  { name: 'test.run alone',              allowedTools: ['test.run'],                         writer: false },
+  // F10 of the 0.3.0 release audit: test.run runs the project's own code, which can change the tree.
+  { name: 'test.run alone',              allowedTools: ['test.run'],                         writer: true },
+  { name: 'read tools and test.run',     allowedTools: ['fs.read', 'grep', 'test.run'],      writer: true },
   { name: 'a near-miss id',              allowedTools: ['fs.writer', 'git.commits', 'patch'], writer: false },
   { name: 'fs.write',                    allowedTools: ['fs.write'],                         writer: true },
   { name: 'fs.delete',                   allowedTools: ['fs.delete'],                        writer: true },
@@ -36,4 +39,11 @@ test('isWriterRole: the default role set — coder and tester write, security an
   );
   // The tester holds patch.apply; keying on the name 'coder' is what left it unreviewed.
   assert.deepEqual(verdicts, { coder: true, tester: true, security: false, reviewer: false });
+});
+
+test('isWriterRole: every tool the default registry rates above read makes its holder a writer', () => {
+  // So a tool added at write, dangerous or execute level cannot leave its holder unreviewed.
+  for (const tool of createDefaultRegistry().getAll()) {
+    assert.equal(isWriterRole(tools([tool.id])), tool.permissionLevel !== 'read', `${tool.id} (${tool.permissionLevel})`);
+  }
 });

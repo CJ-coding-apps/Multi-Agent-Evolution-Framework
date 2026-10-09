@@ -7,7 +7,8 @@ import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
 import { BaseTool } from '../ToolPlugin.js';
-import { makeToolId } from '@maf/types';
+import { makeToolId, resolveInside } from '@maf/types';
+import { gitDirRefusal, namesGitDir, refuseGitDirPaths } from './fs.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -42,6 +43,20 @@ export function extractDiffPaths(diff: string): string[] {
   return [...paths];
 }
 
+/**
+ * The resolved half of the `.git` refusal: a path whose spelling avoids `.git` but that resolves into
+ * it through a link inside the root. A path that does not resolve inside the root is the policy
+ * engine's to refuse (this tool is confined there only; see docs/SECURITY.md), so it is passed over.
+ */
+async function refuseGitDirTargets(tool: string, ctx: ToolContext, paths: readonly string[]): Promise<void> {
+  for (const p of paths) {
+    const relative = await resolveInside(ctx.projectRoot, p).then((c) => c.relative, () => undefined);
+    if (relative !== undefined && namesGitDir(relative)) {
+      throw gitDirRefusal(tool, p, `it resolves to ${JSON.stringify(relative)}, which is git's own data (.git)`);
+    }
+  }
+}
+
 export class PatchApplyTool extends BaseTool<PatchInput> {
   readonly id: ToolId = makeToolId('patch.apply');
   readonly name = 'patch.apply';
@@ -55,11 +70,15 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
    * patch writing the same file.
    */
   declaredPaths(input: PatchInput): string[] {
-    return typeof input.diff === 'string' ? extractDiffPaths(input.diff) : [];
+    const paths = typeof input.diff === 'string' ? extractDiffPaths(input.diff) : [];
+    // Before policy, as fs.write does: a diff that touches .git is refused whatever the rules say.
+    refuseGitDirPaths(this.name, paths);
+    return paths;
   }
 
   async execute(input: PatchInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    await refuseGitDirTargets(this.name, ctx, this.declaredPaths(input));
     const tmpFile = path.join(tmpdir(), `maf-patch-${crypto.randomUUID()}.diff`);
 
     try {

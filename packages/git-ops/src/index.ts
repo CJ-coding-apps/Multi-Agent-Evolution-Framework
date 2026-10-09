@@ -10,5 +10,5 @@ export type {
 } from './ReviewGate.js';
 export { SecurityReviewGate, parseSecurityOutput } from './SecurityReviewGate.js';
 export type { SecurityReviewGateConfig } from './SecurityReviewGate.js';
-export { snapshotDiff, runIsolatedGit, GIT_EMPTY_TREE } from './SnapshotDiff.js';
+export { snapshotDiff, runIsolatedGit, GIT_EMPTY_TREE, MAF_RUNTIME_STATE } from './SnapshotDiff.js';
 export type { IsolatedGitOptions } from './SnapshotDiff.js';
