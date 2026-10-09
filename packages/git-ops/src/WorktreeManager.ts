@@ -25,9 +25,16 @@ export interface RunWorktree {
 
 export type FinishOutcome = 'success' | 'failure';
 
+/**
+ * What `finish` hands back. Only `merge` carries a command: `no-change` has nothing to merge, and
+ * `refused` names the runtime-state paths the run committed — content the security gate's diff
+ * leaves out (D-29), so merging it would take in what no gate saw.
+ */
 export type FinishResult =
-  | { readonly outcome: 'success'; readonly mergeCommand: string; readonly path: string; readonly branch: string }
-  | { readonly outcome: 'failure'; readonly path: string; readonly branch: string };
+  | { readonly kind: 'merge'; readonly mergeCommand: string; readonly path: string; readonly branch: string }
+  | { readonly kind: 'no-change'; readonly path: string; readonly branch: string }
+  | { readonly kind: 'refused'; readonly paths: readonly string[]; readonly path: string; readonly branch: string }
+  | { readonly kind: 'failure'; readonly path: string; readonly branch: string };
 
 /** A run id names a branch and a directory, so it is held to what is safe as both — never rewritten into it. */
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -46,7 +53,7 @@ const RUN_COMMIT_ENV = {
   GIT_COMMITTER_NAME: 'maf', GIT_COMMITTER_EMAIL: 'maf@maf.invalid',
 };
 
-function gitSaid(err: unknown): string {
+export function gitSaid(err: unknown): string {
   const stderr = (err as { stderr?: unknown }).stderr;
   if (typeof stderr === 'string' && stderr.trim()) return stderr.trim();
   return err instanceof Error ? err.message : String(err);
@@ -149,34 +156,72 @@ export class WorktreeManager {
     } catch (err: unknown) {
       throw fail(`git worktree add failed (git said: ${gitSaid(err)}).`);
     }
-    const run: RunWorktree = { runId, path: wtPath, branch, baseCommit, cwd: path.resolve(wtPath, prefix) };
+    const cwd = path.resolve(wtPath, prefix);
+    // A worktree holds only committed content: an untracked or ignored directory has no counterpart
+    // there, and every later step of the run would fail in a directory that does not exist.
+    if (!(await lstat(cwd).then((st) => st.isDirectory(), () => false))) {
+      const undo = await runIsolatedGit(this.projectRoot, ['worktree', 'remove', '--force', wtPath])
+        .then(() => runIsolatedGit(this.projectRoot, ['branch', '-D', branch]))
+        .then(() => '', (err: unknown) => ` Removing the worktree and branch again also failed (git said: ${gitSaid(err)}).`);
+      throw fail(`${this.projectRoot} has no committed files; commit it or run with --no-worktree.${undo}`);
+    }
+    const run: RunWorktree = { runId, path: wtPath, branch, baseCommit, cwd };
     this.runs.set(runId, run);
     return run;
   }
 
   /**
    * Ends a run without merging (D-03). Success commits what the run left uncommitted to its branch
-   * — otherwise the merge command would carry none of it — and returns that command. Failure
+   * — otherwise the merge command would carry none of it — and returns that command, unless the
+   * branch is still at its base (`no-change`) or brings in runtime state (`refused`). Failure
    * changes nothing and returns the worktree's path for inspection. Neither removes anything.
    */
   async finish(runId: RunId, outcome: FinishOutcome): Promise<FinishResult> {
     const { wtPath, branch } = this.names(runId);
-    if (outcome === 'failure') return { outcome, path: wtPath, branch };
+    if (outcome === 'failure') return { kind: 'failure', path: wtPath, branch };
 
+    const baseCommit = this.runs.get(runId)?.baseCommit;
+    if (!baseCommit) {
+      throw new Error(`cannot finish run ${runId}: expected a worktree this manager created with createForRun, ` +
+        `but it holds none for that run, so the commit the run started from is unknown.`);
+    }
     const cwd = await assertOnRunBranch(wtPath, { path: wtPath, branch });
     const prefix = await git(this.projectRoot, ['rev-parse', '--show-prefix']);
-    // The same pathspec the security gate's diff uses (D-29), so what is committed is what was
-    // reviewed: the whole tree minus this run's runtime state.
-    const pathspec = ['--', ':(top)', ...MAF_RUNTIME_STATE.map((s) => `:(top,exclude)${prefix}.maf/${s}`)];
+    const runtimeState = MAF_RUNTIME_STATE.map((s) => `${prefix}.maf/${s}`);
+    // The security gate's pathspec (D-29), so this commit adds nothing that the gate's diff leaves
+    // out. It does not make the branch reviewed: what the run committed itself, or wrote after the
+    // last gate, reaches it without passing through this filter — hence the check below.
+    const pathspec = ['--', ':(top)', ...runtimeState.map((p) => `:(top,exclude)${p}`)];
     const env = { ...RUN_COMMIT_ENV, GIT_LITERAL_PATHSPECS: '0' };
-    await runIsolatedGit(cwd, ['add', '-A', ...pathspec], { env });
-    if (!(await gitTest(cwd, ['diff', '--cached', '--quiet']))) {
-      await runIsolatedGit(cwd, ['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', `maf run ${runId}`], { env });
+    try {
+      await runIsolatedGit(cwd, ['add', '-A', ...pathspec], { env });
+      if (!(await gitTest(cwd, ['diff', '--cached', '--quiet']))) {
+        await runIsolatedGit(cwd, ['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', `maf run ${runId}`], { env });
+      }
+    } catch (err: unknown) {
+      throw new Error(`cannot commit the work run ${runId} left uncommitted in ${cwd} to ${branch} ` +
+        `(git said: ${gitSaid(err)}). Nothing was merged; the worktree is kept as it was.`);
     }
-    return { outcome, mergeCommand: `git merge ${branch}`, path: wtPath, branch };
+
+    try {
+      if (await git(cwd, ['rev-list', '--count', `${baseCommit}..HEAD`]) === '0') {
+        return { kind: 'no-change', path: wtPath, branch };
+      }
+      const { stdout } = await runIsolatedGit(cwd, ['diff', '--name-only', '--no-renames', '-z', baseCommit, 'HEAD', '--',
+        ...runtimeState.map((p) => `:(top)${p}`)], { env: { GIT_LITERAL_PATHSPECS: '0' } });
+      const paths = stdout.split('\0').filter(Boolean);
+      if (paths.length > 0) return { kind: 'refused', paths, path: wtPath, branch };
+    } catch (err: unknown) {
+      throw new Error(`cannot compare ${branch} with the commit run ${runId} started from (${baseCommit.slice(0, 12)}) ` +
+        `in ${cwd} (git said: ${gitSaid(err)}). Nothing was merged; the worktree is kept as it was.`);
+    }
+    return { kind: 'merge', mergeCommand: `git merge ${branch}`, path: wtPath, branch };
   }
 
-  /** Deletes the run's worktree, uncommitted work included, and its branch. Only ever on request. */
+  /**
+   * Deletes the run's worktree, uncommitted work included, its branch and the `maf/<runId>-<task>`
+   * branches `BranchIsolator` made for it. Only ever on request.
+   */
   async remove(runId: RunId): Promise<void> {
     const { wtPath, branch } = this.names(runId);
     try {
@@ -185,9 +230,14 @@ export class WorktreeManager {
       }
       // Clears git's record of a worktree whose directory was deleted by hand.
       await runIsolatedGit(this.projectRoot, ['worktree', 'prune']);
-      if (await gitTest(this.projectRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`])) {
-        await runIsolatedGit(this.projectRoot, ['branch', '-D', branch]);
-      }
+      // `maf/<runId>-*` is also the shape of another run's branch (run `a-b` for run `a`); one checked
+      // out in a worktree belongs to a live run, and git would refuse to delete it anyway.
+      const checkedOut = new Set((await git(this.projectRoot, ['worktree', 'list', '--porcelain']))
+        .split('\n').filter((l) => l.startsWith('branch ')).map((l) => l.slice('branch '.length)));
+      const doomed = (await git(this.projectRoot, ['for-each-ref', '--format=%(refname)', `refs/heads/${branch}-*`]))
+        .split('\n').filter((ref) => ref && !checkedOut.has(ref)).map((ref) => ref.slice('refs/heads/'.length));
+      if (await gitTest(this.projectRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`])) doomed.unshift(branch);
+      if (doomed.length > 0) await runIsolatedGit(this.projectRoot, ['branch', '-D', ...doomed]);
     } catch (err: unknown) {
       throw new Error(`cannot remove the worktree of run ${runId} at ${wtPath} (git said: ${gitSaid(err)}).`);
     }

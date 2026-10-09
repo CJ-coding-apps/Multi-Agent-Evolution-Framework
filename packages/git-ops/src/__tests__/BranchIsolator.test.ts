@@ -39,6 +39,18 @@ test('createBranch() sanitizes the task part of the name and caps it at 40 chara
   assert.doesNotMatch(info.name.slice('maf/'.length), /[^a-zA-Z0-9-]/);
 });
 
+test("a git failure comes back as a full sentence naming the branch, not git's raw output", async (t) => {
+  const { wt } = await repoWithRun(t);
+  const iso = new BranchIsolator(wt);
+  await iso.createBranch(makeTaskId('x.y'));
+  // 'x.y' and 'x_y' sanitize to the same name; the second create is git's refusal.
+  await assert.rejects(() => iso.createBranch(makeTaskId('x_y')), (err: Error) => {
+    assert.match(err.message, /^cannot create the task branch maf\/r1-x-y at [0-9a-f]{12} in the worktree of run r1 at .* \(git said: .*already exists.*\)\.$/s);
+    assert.doesNotMatch(err.message, /Command failed/);
+    return true;
+  });
+});
+
 test("switchTo() moves between the run branch and its task branches, and refuses anything else", async (t) => {
   const { wt } = await repoWithRun(t);
   const iso = new BranchIsolator(wt);

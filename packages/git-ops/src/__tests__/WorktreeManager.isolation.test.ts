@@ -78,7 +78,7 @@ for (const dirty of [false, true]) {
     assert.equal(diff, '', 'every tracked and untracked file has the same bytes');
 
     // And the run's work is where the printed command will find it.
-    assert.equal(result.outcome === 'success' ? result.mergeCommand : result.outcome, 'git merge maf/iso1');
+    assert.equal(result.kind === 'merge' ? result.mergeCommand : result.kind, 'git merge maf/iso1');
     assert.equal(await git(['show', 'maf/iso1:feature.ts'], repo), 'export const answer = 42;');
   });
 }

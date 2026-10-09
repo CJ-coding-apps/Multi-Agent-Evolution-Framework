@@ -1,6 +1,6 @@
 import type { RunId, TaskId } from '@maf/types';
 import { runIsolatedGit } from './SnapshotDiff.js';
-import { assertInWorktree } from './WorktreeManager.js';
+import { assertInWorktree, gitSaid } from './WorktreeManager.js';
 import type { RunWorktree } from './WorktreeManager.js';
 
 async function git(args: string[], cwd: string): Promise<string> {
@@ -23,6 +23,10 @@ export interface BranchInfo {
  * user was on. Every git call runs in the worktree, never in the user's checkout, and only the
  * run's branches are switched to or deleted. There is no merge: MAF never merges (D-03); a run's
  * result reaches the user as the `git merge` command `WorktreeManager.finish` returns.
+ *
+ * Not on the run path in 0.3.0: nothing constructs it, and nothing brings a task branch's work
+ * back to `maf/<runId>` — while one is checked out, `finish('success')` and every rollback refuse,
+ * because the worktree is not on the run's branch. `WorktreeManager.remove` deletes its branches.
  */
 export class BranchIsolator {
   private branches = new Map<string, BranchInfo>();
@@ -34,7 +38,7 @@ export class BranchIsolator {
     // directory of refs), so the task is a suffix.
     const name = `${this.worktree.branch}-${taskId.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 40)}`;
     const baseSha = this.worktree.baseCommit;
-    await git(['checkout', '--quiet', '-b', name, baseSha], await this.cwd());
+    await this.run(['checkout', '--quiet', '-b', name, baseSha], `create the task branch ${name} at ${baseSha.slice(0, 12)}`);
     const info: BranchInfo = { name, runId: this.worktree.runId, taskId, baseSha };
     this.branches.set(name, info);
     return info;
@@ -42,7 +46,7 @@ export class BranchIsolator {
 
   async switchTo(branchName: string): Promise<void> {
     if (branchName !== this.worktree.branch) this.assertOwned(branchName);
-    await git(['checkout', '--quiet', branchName], await this.cwd());
+    await this.run(['checkout', '--quiet', branchName], `switch to ${branchName}`);
   }
 
   async deleteBranch(branchName: string, force = false): Promise<void> {
@@ -54,11 +58,20 @@ export class BranchIsolator {
   }
 
   async currentBranch(): Promise<string> {
-    return git(['rev-parse', '--abbrev-ref', 'HEAD'], await this.cwd());
+    return this.run(['rev-parse', '--abbrev-ref', 'HEAD'], 'read the checked-out branch');
   }
 
   private cwd(): Promise<string> {
     return assertInWorktree(this.worktree.path, this.worktree.path);
+  }
+
+  private async run(args: string[], what: string): Promise<string> {
+    const cwd = await this.cwd();
+    try {
+      return await git(args, cwd);
+    } catch (err: unknown) {
+      throw new Error(`cannot ${what} in the worktree of run ${this.worktree.runId} at ${this.worktree.path} (git said: ${gitSaid(err)}).`);
+    }
   }
 
   private assertOwned(branchName: string): void {
