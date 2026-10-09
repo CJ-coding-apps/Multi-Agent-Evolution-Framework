@@ -91,6 +91,39 @@ test('two requests take turns: the second is shown only once the first is answer
   assert.equal((await second).verdict, 'Approve');
 });
 
+test('once input has ended, a later review is denied at once, not after the gate\'s whole timeout (verifier F7)', async () => {
+  const t = terminal();
+  const gate = new ReviewGate({ reviewer: createTtyReviewer(t), required: true, timeoutMs: 3_000 });
+  const subject = (node: string) => ({ runId: makeRunId('r1'), nodeId: makeNodeId(node), role: 'coder', baseCommit: BASE, diff: DIFF });
+  const first = gate.review(subject('n1'));
+  await prompted(t.shown);
+  t.input.end();
+  assert.match((await first).decision.comment ?? '', /closed before an answer/);
+
+  const started = Date.now();
+  const second = await gate.review(subject('n2'));
+  assert.equal(second.decision.status, 'Rejected');
+  assert.match(second.decision.comment ?? '', /closed before an answer/, 'denied for the closed terminal, not for the timeout');
+  assert.ok(Date.now() - started < 1_000, `denied after ${Date.now() - started} ms`);
+  assert.equal(t.shown().match(/review> /g)?.length, 1, 'no prompt is written that no one can answer');
+});
+
+test('an answer typed before the prompt is written is discarded, never taken for the answer to it (verifier F7)', async () => {
+  const t = terminal();
+  const reviewer = createTtyReviewer(t);
+  t.input.write('approve\n'); // typed ahead, before any diff was shown
+  const first = reviewer(request(DIFF, { nodeId: makeNodeId('first') }), new AbortController().signal);
+  await prompted(t.shown, 1);
+  t.input.write('deny\n');
+  assert.equal((await first).verdict, 'Deny', 'the typed-ahead approve did not approve the first diff');
+
+  t.input.write('approve\n'); // typed between prompts, while no diff is shown
+  const second = reviewer(request(DIFF, { nodeId: makeNodeId('second') }), new AbortController().signal);
+  await prompted(t.shown, 2);
+  t.input.write('deny\n');
+  assert.equal((await second).verdict, 'Deny', 'nor the second');
+});
+
 test('the diff is bounded to 200 lines or 20 KB, and what is left out is counted', () => {
   const many = Array.from({ length: 500 }, (_, i) => `+line ${i}`).join('\n') + '\n';
   const byLines = diffPreview(many);

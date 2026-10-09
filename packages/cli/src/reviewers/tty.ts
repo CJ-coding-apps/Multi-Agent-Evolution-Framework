@@ -46,6 +46,15 @@ function ask(options: TtyReviewerOptions, name: string, request: ReviewRequest, 
   const deny = (comment: string): ReviewDecision => ({ verdict: 'Deny', reviewer: name, comment });
   // Withdrawn (timed out) while queued behind another prompt: there is no one left to ask.
   if (signal.aborted) return Promise.resolve(deny('the review was withdrawn before it reached the terminal'));
+  // Input already at its end gives no 'end' event to wait for: without this, every later review
+  // would hold its node for the gate's whole timeout before denying.
+  if ('readableEnded' in input && input.readableEnded === true) {
+    return Promise.resolve(deny('the terminal closed before an answer'));
+  }
+  // An answer typed before this prompt was written was not given to this diff: drop it, so an
+  // `approve` typed ahead never approves a change the operator has not seen. (A line still in the
+  // terminal's own buffer, which Node has not read yet, cannot be told from an answer.)
+  while (input.read() !== null) { /* discard */ }
 
   return new Promise<ReviewDecision>((resolve) => {
     let typed = '';
