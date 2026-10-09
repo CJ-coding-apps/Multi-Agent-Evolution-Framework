@@ -100,6 +100,10 @@ test('a short sha names a stored harness when exactly one starts with it', async
     assert.equal((await loadStoredHarness(store, a.sha.slice(0, 8))).id, 'a');
     assert.equal((await loadStoredHarness(store, 'b')).id, 'b', 'ids still resolve');
     await assert.rejects(() => loadStoredHarness(store, 'abc'), /No harness found for ref "abc"/, 'under 4 hex digits is not a prefix');
+    // F11 of the 0.3.0 release audit: `set-current 425` said only "No harness found".
+    await assert.rejects(() => loadStoredHarness(store, a.sha.slice(0, 3)),
+      new RegExp(`No harness found for ref "${a.sha.slice(0, 3)}" in .*\\. A sha prefix needs four or more hex digits, and "${a.sha.slice(0, 3)}" has three\\.$`));
+    await assert.rejects(() => loadStoredHarness(store, 'no-such-id'), (err: Error) => !err.message.includes('prefix'));
     await assert.rejects(() => loadStoredHarness(store, 'ffff'.repeat(2)), /No harness found/);
 
     // Two shas sharing a prefix: forge the second file name, since content-addressed shas rarely collide in 4 digits.

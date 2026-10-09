@@ -152,15 +152,31 @@ export class HarnessStore {
   /**
    * CURRENT, failing closed when it names a harness that is missing or fails its integrity check —
    * with an error that says it is CURRENT at fault and how to repair it, because plain runs read it.
+   * Only a CURRENT that does not exist is absent. One that holds anything but a 64-hex sha (an id
+   * typed by hand, a truncated write) or cannot be read is refused the same way: read as absent, the
+   * next plain run minted legacy-default over it, silently dropping the operator's choice — which
+   * may have been a harness that requires review.
    */
   private async loadCurrent(): Promise<HarnessConfig | undefined> {
-    const sha = await readFile(path.join(this.dir, CURRENT_FILE), 'utf8')
-      .then((t) => t.trim())
-      .catch(() => undefined);
-    if (!sha || !SHA_RE.test(sha)) return undefined;
+    const file = path.join(this.dir, CURRENT_FILE);
     const remedy =
       'Plain runs read CURRENT, so they are refused until it names an intact harness: ' +
       '`maf harness set-current legacy-default` (or another id or sha), or restore the file.';
+    let sha: string;
+    try {
+      sha = (await readFile(file, 'utf8')).trim();
+    } catch (err: unknown) {
+      if (isNotFound(err)) return undefined;
+      throw new HarnessIntegrityError(
+        `CURRENT at ${file} could not be read (${err instanceof Error ? err.message : String(err)}). ${remedy}`,
+      );
+    }
+    if (!SHA_RE.test(sha)) {
+      throw new HarnessIntegrityError(
+        `CURRENT at ${file} was expected to hold a harness's 64-hex sha, but it holds ` +
+        `${JSON.stringify(sha.length > 80 ? `${sha.slice(0, 80)}…` : sha)}. ${remedy}`,
+      );
+    }
     let found: HarnessConfig | undefined;
     try {
       found = await this.readVerified(sha);

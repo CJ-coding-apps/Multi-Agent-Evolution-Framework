@@ -88,8 +88,14 @@ export class GeminiAdapter extends BaseAdapter {
     if (options.model) args.push('--model', options.model);
     if (options.systemPrompt) args.push('--system-instruction', options.systemPrompt);
     args.push(...GEMINI_MCP_ISOLATION_ARGS);
-    // gemini CLI reads prompt from stdin or -p flag depending on version
-    args.push('-p', options.prompt);
+    // nativeTools: false — no Gemini CLI flag is known to withhold its built-in tools, so none is passed.
+    //
+    // The prompt is the value of `--prompt`, not a positional: a positional query runs interactively
+    // in a terminal, and `--prompt` is the non-interactive mode. Joined with `=` so yargs takes it as
+    // the value whatever it starts with. As a separate argument after `-p`, a prompt beginning with
+    // `-` is not taken as its value — `-p` has `nargs: 1`, which stops at a dash argument — and is
+    // parsed as options instead; a `--` there would leave `-p` with no value at all.
+    args.push(`--prompt=${options.prompt}`);
     return args;
   }
 }

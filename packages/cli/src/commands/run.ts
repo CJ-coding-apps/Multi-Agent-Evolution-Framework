@@ -4,7 +4,8 @@ import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
 import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
-import type { AdapterName, CliAdapter, DagNode } from '@maf/types';
+import type { AdapterName, CliAdapter, DagNode, RetryPolicy } from '@maf/types';
+import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
@@ -14,7 +15,7 @@ import { createApprovalGate } from '@maf/approval-gate';
 import { PolicyLoader } from '@maf/policy-engine';
 import { GIT_EMPTY_TREE, ReviewGate, SecurityReviewGate, WorktreeManager, resolveWorkingDir, runIsolatedGit, snapshotDiff } from '@maf/git-ops';
 import type { FinishResult, Reviewer, RunWorktree } from '@maf/git-ops';
-import { DagRunner } from '@maf/dag-runner';
+import { DagRunner, withRetry } from '@maf/dag-runner';
 import { GraphAwareInjector } from '@maf/prompt-injector';
 import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
 import { TranscriptLogger } from '@maf/transcript';
@@ -228,6 +229,10 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   const { cwd, isolated, warning } = resolveWorkingDir({ dir, worktree: cfg.worktree, run, offBy: cfg.worktree ? undefined : inPlaceBy });
   if (warning) warn(`[maf] warning: ${warning}`);
   if (run) say(`[maf] worktree: ${run.path} (branch ${run.branch}, from ${run.baseCommit.slice(0, 12)})`);
+  // The registry the agent gets is bound to the run's working directory now that it exists: the
+  // git tools learn the repository root here, before any agent action, so a `.git` the agent later
+  // removes or rewrites cannot redirect them (WP-2.17). `baseTools` above only validated the roles.
+  const agentTools = createDefaultRegistry({ projectRoot: cwd });
 
   let succeeded = false;
   let refusal: string | undefined;
@@ -282,20 +287,12 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       // and *warn* before assigning the default, which was the writer.
       roles,
       roleCatalog: roles.catalog(),
-      generatePlan: async (systemPrompt, userPrompt) => {
-        const result = await adapter.invoke({
-          prompt: userPrompt, systemPrompt,
-          workingDir: cwd, timeoutMs: cfg.timeouts.planMs,
-          maxOutputBytes: 64 * 1024, // planning only needs a JSON block
-          ...model,
-        });
-        return result.output;
-      },
+      generatePlan: planGenerator(adapter, { workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry, ...model }),
     });
 
     const dispatcher = new RoleDispatcher({
       adapter,
-      baseTools,
+      baseTools: agentTools,
       roles,
       injector,
       policy,
@@ -383,6 +380,35 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   }
   // Only a run that succeeded gets a reason here: its hand-over was refused or could not be finished.
   if (refusal !== undefined) throw new Error(refusal);
+}
+
+/**
+ * The planner's model call. It needs only text — a JSON plan — so the backend is given none of its
+ * own tools (`nativeTools: false`). A call that failed is an error, never a plan: its output used to
+ * be parsed anyway, and the error text became a one-node plan for the default role. A transport
+ * failure (a timeout, a silent exit) is retried as a node's is, under the run's retry policy (D-06).
+ */
+export function planGenerator(
+  adapter: CliAdapter,
+  call: { workingDir: string; timeoutMs: number; retry: RetryPolicy; model?: string },
+): (systemPrompt: string, userPrompt: string) => Promise<string> {
+  return (systemPrompt, userPrompt) => withRetry(async () => {
+    const result = await adapter.invoke({
+      prompt: userPrompt, systemPrompt,
+      workingDir: call.workingDir, timeoutMs: call.timeoutMs,
+      maxOutputBytes: 64 * 1024, // planning only needs a JSON block
+      nativeTools: false,
+      ...(call.model !== undefined ? { model: call.model } : {}),
+    });
+    if (result.transportError !== undefined) throw result.transportError;
+    if (!result.success) {
+      throw new Error(
+        `the planner's call to adapter "${adapter.name}" was expected to succeed, but it reported failure ` +
+        `(exit code ${result.exitCode}), so there is no plan to run. Output tail: ${failureTail(result.output)}`,
+      );
+    }
+    return result.output;
+  }, call.retry);
 }
 
 /**

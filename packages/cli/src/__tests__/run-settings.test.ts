@@ -11,7 +11,7 @@ import type { LcmEngineConfig } from '@maf/lcm';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { runIsolatedGit } from '@maf/git-ops';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
-import { FIXED_SUM, driveRun, lockFilePolicy, needsLcm, recording, registryOf } from './runFixture.js';
+import { onePlannedNode, FIXED_SUM, driveRun, lockFilePolicy, needsLcm, recording, registryOf } from './runFixture.js';
 
 // ORACLE: verifier F4 (WP-2.5, rules 2 and 5) — what config.yaml says reaches the pieces that use
 // it: `dag` the scheduler (applyDagSettings), `lcm` the LcmEngine, `timeouts` the planner's call
@@ -55,7 +55,7 @@ test('config.yaml\'s dag, lcm and timeouts reach the scheduler, the LcmEngine, t
       return close0.call(this);
     });
 
-    const scripted = new ScriptedAdapter([{ prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), { prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
     const { adapter, calls } = recording(scripted);
     const run = await driveRun([TASK, '--dir', repo, '--policy', await lockFilePolicy(root)], { adapters: registryOf(adapter), io: headless() });
     assert.equal(run.error, undefined, `${run.out}\n${run.err}`);
@@ -91,7 +91,7 @@ test('--allow-ungoverned runs a cli-tier writer through the dispatcher to a merg
       'version: 1', 'defaultRole: coder', 'roles:',
       '  - { role: coder, systemPrompt: c, allowedTools: [fs.read, fs.write], execution: cli }', '',
     ].join('\n'), 'utf8');
-    const scripted = new ScriptedAdapter([{ prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), { prompt: TASK, final: 'fixed', steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }] }]);
     const run = await driveRun([TASK, '--dir', repo, '--adapter', 'scripted', '--roles', roles, '--allow-ungoverned', '--policy', await lockFilePolicy(root)],
       { adapters: registryOf(scripted), io: headless() });
     assert.equal(run.error, undefined, `${run.out}\n${run.err}`);

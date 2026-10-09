@@ -329,6 +329,43 @@ test('a writer role with execution: cli runs on the cli tier with allowUngoverne
   }
 });
 
+// ORACLE (F10 of the 0.3.0 release audit): a role holding read tools and test.run — execute level —
+// was a reader, so it ran on the cli tier and nothing reviewed what the project's own test command
+// changed. It is a writer now: in-process by default, and the security-gate processor reviews its diff.
+test('a role holding test.run and no write tool runs in-process, and its change is security-reviewed', async () => {
+  const adapter = new TurnStub();
+  adapter.turns = [{ text: 'ran the tests', toolCalls: [] }];
+  const fx = await makeFixture({ adapter, role: role('runner', ['fs.read', 'test.run']) });
+  try {
+    // What a test script can do to the tree while the node runs.
+    await writeFile(path.join(fx.workDir, 'hello.txt'), 'rewritten by a test script', 'utf8');
+    await fx.dispatcher.runNode(nodeFor('runner'));
+    assert.equal(adapter.invoked, 0, 'not the cli tier');
+    assert.equal(adapter.turnsTaken, 1);
+    assert.equal(fx.reviewed.length, 1, 'the security gate reviewed the node\'s diff');
+    assert.match(fx.reviewed[0] ?? '', /rewritten by a test script/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+// ORACLE (F3 of the 0.3.0 release audit): every Codex cli-tier call passes --full-auto, which nothing
+// said. The banner an ungoverned run prints names it when the backend is codex, and only then.
+test('the UNGOVERNED banner names --full-auto when the backend is codex', async () => {
+  const codex = Object.assign(new CliOnly(), { name: 'codex' });
+  for (const [adapter, says] of [[codex, true], [new CliOnly(), false]] as const) {
+    const fx = await makeFixture({ adapter, role: role('coder', WRITE_TOOLS), allowUngoverned: true });
+    try {
+      await writeFile(path.join(fx.workDir, 'hello.txt'), 'changed', 'utf8');
+      await fx.dispatcher.runNode(nodeFor('coder'));
+      assert.equal(fx.stderr.length, 1);
+      assert.equal(/codex is invoked with --full-auto, its sandboxed automatic mode/.test(fx.stderr[0] ?? ''), says, adapter.name);
+    } finally {
+      await fx.cleanup();
+    }
+  }
+});
+
 test('a writer whose adapter cannot run in-process refuses to start, naming --allow-ungoverned', async () => {
   const adapter = new CliOnly();
   const fx = await makeFixture({ adapter, role: role('coder', WRITE_TOOLS), noRepository: true });

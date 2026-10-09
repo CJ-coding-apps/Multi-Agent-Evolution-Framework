@@ -36,7 +36,7 @@ Decided 2026-10-08 by the maintainer, following an independent audit of v0.2.0.
 
 **D-13 · Attestations are in-toto Statements over canonical JSON.** The bundle is a real in-toto Statement signed (HMAC) over a canonical form so that a third party can reproduce the bytes. Refused tool calls are recorded. The bundle carries `keySource: "env" | "dev"`; running with the development key prints a loud warning and is never mistaken for a real signature.
 
-**D-14 · Evaluation is offline, isolated and reproducible.** `goldens run --adapter scripted` runs without a model. A default harness and a baseline result are committed. Results record the corpus sha, the attempt count and the adapter. Each evaluation uses a fresh in-memory graph so past runs cannot leak into the prompt. The judge uses a different role or model than the agent when one is available and discloses when it does not.
+**D-14 · Evaluation is offline, isolated and reproducible.** `goldens run --adapter scripted` runs without a model. A default harness and a baseline result are committed. Results record the corpus sha, the attempt count and the adapter. Each evaluation uses a temporary on-disk graph emptied before each attempt so past runs cannot leak into the prompt. The judge uses a different role or model than the agent when one is available and discloses when it does not.
 
 **D-15 · The evolver only proposes edits that can take effect, and pays only after the gate.** Edits that cannot affect a role's configured tier are rejected at proposal time with the reason. Screening and structural checks run before any evaluation spend. The smoke test runs the target task. Sensitive edits are stored as candidates and shipped with `maf evolve approve <id>`.
 
@@ -60,7 +60,7 @@ Decided 2026-10-08 by the maintainer, following an independent audit of v0.2.0.
 
 **D-23 · The README describes shipped behaviour only.** A Status table (shipped / experimental / planned) is the first section after the summary. A claim appears as prose only when its row says shipped. The documentation pass runs last in each release so it matches what landed.
 
-**D-24 · CI proves what the README demonstrates.** Every job has `timeout-minutes`. An end-to-end job runs `inprocess-demo` and the offline goldens against a real Kùzu database. Live-model validation runs nightly with a daily cap; credentials exist only in that job.
+**D-24 · CI proves what the README demonstrates.** Every job has `timeout-minutes`. An end-to-end job runs `inprocess-demo` and the offline goldens against a real Kùzu database. Live-model validation runs nightly with a daily cap; credentials exist only in that job. The nightly live job is not yet implemented: no workflow runs it in 0.3.0, and [BUILD_PLAN.md](BUILD_PLAN.md) carries it (WP-3.11).
 
 **D-25 · A change ships with the test that would have caught it.** Each pull request that closes an audit finding carries the regression test for it. Adapters are tested against fake CLI binaries on `PATH`. No package the CLI depends on may be without tests.
 

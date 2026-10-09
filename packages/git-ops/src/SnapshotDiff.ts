@@ -20,13 +20,27 @@ export interface IsolatedGitOptions {
 }
 
 /**
+ * Host variables that would choose git's repository, index, object store or configuration for it:
+ * MAF started from a git hook inherits `GIT_DIR` or `GIT_INDEX_FILE` naming the user's repository,
+ * and `git -c` exports its settings to children as `GIT_CONFIG_PARAMETERS`. Dropped from the host's
+ * environment only — a caller's own `opts.env` (the snapshot's scratch `GIT_INDEX_FILE`) still applies.
+ */
+const HOST_GIT_ENV = new Set([
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG',
+]);
+const HOST_GIT_CONFIG_PAIR = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/;
+
+/**
  * Runs git with the host's configuration switched off.
  *
  * A global `core.hooksPath`, `init.templateDir`, `diff.external` or `core.pager` would
  * otherwise run inside a repository maf is operating on, so what maf measures would depend
  * on whose machine it ran on — and a `diff.external` would execute an arbitrary program
  * during what looks like a read. `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM` remove the
- * host's config files, and `core.hooksPath` is pinned in case a repository carries its own.
+ * host's config files, the host's repository and config variables are dropped (`HOST_GIT_ENV`),
+ * and `core.hooksPath` and `core.fsmonitor` are pinned in case a repository carries its own —
+ * an fsmonitor hook runs on status, add, diff and commit, which is every call the gate's diff makes.
  *
  * Every git call maf makes comes through here, so the policy cannot drift apart between
  * callers — which is how the two diff implementations this replaces came to disagree.
@@ -36,11 +50,15 @@ export function runIsolatedGit(
   args: string[],
   opts: IsolatedGitOptions = {},
 ) {
-  return execFileAsync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+  const host: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!HOST_GIT_ENV.has(key) && !HOST_GIT_CONFIG_PAIR.test(key)) host[key] = value;
+  }
+  return execFileAsync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', ...args], {
     cwd,
     maxBuffer: opts.maxBuffer ?? 1024 * 1024,
     env: {
-      ...process.env,
+      ...host,
       GIT_CONFIG_GLOBAL:   '/dev/null',
       GIT_CONFIG_NOSYSTEM: '1',
       ...opts.env,
@@ -61,12 +79,35 @@ export const MAF_RUNTIME_STATE = [
   'approvals',
 ] as const;
 
-/** Top-relative `:(top,exclude)` pathspecs for `<cwd>/.maf/<state>`, wherever `cwd` is in the repo. */
-async function runtimeStateExcludes(cwd: string, env: NodeJS.ProcessEnv): Promise<string[]> {
+/**
+ * Top-relative `:(top,exclude)` pathspecs for `<cwd>/<base>.maf/<state>`, wherever `cwd` is in the
+ * repo — for each entry a `.gitignore` does not already ignore. `git add` refuses a pathspec item
+ * naming an ignored path, an exclusion included ("The following paths are ignored…", exit 1), and
+ * `add -A` passes ignored paths over anyway. The `.maf/.gitignore` maf writes ignores every entry, so
+ * without this an in-place run's review failed on the state it was excluding.
+ *
+ * `base` is where the project's `.maf/` sits relative to `cwd`: '' for the gate's diff, which runs in
+ * the project directory; the project's prefix for the hand-over commit, which runs at the worktree's top.
+ */
+export async function runtimeStateExcludes(cwd: string, env: NodeJS.ProcessEnv, base = ''): Promise<string[]> {
   // `--show-prefix` is cwd relative to the repository top ('' at the top, 'sub/dir/' below it).
   const { stdout } = await runIsolatedGit(cwd, ['rev-parse', '--show-prefix'], { env });
   const prefix = stdout.trim();
-  return MAF_RUNTIME_STATE.map((entry) => `:(top,exclude)${prefix}.maf/${entry}`);
+  const local = MAF_RUNTIME_STATE.map((entry) => `${base}.maf/${entry}`);
+  const ignored = await ignoredOf(cwd, local, env);
+  return local.filter((p) => !ignored.has(p)).map((p) => `:(top,exclude)${prefix}${p}`);
+}
+
+/** Which of `paths` (relative to `cwd`) a `.gitignore` ignores, as `git check-ignore` prints them. */
+async function ignoredOf(cwd: string, paths: readonly string[], env: NodeJS.ProcessEnv): Promise<Set<string>> {
+  try {
+    const { stdout } = await runIsolatedGit(cwd, ['check-ignore', '--', ...paths], { env });
+    return new Set(stdout.split('\n').filter(Boolean));
+  } catch (err: unknown) {
+    // Exit 1: none of them is ignored.
+    if ((err as { code?: unknown }).code === 1) return new Set();
+    throw err;
+  }
 }
 
 /**
@@ -118,7 +159,11 @@ export async function snapshotDiff(cwd: string, startCommit: string): Promise<st
     const magicEnv = { ...env, GIT_LITERAL_PATHSPECS: '0' };
     const pathspec = ['--', ':(top)', ...(await runtimeStateExcludes(cwd, magicEnv))];
     await runIsolatedGit(cwd, ['add', '-A', ...pathspec], { env: magicEnv });
-    const { stdout } = await runIsolatedGit(cwd, ['diff', '--cached', startCommit, ...pathspec], {
+    // The content as text, whatever the attributes say: an agent-written `.gitattributes` could
+    // otherwise turn its change into "Binary files differ" (`-diff`), or hand it to a diff driver the
+    // repository configures (`textconv`, an external command) that prints something else. A genuinely
+    // binary file then prints as bytes, and the gate's cap refuses what it cannot review whole (D-07).
+    const { stdout } = await runIsolatedGit(cwd, ['diff', '--cached', '--text', '--no-ext-diff', '--no-textconv', startCommit, ...pathspec], {
       env: magicEnv,
       maxBuffer: MAX_DIFF_BYTES,
     });

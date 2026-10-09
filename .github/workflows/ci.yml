@@ -119,9 +119,9 @@ jobs:
       - name: In-process demo (scripted model, offline)
         run: node packages/cli/dist/main.js inprocess-demo | tee "$RUNNER_TEMP/demo.log"
 
-      # The demo prints its bundle path even when signing failed (it swallows that error so it can
-      # still report), so the file is checked, not the line. The last check is the control: the
-      # same bundle under another key must not verify, or a pass above would mean nothing.
+      # The demo fails when it cannot write its bundle, but the line it prints is only a path, so the
+      # file is checked, not the line. The last check is the control: the same bundle under another
+      # key must not verify, or a pass above would mean nothing.
       - name: Verify the demo's attestation bundle
         run: |
           bundle=$(sed -n 's/^attn signed bundle: *//p' "$RUNNER_TEMP/demo.log")

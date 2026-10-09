@@ -224,6 +224,40 @@ test('finish(success) from a subdirectory: runtime state is the project\'s .maf,
     { kind: 'refused', paths: ['pkg/.maf/runs/x.json'], path: wt.path, branch: 'maf/r1' });
 });
 
+test('finish(success) with runtime state a committed .gitignore already ignores inside the worktree: the work is committed, the state is not', async (t) => {
+  // `git add` refuses a pathspec item naming an ignored path, an exclusion included ("The following paths
+  // are ignored…", exit 1). A repository whose .gitignore lists MAF's runtime state — MAF's own does —
+  // made every hand-over fail once a run left state in its worktree; finish now builds the gate's pathspec.
+  const repo = await makeRepo();
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  await mkdir(path.join(repo, 'pkg'));
+  await writeFile(path.join(repo, '.gitignore'), '.maf/transcripts/\npkg/.maf/runs\n', 'utf8');
+  await commitFile(repo, 'pkg/a.txt', 'a\n', 'add pkg');
+  await git(['add', '.gitignore'], repo);
+  await git(['commit', '-q', '-m', 'ignore runtime state'], repo);
+
+  for (const [runId, dir, prefix] of [[makeRunId('top1'), repo, ''], [makeRunId('sub1'), path.join(repo, 'pkg'), 'pkg/']] as const) {
+    const mgr = new WorktreeManager(dir);
+    const wt = await mgr.createForRun(runId);
+    await writeFile(path.join(wt.cwd, 'loose.txt'), 'work\n', 'utf8');
+    // Ignored runtime state, where the hand-over's pathspec names it; and one entry nothing ignores.
+    for (const state of ['transcripts', 'runs']) {
+      await mkdir(path.join(wt.cwd, '.maf', state), { recursive: true });
+      await writeFile(path.join(wt.cwd, '.maf', state, 'x.json'), '{}\n', 'utf8');
+    }
+    await writeFile(path.join(wt.cwd, '.maf', 'lcm.db'), 'not ignored by anything\n', 'utf8');
+    assert.match(await git(['check-ignore', '--', `${prefix}.maf/transcripts`, `${prefix}.maf/runs`], wt.path), /\.maf\//,
+      'the fixture: at least one runtime-state entry is ignored inside the worktree');
+
+    const result = await mgr.finish(runId, 'success');
+
+    assert.equal(result.kind, 'merge', JSON.stringify(result));
+    const branch = `maf/${runId}`;
+    assert.equal(await git(['show', `${branch}:${prefix}loose.txt`], repo), 'work', 'the work is committed');
+    assert.equal(await git(['ls-tree', '-r', '--name-only', branch, '--', `${prefix}.maf`], repo), '', 'the runtime state is not, ignored or not');
+  }
+});
+
 test("finish(success) reports a failed commit in a full sentence, not git's raw output", async (t) => {
   const repo = await makeRepo();
   t.after(() => rm(repo, { recursive: true, force: true }));

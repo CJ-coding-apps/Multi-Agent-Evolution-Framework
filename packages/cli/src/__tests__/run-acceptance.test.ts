@@ -13,6 +13,7 @@ import { runIsolatedGit } from '@maf/git-ops';
 import type { ReviewDecision, ReviewRequest } from '@maf/git-ops';
 import { attestVerify } from '../commands/attest.js';
 import {
+  onePlannedNode,
   BUGGY_SUM, FIXED_SUM, dirtyUserRepo, driveRun, lockFilePolicy, needsLcm, recording, registryOf, userState,
 } from './runFixture.js';
 
@@ -31,7 +32,7 @@ test('maf run: worktree → in-process coder → security gate → review record
     const policy = await lockFilePolicy(root);
     const before = await userState(repo);
 
-    const scripted = new ScriptedAdapter([{
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), {
       prompt: TASK,
       steps: [
         { tool: 'fs.read', input: { path: 'sum.js' } },
@@ -84,6 +85,8 @@ test('maf run: worktree → in-process coder → security gate → review record
     // ── every request went to the run's worktree: the planner, each coder turn, the security gate ──
     const asks = calls.map((c) => ({ ...c, what: `${c.via}:${scripted.exchanges[c.exchange]?.kind ?? '?'}` }));
     assert.deepEqual([...new Set(asks.map((a) => a.what))].sort(), ['invoke:security-review', 'invoke:task', 'turn:task']);
+    // F4 of the 0.3.0 release audit: the planner's call and the security review ask for text only.
+    for (const a of asks.filter((x) => x.via === 'invoke')) assert.equal(a.nativeTools, false, `${a.what} asks for no backend tools`);
     for (const a of asks) {
       assert.ok(a.workingDir === worktree || a.workingDir.startsWith(worktree + path.sep),
         `${a.what} was handed ${a.workingDir}, outside the run's worktree ${worktree}`);

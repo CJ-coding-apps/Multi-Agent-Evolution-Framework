@@ -34,7 +34,7 @@ interface EvolveCliOpts {
 export function registerEvolveCommand(program: Command): void {
   program
     .command('evolve')
-    .description('AEGIS-lite harness evolution over the golden corpus (offline; never in the serving path)')
+    .description('AEGIS-lite harness evolution over the golden corpus (experimental; drives a live adapter, claude by default; never in the serving path)')
     .option('-a, --adapter <name>', 'Meta-agent adapter', 'claude')
     .option('-m, --model <model>', 'Meta-agent model')
     .option('-d, --dir <path>', 'Working directory', process.cwd())

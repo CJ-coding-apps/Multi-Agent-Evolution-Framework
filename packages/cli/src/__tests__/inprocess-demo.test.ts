@@ -7,6 +7,7 @@ import type { AttestationBundle } from '@maf/types';
 import { Attestor, MAF_RUN_PREDICATE_TYPE, componentId, parseBundle } from '@maf/attestation';
 import type { InTotoStatement } from '@maf/attestation';
 import { needsLcm } from './runFixture.js';
+import { attestAndClose, demoFailures } from '../commands/inprocessDemo.js';
 
 // ORACLE: WP-2.10 acceptance, the demo half (BUILD_PLAN §6, D-24, verifier F5) — `maf inprocess-demo`
 // runs its coder in-process through the stack goldens and evolve share, its escalated delete is
@@ -59,4 +60,39 @@ test('maf inprocess-demo: in-process coder, security gate, signed in-toto attest
   } finally {
     if (fixture) await rm(path.dirname(fixture), { recursive: true, force: true });
   }
+});
+
+// ORACLE (F11 of the 0.3.0 release audit): the demo's exit status ignored its redaction and gate lines,
+// and a bundle that could not be written was swallowed (`.catch(() => undefined)`) while the result
+// block still named it as the signed bundle.
+
+test('the demo fails on any line of its result block that did not hold, the redaction and gate lines included', () => {
+  const held = { sumFixed: true, testPassed: true, redacted: true, faithful: true, policyDenied: true };
+  assert.deepEqual(demoFailures(held), []);
+  assert.deepEqual(demoFailures({ sumFixed: true, testPassed: true }), [], 'live: the scripted-only lines are not checked');
+  for (const key of Object.keys(held) as Array<keyof typeof held>) {
+    const failures = demoFailures({ ...held, [key]: false });
+    assert.equal(failures.length, 1, key);
+  }
+  assert.match(demoFailures({ ...held, redacted: false })[0] ?? '', /no credential redacted/);
+  assert.match(demoFailures({ ...held, policyDenied: false })[0] ?? '', /fs\.delete was not refused/);
+});
+
+test('a bundle that cannot be written fails the demo, and the stack is closed either way', async () => {
+  let closed = 0;
+  const stack = { close: () => { closed++; } };
+  const unwritable = async (): Promise<never> => { throw new Error('EACCES: permission denied, open attestations/run.bundle.json'); };
+
+  await assert.rejects(() => attestAndClose(stack, unwritable), /EACCES/);
+  assert.equal(closed, 1);
+
+  // A dispatch that already failed is the cause: its error is thrown, the bundle's is reported beside it.
+  await assert.rejects(() => attestAndClose(stack, unwritable, new Error('the coder failed')), /the coder failed/);
+  assert.equal(closed, 2);
+
+  let attested = 0;
+  await attestAndClose(stack, async () => { attested++; });
+  await assert.rejects(() => attestAndClose(stack, async () => { attested++; }, new Error('the coder failed')), /the coder failed/);
+  assert.equal(attested, 2, 'a failed dispatch is still attested');
+  assert.equal(closed, 4);
 });

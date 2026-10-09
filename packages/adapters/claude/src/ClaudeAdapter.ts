@@ -36,7 +36,9 @@ const CLAUDE_MCP_ISOLATION_ARGS: readonly string[] = [
  * attestation wherever the user's `permissions.allow` lets it. `--tools` leaves MCP tools alone;
  * the empty strict MCP set removes those, and with none left `""` removes every built-in tool.
  * The empty string is one argv element (`spawn` runs without a shell). `invoke` and `stream`
- * are the cli tier, where the backend is meant to act with its own tools, so they keep them.
+ * are the cli tier, where the backend is meant to act with its own tools, so they keep them —
+ * unless the caller says `nativeTools: false` (the planner, the security reviewer), whose call
+ * needs only text and gets this set too.
  */
 const CLAUDE_TURN_ISOLATION_ARGS: readonly string[] = [
   '--tools', '',
@@ -102,7 +104,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
 
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const start = Date.now();
-    const args = this.buildArgs(options, CLAUDE_MCP_ISOLATION_ARGS);
+    const args = this.buildArgs(options, cliTierIsolation(options));
 
     const result = await this.spawn('claude', args, {
       cwd: options.workingDir,
@@ -124,7 +126,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
   }
 
   override async *stream(options: AdapterInvokeOptions): AsyncGenerator<string> {
-    const args = [...this.buildArgs(options, CLAUDE_MCP_ISOLATION_ARGS), '--stream'];
+    const args = this.buildArgs(options, [...cliTierIsolation(options), '--stream']);
     for await (const chunk of this.spawnStreaming('claude', args, { cwd: options.workingDir })) {
       yield chunk;
     }
@@ -141,7 +143,14 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     // a knob must ignore it, never error). The in-process loop enforces tokenBudget itself;
     // golden determinism on the CLI path relies on the model default, not a pinned temperature.
     args.push(...isolation);
-    args.push('-p', options.prompt);
+    // `--` ends option parsing, so the prompt is the positional prompt whatever it starts with: a
+    // node description beginning `--settings=…` would otherwise be read as that option.
+    args.push('-p', '--', options.prompt);
     return args;
   }
+}
+
+/** A cli-tier call keeps claude's own tools unless its caller needs only text (`nativeTools: false`). */
+function cliTierIsolation(options: AdapterInvokeOptions): readonly string[] {
+  return options.nativeTools === false ? CLAUDE_TURN_ISOLATION_ARGS : CLAUDE_MCP_ISOLATION_ARGS;
 }

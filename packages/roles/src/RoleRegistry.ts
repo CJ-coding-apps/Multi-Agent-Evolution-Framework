@@ -40,7 +40,7 @@ export class RoleRegistry implements RoleResolver {
       if (role.expectsChange === true && !isWriterRole(role)) {
         throw new RoleConfigError(
           `Role "${role.role}" sets expectsChange: true, which needs a role that holds a write tool ` +
-          '(fs.write, fs.delete, patch.apply, git.add, git.commit or git.reset), but it holds none.',
+          '(fs.write, fs.delete, patch.apply, git.add, git.commit, git.reset or test.run), but it holds none.',
         );
       }
       this.byName.set(role.role, role);
