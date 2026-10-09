@@ -179,6 +179,16 @@ function parseRoleSet(text: string): RoleSet {
   if (!isRoleSet(parsed)) {
     throw new RoleConfigError('roles.yaml does not match the expected RoleSet shape');
   }
+  // An empty inline prompt is the prompt (`loadPrompt` checks `!== undefined`, so a harness can
+  // carry an empty prompt file's text). Written by hand in a roles file, it would dispatch "" and
+  // hide any promptFile beside it, so it is refused here rather than run.
+  for (const r of parsed.roles) {
+    if (r.systemPrompt === '')
+      throw new RoleConfigError(
+        `Role "${r.role}" has an empty systemPrompt; give it text or a promptFile` +
+        (r.promptFile !== undefined ? ` (remove the empty systemPrompt to use promptFile "${r.promptFile}")` : ''),
+      );
+  }
   // `isRoleSet` checked that every name is a string; this is where those strings become
   // `RoleName`s. A role set is the *definition* of which names exist, so a file that
   // supplies one is authoring the namespace — the same mint the built-in

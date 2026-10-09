@@ -7,7 +7,7 @@ import type {
   CliAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, AttestationBundle,
   DagNode, RoleName,
 } from '@maf/types';
-import { makeNodeId, makeRunId } from '@maf/types';
+import { makeNodeId, makeRunId, makeToolId } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { Attestor } from '@maf/attestation';
 import { HarnessStore, mintHarnessConfig, resolveHarnessRef } from '@maf/harness-config';
@@ -197,9 +197,11 @@ test('a plain run: the attestation digest is the dispatched harness, and editing
     assert.notEqual(digest3, digest2);
     assert.equal(third.harness.roleSet.roles[0]?.description, 'reads code carefully');
 
-    // The signed bundle on disk carries the same digest.
+    // The signed bundle on disk carries the same digest. Read it from either file shape: the
+    // provenance at the top level, or under `predicate` once the file is an in-toto statement (WP-2.8).
     const onDisk = JSON.parse(await readFile(path.join(mafDir, 'attestations', 'run-3.bundle.json'), 'utf8'));
-    assert.equal(onDisk.provenance.invocation.configSource.digest.sha256, third.harness.sha);
+    const provenance = (onDisk.predicate ?? onDisk).provenance;
+    assert.equal(provenance.invocation.configSource.digest.sha256, third.harness.sha);
   });
 });
 
@@ -241,5 +243,57 @@ test('loadPrompt: an empty inline prompt is the prompt; the prompt file beside i
       roles: [{ role: ANALYST, systemPrompt: '', promptFile: 'prompts/analyst.md', allowedTools: [] }],
     }, mafDir);
     assert.equal(await roles.loadPrompt(roles.getDefault()), '');
+  });
+});
+
+test('harness round trip: roleSetFromHarness(harnessRoleSetFromRegistry(r)) gives back r.list(), the prompt file\'s text inlined', async () => {
+  // Regression (verifier F8): the two directions are separate field lists. A field one of them
+  // drops is hashed into the harness but never dispatched (or dispatched but never hashed).
+  await withMafDir(async (mafDir) => {
+    const registry = RoleRegistry.fromSet({
+      version: 1,
+      defaultRole: ANALYST,
+      roles: [
+        {
+          role: defineRoleName('every-field'), description: 'all of them', systemPrompt: 'inline',
+          allowedTools: [makeToolId('fs.read'), makeToolId('fs.write')], policyTag: 'tag', model: 'some-model',
+          execution: 'in-process', timeoutMs: 1234, maxToolIterations: 7, tokenBudget: 4096,
+        },
+        { role: ANALYST, description: 'reads code', promptFile: 'prompts/analyst.md', allowedTools: [makeToolId('fs.read')] },
+        { role: defineRoleName('bare'), allowedTools: [] },
+      ],
+    }, mafDir);
+    const back = roleSetFromHarness(await harnessRoleSetFromRegistry(registry));
+    assert.equal(back.defaultRole, registry.defaultRole);
+    assert.deepEqual(back.roles, registry.list().map((role) =>
+      role.promptFile !== undefined && role.systemPrompt === undefined
+        ? { ...role, systemPrompt: 'You are the analyst, v1.' }
+        : role));
+  });
+});
+
+test('roles.yaml: an empty systemPrompt is refused, alone or beside a promptFile, rather than dispatched as ""', async () => {
+  // Regression (verifier F7): with loadPrompt reading `systemPrompt !== undefined`, "" in a roles
+  // file dispatched an empty prompt — ignoring the promptFile beside it, or the missing prompt.
+  await withMafDir(async (mafDir) => {
+    const yamlPath = path.join(mafDir, 'roles.yaml');
+    const load = () => RoleRegistry.fromYamlOrDefault(yamlPath, mafDir, BASE_TOOLS);
+    const withAnalyst = (fields: object) => JSON.stringify({
+      version: 1, defaultRole: 'analyst', roles: [{ role: 'analyst', allowedTools: ['fs.read'], ...fields }],
+    });
+
+    await writeFile(yamlPath, withAnalyst({ systemPrompt: '', promptFile: 'prompts/analyst.md' }), 'utf8');
+    await assert.rejects(load, (err: unknown) => err instanceof RoleConfigError && err.message ===
+      'Role "analyst" has an empty systemPrompt; give it text or a promptFile ' +
+      '(remove the empty systemPrompt to use promptFile "prompts/analyst.md")');
+
+    await writeFile(yamlPath, withAnalyst({ systemPrompt: '' }), 'utf8');
+    await assert.rejects(load, (err: unknown) => err instanceof RoleConfigError && err.message ===
+      'Role "analyst" has an empty systemPrompt; give it text or a promptFile');
+
+    // A prompt file that is empty is still a prompt file: the harness carries "" for it.
+    await writeFile(yamlPath, withAnalyst({ promptFile: 'prompts/analyst.md' }), 'utf8');
+    await writeFile(path.join(mafDir, 'prompts', 'analyst.md'), '', 'utf8');
+    assert.equal((await harnessRoleSetFromRegistry(await load())).roles[0]?.systemPrompt, '');
   });
 });

@@ -24,8 +24,10 @@ export function roleSetFromHarness(roleSet: HarnessRoleSet): RoleSet {
  * file's text as `systemPrompt` — exactly what `registry.loadPrompt` returns, and what dispatch
  * reads first — so editing a prompt file changes the sha, and a harness dispatches the text it
  * was hashed with whatever the file says later. The path stays, as provenance. Every other field
- * is carried as the registry holds it, so a field added to `RoleConfig` is hashed without an
- * edit here.
+ * is carried as the registry holds it, so a field added to `RoleConfig` is hashed without an edit
+ * here — but `roleConfigFromHarness` (the other direction) copies only the fields it lists, so the
+ * field is dispatched only once it is added there too. Edit both directions together; the
+ * round-trip test in harness-identity.test.ts holds them to it.
  */
 export async function harnessRoleSetFromRegistry(registry: RoleRegistry): Promise<HarnessRoleSet> {
   const roles: HarnessRoleConfig[] = [];
