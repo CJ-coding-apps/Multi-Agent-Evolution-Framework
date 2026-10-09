@@ -1,5 +1,6 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
+import tty from 'node:tty';
 import type { Command } from 'commander';
 import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
 import type { AdapterName, CliAdapter, DagNode } from '@maf/types';
@@ -10,8 +11,8 @@ import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor, componentId } from '@maf/attestation';
 import { createApprovalGate } from '@maf/approval-gate';
 import { PolicyLoader } from '@maf/policy-engine';
-import { RollbackManager, SecurityReviewGate, WorktreeManager, resolveWorkingDir, runIsolatedGit } from '@maf/git-ops';
-import type { FinishResult, RunWorktree } from '@maf/git-ops';
+import { ReviewGate, RollbackManager, SecurityReviewGate, WorktreeManager, resolveWorkingDir, runIsolatedGit } from '@maf/git-ops';
+import type { FinishResult, Reviewer, RunWorktree } from '@maf/git-ops';
 import { DagRunner } from '@maf/dag-runner';
 import { GraphAwareInjector } from '@maf/prompt-injector';
 import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
@@ -23,6 +24,7 @@ import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { resolveRunHarness } from '../wiring.js';
+import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
 import type { MafConfig } from '../config/ConfigLoader.js';
 
@@ -47,6 +49,8 @@ export interface RunOptions {
   harness?: string;
   /** Let a writer role run on the cli tier, outside MAF's gates (D-01). */
   allowUngoverned?: boolean;
+  /** Ask a reviewer to decide each writer change; advisory unless the harness requires review (D-34). */
+  review?: boolean;
 }
 
 /** The flags whose commander default must be told apart from the same value typed. */
@@ -69,6 +73,8 @@ export interface RunDeps {
   io?:       Partial<RunIo>;
   /** The adapters `--adapter` can name; `createAdapterRegistry()` when unset. */
   adapters?: () => Map<AdapterName, CliAdapter>;
+  /** Decides review requests in place of the terminal reviewer, which needs a TTY. */
+  reviewer?: Reviewer;
 }
 
 export interface RunContext extends RunDeps {
@@ -88,6 +94,7 @@ export function registerRunCommand(program: Command, deps: RunDeps = {}): void {
     .option('--roles <path>', 'Path to roles YAML file', '.maf/roles.yaml')
     .option('--harness <ref>', 'Harness id, sha, or "current" (default: CURRENT if set, else legacy-default from --roles (overrides --roles when given))')
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
+    .option('--review', 'Ask at the terminal to approve each writer change (advisory unless the harness requires review; D-34)')
     .action(async (taskDescription: string, opts: RunOptions, cmd: Command) => {
       await runTask(taskDescription, opts, { ...deps, given: (flag) => cmd.getOptionValueSource(flag) === 'cli' });
     });
@@ -165,6 +172,20 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       'attestation and processor hooks (D-01). Pass --allow-ungoverned to run them there anyway, or ' +
       'give them execution: in-process on an adapter that can run the loop.',
     );
+  }
+
+  // ── Review (D-34): a gate exists only when the harness requires review or --review asks for it.
+  // Headless, a required review gets no gate — so every writer change is refused, failing closed —
+  // and an advisory one cannot be honoured, so the run goes on without it and says so.
+  const required = harness.reviewGate?.required === true;
+  let reviewGate: ReviewGate | undefined;
+  if (required || opts.review === true) {
+    const unavailable = ctx.reviewer ? undefined : reviewerUnavailable(ctx.io?.isTTY ?? tty.isatty(0), env);
+    const reviewer = ctx.reviewer
+      ?? (unavailable === undefined ? createTtyReviewer({ input: ctx.io?.stdin ?? process.stdin, output: stderr }) : undefined);
+    if (reviewer) reviewGate = new ReviewGate({ reviewer, required });
+    else if (required) warn(`[maf] warning: harness ${harness.id} requires review and no reviewer is available (${unavailable ?? 'none was given'}); every writer change will be refused (D-34).`);
+    else warn(`[maf] --review was given, but no reviewer is available (${unavailable ?? 'none was given'}); running without a review gate.`);
   }
 
   // ── Worktree (D-03): one manager for the whole run — `finish` reads the base commit from it.
@@ -256,6 +277,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       transcript,
       lcmBridge,
       securityGate,
+      ...(reviewGate ? { reviewGate } : {}),
       cwd,
       sessionId,
       runId,
