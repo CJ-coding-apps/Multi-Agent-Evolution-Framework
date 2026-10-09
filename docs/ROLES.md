@@ -4,7 +4,9 @@ Every DAG node in MAF runs as a *role*. A role bundles:
 
 1. A **system prompt** (inline or loaded from a file).
 2. An **allowed tool set** — the only tools the role is allowed to call on the `in-process` tier, where a [writer](#writer-roles) runs by default. On the `cli` tier — the default for a read-only role, and a writer's only with `--allow-ungoverned` — the allowlist is not passed to the backend CLI, which uses its own tools.
-3. Optional **model**, **timeout**, **token budget**, and **policyTag** overrides.
+3. Optional **execution** tier, **expectsChange**, and **model**, **timeout**, **token budget** and **policyTag** overrides.
+
+A run does not dispatch from the roles file directly. It resolves a *harness* first — by default `legacy-default`, minted from the roles file as it is when the run starts, each prompt file's text included — and dispatches from the role set that harness carries, so the sha its attestation names is the content that ran. See the README's "Which harness runs".
 
 The planner emits `agentRole` on each node it produces. That name is checked against the role set in force **where the DAG is built** — the planner, `DagParser` and `DagSynthesizer` each refuse a name the set does not define, and the refusal lists the roles that do exist. A node carries a `RoleName`, which only a role set can produce, so an unrecognised name cannot reach the dispatcher at all. (Before this it did, and silently: an unknown name resolved to the *default* role — `coder`, a writer — so a typo or a hallucinated role name widened privilege rather than being refused.)
 
@@ -56,15 +58,15 @@ Fields:
 |---------------------|----------|-------|
 | `role`              | yes      | Unique role name. Used in `node.agentRole`. |
 | `description`       | no       | Shown to the planner in the role catalog. |
-| `systemPrompt`      | one of   | Inline prompt — wins if both are set. |
-| `promptFile`        | one of   | Relative to `.maf/` (or absolute). Cached after first read. |
+| `systemPrompt`      | one of   | Inline prompt — wins if both are set. An empty string is refused, with or without a `promptFile` beside it. |
+| `promptFile`        | one of   | Relative to `.maf/` (or absolute). Read when the run starts and carried in the harness as text, so editing the file changes the harness sha and a pinned harness keeps the text it was minted with. A file that cannot be read stops the run. |
 | `allowedTools`      | yes      | Must reference tool IDs that exist in the base registry — startup throws on unknown IDs. Enforced on the `in-process` tier; not passed to a `cli`-tier backend. Holding any write tool makes the role a writer (see [Writer roles](#writer-roles)). |
 | `policyTag`         | no       | Optional tag for grouping in policy rules (currently informational). |
 | `model`             | no       | Per-role model override. Beats the CLI's `--model`. |
 | `timeoutMs`         | no       | Per-role timeout, otherwise the node's `timeoutMs` applies. |
 | `tokenBudget`       | no       | Token cap. Enforced on the in-process path (real usage if reported, else estimated) and sent as `max_tokens`/`num_predict` by the HTTP adapters; the `claude`, `codex` and `gemini` CLIs have no such flag, so a `cli`-tier node ignores it. |
 | `maxToolIterations` | no       | Cap on tool-call iterations (turns) in the loop. |
-| `execution`         | no       | `'in-process'` or `'cli'`. Default: `'in-process'` for a [writer](#writer-roles), `'cli'` for any other role ([D-01](DECISIONS.md)). `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair) and needs a `TurnAdapter` with the `inProcessLoop` capability. Without one, a read-only role falls back to `cli` and notes the fallback in the run's transcript, while a writer refuses to start unless the run allows ungoverned writers (`--allow-ungoverned`). A writer set to `'cli'` needs the same flag. See the README "In-process execution" section. |
+| `execution`         | no       | `'in-process'` or `'cli'`. Default: `'in-process'` for a [writer](#writer-roles), `'cli'` for any other role ([D-01](DECISIONS.md)). `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair) and needs a `TurnAdapter` with the `inProcessLoop` capability. Without one, a read-only role falls back to `cli` and notes the fallback in the run's transcript, while a writer refuses to start unless the run allows ungoverned writers (`--allow-ungoverned`). A writer set to `'cli'` needs the same flag. Any other value is a `RoleConfigError`. See the README "In-process execution" section. |
 | `expectsChange`     | no       | `true` when the role's job is to change the tree ([D-32](DECISIONS.md)). A `cli`-tier node of such a role that answers and exits 0 but leaves no diff against its start commit fails with `no_change`, the output tail in the error — what a backend that refused the edit under its own permission settings looks like. Only a writer may set it; on any other role it is a `RoleConfigError`. The built-in `coder` and this repository's `.maf/roles.yaml` coder set it; the tester does not, because a tester that adds no test has often done its job. |
 
 ### YAML or JSON?
@@ -74,10 +76,15 @@ Either: the parser reads YAML, and the JSON form above is YAML, so it and its bl
 ## How dispatch flows
 
 ```
-planner.plan(task) → DAG with node.agentRole on each node
+resolve the harness (--harness, else an operator-set CURRENT, else legacy-default minted from roles.yaml)
+roles = RoleRegistry.fromSet(harness.roleSet)
+maf run refuses here, before planning, if a writer would land on the cli tier without --allow-ungoverned
                      │
                      ▼
-DagRunner.run({ executor: (node) => dispatcher.runNode(node) })
+planner.plan(task) → DAG with node.agentRole on each node (and metadata.runTitle, for failure recall)
+                     │
+                     ▼
+DagRunner.run({ executor: (node) => dispatcher.runNode(node), failureRecorder: graph })
                      │
                      ▼
 RoleDispatcher.runNode(node):
@@ -93,21 +100,28 @@ RoleDispatcher.runNode(node):
        startCommit = git rev-parse HEAD              // captured before the node runs, once per node;
                                                      // a retry reuses it (empty tree if no commits yet)
   3. roleTools = new RoleToolRegistry(baseTools, role.allowedTools)
-  4. rolePrompt = await roles.loadPrompt(role)
+  4. rolePrompt = await roles.loadPrompt(role)       // the harness's text for the role
   5. systemPrompt = injector.assemble(node.label, sessionId, role.role) + '\n' + rolePrompt
   6. cli tier:        result = adapter.invoke({ prompt, systemPrompt, … })
-     in-process tier: InProcessAgentLoop.run() — every tool call through executeToolGated;
+     in-process tier: InProcessAgentLoop.run() — every tool call through executeToolGated, where an
+                      Escalate verdict goes to the approval gate;
                       for a writer, the security-gate processor runs the step-7 review at task_end;
                       a tool or backend turn that throws still fires task_end, once
      if either throws (a timed-out turn, a backend that never started) and the role is a writer:
-                      run the step-7 review now if it has not run, then rethrow — a GateRefused outranks the error
+                      run the step-7 review now if it has not run, then rethrow — a GateRefused
+                      or ReviewRefused outranks the error
   7. writer role, once per attempt — on the cli tier after the backend returns; in-process at
      task_end, or right after the loop when the harness bundle leaves the security-gate processor out:
        diff = snapshotDiff(cwd, startCommit)         // whole repository vs startCommit;
                                                      // this run's .maf/ runtime state excluded
+       if diff is empty: stop here
+       attestor.recordDiffHash(`${node.id}.diff`, diff)  // a subject of the run's statement
        result = await securityGate.reviewDiff(diff)  // GateRefused above the size cap
        attestor.recordSecurityFindings(node.id, result)
        if !result.passed: graph.addNode(Failure) + throw GateRefused
+       if the run has a review gate, or the harness requires review:
+         decision = await reviewGate.review(…)       // the node waits; recorded in approvals
+         if required and not approved: throw ReviewRefused
   8. fail the node: a cli result that carried a transport failure → TransportError (may be retried);
      one that reported failure, or a writer's empty output → NodeFailure;
      a loop that ended budget_exhausted without node.allowPartial → NodeFailure
@@ -115,11 +129,13 @@ RoleDispatcher.runNode(node):
        throw NodeFailure('no_change')                // the output tail in the message (D-32)
 ```
 
-`node.allowPartial` can be set only on a DAG built in code in 0.2.1: neither a DAG spec (`DagParser`), `DagSynthesizer` nor the planner sets it yet, so a planned run cannot accept partial work. Setting it from specs and plans is planned for 0.3.0.
+A node that fails, after its last attempt, is handed to the failure recorder: the memory graph gets a `Task` (the node's instruction, with the run's title in its properties) joined to a `Failure` by a `CAUSED_FAILURE` edge, which the planner recalls the next time a title with the same first three words is planned ([D-37](DECISIONS.md)).
+
+`node.allowPartial` can be set only on a DAG built in code: neither a DAG spec (`DagParser`), `DagSynthesizer` nor the planner sets it, so a planned run cannot accept partial work. Setting it from specs and plans did not land in 0.3.0 and is not yet scheduled.
 
 The diff base is the commit captured in step 2, not `HEAD` at review time, so a writer that commits its own work is still reviewed. `RoleDispatcher.endNode(nodeId)`, called from the scheduler's `onNodeEnd`, forgets it.
 
-On the `in-process` tier the dispatcher never bypasses policy: the loop advertises only the role's allowed tools, answers a call to any other tool with an error, and sends every allowed call through `executeToolGated` (in `@maf/tool-loop`), which asks the policy engine first. A role with `fs.write` in its allowlist can still be denied by a path-glob rule. On the `cli` tier none of this applies: the backend CLI runs its own tools, and MAF sees only a writer role's diff afterwards.
+On the `in-process` tier the dispatcher never bypasses policy: the loop advertises only the role's allowed tools, answers a call to any other tool with an error, and sends every allowed call through `executeToolGated` (in `@maf/tool-loop`), which asks the policy engine first and puts an `Escalate` verdict to the approval gate (see [POLICY.md](POLICY.md#escalate-asking-a-person)). A role with `fs.write` in its allowlist can still be denied by a path-glob rule. On the `cli` tier none of this applies: the backend CLI runs its own tools, and MAF sees only a writer role's diff afterwards.
 
 ### Where policy sees the role
 
@@ -131,14 +147,15 @@ A role is a writer when it holds any of `fs.write`, `fs.delete`, `patch.apply`, 
 
 - runs it on the `in-process` tier unless its `execution` is `'cli'` ([D-01](DECISIONS.md)): policy verdicts, secret redaction, attested tool calls and processor hooks exist only there. A writer that would land on the `cli` tier — by its own `execution: 'cli'`, or because the adapter cannot run the in-process loop (`codex`, `gemini`, `ollama` and `openrouter` cannot; only `claude` can) — refuses to start, before it captures anything or calls a model, with an error naming `--allow-ungoverned`. With that flag it runs on the `cli` tier, the run prints an `UNGOVERNED` banner on stderr once, and the transcript notes each such node. There a CLI backend (`claude`, `codex`, `gemini`) edits the tree with its own tools under its own permission settings, while an HTTP backend (`ollama`, `openrouter`) has no file tools and cannot change the tree at all, so a role with `expectsChange` cannot succeed on it (`no_change`). `effectiveTier(role, adapter)` says which tier a role gets;
 - captures the start commit before the node runs, so the target directory must be a git repository;
-- security-reviews the diff once per attempt: on the `cli` tier after the backend returns, whatever it returned; on the `in-process` tier at `task_end` through the `security-gate` processor, or right after the loop when a harness's own bundle leaves that processor out; and, on either tier, before an error thrown by the backend or the loop propagates ([D-31](DECISIONS.md)). A tool or a backend turn that throws inside the loop still fires `task_end`, so every processor sees the task end;
+- security-reviews the diff once per attempt: on the `cli` tier after the backend returns, whatever it returned; on the `in-process` tier at `task_end` through the `security-gate` processor, or right after the loop when a harness's own bundle leaves that processor out; and, on either tier, before an error thrown by the backend or the loop propagates ([D-31](DECISIONS.md)). A tool or a backend turn that throws inside the loop still fires `task_end`, so every processor sees the task end. A non-empty diff is a subject of the run's attestation;
+- puts a diff the security gate passed to the human review gate, when the run has one or the harness requires review ([D-34](DECISIONS.md); see [SECURITY.md](SECURITY.md#the-human-review-gate));
 - fails the node on the `cli` tier if the backend returns empty output, or — for a role with `expectsChange` — if it answers and leaves the tree unchanged against the start commit (`no_change`, [D-32](DECISIONS.md)).
 
 The scheduler's writer lock — which stops two nodes editing the tree at once — uses a broader test, `isWriterForLock(role, adapter, baseTools)`: every role that runs on the `cli` tier counts as a writer there, because its backend CLI has file tools of its own whatever the allowlist says — including a read-only role that asked for `in-process` on an adapter that cannot run it — and an `in-process` role counts as one if it holds any tool that is not read-only.
 
 ## Planning instructions
 
-`RetrievalAugmentedPlanner` is given the role set in force — which supplies both the default role and the answer to "is this name real?" — plus an optional `roleCatalog` for wording. The planner's system prompt enumerates the catalog and tells the LLM:
+`RetrievalAugmentedPlanner` is given the role set in force — which supplies both the default role and the answer to "is this name real?" — plus an optional `roleCatalog` for wording. Its prompt also carries, in a `<past-failures>` block, up to five failures recalled from the memory graph for a similar title. The planner's system prompt enumerates the catalog and tells the LLM:
 
 > After any coder node that introduces new behavior, emit a tester node that depends on it.
 >
@@ -171,5 +188,6 @@ That is belt-and-suspenders with the tool allowlist: even if a future role confi
 3. Pick the tool allowlist conservatively — start with what's strictly needed. Any write tool makes the role a [writer](#writer-roles).
 4. Add a policy rule with `predicate.agentRole: "<role>"` for any path/operation restrictions that aren't already implied by the tool list.
 5. (Optional) Set `model`, `timeoutMs`, or `maxToolIterations` if the role has special performance needs.
+6. (Optional) Set `expectsChange: true` if the role's job is to change the tree, so a `cli`-tier node that changes nothing fails rather than succeeds.
 
 The planner picks up the new role automatically through `roles.catalog()`.
