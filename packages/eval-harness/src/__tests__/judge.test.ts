@@ -53,6 +53,19 @@ test('the judge disclosure says when the agent judged itself', () => {
   assert.deepEqual(describeJudge({ adapter: 'claude', model: 'a' }, { adapter: 'claude', model: 'b' }),
     { adapter: 'claude', model: 'b', distinct: true });
   assert.equal(describeJudge({ adapter: 'claude' }, { adapter: 'gemini' }).distinct, true);
+  assert.equal(describeJudge({ adapter: 'claude', model: 'a' }, { adapter: 'claude', model: 'a' }).distinct, false);
+});
+
+test('an adapter default on either side is not shown to differ from a named model, and the note says so', () => {
+  // The agent left on its adapter's default, the judge given that default by name: possibly one model.
+  assert.deepEqual(describeJudge({ adapter: 'claude' }, { adapter: 'claude', model: 'claude-x' }), {
+    adapter: 'claude', model: 'claude-x', distinct: false,
+    note: 'The judge ran on the agent\'s own adapter (claude) and only one side named a model ' +
+      '(agent: the adapter default, judge: claude-x), so it may be the agent\'s own model and is not counted as a distinct judge.',
+  });
+  const judgeOnDefault = describeJudge({ adapter: 'claude', model: 'claude-x' }, { adapter: 'claude' });
+  assert.equal(judgeOnDefault.distinct, false);
+  assert.match(judgeOnDefault.note ?? '', /only one side named a model \(agent: claude-x, judge: the adapter default\)/);
 });
 
 test('the judge runs as the judge — its own prompt, no tools — and a failed judge call is a failed verdict', async () => {
