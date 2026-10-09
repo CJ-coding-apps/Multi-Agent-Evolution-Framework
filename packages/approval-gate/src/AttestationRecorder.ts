@@ -1,6 +1,6 @@
 import type { ApprovalStatus, ReviewAttestation } from '@maf/types';
 import { makeCommitHash } from '@maf/types';
-import { buildInTotoStatement } from '@maf/attestation';
+import { buildInTotoStatement, componentId } from '@maf/attestation';
 
 /** Where decisions go: `Attestor` satisfies it with its existing `addApproval`. */
 export interface ApprovalSink {
@@ -45,7 +45,7 @@ export class AttestationRecorder {
       diffHash:   settled.requestHash,
       intotoStmt: buildInTotoStatement(
         { [`tool-call:${settled.requestId}`]: settled.requestHash },
-        { id: 'maf-approval-gate', modelVersion: settled.reviewer },
+        { id: componentId('maf-approval-gate'), modelVersion: settled.reviewer },
         {
           configSource: { uri: `policy-rule:${settled.policyRuleId}`, digest: { sha256: settled.requestHash } },
           parameters:   { toolId: settled.toolId, declaredPaths: [...settled.declaredPaths], status: settled.status },

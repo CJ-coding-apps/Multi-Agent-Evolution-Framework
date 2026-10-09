@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream';
 import type { ToolPlugin, ToolContext, ToolResult, ToolInput, AttestationBundle } from '@maf/types';
 import { makeToolId, makeRunId, makeTaskId, makeAgentId } from '@maf/types';
 import { PolicyEngine, PolicyViolationError } from '@maf/policy-engine';
-import { Attestor } from '@maf/attestation';
+import { Attestor, componentId } from '@maf/attestation';
 import { createApprovalGate, confirmationCode } from '@maf/approval-gate';
 import { executeToolGated } from '@maf/tool-loop';
 
@@ -112,6 +112,10 @@ test('on a terminal: the operator approves one call by its hash, refuses the nex
     assert.equal(bundle.approvals[1]?.requestId, requestIdOf(refused));
     assert.equal(bundle.approvals[0]?.diffHash, firstPrompt.requestHash, 'bound to the hash the operator was shown');
     assert.equal(bundle.approvals[0]?.requestId, firstPrompt.requestId);
+    // The gate names itself by the version it shipped as (D-13), never a literal.
+    const builder = (JSON.parse(bundle.approvals[0]?.intotoStmt ?? '{}') as { predicate?: { builder?: { id?: unknown } } }).predicate?.builder?.id;
+    assert.equal(builder, componentId('maf-approval-gate'));
+    assert.match(String(builder), /^maf-approval-gate@\d+\.\d+\.\d+/);
   });
 });
 

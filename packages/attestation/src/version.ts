@@ -5,7 +5,7 @@ let cached: string | undefined;
 
 /**
  * The version this code shipped as, read from the package rather than written down — a literal
- * is how component ids stayed at `@0.1.0` through two releases. Every @maf package is released
+ * is how component ids kept naming version 0.1.0 through two releases. Every @maf package is released
  * under one version, so this package's is the framework's. Read on first use, so an unreadable
  * `package.json` fails the caller that wanted a version, not every import of the package.
  */

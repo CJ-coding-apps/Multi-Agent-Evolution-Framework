@@ -214,7 +214,7 @@ Proof on `wp/phase-1` (2026-10-08, macOS, Node 25, pnpm 8.15.1): install/build c
 **Acceptance:** editing `roles.yaml` or a `promptFile` changes the harness sha that `run` stamps; `harness set-current` changes what the next plain `run` uses; the attestation's `configSource.digest` equals the harness actually dispatched.
 
 ### WP-2.10 Integration: `run.ts` and `wiring.ts` — `todo` [core, maintainer merges]
-Wires WP-2.1, 2.2, 2.3, 2.4, 2.5, 2.9 into the two entry points. One PR, after the lanes are merged. **Acceptance:** `inprocess-demo` and a `run` against a temp repository (scripted adapter) exercise worktree → in-process coder → security gate → review record → attestation with `keySource` and approvals; the user's tree is untouched.
+Wires WP-2.1, 2.2, 2.3, 2.4, 2.5, 2.9 into the two entry points. One PR, after the lanes are merged. **Acceptance:** `run` exercises worktree → in-process coder → security gate → review record → attestation; `inprocess-demo` exercises in-process coder → security gate → an escalated call refused headless → signed attestation with `keySource`, approvals and a subject; the user's tree is untouched.
 
 ### WP-2.11 Toolchain floor — `todo` [mech, maintainer merges] · D-21 · audit §quickstart 3, 6, 17
 **Files:** root `package.json` (`engines`, `packageManager: pnpm@10.x`, `pnpm.onlyBuiltDependencies`), `pnpm-lock.yaml` (v9, mechanical), `.github/workflows/ci.yml` (pnpm 10), README prerequisites, `packages/cli/src/main.ts` shebang (`#!/usr/bin/env node`; heap flag moved to a documented `NODE_OPTIONS` or a wrapper script).

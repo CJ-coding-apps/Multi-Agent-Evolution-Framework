@@ -14,7 +14,7 @@ import { IN_TOTO_STATEMENT_TYPE } from '../InTotoStatement.js';
 import { componentId, mafVersion } from '../version.js';
 
 // ORACLE: D-13 (part 2) + audit P1 "custom JSON; in-toto builder unused; diffHashes always
-// empty" and P2 "canonicalize before HMAC; component ids still @0.1.0". The bundle is an
+// empty" and P2 "canonicalize before HMAC", with component ids still naming 0.1.0. The bundle is an
 // in-toto Statement whose subjects are the run's diffs, signed over canonical JSON, so a third
 // party can reproduce the bytes and a re-serialization does not break it while an edit does.
 
@@ -327,7 +327,7 @@ test('parseBundle refuses what is not a bundle, with a sentence saying what it f
   assert.throws(() => parseBundle('{"runId":"r"}'), /expected a string "signature", found undefined/);
 });
 
-test('component ids carry the version the package ships as, not @0.1.0', () => {
+test('component ids carry the version the package ships as, not 0.1.0', () => {
   const pkg = JSON.parse(readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')) as { version: string };
   assert.equal(mafVersion(), pkg.version);
   assert.notEqual(mafVersion(), '0.1.0');

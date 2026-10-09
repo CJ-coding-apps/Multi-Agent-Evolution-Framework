@@ -9,6 +9,7 @@ import type { CliAdapter, RunStatus } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { buildTurnSystemPrompt } from '@maf/adapter-base';
+import { componentId } from '@maf/attestation';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { runIsolatedGit } from '@maf/git-ops';
 import { buildRunStack } from '../wiring.js';
@@ -40,7 +41,7 @@ const CODER_PROMPT =
 /**
  * The deterministic stand-in for the model walks this script, one tool call per turn:
  *   1. fs.read config.txt   (shows redaction of the result the model sees)
- *   2. fs.delete sum.js      (blocked by policy — demonstrates the gate)
+ *   2. fs.delete sum.js      (escalated; no one can approve it headless, so it is refused and recorded)
  *   3. fs.write sum.js fix   (real file effect)
  *   4. test.run              (real execution)
  *   5. finish (no tool calls)
@@ -49,7 +50,7 @@ const DEMO_SCRIPT = {
   prompt: CODER_PROMPT,
   steps: [
     { tool: 'fs.read', input: { path: 'config.txt' } },
-    { tool: 'fs.delete', input: { path: 'sum.js' } },          // policy denies
+    { tool: 'fs.delete', input: { path: 'sum.js' } },          // escalated, refused headless
     { tool: 'fs.write', input: { path: 'sum.js', content: SUM_FIXED } },
     { tool: 'test.run', input: {} },
   ],
@@ -96,13 +97,14 @@ export function registerInProcessDemoCommand(program: Command): void {
       const fixture = await makeFixture();
       const mafDir = path.join(fixture, '.maf');
       await mkdir(mafDir, { recursive: true });
-      // Policy: deny fs.delete (so the scripted delete attempt is gated), allow the rest.
+      // Policy: fs.delete needs a human's approval, allow the rest. The demo runs headless, so the
+      // scripted delete is refused without a prompt, and the refusal lands in the bundle's approvals.
       const policyPath = path.join(mafDir, 'policy.yaml');
       await writeFile(policyPath, JSON.stringify({
         rules: [{
-          id: 'no-delete', description: 'no file deletion in the demo',
+          id: 'delete-needs-a-human', description: 'a file is deleted only with a human\'s approval',
           predicate: { toolId: 'fs.delete' },
-          action: { kind: 'Deny', reason: 'file deletion is not permitted in this demo' },
+          action: { kind: 'Escalate', requiresApproval: true },
           priority: 100,
         }],
       }, null, 2), 'utf8');
@@ -131,7 +133,8 @@ export function registerInProcessDemoCommand(program: Command): void {
       console.log(`[demo] adapter:  ${adapter.name} (inProcessLoop=${adapter.capabilities().inProcessLoop})`);
       console.log(`[demo] run:      ${runId}`);
 
-      const stack = await buildRunStack({ cwd: fixture, mafDir, policyPath, adapter, runId, harnessSha: harness.sha });
+      // Headless whatever the terminal, so the demo runs the same offline, unattended and in CI (D-02).
+      const stack = await buildRunStack({ cwd: fixture, mafDir, policyPath, adapter, runId, harnessSha: harness.sha, headless: true });
 
       let output: string;
       let demoStatus: RunStatus = 'Succeeded';
@@ -143,7 +146,7 @@ export function registerInProcessDemoCommand(program: Command): void {
       } finally {
         // produce a signed attestation bundle for the run (records are already redacted at record-time)
         await stack.attestor.bundle(
-          { id: '@maf/inprocess-demo@0.1.0', modelVersion: adapter.name },
+          { id: componentId('@maf/inprocess-demo'), modelVersion: adapter.name },
           { configSource: { uri: 'inprocess-demo', digest: { sha256: harness.sha } }, parameters: { harnessId: harness.id }, environment: {} },
           [],
           { status: demoStatus, unscheduled: [] },

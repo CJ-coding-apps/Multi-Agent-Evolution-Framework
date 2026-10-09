@@ -259,8 +259,13 @@ export class WorktreeManager {
 export interface WorkingDirOptions {
   /** The directory maf was pointed at (`--dir`). */
   readonly dir:      string;
-  /** False for `--no-worktree` (commander's `worktree` option). */
+  /** False when isolation is off: `--no-worktree`, or `worktree: false` in `.maf/config.yaml`. */
   readonly worktree: boolean;
+  /**
+   * What turned isolation off, as the user would recognise it (`--no-worktree`, `worktree: false in
+   * .maf/config.yaml`). The warning names it, so it never names a flag the user did not type.
+   */
+  readonly offBy?:   string | undefined;
   /** The run's worktree from `createForRun`: present exactly when `worktree` is true. */
   readonly run?:     RunWorktree | undefined;
 }
@@ -285,8 +290,8 @@ export function resolveWorkingDir(opts: WorkingDirOptions): WorkingDir {
     return {
       cwd,
       isolated: false,
-      warning: `--no-worktree: this run edits ${cwd} in place, on whatever branch is checked out there. ` +
-        `Its changes mix with yours, and rollbacks are disabled (D-03).`,
+      warning: `worktree isolation is off${opts.offBy ? ` (${opts.offBy})` : ''}: this run edits ${cwd} in place, ` +
+        `on whatever branch is checked out there. Its changes mix with yours, and rollbacks are disabled (D-03).`,
     };
   }
   if (!opts.run) {

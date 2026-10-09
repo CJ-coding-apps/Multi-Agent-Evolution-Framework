@@ -3,6 +3,7 @@ import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
+import { componentId } from '@maf/attestation';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { makeRunId } from '@maf/types';
 import type { CliAdapter, RunId, RunStatus } from '@maf/types';
@@ -10,6 +11,7 @@ import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { MemoryGraph } from '@maf/memory-graph';
 import { RoleRegistry, roleSetFromHarness } from '@maf/roles';
+import { createDefaultRegistry } from '@maf/tools';
 import {
   GoldenRunner, ScoreRecorder, ScriptedAdapter, SCRIPTED_ADAPTER_NAME, assertGoldenCorpus,
   describeJudge, loadScriptedTasks, makeLlmJudge, seesawDecision,
@@ -17,7 +19,7 @@ import {
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
+import { RESOLVER_REFS, buildRunStack, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
 import { committedDefaults, loadHarnessFile, locateStoredHarness } from './harness.js';
 
 /**
@@ -37,29 +39,42 @@ export function goldenRunStatus(result: GoldenSuiteResult): RunStatus {
 }
 
 /**
- * The harness a golden run evaluates: `--harness` (a stored ref, or a harness file), else
- * CURRENT, else the committed `.maf/harnesses/default-<sha>.json` — which is all a fresh clone
- * that has never run maf has. The committed default also answers to its id and (short) sha, and
- * is read in place, not imported into the store.
+ * The harness a golden run evaluates and `evolve` starts from: `--harness` (a stored ref, or a
+ * harness file), else CURRENT, else the committed `.maf/harnesses/default-<sha>.json` — which is
+ * all a fresh clone that has never run maf has. The committed default also answers to its id and
+ * (short) sha, and is read in place, not imported into the store. A stored ref and CURRENT go
+ * through `run`'s own resolution (`resolveRunHarness`).
  */
 export async function resolveGoldensHarness(mafDir: string, ref?: string): Promise<{ harness: HarnessConfig; source: string }> {
   const store = new HarnessStore(mafDir);
   if (ref !== undefined && (ref.endsWith('.json') || ref.includes('/') || ref.includes(path.sep))) {
     return { harness: await loadHarnessFile(path.resolve(ref)), source: path.resolve(ref) };
   }
-  if (ref !== undefined) return locateStoredHarness(store, ref);
-  const current = await store.current();
-  if (current) return { harness: current, source: path.join(store.dir, `${current.sha}.yaml`) };
-  const defaults = await committedDefaults(store);
-  if (defaults.length !== 1) {
-    throw new Error(
-      `goldens: no harness to evaluate — no --harness, no CURRENT in ${store.dir}, and ` +
-      `${defaults.length === 0 ? 'no' : 'more than one'} committed default-<sha>.json there. ` +
-      'Pass --harness, or run maf once to mint one.',
-    );
+  const plain = ref === undefined || ref === 'current' || ref === 'CURRENT';
+  if (!plain && !RESOLVER_REFS.has(ref)) {
+    const found = await locateStoredHarness(store, ref);
+    if (found.source !== path.join(store.dir, `${found.harness.sha}.yaml`)) return found; // a committed default, read in place
   }
-  const file = defaults[0] as string;
-  return { harness: await loadHarnessFile(file), source: file };
+  if (plain && (await store.current()) === undefined) {
+    const defaults = await committedDefaults(store);
+    if (defaults.length !== 1) {
+      throw new Error(
+        `goldens: no harness to evaluate — no --harness, no CURRENT in ${store.dir}, and ` +
+        `${defaults.length === 0 ? 'no' : 'more than one'} committed default-<sha>.json there. ` +
+        'Pass --harness, or run maf once to mint one.',
+      );
+    }
+    // Located by its sha, like a typed ref, so `evolve` starting from it and `goldens` measuring it
+    // name one harness; a copy `run` imported into the store is the same content.
+    const file = defaults[0] as string;
+    return locateStoredHarness(store, path.basename(file).slice('default-'.length, -'.json'.length));
+  }
+  // Everything else is resolved as `run` resolves it, so a CURRENT that tracks the roles file
+  // evaluates the roles file now, and a harness whose prompts are not in its sha is refused.
+  const { harness } = await resolveRunHarness({
+    store, ref: plain ? undefined : ref, rolesPath: path.join(mafDir, 'roles.yaml'), mafDir, baseTools: createDefaultRegistry(),
+  });
+  return { harness, source: (await store.configSource(harness)).uri };
 }
 
 /**
@@ -102,6 +117,8 @@ export interface GoldenSuiteOptions {
   attempts: number;
   policyPath: string;
   runId: RunId;
+  /** `--allow-ungoverned`: a writer role may run on the cli tier, outside MAF's gates (D-01). */
+  allowUngoverned?: boolean;
 }
 
 /**
@@ -125,7 +142,8 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
     await stagePromptFiles(o.harness, mafDir, evalDir);
     const stack = await buildRunStack({
       cwd: o.cwd, mafDir: evalDir, policyPath: o.policyPath, adapter: o.agent, runId: o.runId,
-      harnessSha: o.harness.sha, ...model,
+      harnessSha: o.harness.sha, headless: true, ...model,
+      ...(o.allowUngoverned === true ? { allowUngoverned: true } : {}),
     });
     let result: GoldenSuiteResult;
     try {
@@ -153,7 +171,7 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
         },
       }).run();
       await stack.attestor.bundle(
-        { id: `@maf/adapter-${o.agent.name}@0.1.0`, modelVersion: o.model ?? 'default' },
+        { id: componentId(`@maf/adapter-${o.agent.name}`), modelVersion: o.model ?? 'default' },
         {
           configSource: { uri: o.harnessSource, digest: { sha256: o.harness.sha } },
           parameters: { harnessId: o.harness.id, eval: 'goldens' },
@@ -238,7 +256,7 @@ async function loadGoldenResult(resultsDir: string, ref: string): Promise<Golden
 
 interface GoldenOpts {
   adapter: string; model?: string; judgeAdapter?: string; judgeModel?: string;
-  dir: string; corpus: string; harness?: string; attempts: string; policy: string;
+  dir: string; corpus: string; harness?: string; attempts: string; policy: string; allowUngoverned?: boolean;
 }
 
 export function registerGoldensCommand(program: Command): void {
@@ -255,6 +273,7 @@ export function registerGoldensCommand(program: Command): void {
     .option('--harness <ref>', 'Harness id/sha/file (default: current, else the committed default)')
     .option('--attempts <k>', 'pass@k attempts per task', '2')
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
+    .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .description('Run the golden corpus under a harness, isolated from past runs (temperature pinned to 0 where the backend supports it)')
     .action(async (opts: GoldenOpts) => {
       const cwd = path.resolve(opts.dir);
@@ -274,6 +293,7 @@ export function registerGoldensCommand(program: Command): void {
         cwd, corpusRoot, harness, harnessSource: source, agent, ...(opts.model ? { model: opts.model } : {}),
         judge: { adapter: judgeAdapter, ...(judgeModel ? { model: judgeModel } : {}) },
         attempts: Number(opts.attempts) || 2, policyPath: path.resolve(cwd, opts.policy), runId,
+        ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
       });
 
       // The score goes into the project's memory for the evolver's digest; nothing reads it back
