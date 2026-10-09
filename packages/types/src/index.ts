@@ -267,6 +267,24 @@ export class VerdictError extends Error {
   }
 }
 
+/**
+ * A path a tool refuses whatever the policy says: confinement built into the tool, not a rule. The
+ * one case today is git's own data — `fs.write`, `fs.delete` and `patch.apply` refuse a path into
+ * `.git`, because the worktree's `.git` is what keeps every git tool on the run's branch. Thrown from
+ * `declaredPaths` (the spelling) and from `execute` (the resolved path); the gate turns it into an
+ * attested `Deny`, so the model is told why and the node goes on.
+ */
+export class PathConfinementError extends Error {
+  /**
+   * @param path   the path as the caller named it
+   * @param reason why it is refused, as a clause ("the path names git's own data (.git)")
+   */
+  constructor(message: string, readonly path: string, readonly reason: string) {
+    super(message);
+    this.name = 'PathConfinementError';
+  }
+}
+
 export interface DagNodeExecution {
   nodeId:      NodeId;
   runId:       RunId;
@@ -285,6 +303,10 @@ export interface DagNodeExecution {
  *  - `adapter_failed`   — CLI tier: the adapter reported `success: false` (a timeout's exit 124,
  *                         an expired login, an HTTP error body).
  *  - `empty_output`     — CLI tier: a role holding a write tool returned no output.
+ *  - `no_change`        — CLI tier: a role that expects to change the tree (`expectsChange`)
+ *                         answered and exited 0, but its diff against the node's start commit is
+ *                         empty — what a backend that refused the edit under its own permission
+ *                         settings looks like (D-32).
  *  - `budget_exhausted` — in-process: the role's own `maxToolIterations` or `tokenBudget` ran
  *                         out, or a processor stopped the loop before a step.
  *  - `loop_failed`      — in-process: the loop itself reported failure.
@@ -292,6 +314,7 @@ export interface DagNodeExecution {
 export type NodeFailureReason =
   | 'adapter_failed'
   | 'empty_output'
+  | 'no_change'
   | 'budget_exhausted'
   | 'loop_failed';
 
@@ -323,6 +346,40 @@ export interface PartialNodeOutcome {
   status: 'partial';
   reason: NodeFailureReason;
   detail: string;
+}
+
+/**
+ * What the scheduler knows about a node once it has judged it failed (D-16): enough for the
+ * planner to recognise the task next time. Plain values, so a recorder needs nothing from the
+ * scheduler and the scheduler nothing from the graph.
+ */
+export interface NodeFailureRecord {
+  runId:     RunId;
+  nodeId:    NodeId;
+  /** The node's own short label. */
+  label:     string;
+  /** What the node was asked to do: its `metadata.taskDescription`, or its label without one. */
+  task:      string;
+  /**
+   * The title of the run the node was planned for (its `metadata.runTitle`), when the planner set
+   * one. A planned node's instruction is its own step, so the run's title is what the next plan
+   * for the same task can recognise.
+   */
+  runTitle?: string;
+  role:      RoleName;
+  /** `NodeFailure.reason` when the error was one; otherwise the error's class name (a plain `Error`'s `name`). */
+  reason:    string;
+  message:   string;
+  /** `NodeFailure.exitCode`, when the failure came from a CLI-tier invocation. */
+  exitCode?: number;
+}
+
+/**
+ * Where a failed node is written down so the planner can recall it (D-16). The scheduler calls
+ * it once per node, after the node's retries are spent; the memory graph implements it.
+ */
+export interface FailureRecorder {
+  recordFailure(input: NodeFailureRecord): Promise<void>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -617,6 +674,38 @@ export interface ApprovalDecision {
   signature?: string;
 }
 
+/**
+ * The call an `Escalate` verdict is about, as `executeToolGated` holds it: the input the tool will
+ * run on and the paths it declared. The gate binds its decision to these, not to the request's
+ * description, which is prose.
+ */
+export interface ApprovalAsk {
+  request:       ApprovalRequest;
+  toolId:        ToolId;
+  input:         ToolInput;
+  declaredPaths: readonly string[];
+}
+
+export interface ApprovalOutcome {
+  /** Only `true` runs the call; it is good for the one call it was asked about. */
+  approved:    boolean;
+  status:      ApprovalStatus;
+  requestId:   string;
+  /** sha256 of the canonical request; empty when the request could not be hashed (and was refused). */
+  requestHash: string;
+  reason:      string;
+}
+
+/**
+ * Asked by `executeToolGated` on an `Escalate` verdict. Lives here rather than in
+ * `@maf/approval-gate` so `@maf/tool-loop` needs no dependency on the gate's implementation.
+ * `decide` settles every request it is given and records the decision in the attestation; it does
+ * not throw for a refusal.
+ */
+export interface ApprovalGateHandle {
+  decide(ask: ApprovalAsk): Promise<ApprovalOutcome>;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ATTESTATION — SLSA-style
 // ─────────────────────────────────────────────────────────────────────────────
@@ -696,6 +785,26 @@ export class GateRefused extends VerdictError {
   }
 }
 
+/**
+ * A required human review did not approve a writer node's change: the reviewer denied it, did not
+ * answer in time, failed before deciding or answered with something that is not a decision — or
+ * the run's harness requires review and no required review gate was wired to ask anyone.
+ *
+ * A GateRefused, so whatever already treats a gate's refusal as final treats this one the same: it
+ * is never retried (D-06), and a dispatcher that meets it on the way out of a failing backend does
+ * not review the diff a second time. `findings` is empty; a human review produces none.
+ */
+export class ReviewRefused extends GateRefused {
+  /** The review request this refusal answers; undefined when no reviewer was asked. */
+  readonly requestId: string | undefined;
+
+  constructor(message: string, requestId?: string) {
+    super(message, []);
+    this.name = 'ReviewRefused';
+    this.requestId = requestId;
+  }
+}
+
 export interface GoldensSection {
   harnessSha:      string;
   harnessId:       string;
@@ -762,6 +871,13 @@ export interface AdapterInvokeOptions {
   /** Pinned sampling temperature when the backend supports it (golden determinism).
    *  Adapters that cannot control temperature MUST ignore it, never error. */
   temperature?:     number;
+  /**
+   * Whether the backend may use tools of its own — a CLI's file, shell and edit tools. Default `true`.
+   * `false` means the backend must not be given its own tools: the call needs only text (a plan, a
+   * review verdict), and whatever a tool did would happen outside MAF's gates — after the security
+   * review, for the reviewer. An adapter that knows no flag for it says so where it builds its argv.
+   */
+  nativeTools?:     boolean;
 }
 
 export interface AdapterInvokeResult {
@@ -923,3 +1039,10 @@ export function estimateTokens(text: string): number {
  */
 export { resolveInside, PathEscapeError } from './paths.js';
 export type { ConfinedPath } from './paths.js';
+
+/**
+ * Canonical JSON lives here for the reason path confinement does: the harness sha and the
+ * attestation signature (D-13) both need the one serializer, and both packages already depend
+ * on this one, where an `attestation → harness-config` edge would be a new dependency.
+ */
+export { canonicalJson } from './canonicalJson.js';

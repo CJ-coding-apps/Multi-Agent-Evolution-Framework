@@ -65,7 +65,7 @@ test('corpus schema: unknown verifier kind and duplicate ids rejected', () => {
 test('runner: pass@2, determinism across runs, verifier details recorded', async () => {
   await withCorpus(async (root) => {
     const mk = () => new GoldenRunner({
-      corpusRoot: root, harnessSha: 'a'.repeat(64), harnessId: 'h1',
+      corpusRoot: root, harnessSha: 'a'.repeat(64), harnessId: 'h1', adapter: 'stub',
       attempts: 2, dispatch: passDispatch,
     });
     const r1 = await mk().run();
@@ -80,7 +80,7 @@ test('runner: pass@2, determinism across runs, verifier details recorded', async
 test('runner: failing dispatcher marks task failed without crashing the suite', async () => {
   await withCorpus(async (root) => {
     const runner = new GoldenRunner({
-      corpusRoot: root, harnessSha: 'b'.repeat(64), harnessId: 'h2',
+      corpusRoot: root, harnessSha: 'b'.repeat(64), harnessId: 'h2', adapter: 'stub',
       attempts: 2, dispatch: async () => { throw new Error('boom'); },
     });
     const r = await runner.run();
@@ -93,7 +93,7 @@ test('runner: isolation — fixture copies get fresh working dirs per attempt', 
   await withCorpus(async (root) => {
     const seen: string[] = [];
     const runner = new GoldenRunner({
-      corpusRoot: root, harnessSha: 'c'.repeat(64), harnessId: 'h3', attempts: 2,
+      corpusRoot: root, harnessSha: 'c'.repeat(64), harnessId: 'h3', adapter: 'stub', attempts: 2,
       dispatch: async (_t, workDir) => { seen.push(workDir); return 'x'; },
     });
     await runner.run();
@@ -104,7 +104,7 @@ test('runner: isolation — fixture copies get fresh working dirs per attempt', 
 // ─── seesaw (pure) ─────────────────────────────────────────────────────────
 
 function suite(solved: string[]): GoldenSuiteResult {
-  return { harnessSha: 'x'.repeat(64), harnessId: 'h', tasks: [], solvedTaskIds: solved, ranAt: 't' };
+  return { harnessSha: 'x'.repeat(64), harnessId: 'h', adapter: 'stub', tasks: [], solvedTaskIds: solved, ranAt: 't' };
 }
 
 test('seesaw: ship requires improvement with no regressions', () => {

@@ -25,6 +25,12 @@ export interface GoldenTask {
   role: string;
   /** Ordered; all must pass. */
   verifiers: VerifierRef[];
+  /**
+   * Fixture-relative files the agent must leave byte-identical — the tests a coder task is
+   * scored by. A task that edits one fails whatever its verifiers say, so it cannot pass by
+   * rewriting its own test.
+   */
+  mustNotModify?: string[];
   provenance: GoldenProvenance;
 }
 
@@ -71,6 +77,14 @@ export function assertGoldenTask(x: unknown, where: string): asserts x is Golden
         break;
       default:
         fail(`verifiers[${i}].kind unknown: ${JSON.stringify(vv['kind'])}`);
+    }
+  }
+  if (o['mustNotModify'] !== undefined) {
+    const paths = o['mustNotModify'];
+    if (!Array.isArray(paths)) fail('mustNotModify must be an array of fixture-relative paths');
+    for (const [i, p] of (paths as unknown[]).entries()) {
+      if (typeof p !== 'string' || p.length === 0 || p.startsWith('/') || p.split(/[\\/]/).includes('..'))
+        fail(`mustNotModify[${i}] must be a fixture-relative path without ..`);
     }
   }
   const prov = o['provenance'] as Record<string, unknown> | undefined;

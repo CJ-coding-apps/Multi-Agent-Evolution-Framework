@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { parseYamlDocument, YamlSyntaxError } from '@maf/policy-engine';
 import type { Result, RoleName, RoleResolver, UnknownRole } from '@maf/types';
 import { err, ok } from '@maf/types';
 import type { ToolId } from '@maf/types';
@@ -7,6 +8,7 @@ import type { ToolRegistry } from '@maf/tools';
 import type { RoleConfig, RoleSet, RoleCatalogEntry } from './RoleConfig.js';
 import { defineRoleName } from './RoleConfig.js';
 import { DEFAULT_ROLE_SET } from './defaults.js';
+import { isWriterRole } from './isWriterRole.js';
 
 export class RoleConfigError extends Error {
   constructor(message: string) {
@@ -33,6 +35,14 @@ export class RoleRegistry implements RoleResolver {
       if (this.byName.has(role.role)) {
         throw new RoleConfigError(`Duplicate role "${role.role}" in role set`);
       }
+      // A role with no write tool could change the tree only through a cli-tier backend's own
+      // tools, outside every gate — so it may not be told that changing the tree is its job.
+      if (role.expectsChange === true && !isWriterRole(role)) {
+        throw new RoleConfigError(
+          `Role "${role.role}" sets expectsChange: true, which needs a role that holds a write tool ` +
+          '(fs.write, fs.delete, patch.apply, git.add, git.commit, git.reset or test.run), but it holds none.',
+        );
+      }
       this.byName.set(role.role, role);
     }
     if (!this.byName.has(set.defaultRole)) {
@@ -47,22 +57,35 @@ export class RoleRegistry implements RoleResolver {
     return new RoleRegistry(set, mafDir);
   }
 
+  /**
+   * The role set in the file at `yamlPath`, or the built-in set when there is no file there (D-08).
+   *
+   * Only absence means "the built-in roles". Every other failure throws: a file that cannot be
+   * read, is not YAML, or fails validation was meant to say something, and the built-in set it
+   * would be replaced with includes `coder`, a writer.
+   */
   static async fromYamlOrDefault(
     yamlPath: string,
     mafDir: string,
     baseTools: ToolRegistry,
   ): Promise<RoleRegistry> {
+    let text: string;
     try {
-      const text = await readFile(yamlPath, 'utf8');
-      const parsed = parseRoleSet(text);
-      validateAllowedTools(parsed, baseTools);
-      return new RoleRegistry(parsed, mafDir);
+      text = await readFile(yamlPath, 'utf8');
     } catch (err: unknown) {
-      if (err instanceof RoleConfigError) throw err;
-      // The file could not be read (usually: it does not exist) → the built-in defaults. A file
-      // that was read but does not parse or validate is a RoleConfigError, rethrown above.
-      return new RoleRegistry(DEFAULT_ROLE_SET, mafDir);
+      // A dangling symlink also reads as ENOENT, but its name exists: the role set it pointed at
+      // has gone, which is not the same as there being none.
+      if (isNotFound(err) && !(await nameExists(yamlPath))) {
+        return new RoleRegistry(DEFAULT_ROLE_SET, mafDir);
+      }
+      throw new RoleConfigError(
+        `Roles file ${JSON.stringify(yamlPath)} exists but could not be read, and a roles file that ` +
+        `exists is never replaced by the built-in roles: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
+    const parsed = parseRoleSet(text, yamlPath);
+    validateAllowedTools(parsed, baseTools);
+    return new RoleRegistry(parsed, mafDir);
   }
 
   /**
@@ -149,7 +172,9 @@ export class RoleRegistry implements RoleResolver {
   }
 
   async loadPrompt(role: RoleConfig): Promise<string> {
-    if (role.systemPrompt) return role.systemPrompt;
+    // `!== undefined`, not truthiness: a harness inlines an empty prompt file as '' beside its
+    // path, and re-reading the file would dispatch text the harness sha does not cover.
+    if (role.systemPrompt !== undefined) return role.systemPrompt;
     if (!role.promptFile) {
       throw new RoleConfigError(`Role "${role.role}" has neither systemPrompt nor promptFile`);
     }
@@ -164,18 +189,43 @@ export class RoleRegistry implements RoleResolver {
   }
 }
 
-function parseRoleSet(text: string): RoleSet {
-  // Strip comment lines, JSON.parse the rest: a roles file is JSON despite its .yaml name.
-  // Policy files moved to PolicyLoader's real YAML parser; this parser has not followed yet.
-  const stripped = text.replace(/^\s*#.*$/gm, '');
+function isNotFound(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT';
+}
+
+async function nameExists(p: string): Promise<boolean> {
+  return lstat(p).then(() => true, () => false);
+}
+
+function parseRoleSet(text: string, source: string): RoleSet {
+  // YAML, through the parser policy files use (D-08). The JSON-with-`#`-comment-lines form roles
+  // files have always been written in is YAML too, so every file that loaded before still does —
+  // except one that repeats a key in a mapping, which JSON.parse resolved by keeping the last.
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripped);
-  } catch {
-    throw new RoleConfigError('roles.yaml could not be parsed as JSON (install a YAML parser for true YAML support)');
+    parsed = parseYamlDocument(text, source).value;
+  } catch (err: unknown) {
+    if (!(err instanceof YamlSyntaxError)) throw err;
+    throw new RoleConfigError(
+      `Roles file ${JSON.stringify(source)} is not valid YAML at line ${err.line}, column ${err.column}, ` +
+      `so the run cannot start: ${err.reason}`,
+    );
   }
   if (!isRoleSet(parsed)) {
-    throw new RoleConfigError('roles.yaml does not match the expected RoleSet shape');
+    throw new RoleConfigError(
+      `Roles file ${JSON.stringify(source)} does not match the role-set shape: expected version: 1, ` +
+      'a defaultRole, and a roles list whose entries each have a role name and an allowedTools list.',
+    );
+  }
+  // An empty inline prompt is the prompt (`loadPrompt` checks `!== undefined`, so a harness can
+  // carry an empty prompt file's text). Written by hand in a roles file, it would dispatch "" and
+  // hide any promptFile beside it, so it is refused here rather than run.
+  for (const r of parsed.roles) {
+    if (r.systemPrompt === '')
+      throw new RoleConfigError(
+        `Role "${r.role}" has an empty systemPrompt; give it text or a promptFile` +
+        (r.promptFile !== undefined ? ` (remove the empty systemPrompt to use promptFile "${r.promptFile}")` : ''),
+      );
   }
   // `isRoleSet` checked that every name is a string; this is where those strings become
   // `RoleName`s. A role set is the *definition* of which names exist, so a file that
@@ -210,6 +260,16 @@ function isRoleSet(x: unknown): x is RawRoleSet {
     if (!Array.isArray(rr['allowedTools'])) return false;
     if (rr['systemPrompt'] !== undefined && typeof rr['systemPrompt'] !== 'string') return false;
     if (rr['promptFile']   !== undefined && typeof rr['promptFile']   !== 'string') return false;
+    if (rr['expectsChange'] !== undefined && typeof rr['expectsChange'] !== 'boolean') return false;
+    // Thrown, not `false`, so the message can name the value: a misspelt tier would otherwise
+    // reach the dispatcher and be refused as an adapter that "cannot run the in-process loop".
+    const execution = rr['execution'];
+    if (execution !== undefined && execution !== 'cli' && execution !== 'in-process') {
+      throw new RoleConfigError(
+        `Role "${rr['role']}" sets execution ${JSON.stringify(execution)}, but execution must be ` +
+        `'cli' or 'in-process'.`,
+      );
+    }
   }
   return true;
 }

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
 import { BaseTool } from '../ToolPlugin.js';
-import { makeToolId, resolveInside } from '@maf/types';
+import { makeToolId, resolveInside, PathConfinementError } from '@maf/types';
 
 /**
  * The single path a one-path tool declares, or `[]` when the model omitted it — a call with
@@ -33,6 +33,58 @@ function onePath(input: { path?: unknown }): string[] {
  */
 async function confinedPath(ctx: ToolContext, p: string): Promise<string> {
   return (await resolveInside(ctx.projectRoot, p)).absolute;
+}
+
+// ── git's own data ────────────────────────────────────────────────────────────
+
+/**
+ * Whether `p` has a `.git` segment at any depth. Compared without case, because a case-insensitive
+ * filesystem (macOS by default) opens `.GIT` as `.git`.
+ */
+export function namesGitDir(p: string): boolean {
+  return p.split(/[\\/]+/).some((segment) => segment.toLowerCase() === '.git');
+}
+
+/**
+ * The refusal every write or delete tool gives for a path into `.git`; `why` says how it got there.
+ * A `PathConfinementError`, which the gate records and reports as a `Deny` rather than letting it
+ * end the node.
+ */
+export function gitDirRefusal(tool: string, p: string, why: string): PathConfinementError {
+  return new PathConfinementError(
+    `${tool} refuses ${JSON.stringify(p)}: ${why}. The run's tools never write or delete git's own ` +
+    `data, because the worktree's .git is what keeps git — and every git tool — on the run's branch ` +
+    `rather than on your repository.`,
+    p,
+    why,
+  );
+}
+
+/**
+ * Refuses a path naming `.git`, before policy: a write or delete tool calls this from
+ * `declaredPaths`, which the gate evaluates before any rule, so no rule set — the empty one included —
+ * and no approval can let one through. Deleting a worktree's `.git` file makes git find the user's
+ * repository above it; rewriting it to `gitdir: <repo>/.git` points every git call at the user's branch.
+ */
+export function refuseGitDirPaths(tool: string, paths: readonly string[]): void {
+  for (const p of paths) {
+    if (namesGitDir(p)) throw gitDirRefusal(tool, p, 'the path names git\'s own data (.git)');
+  }
+}
+
+/**
+ * The same refusal on the resolved path, for a write or delete about to run: a link inside the root
+ * that leads into `.git` passes the check on the spelling and not this one. The root itself is
+ * refused too, since it holds `.git`.
+ */
+async function writablePath(ctx: ToolContext, tool: string, p: string): Promise<string> {
+  refuseGitDirPaths(tool, [p]);
+  const confined = await resolveInside(ctx.projectRoot, p);
+  if (confined.relative === '') throw gitDirRefusal(tool, p, 'it is the project root, which holds git\'s own data (.git)');
+  if (namesGitDir(confined.relative)) {
+    throw gitDirRefusal(tool, p, `it resolves to ${JSON.stringify(confined.relative)}, which is git's own data (.git)`);
+  }
+  return confined.absolute;
 }
 
 // ── fs.read ───────────────────────────────────────────────────────────────────
@@ -67,11 +119,15 @@ export class FsWriteTool extends BaseTool<WriteInput> {
   readonly description = 'Write text content to a file, overwriting if it exists.';
   readonly permissionLevel = 'write' as const;
 
-  declaredPaths(input: WriteInput): string[] { return onePath(input); }
+  declaredPaths(input: WriteInput): string[] {
+    const paths = onePath(input);
+    refuseGitDirPaths(this.name, paths);
+    return paths;
+  }
 
   async execute(input: WriteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const abs = await confinedPath(ctx, input.path);
+    const abs = await writablePath(ctx, this.name, input.path);
     if (input.createDirs) await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, input.content, 'utf8');
     return this.ok(`Wrote ${input.content.length} bytes to ${input.path}`, performance.now() - t);
@@ -88,11 +144,15 @@ export class FsDeleteTool extends BaseTool<DeleteInput> {
   readonly description = 'Delete a file or directory.';
   readonly permissionLevel = 'dangerous' as const;
 
-  declaredPaths(input: DeleteInput): string[] { return onePath(input); }
+  declaredPaths(input: DeleteInput): string[] {
+    const paths = onePath(input);
+    refuseGitDirPaths(this.name, paths);
+    return paths;
+  }
 
   async execute(input: DeleteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const abs = await confinedPath(ctx, input.path);
+    const abs = await writablePath(ctx, this.name, input.path);
     await fs.rm(abs, { recursive: input.recursive ?? false });
     return this.ok(`Deleted ${input.path}`, performance.now() - t);
   }

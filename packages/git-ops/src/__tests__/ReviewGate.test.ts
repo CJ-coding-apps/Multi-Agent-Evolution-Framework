@@ -1,120 +1,192 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { CliAdapter, AdapterInvokeOptions, AdapterInvokeResult } from '@maf/types';
-import { makeRunId, makeTaskId } from '@maf/types';
+import crypto from 'node:crypto';
+import { makeNodeId, makeRunId, GateRefused, ReviewRefused, TransportError, VerdictError } from '@maf/types';
 import { ReviewGate } from '../ReviewGate.js';
-import type { WorktreeManager } from '../WorktreeManager.js';
+import type { ReviewDecision, ReviewRequest, ReviewSubject, Reviewer } from '../ReviewGate.js';
 
-const RUN  = makeRunId('r1');
-const TASK = makeTaskId('t1');
+// ORACLE: WP-2.3 — the human review gate takes the diff itself, and only an approval from a
+// named reviewer is an approval. A denial, silence past the timeout, a reviewer that fails and an
+// answer that is not a decision are all non-approvals, and a required gate turns each into a
+// ReviewRefused verdict. The gate this replaces read the diff itself and approved when it could
+// not (0.2.x swallowed a failed harvest as "No changes to review").
 
-function fakeAdapter(output: string, capture?: { opts?: AdapterInvokeOptions }): CliAdapter {
-  return {
-    name: 'claude',
-    capabilities: () => ({
-      supportsStreaming: false, supportsToolCalling: false, inProcessLoop: false,
-      supportsWorktrees: false, maxConcurrentTasks: 1, nativePlugins: [],
-    }),
-    isAvailable: async () => true,
-    invoke: async (opts: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
-      if (capture) capture.opts = opts;
-      return { success: true, output, toolCallLog: [], exitCode: 0, duration: 1 };
-    },
-    stream: async function* () { yield output; },
+const DIFF = 'diff --git a/hello.txt b/hello.txt\n-hello\n+hello, changed\n';
+const BASE = 'a'.repeat(40);
+
+const SUBJECT: ReviewSubject = {
+  runId: makeRunId('run-review'), nodeId: makeNodeId('c1'), role: 'coder', baseCommit: BASE, diff: DIFF,
+};
+
+/** A reviewer that answers `decision` and keeps every request it was asked. */
+function answering(decision: unknown, asked: ReviewRequest[] = []): Reviewer {
+  return async (request) => {
+    asked.push(request);
+    return decision as ReviewDecision;
   };
 }
 
-const worktreesWithDiff = (diff: string): WorktreeManager =>
-  ({ harvest: async () => diff } as unknown as WorktreeManager);
+const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
-const worktreesThrowing = (): WorktreeManager =>
-  ({ harvest: async () => { throw new Error('no worktree'); } } as unknown as WorktreeManager);
+test('an approval from a named reviewer is recorded against the whole diff, its hash and its base', async () => {
+  const asked: ReviewRequest[] = [];
+  // The default timeout is ten minutes: if the gate left its timer running, this file would
+  // hold the test process open that long.
+  const gate = new ReviewGate({ reviewer: answering({ verdict: 'Approve', reviewer: 'alice', comment: 'fine' }, asked) });
+  const outcome = await gate.review(SUBJECT);
 
-const gate = (adapter: CliAdapter) =>
-  new ReviewGate({ adapter, projectRoot: '/tmp' });
+  assert.equal(asked.length, 1);
+  const request = asked[0];
+  assert.ok(request);
+  assert.equal(request.diff, DIFF, 'the reviewer sees the whole diff');
+  assert.equal(request.diffHash, sha256(DIFF));
+  assert.equal(request.baseCommit, BASE);
+  assert.equal(request.nodeId, SUBJECT.nodeId);
+  assert.equal(request.required, false, 'advisory by default');
+  assert.equal(request.expiresAt.getTime() - request.requestedAt.getTime(), 10 * 60_000);
 
-test('review() auto-approves when there is no diff to review', async () => {
-  const g = gate(fakeAdapter('SHOULD NOT BE CALLED'));
-  const res = await g.review(TASK, RUN, worktreesThrowing());
-  assert.equal(res.approved, true);
-  assert.match(res.reasoning, /No changes/);
-  assert.deepEqual(res.suggestions, []);
+  assert.equal(outcome.decision.status, 'Approved');
+  assert.equal(outcome.decision.reviewer, 'alice');
+  assert.equal(outcome.decision.comment, 'fine');
+  assert.equal(outcome.decision.requestId, request.id);
+  assert.equal(outcome.refusal, undefined);
+
+  const att = outcome.attestation;
+  assert.equal(att.requestId, request.id);
+  assert.equal(att.diffHash, sha256(DIFF));
+  assert.equal(att.commitHash, BASE);
+  assert.deepEqual(att.decision, outcome.decision);
+  const stmt = JSON.parse(att.intotoStmt) as {
+    _type: string; subject: Array<{ digest: { sha256: string } }>;
+    predicate: { status: string; reviewer: string; requestId: string; required: boolean };
+  };
+  assert.equal(stmt._type, 'https://in-toto.io/Statement/v0.1');
+  assert.equal(stmt.subject[0]?.digest.sha256, sha256(DIFF), 'the statement names the diff it decided on');
+  assert.equal(stmt.predicate.status, 'Approved');
+  assert.equal(stmt.predicate.reviewer, 'alice');
+  assert.equal(stmt.predicate.requestId, request.id);
 });
 
-test('review() parses an APPROVED verdict with reasoning and numbered suggestions', async () => {
-  const output = [
-    'APPROVED',
-    'The change is small and well-tested.',
-    'It follows existing conventions.',
-    '1. Consider extracting the helper.',
-    '2. Add a doc comment.',
-  ].join('\n');
-  const capture: { opts?: AdapterInvokeOptions } = {};
-  const g = gate(fakeAdapter(output, capture));
-  const res = await g.review(TASK, RUN, worktreesWithDiff('diff --git a/x b/x\n+new line\n'));
-
-  assert.equal(res.approved, true);
-  assert.match(res.reasoning, /small and well-tested/);
-  assert.match(res.reasoning, /existing conventions/);
-  assert.deepEqual(res.suggestions, ['Consider extracting the helper.', 'Add a doc comment.']);
-  // The diff was actually sent to the adapter
-  assert.match(capture.opts?.prompt ?? '', /\+new line/);
-  assert.ok((capture.opts?.systemPrompt ?? '').length > 0, 'system prompt should be set');
-});
-
-test('review() parses a REJECTED verdict', async () => {
-  const g = gate(fakeAdapter('REJECTED\nThe diff deletes the test suite.'));
-  const res = await g.review(TASK, RUN, worktreesWithDiff('diff'));
-  assert.equal(res.approved, false);
-  assert.match(res.reasoning, /deletes the test suite/);
-});
-
-test('review() treats a verdict containing both words as rejection (fail closed)', async () => {
-  const g = gate(fakeAdapter('REJECTED (not APPROVED)\nProblems found.'));
-  const res = await g.review(TASK, RUN, worktreesWithDiff('diff'));
-  assert.equal(res.approved, false);
-});
-
-test('review() does not approve when the verdict line is missing', async () => {
-  const g = gate(fakeAdapter('Looks fine to me I guess'));
-  const res = await g.review(TASK, RUN, worktreesWithDiff('diff'));
-  assert.equal(res.approved, false);
-});
-
-test('review() collects bullet-style suggestions and stops reasoning at the list', async () => {
-  const output = [
-    'APPROVED',
-    'Good work overall.',
-    '- tighten the regex',
-    '* rename the variable',
-    'trailing text after list is treated as reasoning no longer',
-  ].join('\n');
-  const g = gate(fakeAdapter(output));
-  const res = await g.review(TASK, RUN, worktreesWithDiff('diff'));
-  assert.equal(res.approved, true);
-  assert.equal(res.reasoning, 'Good work overall.');
-  assert.ok(res.suggestions.includes('tighten the regex'));
-  assert.ok(res.suggestions.includes('rename the variable'));
-});
-
-test('review() truncates very large diffs before sending to the adapter', async () => {
-  const capture: { opts?: AdapterInvokeOptions } = {};
-  const g = gate(fakeAdapter('APPROVED\nok', capture));
-  const bigDiff = 'x'.repeat(50_000);
-  await g.review(TASK, RUN, worktreesWithDiff(bigDiff));
-  const prompt = capture.opts?.prompt ?? '';
-  assert.ok(prompt.length < 10_000, `prompt length ${prompt.length} should be bounded`);
-});
-
-test('review() honors a custom review prompt and timeout', async () => {
-  const capture: { opts?: AdapterInvokeOptions } = {};
-  const g = new ReviewGate({
-    adapter: fakeAdapter('APPROVED\nok', capture),
-    projectRoot: '/tmp',
-    reviewPrompt: 'CUSTOM REVIEWER RULES',
-    timeoutMs: 5_000,
+test('required: a denial is a ReviewRefused verdict naming the reviewer and the reason', async () => {
+  const gate = new ReviewGate({
+    reviewer: answering({ verdict: 'Deny', reviewer: 'bob', comment: 'deletes the tests' }), required: true,
   });
-  await g.review(TASK, RUN, worktreesWithDiff('diff'));
-  assert.equal(capture.opts?.systemPrompt, 'CUSTOM REVIEWER RULES');
-  assert.equal(capture.opts?.timeoutMs, 5_000);
+  const outcome = await gate.review(SUBJECT);
+  assert.equal(outcome.decision.status, 'Rejected');
+  const refusal = outcome.refusal;
+  assert.ok(refusal instanceof ReviewRefused, 'a required denial carries the refusal');
+  // A verdict, never a transport failure: the scheduler must not retry it (D-06), and the
+  // dispatcher must not review the diff again on the way out of a failing backend.
+  assert.ok(refusal instanceof GateRefused);
+  assert.ok(refusal instanceof VerdictError);
+  assert.ok(!(refusal instanceof TransportError));
+  assert.equal(refusal.requestId, outcome.request.id);
+  assert.deepEqual(refusal.findings, []);
+  assert.match(refusal.message, /node c1: bob denied it \(deletes the tests\)\. The review gate is required/);
+});
+
+test('advisory: a denial is recorded and refuses nothing', async () => {
+  const gate = new ReviewGate({ reviewer: answering({ verdict: 'Deny', reviewer: 'bob' }) });
+  const outcome = await gate.review(SUBJECT);
+  assert.equal(outcome.decision.status, 'Rejected');
+  assert.equal(outcome.attestation.decision.status, 'Rejected', 'the denial is in the record');
+  assert.equal(outcome.refusal, undefined, 'and the node is not failed for it');
+});
+
+test('required: a reviewer that never answers times out, the request is withdrawn, and the change is refused', async () => {
+  let signal: AbortSignal | undefined;
+  const gate = new ReviewGate({
+    reviewer: (_request, s) => { signal = s; return new Promise<ReviewDecision>(() => {}); },
+    required: true,
+    timeoutMs: 20,
+  });
+  const outcome = await gate.review(SUBJECT);
+  assert.equal(outcome.decision.status, 'TimedOut');
+  assert.equal(outcome.decision.reviewer, '(no answer)');
+  assert.match(outcome.decision.comment ?? '', /No decision arrived within 20 ms/);
+  assert.equal(signal?.aborted, true, 'the reviewer is told the gate stopped waiting');
+  assert.ok(outcome.refusal instanceof ReviewRefused);
+  assert.match(outcome.refusal.message, /no decision arrived within 20 ms/);
+});
+
+test('an approval that arrives after the timeout is ignored, and a late failure is not a crash', async () => {
+  const late = (settle: (resolve: (d: ReviewDecision) => void, reject: (e: Error) => void) => void): Reviewer =>
+    () => new Promise<ReviewDecision>((resolve, reject) => { setTimeout(() => settle(resolve, reject), 60); });
+  const approvesLate = new ReviewGate({
+    reviewer: late((resolve) => resolve({ verdict: 'Approve', reviewer: 'alice' })), required: true, timeoutMs: 20,
+  });
+  const failsLate = new ReviewGate({
+    reviewer: late((_resolve, reject) => reject(new Error('tty closed'))), required: true, timeoutMs: 20,
+  });
+  const [a, b] = await Promise.all([approvesLate.review(SUBJECT), failsLate.review(SUBJECT)]);
+  assert.equal(a.decision.status, 'TimedOut');
+  assert.equal(b.decision.status, 'TimedOut');
+  // Let both late answers land: an unhandled rejection here would fail this test file.
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(a.decision.status, 'TimedOut', 'the decision of record does not change after the fact');
+});
+
+test('a reviewer that fails before deciding is a denial, never an approval and never a crash', async () => {
+  const failures: Reviewer[] = [
+    async () => { throw new Error('the terminal went away'); },
+    () => { throw new Error('the terminal went away'); },
+  ];
+  for (const reviewer of failures) {
+    const required = await new ReviewGate({ reviewer, required: true }).review(SUBJECT);
+    assert.equal(required.decision.status, 'Rejected');
+    assert.match(required.decision.comment ?? '', /failed before deciding \(the terminal went away\)/);
+    assert.ok(required.refusal instanceof ReviewRefused);
+
+    const advisory = await new ReviewGate({ reviewer }).review(SUBJECT);
+    assert.equal(advisory.decision.status, 'Rejected');
+    assert.equal(advisory.refusal, undefined, 'advisory: recorded, and the node goes on');
+  }
+});
+
+test('an answer that is not a decision is a denial', async () => {
+  const answers: unknown[] = [
+    { verdict: 'approve', reviewer: 'alice' },       // misspelt verdict
+    { verdict: 'Approved', reviewer: 'alice' },      // an ApprovalStatus, not a verdict
+    { verdict: 'Approve' },                          // nobody to name
+    { verdict: 'Approve', reviewer: '   ' },
+    { verdict: 'Approve', reviewer: 42 },
+    'Approve',
+    true,
+    null,
+    undefined,
+  ];
+  for (const answer of answers) {
+    const outcome = await new ReviewGate({ reviewer: answering(answer), required: true }).review(SUBJECT);
+    assert.equal(outcome.decision.status, 'Rejected', `${JSON.stringify(answer)} must not approve`);
+    assert.match(outcome.decision.comment ?? '', /not a decision/);
+    assert.ok(outcome.refusal instanceof ReviewRefused);
+  }
+});
+
+test('an empty diff is an error, never an approval, and nobody is asked', async () => {
+  const asked: ReviewRequest[] = [];
+  const gate = new ReviewGate({ reviewer: answering({ verdict: 'Approve', reviewer: 'alice' }, asked) });
+  for (const diff of ['', ' \n\t']) {
+    await assert.rejects(gate.review({ ...SUBJECT, diff }), /handed an empty diff for node c1/);
+  }
+  assert.equal(asked.length, 0);
+});
+
+test('every request gets its own id', async () => {
+  const asked: ReviewRequest[] = [];
+  const gate = new ReviewGate({ reviewer: answering({ verdict: 'Approve', reviewer: 'alice' }, asked) });
+  await gate.review(SUBJECT);
+  await gate.review(SUBJECT);
+  assert.equal(asked.length, 2);
+  assert.notEqual(asked[0]?.id, asked[1]?.id);
+});
+
+test('a timeout setTimeout cannot honour is refused at construction', () => {
+  const reviewer = answering({ verdict: 'Approve', reviewer: 'alice' });
+  // NaN and anything past 2^31 - 1 make setTimeout fire at once, which would deny every review.
+  for (const timeoutMs of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31]) {
+    assert.throws(() => new ReviewGate({ reviewer, timeoutMs }), /timeoutMs must be a whole number/);
+  }
+  assert.equal(new ReviewGate({ reviewer, timeoutMs: 2 ** 31 - 1 }).required, false);
+  assert.equal(new ReviewGate({ reviewer, required: true }).required, true);
 });

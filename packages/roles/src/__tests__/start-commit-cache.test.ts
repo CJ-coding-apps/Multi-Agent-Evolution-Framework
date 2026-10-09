@@ -111,6 +111,9 @@ async function makeFixture(): Promise<Fixture> {
     sessionId: 's1',
     runId: makeRunId('run-baseline'),
     harness: { processorBundles: [] } as unknown as HarnessConfig,
+    // A cli-tier coder, which needs the run's consent to be ungoverned (D-01).
+    allowUngoverned: true,
+    stderr: { write: () => true },
   });
 
   return {

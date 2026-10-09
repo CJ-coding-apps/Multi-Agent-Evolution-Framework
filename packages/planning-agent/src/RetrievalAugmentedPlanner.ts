@@ -1,9 +1,11 @@
 import crypto from 'node:crypto';
 import type {
   Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
-  GraphQueryRunner, GraphRow,
+  GraphQueryRunner,
 } from '@maf/types';
 import { makeNodeId, DEFAULT_RETRY_POLICY } from '@maf/types';
+import { recallFailures } from '@maf/memory-graph';
+import type { RecalledFailure } from '@maf/memory-graph';
 import type { LcmEngine } from '@maf/lcm';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
 
@@ -73,23 +75,19 @@ export class RetrievalAugmentedPlanner {
   }
 
   private async getFailureContext(title: string): Promise<string> {
-    const keywords = title.split(' ').slice(0, 3).join(' ');
     // Recall is a bonus, never a precondition. The tolerance is written here rather than implied
     // by a query method that answered every failure with `[]` — that made "the graph is down" and
     // "we have no history" the same input to the prompt.
-    let rows: GraphRow[] = [];
+    let failures: RecalledFailure[] = [];
     try {
-      rows = await this.config.graph.run({
-        cypher: `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
-       WHERE t.label CONTAINS $kw
-       RETURN t.label AS task, f.properties AS failure LIMIT 5`,
-        params: { kw: keywords },
-      });
+      failures = await recallFailures(this.config.graph, { title, limit: 5 });
     } catch { return ''; }
 
-    if (rows.length === 0) return '';
+    if (failures.length === 0) return '';
 
-    const items = rows.map((r) => `- Task "${String(r['task'] ?? '')}" → ${String(r['failure'] ?? '')}`).join('\n');
+    const items = failures
+      .map((f) => `- Task "${oneLine(f.task)}" (${f.role}) → ${f.reason}: ${oneLine(f.message)}`)
+      .join('\n');
     return `<past-failures>\nThese similar tasks failed previously — avoid repeating these patterns:\n${items}\n</past-failures>`;
   }
 
@@ -137,7 +135,7 @@ export class RetrievalAugmentedPlanner {
         timeoutMs:    300_000,
         inputs:       {},
         outputs:      {},
-        metadata:     { taskDescription, planText },
+        metadata:     { taskDescription, planText, ...runTitleOf(task) },
       }]]),
       edges:  [],
       config: DEFAULT_DAG_CONFIG,
@@ -173,7 +171,7 @@ function specToDag(
       timeoutMs:    n.timeoutMs ?? 300_000,
       inputs:       {},
       outputs:      {},
-      metadata:     { taskDescription: n.description ?? task?.description ?? task?.title ?? n.label },
+      metadata:     { taskDescription: n.description ?? task?.description ?? task?.title ?? n.label, ...runTitleOf(task) },
     });
   }
   const edges: DagEdge[] = (spec.edges ?? []).map((e) => ({
@@ -208,6 +206,23 @@ function resolveRole(
     );
   }
   return resolved.value;
+}
+
+/**
+ * The run's title, carried on every node it plans (D-16). A node's `taskDescription` is its own
+ * step; recall matches the next run's title, so a failure must remember the title it was planned for.
+ */
+function runTitleOf(task: TaskDescription | undefined): { runTitle?: string } {
+  return task === undefined ? {} : { runTitle: task.title };
+}
+
+/**
+ * A recalled task or error, as one prompt line. Both can be long (a full node instruction, an
+ * output tail), and the block is a reminder, not a transcript.
+ */
+function oneLine(text: string, max = 200): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
 
 const DEFAULT_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;

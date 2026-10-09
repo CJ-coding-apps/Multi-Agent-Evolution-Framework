@@ -5,8 +5,8 @@ import type { Command } from 'commander';
 import { makeRunId } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
-import { GoldenRunner } from '@maf/eval-harness';
-import type { GoldenTask } from '@maf/eval-harness';
+import { GoldenRunner, describeJudge, makeLlmJudge } from '@maf/eval-harness';
+import type { GoldenSuiteResult, GoldenTask } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
 import { evolve } from '@maf/evolver';
 import { createDefaultRegistry } from '@maf/tools';
@@ -14,25 +14,37 @@ import { createDefaultProcessorRegistry } from '@maf/processors';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
+import { resolveGoldensHarness } from './goldens.js';
+
+/**
+ * Evolve's smoke check: one attempt of the task it names. It ran the whole corpus and judged
+ * `tasks[0]`, so a candidate was accepted or refused on whichever task happened to be first.
+ */
+export async function smokeCheck(runner: { run(only?: readonly string[]): Promise<GoldenSuiteResult> }, taskId: string): Promise<void> {
+  const res = await runner.run([taskId]);
+  const error = res.tasks.find((t) => t.taskId === taskId)?.attempts[0]?.error;
+  if (error) throw new Error(error);
+}
 
 interface EvolveCliOpts {
   adapter: string; model?: string; dir: string; corpus: string; harness?: string;
-  rounds: string; patience: string; policy: string; approveSensitive: boolean;
+  rounds: string; patience: string; policy: string; approveSensitive: boolean; allowUngoverned?: boolean;
 }
 
 export function registerEvolveCommand(program: Command): void {
   program
     .command('evolve')
-    .description('AEGIS-lite harness evolution over the golden corpus (offline; never in the serving path)')
+    .description('AEGIS-lite harness evolution over the golden corpus (experimental; drives a live adapter, claude by default; never in the serving path)')
     .option('-a, --adapter <name>', 'Meta-agent adapter', 'claude')
     .option('-m, --model <model>', 'Meta-agent model')
     .option('-d, --dir <path>', 'Working directory', process.cwd())
     .option('--corpus <path>', 'Golden corpus root', '.maf/goldens')
-    .option('--harness <ref>', 'Starting harness (default: current)')
+    .option('--harness <ref>', 'Starting harness id/sha/file (default: current, else the committed default)')
     .option('--rounds <n>', 'Max evolution rounds', '10')
     .option('--patience <n>', 'Consecutive no-ship rounds before stopping', '3')
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
     .option('--approve-sensitive', 'Pre-approve edits to safety-adjacent roles (security/reviewer)', false)
+    .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .action(async (opts: EvolveCliOpts) => {
       const cwd = path.resolve(opts.dir);
       const mafDir = path.join(cwd, '.maf');
@@ -40,13 +52,15 @@ export function registerEvolveCommand(program: Command): void {
       const runId = makeRunId(crypto.randomUUID());
 
       const store = new HarnessStore(mafDir);
-      const base = await store.load(opts.harness ?? 'current');
+      // The harness `goldens run` would measure, so a fresh clone evolves from the one it evaluates.
+      const { harness: base } = await resolveGoldensHarness(mafDir, opts.harness);
       console.log(`[maf] evolve ${runId} | base: ${base.id} (${shortSha(base.sha)}) | rounds=${opts.rounds} patience=${opts.patience}`);
 
       const adapter = await resolveAdapter(opts.adapter, createAdapterRegistry());
       const stack = await buildRunStack({
         cwd, mafDir, policyPath: path.resolve(cwd, opts.policy), adapter, runId,
-        harnessSha: base.sha, ...(opts.model ? { model: opts.model } : {}),
+        harnessSha: base.sha, headless: true, ...(opts.model ? { model: opts.model } : {}),
+        ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
       });
 
       const corpus: GoldenTask[] = JSON.parse(await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'));
@@ -75,24 +89,24 @@ export function registerEvolveCommand(program: Command): void {
         return (['none', 'low', 'medium', 'high', 'critical'] as const)[worst] ?? 'critical';
       };
 
+      const agent = { adapter: adapter.name, ...(opts.model ? { model: opts.model } : {}) };
       const runnerFor = (harness: HarnessConfig, attempts: number) =>
         new GoldenRunner({
           corpusRoot, harnessSha: harness.sha, harnessId: harness.id,
           attempts, temperature: 0,
           dispatch: (task, workDir, { timeoutMs, temperature }) =>
             stack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature),
-          llmJudge: (rubric, subject) => stack.judge(rubric, subject),
+          ...agent,
+          llmJudge: {
+            verdict: makeLlmJudge({ adapter, ...(opts.model ? { model: opts.model } : {}) }, cwd),
+            disclosure: describeJudge(agent, agent),
+          },
           securityScore,
         });
 
       const runGoldensFor = (harness: HarnessConfig) => runnerFor(harness, 2).run();
 
-      const runSmoke = async (harness: HarnessConfig, taskId: string) => {
-        const task = corpus.find((t) => t.id === taskId);
-        if (!task) throw new Error(`smoke target ${taskId} not in corpus`);
-        const res = await runnerFor(harness, 1).run();
-        if (res.tasks[0]?.attempts[0]?.error) throw new Error(res.tasks[0].attempts[0].error);
-      };
+      const runSmoke = (harness: HarnessConfig, taskId: string) => smokeCheck(runnerFor(harness, 1), taskId);
 
       // Static registry membership = the allowlist (§10.2; registry-driven, not hardcoded here)
       const processorNames = new Set(createDefaultProcessorRegistry().names());

@@ -112,6 +112,9 @@ async function makeFixture(opts: {
     sessionId: 's1',
     runId: makeRunId('run-gates'),
     harness: { processorBundles: [] } as unknown as HarnessConfig,
+    // These gates are the cli tier's; a writer reaches it only with the run's consent (D-01).
+    allowUngoverned: true,
+    stderr: { write: () => true },
     ...(opts.securityGate ? { securityGate: opts.securityGate } : {}),
   };
 

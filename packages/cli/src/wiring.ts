@@ -8,14 +8,18 @@ import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor } from '@maf/attestation';
+import { createApprovalGate } from '@maf/approval-gate';
 import { PolicyLoader } from '@maf/policy-engine';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { GraphAwareInjector } from '@maf/prompt-injector';
 import { TranscriptLogger } from '@maf/transcript';
 import { createDefaultRegistry } from '@maf/tools';
-import { RoleDispatcher, RoleRegistry, roleSetFromHarness } from '@maf/roles';
-import type { HarnessConfig } from '@maf/harness-config';
+import type { ToolRegistry } from '@maf/tools';
+import { RoleDispatcher, RoleRegistry, harnessRoleSetFromRegistry, roleSetFromHarness } from '@maf/roles';
+import { LEGACY_DEFAULT_ID, resolveHarnessRef } from '@maf/harness-config';
+import type { HarnessConfig, HarnessStore, ResolvedHarness } from '@maf/harness-config';
 import type { TaskDispatcher } from '@maf/eval-harness';
+import { importHarness, locateStoredHarness } from './commands/harness.js';
 
 /**
  * Shared CLI wiring for run/goldens/evolve commands: one component stack per
@@ -26,28 +30,6 @@ import type { TaskDispatcher } from '@maf/eval-harness';
 export const SECURITY_REVIEW_FALLBACK_PROMPT = `You are a security auditor. Review the supplied diff for vulnerabilities. Respond with a strict JSON block:
 { "findings": [ { "severity": "critical|high|medium|low|info", "category": "t", "file": "f", "line": 0, "rationale": "r", "remediation": "x" } ], "summary": "s", "passed": true }`;
 
-export const JUDGE_SYSTEM_PROMPT = `You are a strict evaluation judge. You are given a RUBRIC and a SUBJECT (an agent's output).
-Decide whether the subject satisfies the rubric. Respond with ONLY a fenced JSON block:
-\`\`\`json
-{ "passed": true, "rationale": "one concise sentence" }
-\`\`\`
-Be conservative: if the subject does not clearly meet the rubric, "passed" is false.`;
-
-/** Extract {passed, rationale} from a judge model response (fenced JSON or bare). */
-export function parseJudgeVerdict(output: string): { passed: boolean; rationale: string } {
-  const m = /```(?:json)?\s*\n([\s\S]*?)\n```/.exec(output);
-  const candidate = m ? m[1]! : output.trim();
-  try {
-    const parsed = JSON.parse(candidate) as { passed?: unknown; rationale?: unknown };
-    return {
-      passed: parsed.passed === true,
-      rationale: typeof parsed.rationale === 'string' ? parsed.rationale : '',
-    };
-  } catch {
-    return { passed: false, rationale: 'unparseable judge response — fail closed' };
-  }
-}
-
 export interface RunStack {
   adapter: CliAdapter;
   graph: MemoryGraph;
@@ -56,8 +38,6 @@ export interface RunStack {
   securityPrompt: string;
   rolesFor(harness: HarnessConfig): RoleRegistry;
   dispatchTask(harness: HarnessConfig, role: string, prompt: string, workDir: string, timeoutMs: number, temperature?: number): Promise<string>;
-  /** LLM judge for llm-judge verifiers (M4): rubric + subject → pass/fail. */
-  judge(rubric: string, subject: string): Promise<{ passed: boolean; rationale: string }>;
   close(): void;
 }
 
@@ -69,10 +49,19 @@ export async function buildRunStack(cfg: {
   model?: string;
   runId: RunId;
   harnessSha: string;
+  /** `--allow-ungoverned`: a writer role may run on the cli tier (D-01). */
+  allowUngoverned?: boolean;
+  /** No one is asked anything: an escalated tool call is refused (D-02). goldens and evolve run so. */
+  headless?: boolean;
 }): Promise<RunStack> {
   const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
   const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
   const policy = await PolicyLoader.loadEngine(cfg.policyPath, graph);
+  // One gate for every task of the stack, outside dispatchTask, so request ids are unique across them.
+  const approvalGate = createApprovalGate({
+    recorder: attestor, mafDir: cfg.mafDir,
+    env: cfg.headless === true ? { ...process.env, MAF_HEADLESS: '1' } : process.env,
+  });
   const baseTools = createDefaultRegistry();
   const board = new BlackboardStore();
   const lcm = new LcmEngine({
@@ -114,15 +103,19 @@ export async function buildRunStack(cfg: {
         adapter: cfg.adapter, projectRoot: workDir, securityPrompt: stack.securityPrompt,
         ...(cfg.model ? { model: cfg.model } : {}),
       });
+      // Bound to this task's directory so the git tools learn its repository root before the agent
+      // acts (WP-2.17); the shared `baseTools` above only validates role allowlists.
+      const taskTools = createDefaultRegistry({ projectRoot: workDir });
       const dispatcher = new RoleDispatcher({
-        adapter: cfg.adapter, baseTools, roles, injector, policy,
-        attestor, graph, transcript, lcmBridge, securityGate: gate,
+        adapter: cfg.adapter, baseTools: taskTools, roles, injector, policy,
+        attestor, approvalGate, graph, transcript, lcmBridge, securityGate: gate,
         cwd: workDir, sessionId: cfg.runId, runId: cfg.runId, harness,
+        ...(cfg.allowUngoverned === true ? { allowUngoverned: true } : {}),
         ...(cfg.model ? { modelOverride: cfg.model } : {}),
         ...(temperature !== undefined ? { temperature } : {}),
       });
       const node: DagNode = {
-        id: makeNodeId(`evolve-${taskId}`), label: prompt, agentRole: resolvedRole.value,
+        id: makeNodeId(`task-${taskId}`), label: prompt, agentRole: resolvedRole.value,
         dependencies: [], retryPolicy: { maxAttempts: 1, backoffMs: 0, backoffFactor: 1, jitterMs: 0 },
         timeoutMs, inputs: {}, outputs: {}, metadata: { taskDescription: prompt },
       };
@@ -130,22 +123,46 @@ export async function buildRunStack(cfg: {
       const value = out['output'];
       return value && value.kind === 'string' ? value.value : '';
     },
-    async judge(rubric, subject) {
-      const result = await cfg.adapter.invoke({
-        prompt: `RUBRIC:\n${rubric}\n\nSUBJECT:\n${subject}`,
-        systemPrompt: JUDGE_SYSTEM_PROMPT,
-        workingDir: cfg.cwd, timeoutMs: 120_000, maxOutputBytes: 64 * 1024,
-        temperature: 0,
-        ...(cfg.model ? { model: cfg.model } : {}),
-      });
-      return parseJudgeVerdict(result.output);
-    },
     close() {
       graph.close();
       lcm.close();
     },
   };
   return stack;
+}
+
+/** Refs `resolveHarnessRef` gives a meaning of its own: a plain run, and the roles file as it is now. */
+export const RESOLVER_REFS: ReadonlySet<string> = new Set(['current', 'CURRENT', LEGACY_DEFAULT_ID]);
+
+export interface RunHarnessOptions {
+  store:     HarnessStore;
+  /** `--harness`, or `legacy-default` when only `--roles` was typed; absent for a plain run. */
+  ref?:      string | undefined;
+  /** The legacy roles file a plain run, or `legacy-default`, mints from. */
+  rolesPath: string;
+  mafDir:    string;
+  baseTools: ToolRegistry;
+}
+
+/**
+ * The harness a command dispatches, by the one path `run` takes (WP-2.9, WP-2.7). A stored ref — an
+ * id, a sha or a unique sha prefix — or a committed `default-<sha>.json`, imported into the store on
+ * the way because an attestation can only name a stored harness, is resolved to its full sha; then
+ * `resolveHarnessRef` loads it, else an operator-set CURRENT, else `legacy-default` minted from the
+ * roles file now — never a stale snapshot of it, and never a harness whose prompts live outside its sha.
+ */
+export async function resolveRunHarness(o: RunHarnessOptions): Promise<ResolvedHarness> {
+  let ref = o.ref;
+  if (ref !== undefined && !RESOLVER_REFS.has(ref)) {
+    const found = await locateStoredHarness(o.store, ref);
+    if (found.source !== path.join(o.store.dir, `${found.harness.sha}.yaml`)) await importHarness(o.store, found.source);
+    ref = found.harness.sha;
+  }
+  return resolveHarnessRef({
+    harness: ref,
+    legacyRoleSet: async () => harnessRoleSetFromRegistry(
+      await RoleRegistry.fromYamlOrDefault(o.rolesPath, o.mafDir, o.baseTools)),
+  }, o.store);
 }
 
 /**

@@ -73,7 +73,7 @@ test('invoke keeps a non-zero exit that wrote output as a judged failure without
 test('stream runs through the injected spawnStreaming', async () => {
   const seen: string[] = [];
   async function* spawnStreaming(cmd: string, args: string[]): AsyncGenerator<string> {
-    seen.push(cmd, ...args.slice(-2));
+    seen.push(cmd, ...args.slice(-1));
     yield 'a';
     yield 'b';
   }
@@ -81,5 +81,47 @@ test('stream runs through the injected spawnStreaming', async () => {
   for await (const chunk of new GeminiAdapter({ spawnStreaming }).stream(CALL)) chunks.push(chunk);
 
   assert.deepEqual(chunks, ['a', 'b']);
-  assert.deepEqual(seen, ['gemini', '-p', 'say hi']);
+  assert.deepEqual(seen, ['gemini', '--prompt=say hi']);
+});
+
+// ORACLE (WP-2.1; cli-tier hardening). A spawned `gemini` connected to every MCP server in the
+// user's configuration. Its CLI has no strict switch, only an allowlist, so every spawn passes an
+// allowlist naming a server no configuration defines.
+
+test('invoke spawns gemini with an MCP allowlist that admits no configured server', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  await new GeminiAdapter({ spawn }).invoke({ ...CALL, model: 'gemini-2.5-pro' });
+
+  const args = calls[0]?.args ?? [];
+  const at = args.indexOf('--allowed-mcp-server-names');
+  assert.ok(at >= 0, `the allowlist flag is passed: ${JSON.stringify(args)}`);
+  assert.equal(args[at + 1], 'maf-allows-no-mcp-server', 'one name, which no configuration defines; an empty list is not a documented refusal');
+  assert.deepEqual(args, ['--model', 'gemini-2.5-pro', '--allowed-mcp-server-names', 'maf-allows-no-mcp-server', '--prompt=say hi']);
+});
+
+test('stream spawns gemini with the same MCP allowlist', async () => {
+  const seen: string[][] = [];
+  async function* spawnStreaming(_cmd: string, args: string[]): AsyncGenerator<string> {
+    seen.push([...args]);
+    yield 'a';
+  }
+  for await (const _chunk of new GeminiAdapter({ spawnStreaming }).stream(CALL)) { /* drain */ }
+  assert.deepEqual(seen[0], ['--allowed-mcp-server-names', 'maf-allows-no-mcp-server', '--prompt=say hi']);
+});
+
+// ORACLE (F5 of the 0.3.0 release audit). The prompt was the argument after `-p`. Gemini's yargs gives
+// `-p` `nargs: 1`, which does not take an argument starting with a dash, so a prompt beginning with `-`
+// was parsed as options. Joined as `--prompt=<text>` it is the value whatever it holds: yargs splits
+// `--key=value` at the first `=` and never parses the value. (`-p -- <text>` would leave `-p` empty,
+// and a positional prompt runs interactively in a terminal.) The maintainer checks it on a live `gemini`.
+
+test('a prompt that starts with a dash, or holds = and newlines, is one --prompt= argument', async () => {
+  const hostile = '--yolo -s false\nthen a=b';
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  await new GeminiAdapter({ spawn }).invoke({ ...CALL, prompt: hostile });
+
+  const args = calls[0]?.args ?? [];
+  assert.equal(args.at(-1), `--prompt=${hostile}`);
+  assert.equal(args.includes('-p'), false);
+  assert.equal(args.includes('--yolo'), false, 'no part of the prompt is an argument of its own');
 });

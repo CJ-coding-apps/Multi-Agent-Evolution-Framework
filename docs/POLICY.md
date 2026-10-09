@@ -1,12 +1,12 @@
 # Policy
 
-On the `in-process` tier, every tool call a role makes passes through `executeToolGated` (`@maf/tool-loop`), which asks the policy engine for a verdict before the tool runs. Only `Allow` runs the tool; every other verdict refuses the call. (On the default `cli` tier the backend CLI runs its own tools and no policy applies at all — see [SECURITY.md](SECURITY.md).)
+On the `in-process` tier, every tool call a role makes passes through `executeToolGated` (`@maf/tool-loop`), which asks the policy engine for a verdict before the tool runs. Only `Allow` runs the tool, or an `Escalate` a person approves; every other verdict refuses the call. (On the `cli` tier — where a read-only role runs by default, and a writer only under `--allow-ungoverned` — the backend CLI runs its own tools and no policy applies at all; see [SECURITY.md](SECURITY.md#the-execution-tier-boundary).)
 
 | Verdict         | What happens |
 |-----------------|--------------|
 | `Allow`         | The tool runs, and the call is recorded in the attestation bundle. |
 | `Deny`          | The tool does not run. The refusal is recorded in the bundle with the id of the rule that denied (a confinement `Deny`, which no rule decides, has none), and the model is told `policy Deny: <reason>`. |
-| `Escalate`      | Refused in 0.2.1, exactly as `Deny` is: the tool does not run, the refusal is recorded with the rule id, and the model is told the call requires approval. No one is asked; an approval flow is planned for 0.3.0. |
+| `Escalate`      | A person at the terminal is asked about this one call, and it runs only if they approve it. Refused as `Deny` is — with the rule id, and the decision recorded — when they do not, when no one answers in time, when the run is headless, or when the run has no approval gate. See [Escalate: asking a person](#escalate-asking-a-person). |
 | `Indeterminate` | The policy could not be evaluated: a rule's `memoryPattern` query failed, or named a parameter that cannot be bound. Refused like `Deny`, and recorded with the rule id. |
 
 A refused call is thrown inside `executeToolGated` as `PolicyViolationError`; the in-process loop turns that into an error result for the model, and the loop carries on. A call to a tool outside the role's allowlist never reaches the policy engine: the loop answers it with an error before policy, and it is not recorded in the bundle.
@@ -19,7 +19,7 @@ Rules are evaluated in **descending priority** order. The first rule whose predi
 
 - **A missing file** prints one warning line and loads no rules. Path confinement (below) still applies.
 - **A file that exists but cannot be used stops the run**: one that cannot be read, is not valid YAML, or fails validation. The error carries the parse error, or every validation problem at once. An empty or comment-only file is refused; write `rules: []` to run with no rules on purpose.
-- **Validation.** Each rule needs `id` (unique across the file), `priority` (a finite number), `predicate` (a mapping; `{}` matches every call) and `action`; `description` is optional. A `Deny` action needs `reason`, and an `Escalate` action needs `requiresApproval` (`true` or `false`). An unknown field is refused wherever it appears — the document, a rule, a predicate, a `memoryPattern`, an action — because a misspelt `agentRole` would otherwise widen a rule to every role. An empty glob and an empty list are refused too: the engine would read either as "no condition".
+- **Validation.** Each rule needs `id` (unique across the file), `priority` (a finite number), `predicate` (a mapping; `{}` matches every call) and `action`; `description` is optional. A `Deny` action needs `reason`, and an `Escalate` action needs `requiresApproval` (`true` or `false`) — although the engine does not read it: an `Escalate` rule asks for approval whichever it says. An unknown field is refused wherever it appears — the document, a rule, a predicate, a `memoryPattern`, an action — because a misspelt `agentRole` would otherwise widen a rule to every role. An empty glob and an empty list are refused too: the engine would read either as "no condition".
 - **Quote every glob.** YAML reads a bare value starting with `*` as an alias and one starting with `{` as a mapping.
 
 ## Rule shape
@@ -170,7 +170,21 @@ action: { kind: Escalate, requiresApproval: true }
 
 - `Allow` produces an `Allow` verdict and short-circuits further evaluation.
 - `Deny` includes the rule's `reason` in what the model is told, and carries the rule's id. The optional `alternative` is carried on the decision (e.g. "use `patch.apply` instead of `fs.write`").
-- `Escalate` builds an `ApprovalRequest` keyed to `ruleId`, with a 24-hour expiry, and the call is then refused as described at the top of this page.
+- `Escalate` builds an `ApprovalRequest` keyed to `ruleId` (`requiresApproval: false` changes nothing), and the call then waits on the approval gate, as described in [Escalate: asking a person](#escalate-asking-a-person). The request's 24-hour `expiresAt` is not what limits the wait; the gate's own timeout is.
+
+## Escalate: asking a person
+
+`Escalate` is the one refusal a person can lift, and only for the call in front of them ([D-02](DECISIONS.md)). `executeToolGated` hands the run's approval gate (`@maf/approval-gate`) the request, the tool id, the input the tool will run on and the paths it declared. `maf run` builds one gate per run, which asks at the terminal when stdin is one and `MAF_HEADLESS=1` is not set, and is headless otherwise; `maf goldens`, `maf evolve` and `maf inprocess-demo` always build a headless one. A caller of `executeToolGated` that passes no gate gets `Escalate` refused as `Deny` is.
+
+- **On a terminal** (stdin is a TTY), the gate prompts on stderr with the rule id, the tool id, the declared paths, a preview of the input, the request id and the request hash, and waits. The preview shows each input field escaped, up to its first 20 lines or 2,000 characters, whichever is less (a string as its lines, anything else as compact JSON), and counts the bytes it leaves out; past the eighth field, fields are counted rather than shown. Escaping covers control characters, so nothing in the input can redraw the prompt. The hash covers the whole input. Approving is typing the six-character confirmation code printed in that prompt. Any other answer, an empty line or a closed terminal refuses. The code is made for that one request, so a `y` typed ahead, or a code typed twice, approves nothing. One approval prompt is shown at a time.
+- **Headless** (stdin is not a TTY, or `MAF_HEADLESS=1`), no one is asked: the call is refused at once, and the request is written to `.maf/approvals/pending/<id>.json` in the target directory (not the run's worktree) — the request, its hash, the tool id, the declared paths, a timestamp and why, but not the tool's input — for audit. The file is a record, not a queue; approving it later approves nothing.
+- **Timeout.** No answer within 120 seconds of the prompt appearing (the gate's `timeoutMs` option, which `maf run` leaves at its default) refuses the call with status `TimedOut`, and the gate stops reading the terminal. A request waiting behind another prompt is not timed until its own prompt is shown.
+
+A decision is bound to its request. The request hash is sha256 over the canonical JSON (object keys sorted; plain JSON values only) of the tool id, the input, the declared paths and the rule id. The gate refuses a decision carrying another hash, a decision for another request, a request id it has seen before, and an input that changed while the person was deciding. An approval runs the call once: the same call made again is a new request, and is asked about again.
+
+Every decision — approved, refused, timed out, refused headless, or refused by the gate's own checks — is added to the attestation bundle's `approvals` as a `ReviewAttestation`. Its `requestId` is the call's `policyDecision.approvalRequest.id`; `decision.status` is `Approved`, `Rejected` or `TimedOut`; `decision.reviewer` is `terminal:<user>`, `headless` or `maf-approval-gate`; `decision.comment` says why; `diffHash` is the request hash. `commitHash` is all zeros, because an approval binds a tool call, not a commit. An approved call is then recorded in `toolCalls` like any call that ran, with its `Escalate` verdict; a refused one carries `metadata.refused: true` and `metadata.approval`, the decision's status.
+
+GitHub pull-request review is not an approval channel in 0.3.0. The earlier code that read a merged pull request as an approval is removed.
 
 ## Default rules in `.maf/policy.yaml`
 
@@ -181,8 +195,8 @@ The policy shipped in this repository:
 | 1000 | `deny-git-dir` | Deny `fs.write`, `fs.delete`, `patch.apply` and `git.add` on `{**/.git,**/.git/**}` — a `.git` directory or file at any depth — for every role. |
 | 1000 | `deny-maf-dir` | Deny `fs.write`, `fs.delete`, `patch.apply` and `git.add` on `{.maf,.maf/**}` — the project's own MAF state — for every role. |
 | 100 | `deny-env-files` | Deny `fs.write` to `**/.env*`. |
-| 95  | `protect-lock-files` | Escalate (today: refuse) writes/patches to `**/*.lock`. |
-| 90  | `protect-migrations` | Escalate (today: refuse) writes/patches to `**/migrations/**`. |
+| 95  | `protect-lock-files` | Escalate (ask a person) writes/patches to `**/*.lock`. |
+| 90  | `protect-migrations` | Escalate (ask a person) writes/patches to `**/migrations/**`. |
 | 90  | `coder-no-secrets-dir` | Deny `coder` writes to `**/secrets/**`. |
 | 85  | `deny-readonly-roles`  | Deny mutating tools for `reviewer`/`security`. |
 | 81  | `tester-no-ci-config` | Deny `tester` writes/patches/deletes under `{.github,.github/**}`: once globs matched dotfiles, `**/*test*` reached `.github/workflows/test.yml`, which is CI configuration, not a test ([D-30](DECISIONS.md)). |
@@ -214,7 +228,7 @@ Each example is one entry in the file's `rules:` list.
     reason: docs-writer may only modify docs
 ```
 
-**Mark a directory as needing approval** (refused outright until the approval flow ships):
+**Mark a directory as needing approval** (a person is asked on a terminal; a headless run refuses):
 
 ```yaml
 - id: platform-needs-review
@@ -258,8 +272,9 @@ PolicyEngine.evaluate(toolId, input, ctx, declaredPaths)
       → buildDecision(rule.action) → return
   → no rules matched → { verdict: 'Allow' }
   ↓
-verdict !== 'Allow' : attestor.record(refusal) → throw PolicyViolationError
-verdict === 'Allow' : tool.execute → redact secrets → attestor.record(call)
+verdict === 'Escalate', with a gate : approvalGate.decide → approved: run as Allow does
+verdict !== 'Allow', not approved   : attestor.record(refusal) → throw PolicyViolationError
+verdict === 'Allow'                 : tool.execute → redact secrets → attestor.record(call)
 ```
 
-Anything but `Allow` is attested as a refusal (`metadata.refused: true`, with the rule id where a rule decided) and then thrown as `PolicyViolationError`, which the in-process loop reports to the model as an error. An `Allow` verdict lets the tool run; the call is then recorded in the attestation bundle and as a `ToolInvocation` node on the memory graph (via `Attestor.record`), as a refusal is.
+Anything but `Allow`, and an `Escalate` the gate did not approve, is attested as a refusal (`metadata.refused: true`, with the rule id where a rule decided) and then thrown as `PolicyViolationError`, which the in-process loop reports to the model as an error. An `Allow` verdict lets the tool run; the call is then recorded in the attestation bundle and as a `ToolInvocation` node on the memory graph (via `Attestor.record`), as a refusal is.

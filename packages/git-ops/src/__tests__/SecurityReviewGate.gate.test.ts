@@ -54,6 +54,18 @@ test('reviewDiff() sends the diff and the configured security system prompt', as
   assert.equal(capture.opts?.timeoutMs, 120_000);
 });
 
+// ORACLE (F4 of the 0.3.0 release audit): the diff the reviewer reads was written by the agent, and
+// with claude's own tools the reviewer could edit the tree after the review that passed it. The diff
+// review asks for text only; the path review, which tells the reviewer to read the files, keeps them.
+test('reviewDiff() asks the adapter for no native tools; reviewPaths() keeps them', async () => {
+  const capture: { opts?: AdapterInvokeOptions } = {};
+  const g = gate(fakeAdapter(CLEAN_RESULT, capture));
+  await g.reviewDiff('diff --git a/db.ts b/db.ts\n+exec(userInput)\n');
+  assert.equal(capture.opts?.nativeTools, false);
+  await g.reviewPaths(['src/a.ts'], '/repo/root');
+  assert.equal(capture.opts?.nativeTools, undefined, 'the default: the backend keeps its tools');
+});
+
 // ORACLE: D-07 — the gate used to send `diff.slice(0, 16000)` and attest the whole change as
 // reviewed. A diff over the cap is now a refusal, never a slice: no model call, and an error
 // that names the size and the cap so the user knows what to change.

@@ -51,7 +51,7 @@ test('a plain fixture — no repository of its own — still yields a diff the v
   await withPlainCorpus(async (root) => {
     const scored: string[] = [];
     const runner = new GoldenRunner({
-      corpusRoot: root, harnessSha: 'a'.repeat(64), harnessId: 'h-plain',
+      corpusRoot: root, harnessSha: 'a'.repeat(64), harnessId: 'h-plain', adapter: 'stub',
       attempts: 1,
       dispatch: async (_t, workDir) => {
         await writeFile(path.join(workDir, 'done.txt'), 'done', 'utf8');
@@ -72,7 +72,7 @@ test('a plain fixture — no repository of its own — still yields a diff the v
 test('a run whose diff cannot be computed is an error, never an empty diff', async () => {
   await withPlainCorpus(async (root) => {
     const runner = new GoldenRunner({
-      corpusRoot: root, harnessSha: 'b'.repeat(64), harnessId: 'h-norepo',
+      corpusRoot: root, harnessSha: 'b'.repeat(64), harnessId: 'h-norepo', adapter: 'stub',
       attempts: 1,
       dispatch: async (_t, workDir) => {
         // What a coder could do to itself: destroy the baseline it is diffed against.
@@ -95,7 +95,7 @@ test('a coder that commits its own work is still diffed against the baseline', a
     let headBefore = '';
     let headAfter = '';
     const runner = new GoldenRunner({
-      corpusRoot: root, harnessSha: 'c'.repeat(64), harnessId: 'h-commits',
+      corpusRoot: root, harnessSha: 'c'.repeat(64), harnessId: 'h-commits', adapter: 'stub',
       attempts: 1,
       dispatch: async (_t, workDir) => {
         // Claude Code commonly commits what it changes. Diffing against HEAD would see
@@ -158,7 +158,7 @@ test('a hostile host git config cannot reach the golden repo', async () => {
     try {
       let branch = '';
       const runner = new GoldenRunner({
-        corpusRoot: root, harnessSha: 'd'.repeat(64), harnessId: 'h-hostile',
+        corpusRoot: root, harnessSha: 'd'.repeat(64), harnessId: 'h-hostile', adapter: 'stub',
         attempts: 1,
         dispatch: async (_t, workDir) => {
           branch = (await git(workDir, 'rev-parse', '--abbrev-ref', 'HEAD')).stdout.trim();

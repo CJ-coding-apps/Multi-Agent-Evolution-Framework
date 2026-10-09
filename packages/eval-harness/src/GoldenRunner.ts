@@ -4,8 +4,10 @@ import path from 'node:path';
 import { snapshotDiff, runIsolatedGit } from '@maf/git-ops';
 import type { GoldenTask } from './GoldenTask.js';
 import { assertGoldenCorpus } from './GoldenTask.js';
-import { runVerifiers } from './verifiers.js';
+import { checkUnmodified, runVerifiers } from './verifiers.js';
 import type { VerifierContext, VerifierOutcome } from './verifiers.js';
+import { computeCorpusSha } from './corpusSha.js';
+import type { JudgeDisclosure } from './judge.js';
 
 export interface AttemptResult {
   attempt: number;
@@ -26,6 +28,16 @@ export interface GoldenTaskResult {
 export interface GoldenSuiteResult {
   harnessSha: string;
   harnessId: string;
+  // Optional in the type so results written before 0.3.0 still load; the runner always sets them.
+  /** sha256 over the canonical corpus (D-14); results with different shas do not compare. */
+  corpusSha?: string;
+  /** pass@k: attempts per task. */
+  attempts?: number;
+  /** The adapter (and model) under evaluation. */
+  adapter?: string;
+  model?: string;
+  /** Who judged the llm-judge verifiers; absent when no judge was wired (they then fail closed). */
+  judge?: JudgeDisclosure;
   tasks: GoldenTaskResult[];
   /** Task ids that passed. */
   solvedTaskIds: string[];
@@ -51,8 +63,15 @@ export interface GoldenRunnerOptions {
   temperature?: number;
   timeoutMs?: number;
   dispatch: TaskDispatcher;
+  /** The adapter (and model) the dispatcher evaluates, recorded on the result. */
+  adapter: string;
+  model?: string;
   securityScore?: VerifierContext['securityScore'];
-  llmJudge?: VerifierContext['llmJudge'];
+  /** The judge and who it is: a judge cannot be wired without being disclosed (D-14). */
+  llmJudge?: {
+    verdict: NonNullable<VerifierContext['llmJudge']>;
+    disclosure: JudgeDisclosure;
+  };
 }
 
 export class GoldenRunner {
@@ -65,15 +84,27 @@ export class GoldenRunner {
     return parsed;
   }
 
-  async run(): Promise<GoldenSuiteResult> {
+  /** Runs the corpus, or only the tasks named in `only` (each must be in the corpus). */
+  async run(only?: readonly string[]): Promise<GoldenSuiteResult> {
     const corpus = await this.loadCorpus();
+    const corpusSha = await computeCorpusSha(this.opts.corpusRoot, corpus);
+    const missing = (only ?? []).filter((id) => !corpus.some((t) => t.id === id));
+    if (missing.length > 0) {
+      throw new Error(`goldens: task(s) ${missing.join(', ')} are not in the corpus at ${this.opts.corpusRoot}.`);
+    }
     const tasks: GoldenTaskResult[] = [];
     for (const task of corpus) {
+      if (only && !only.includes(task.id)) continue;
       tasks.push(await this.runTask(task));
     }
     return {
       harnessSha: this.opts.harnessSha,
       harnessId: this.opts.harnessId,
+      corpusSha,
+      attempts: this.attempts(),
+      adapter: this.opts.adapter,
+      ...(this.opts.model !== undefined ? { model: this.opts.model } : {}),
+      ...(this.opts.llmJudge ? { judge: this.opts.llmJudge.disclosure } : {}),
       tasks,
       solvedTaskIds: tasks.filter((t) => t.passed).map((t) => t.taskId),
       ranAt: new Date().toISOString(),
@@ -82,7 +113,7 @@ export class GoldenRunner {
 
   private async runTask(task: GoldenTask): Promise<GoldenTaskResult> {
     const attempts: AttemptResult[] = [];
-    const k = this.opts.attempts ?? 2;
+    const k = this.attempts();
     for (let i = 0; i < k; i++) {
       attempts.push(await this.runAttempt(task, i));
     }
@@ -94,11 +125,16 @@ export class GoldenRunner {
     };
   }
 
+  private attempts(): number {
+    return this.opts.attempts ?? 2;
+  }
+
   private async runAttempt(task: GoldenTask, attempt: number): Promise<AttemptResult> {
     const workRoot = await mkdtemp(path.join(tmpdir(), 'maf-golden-'));
     const workDir = path.join(workRoot, 'repo');
+    const fixtureDir = path.join(this.opts.corpusRoot, task.repoFixture);
     try {
-      await cp(path.join(this.opts.corpusRoot, task.repoFixture), workDir, { recursive: true });
+      await cp(fixtureDir, workDir, { recursive: true });
       const baseline = await initBaselineRepo(workDir);
       const output = await this.opts.dispatch(task, workDir, {
         temperature: this.opts.temperature ?? 0,
@@ -107,11 +143,14 @@ export class GoldenRunner {
       // The base is the RECORDED baseline, not HEAD: an agent that commits its own work would
       // diff clean against HEAD, and an empty diff scores every security verifier clean.
       const diff = await snapshotDiff(workDir, baseline);
-      const outcomes = await runVerifiers(task.verifiers, {
+      const protectedFiles = task.mustNotModify && task.mustNotModify.length > 0
+        ? [await checkUnmodified(workDir, fixtureDir, task.mustNotModify)]
+        : [];
+      const outcomes = [...protectedFiles, ...await runVerifiers(task.verifiers, {
         workDir, output, diff, corpusRoot: this.opts.corpusRoot,
         ...(this.opts.securityScore ? { securityScore: this.opts.securityScore } : {}),
-        ...(this.opts.llmJudge ? { llmJudge: this.opts.llmJudge } : {}),
-      });
+        ...(this.opts.llmJudge ? { llmJudge: this.opts.llmJudge.verdict } : {}),
+      })];
       return { attempt, output, outcomes, passed: outcomes.every((o) => o.passed) };
     } catch (err) {
       return {

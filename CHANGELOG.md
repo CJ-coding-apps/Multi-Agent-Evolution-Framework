@@ -9,6 +9,324 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-09
+
+The governed-by-default execution model, and the wiring the 0.2.1 README listed as planned: writer roles
+run in MAF's in-process loop by default, an `Escalate` verdict asks a person, a human review gate, worktree
+isolation, `.maf/config.yaml` and a YAML `roles.yaml`, planner failure recall, offline evaluation, an
+in-toto attestation with `maf attest verify`, and a harness that is the content a run dispatched. Phase 2
+of [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md); D-nn cite [docs/DECISIONS.md](docs/DECISIONS.md). Not in this
+release: the toolchain floor (D-21, WP-2.11), and `allowPartial` set from a DAG spec or by the planner —
+the README's Status table lists both as planned.
+
+### Security
+
+- **Writer roles run governed by default** (D-01). Every role ran on the `cli` tier unless it opted in, and
+  no shipped role did, so no writer's tool call was ever seen by the policy engine, redaction or the
+  attestation. A role that holds a write tool now runs in-process
+  unless its `execution` says `cli`. A writer that would land on the `cli` tier — by that setting, or
+  because the adapter cannot run the loop (`codex`, `gemini`, `ollama`, `openrouter`: only `claude` can) —
+  is refused: `maf run` refuses before planning, naming the roles, and the dispatcher refuses again before
+  the node captures anything or calls a model. `--allow-ungoverned` runs such writers on the `cli` tier and
+  prints an `UNGOVERNED` banner once; the transcript notes each such node. A read-only role still runs on
+  the `cli` tier.
+- **An in-process turn spawns `claude` with its own tools off** (D-33, found by the WP-2.1 verifier). Under
+  D-01 every writer on `claude` ran through `sendTurn`, whose `claude --print` still had Claude Code's
+  built-in tools: within a single turn, before its answer reached MAF, the backend could edit files outside
+  policy and attestation wherever the user's `permissions.allow` let it. A governed turn now passes
+  `--tools ""` beside the MCP isolation below, so the only tools in the loop are MAF's. This needs a Claude
+  Code CLI that has the `--tools` flag. Codex has no known equivalent and keeps `inProcessLoop` off.
+- **`claude` no longer starts the user's MCP servers** (carried from the WP-1.12 fresh-clone proof, where a
+  third-party MCP server's dashboard opened once per spawn). Every `claude` spawn, on either tier, passes
+  `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`. `gemini` gets `--allowed-mcp-server-names`
+  naming a server no configuration defines; that is not verified against a live `gemini`. `codex` has no
+  known flag and gets none.
+- **`Escalate` asks a person; a headless run refuses** (D-02). `Escalate` was refused exactly as `Deny`
+  was, and `@maf/approval-gate` was not used by `maf run`. Now, when stdin is a terminal, the gate prompts
+  on stderr with the rule, the tool, the declared paths, an escaped and bounded preview of the input, the
+  request id and its hash, and the call runs once if the operator types the six-character code made for
+  that request — so a `y` typed ahead, or a code typed twice, approves nothing. With stdin not a terminal,
+  or `MAF_HEADLESS=1`, nobody is asked: the call is refused and recorded at
+  `.maf/approvals/pending/<id>.json`. No answer within 120 seconds of the prompt appearing refuses the
+  call. Each decision is bound to a sha256 of the tool id, input, declared paths and rule id; the gate
+  refuses another hash, another request's decision, a reused request id and an input changed while the
+  person decided, and a provider that answers nothing or a gate that throws is a refusal. Every decision is
+  attested. The code that read a merged GitHub pull request as an approval (`GithubPrReviewer`), which
+  nothing called and nothing bound to the request, is removed.
+- **A human review gate** (D-34). A harness's `reviewGate: { required: true }`, or `--review`, puts each
+  writer change the security gate passed to a reviewer at the terminal; see Added. Its `ReviewGate`
+  replaces one that read the diff itself and answered any error reading it with an empty diff, which it
+  then approved, and whose model-based review saw only the first 8,000 characters. A required review fails
+  closed: with no one to ask, every writer change is refused with `ReviewRefused`.
+- **MAF no longer edits your checkout** (D-03). A run edited the target working tree in place, on its
+  current branch, and `--no-worktree` had no effect. Each run now works in its own worktree and branch and
+  hands its work back as a merge command it does not run; see Added. A run branch that commits MAF's
+  runtime state — which the security gate never reviews — is offered no merge, and the run exits non-zero
+  (D-35).
+- **The agent's `git.*` tools no longer run hooks or the host's git configuration** (WP-2.14, found by the
+  WP-2.10 verifier). They ran git with the host's configuration and the repository's hooks: under a
+  relative `core.hooksPath` such as husky's `.husky`, an agent could `fs.write` a `pre-commit` hook and then
+  call `git.commit`, which ran it outside every gate; the host's global `commit.gpgsign` and identity
+  applied to the agent's commits. Every git command the tools run now pins `core.hooksPath=/dev/null`,
+  an empty `core.fsmonitor` and `commit.gpgsign=false`, ignores the host's global and system configuration
+  and the git configuration exported through the environment, and never prompts. `git.commit` uses the
+  repository's own identity and names `maf` only for what the repository leaves unset. Not closed:
+  repository configuration that names a program (`diff.external`, a `textconv` or filter driver,
+  `gpg.program` with `log.showSignature`) still runs it; see docs/SECURITY.md.
+- **The attestation is an in-toto Statement signed over RFC 8785 bytes** (D-13, D-36). The bundle was
+  MAF's own JSON, signed over `JSON.stringify` in the order its fields happened to be written, so no third
+  party could reproduce the signed bytes and a re-serialized bundle no longer verified. It is now an
+  in-toto Statement whose subjects are the writer nodes' diffs (`recordDiffHash` had no production caller)
+  and whose predicate is the run record, `keySource` inside it; the signature is HMAC-SHA256 over the
+  statement's RFC 8785 form (`jcs.ts`). A statement whose subjects are not exactly its `diffHashes`, or
+  that names no `keySource`, does not verify, and a signature must be the exact lowercase hex digest.
+  `approvals`, always empty before, now holds every approval-gate and review-gate decision.
+- **A run's recorded harness is the content it dispatched.** `legacy-default` was minted once from
+  `roles.yaml` and never again, and the sha covered a role's `promptFile` path but not its text, so a run's
+  attestation could name a role set and prompts other than the ones that ran. A plain run now mints
+  `legacy-default` again from the roles file and the text of each prompt file, dispatches from that harness,
+  and attests `configSource` as the stored harness file and its sha, re-verified at the end of the run.
+  `goldens` and `evolve` resolve their harness the same way; they loaded `current` directly and could
+  evaluate a stale snapshot whose prompts were read from disk, outside its sha.
+- **A roles file that exists but cannot be read no longer falls back to the built-in roles** (D-08). A
+  roles path that was a directory, unreadable, or a dangling symlink was answered with the built-in set,
+  whose default role is a writer. Only a path where nothing exists gets the built-in roles now; anything
+  else stops the run with a `RoleConfigError` naming the file. A role whose `execution` is anything but
+  `cli` or `in-process` — `inprocess`, say — is refused; it ran on the `cli` tier. A YAML merge key (`<<`)
+  in `roles.yaml` or `config.yaml` is refused at any depth, naming the file and line (D-40): YAML 1.2 has no
+  merge, so it loaded as a literal key and the fields it was meant to bring in were silently missing.
+- **The agent's tools cannot leave the run's worktree** (F1 of the release audit). With no policy file, an
+  agent could `fs.delete .git` and then `git.reset --hard`, which git — finding no repository in the
+  worktree — ran on the user's checkout above it; or rewrite `.git` to `gitdir: <repo>/.git` and commit
+  onto the user's branch. `fs.write`, `fs.delete` and `patch.apply` now refuse any path into `.git`, at any
+  depth and in any case, before policy and again on the resolved path; the refusal is a `Deny` under rule
+  id `builtin:git-dir`, attested in the bundle and reported to the agent, whose node goes on. The git
+  tools learn the run's repository root once, from the project root, and every git tool asks git which
+  repository it found before each call — its top and its git directory, so a `.git` link that `test.run`
+  rewrote to your `.git` is caught even though the top stays the worktree — and refuses unless both are
+  the ones it learned, with `GIT_CEILING_DIRECTORIES` at the root's parent and the host's `GIT_DIR`, `GIT_INDEX_FILE` and other repository variables dropped:
+  a run pointed at a subdirectory works there, its git confined to the repository root. MAF's own git
+  calls drop the same variables and pin `core.fsmonitor` too. `test.run` runs the project's own command
+  and is not confined; docs/SECURITY.md says so.
+- **The reviewed diff shows the change whatever `.gitattributes` says** (F2 of the release audit). An
+  agent-written `*.js -diff` turned its change into "Binary files differ" in the diff the security gate and
+  a human reviewer were shown, and the attestation signed that. `snapshotDiff` passes `--text
+  --no-ext-diff --no-textconv`; a genuinely binary file prints as bytes and is refused by the gate's cap
+  when it cannot be reviewed whole. A filter driver the repository configures still shapes what is staged.
+- **The planner's and the security reviewer's calls run without the backend's own tools** (F4 of the
+  release audit). Both are `cli`-tier calls that need only text, yet `claude` kept its built-in tools, so
+  the reviewer could edit the tree it had just passed. `AdapterInvokeOptions.nativeTools: false` gives
+  `claude` `--tools ""` on `invoke` and `stream`; `codex` and `gemini` know no such flag and keep theirs.
+- **A prompt is never read as an option** (F5 of the release audit). The prompt followed `-p`, which is
+  `claude`'s boolean `--print`, so one starting with `-` — a node description the planner wrote — was
+  parsed as options such as `--settings=<json>`. `claude` now gets `--` before the prompt; `gemini`, whose
+  `-p` takes the prompt as its value, gets `--prompt=<text>`. Checked against a stand-in spawner, not yet
+  against live binaries.
+
+### Added
+
+- **`--allow-ungoverned`** on `maf run`, `maf goldens run` and `maf evolve` (D-01; see Security).
+- **`expectsChange` and `no_change`** (D-32). A role that sets `expectsChange: true` — in the built-in
+  set and this repository's `.maf/roles.yaml`, only `coder` — fails with `NodeFailure('no_change')` when
+  its `cli`-tier node answers, exits 0 and leaves no diff against its start commit, the output tail in the
+  error. That is what a backend that refused the edit under its own permission settings looks like, and
+  0.2.1 reported it `Succeeded`. Only a writer may set it.
+- **The human review gate** (D-34). `maf run` builds it when the harness sets
+  `reviewGate: { required: true }` or `--review` is given. The terminal reviewer shows the node, its role,
+  the base commit, the diff's sha256 and the diff (up to 200 lines or 20 KB), and reads `approve` or
+  `deny`; an answer typed before the prompt is discarded, and the end of input denies at once. The node
+  waits for the decision, up to 10 minutes. Required: anything but an approval fails the node with
+  `ReviewRefused`, a verdict that is never retried. Advisory (`--review` alone): the decision is recorded
+  and the node completes. `--review` with no terminal prints one line and runs without a gate. The review
+  runs for the roles the security gate reviews, after it passes a change, on either tier. `reviewGate` is
+  part of the harness and its sha; `maf evolve` carries a parent's into every candidate it builds.
+- **Worktree isolation** (D-03, D-35). `maf run` creates `.maf/worktrees/<runId>` on a new branch
+  `maf/<runId>` from HEAD, prints its path, and runs the planner, the agents and the security reviewer
+  there. On success it commits what the run left uncommitted (as `maf <maf@maf.invalid>`, unsigned, hooks
+  off, runtime state excluded) and prints `git merge maf/<runId>`; a branch still at its base gets a
+  "changed nothing" line instead; a branch that commits runtime state is refused (exit non-zero, paths
+  named); a failed run keeps its worktree and prints its path. MAF never deletes a worktree or a branch. A
+  directory with no commit, or with no committed files, is refused before any agent work, naming
+  `--no-worktree`. With uncommitted work in the target, the run warns that it will not see it.
+  `--no-worktree`, or `worktree: false` in `.maf/config.yaml`, runs in place after a warning naming which
+  of the two turned isolation off; with uncommitted work in the tree there, it warns that the gates will
+  see it as the run's own, and refuses `--review`.
+- **`.maf/config.yaml` is read** (D-08). Keys: `adapter`, `model`, `worktree`, `lcm` (`mode`,
+  `contextThreshold`, `freshTailCount`), `dag` (`maxConcurrent`, `retry`), `timeouts` (`planMs`,
+  `securityReviewMs`). Precedence is per key: a flag the user typed (`-a/--adapter`, `-m/--model`,
+  `--no-worktree`), then the file, then the built-in defaults, which are the values 0.2.1 hard-coded. See
+  Changed for the migration.
+- **Planner failure recall** (D-16, D-37). The planner's query matched nothing a run wrote. A failed node
+  is now recorded once, after its last attempt, by `DagRunner`'s failure recorder: a `Task` (the node's
+  instruction, with the run's title, role and node id in its properties) joined to a `Failure` (reason,
+  message, exit code) by a `MemoryEdge {relation: 'CAUSED_FAILURE'}`. The planner recalls up to five, most
+  recent first, whose Task text contains the first three words of the new title, ignoring case, into a
+  `<past-failures>` block; `FailurePatternDetector` reads them through the same query (`recallFailures` in
+  `@maf/memory-graph`). The recorder's wait is bounded at 10 seconds. `querySubgraph` now filters before
+  it limits, so a match written after more than `maxNodes * 3` other nodes is still found.
+- **Offline evaluation** (D-14, D-38). `maf goldens run --adapter scripted` runs the golden corpus
+  without a model, a key or an earlier `maf run`, through `ScriptedAdapter` (now in `@maf/eval-harness`)
+  and `tests/goldens/scripted.json`. A default harness (`.maf/harnesses/default-425ac38e….json`) and its
+  result (`tests/goldens/baseline.json`) are committed; `goldens` evaluates `--harness`, else CURRENT, else
+  that default. Each evaluation runs in a temporary stack whose graph is emptied before every attempt, so
+  nothing from the project's graph or an earlier attempt reaches the prompt. Results record the corpus sha,
+  the attempt count, the adapter, the model and who judged. Coder tasks protect their test file
+  (`mustNotModify`). The judge's prompt and parser now agree (JSON `{passed}`); `--judge-adapter` and
+  `--judge-model` choose a judge, and the result says when the agent judged itself.
+- **`maf harness import <file>`** (D-19, D-39): validates a harness file, copies it into the store and
+  indexes its id; it refuses the reserved ids `legacy-default`, `current` and `CURRENT` (in any case) and
+  an id already bound to other content. Harness refs now accept a unique sha prefix of four or more hex
+  digits, and the committed default answers to its id and sha.
+- **`maf attest verify <bundle>`** (D-13): prints `valid`, the `keySource` it checked against, the number
+  of subjects and, for a 0.2.x bundle, `legacy: true`; exits 1 with the reason when the bundle does not
+  verify, cannot be read or is not a bundle.
+- **`[maf] harness: <id> (<sha>) [<source>]`**: `run` says which harness it dispatches and why (`legacy`,
+  `current` or `flag`), and prints the worktree it works in.
+- **`--adapter scripted`**: the offline adapter is in the adapter registry. It answers the security gate
+  and the judge, and refuses any task it has no script for.
+- **CI job `e2e · demo · attestation · offline goldens`** (D-24): builds, runs `inprocess-demo`, checks its
+  bundle with `maf attest verify` (and that it does not verify under another key), runs the offline
+  goldens in the checkout and compares the result with `tests/goldens/baseline.json`, `ranAt` aside
+  (`scripts/compare-goldens.mjs`, with its own `--self-test`).
+
+### Fixed
+
+- **Kùzu query results are closed as they are read** (WP-2.15). `KuzuDriver` never closed a
+  `QueryResult`, whose rows live in memory its database owns. When a graph was garbage-collected while
+  the process ran on, the database and its last results were finalized in no fixed order, and a result
+  freed after its database wrote into freed memory: a segfault, or a corrupted heap that a later,
+  unrelated allocation aborted on. It showed as an intermittent native crash in a test process that built and
+  dropped several graphs, and it was also why `db.close()` "segfaulted" and was never called. Each result is now closed once read; `close()` refuses
+  later queries and closes the connection and then the database once nothing is in flight. Closing the
+  database also returns its address-space reservation (8 TB by default), which an unclosed database kept
+  until exit, so a process that opened several graphs in turn ran out (`Mmap … failed`).
+- **A tool or backend turn that throws inside the in-process loop still fires `task_end`**, once, so every
+  processor sees the task end.
+- **An in-process writer whose harness leaves out the `security-gate` processor is reviewed.** It was
+  reviewed only when its loop threw. The dispatcher now runs the same review right after the loop, once
+  per attempt, whichever path reaches it first.
+- **`maf run --harness <sha>` naming nothing** says "not found"; it reported that the store's index
+  pointed at a missing file, as if the store had been tampered with. A CURRENT that names a tampered or
+  missing harness still stops the run, with an error that says CURRENT is at fault and how to repair it.
+- **Harness store writes are atomic.** `save`, the index and CURRENT are written to a temporary file and
+  renamed into place, so a concurrent run never reads a half-written harness and reports it as tampered,
+  and a plain run whose role set has not changed writes nothing (D-39).
+- **Every component id names the version it ships as.** The adapter, demo and approval-gate builder ids
+  said `@0.1.0`, and `maf --version` printed a literal; both now read the packages' version.
+- **`maf goldens run` no longer reads the project's memory graph**: each evaluation runs in its own
+  temporary stack (D-14), so a past run's failures cannot leak into the prompt. `maf evolve` still
+  evaluates through the project's graph. `evolve`'s smoke check runs the task it names, and on a fresh
+  clone `evolve` starts from the same committed default `goldens` evaluates.
+
+### Changed
+
+Behaviour you may notice:
+
+- **Writer roles need `claude`, or `--allow-ungoverned`.** On `codex`, `gemini`, `ollama` or `openrouter`
+  a run whose role set holds a writer stops before planning unless the flag is given. Under the flag, an
+  HTTP backend cannot change the tree, so `coder` fails with `no_change`.
+- **A governed turn passes `--tools ""` to `claude`**; a Claude Code CLI without that flag fails every
+  in-process turn.
+- **A run works in a worktree.** It no longer changes your checkout or branch, does not see uncommitted
+  work, and leaves `.maf/worktrees/<runId>` and the branch `maf/<runId>` behind for you to merge and
+  delete. It needs a repository with at least one commit, unless `--no-worktree`.
+- **`.maf/config.yaml` (0.2.1 → 0.3.0).** `maf run` now reads `.maf/config.yaml` and stops if it does not
+  validate; in 0.2.1 the file was not read and nothing in it had any effect. A file in the shape 0.2.1
+  shipped is refused with `unknown key "version"` and `unknown key "defaults"`. To migrate: (1) delete
+  `version`; (2) move every key out of `defaults` to the top level and delete `defaults`; (3) delete
+  `circuit`, which nothing on the run path reads and which is refused as an unknown key; (4) check the
+  values you keep, because they now take effect for the first time. Or delete the file: a run without one
+  uses the built-in defaults and prints one line. JSON still loads once the keys are at the top level, and
+  the shipped `.maf/config.yaml` is the 0.3.0 form of the defaults. A section whose keys are all commented
+  out is empty and stops the run. `-a/--adapter` has no default of its own any more: without it, the file's
+  `adapter` applies, else `claude`.
+- **`roles.yaml` is YAML.** The JSON form, `#` comment lines included, loads unchanged. Two kinds of JSON
+  file no longer load: one that repeats a key within a mapping (the last value used to win) and one with
+  bare carriage-return line endings. A merge key (`<<`) is refused. `systemPrompt: ""` is refused, alone or
+  beside a `promptFile`: it would now dispatch the empty string rather than fall back to the file. A prompt file that cannot be read stops the run when it starts, not at that
+  role's first dispatch.
+- **Harnesses.** `legacy-default` is minted again on every plain run, and `maf harness list` shows one
+  `legacy-default` row per distinct role set a run minted. CURRENT is either the operator's choice or it
+  tracks the roles file: absent, or naming any `legacy-default` snapshot — including one 0.2.x left — it
+  moves to each fresh mint. `maf harness set-current` refuses a sha the store does not hold and a
+  `legacy-default` snapshot that is not the newest mint (run that one with `--harness <sha>`), and imports a
+  committed default before pointing CURRENT at it. A typed `--roles` without `--harness` means that file
+  even when CURRENT is set.
+- **A role holding `test.run` is a writer** (F10 of the release audit). `test.run` runs the project's own
+  code, so a role holding it with only read tools now runs in-process by default and has its diff
+  security-reviewed, like any writer; on an adapter that cannot run the loop it needs `--allow-ungoverned`.
+- **A CURRENT set before 0.3.0** to a harness other than `legacy-default` names its prompt files without
+  their text, so its sha does not cover the prompts that would run. Every plain run is refused while
+  CURRENT names it; run `maf harness set-current legacy-default` to hand plain runs back to the roles file,
+  or point CURRENT at a harness minted by 0.3.0.
+- **`maf goldens`**: results are written as `<harnessSha>.<adapter>.json` (a `<sha>.json` from 0.2.1
+  still loads by path or prefix), so a scripted run never overwrites a model's. `goldens compare` exits 2,
+  comparing nothing, when a result is missing or malformed or the two were measured on different
+  corpora, adapters, models or attempt counts; it exits 1 on a regression and 0 otherwise. `goldens`
+  and `evolve` run headless: an escalated tool call is refused.
+- **Attestation format.** A 0.3.0 bundle is an in-toto Statement; `Attestor.bundle()` still returns the
+  run record with its signature and `keySource`. A 0.2.x bundle still verifies against the key you supply
+  and is reported `legacy: true` — only when its 0.2.x signature matched — and a 0.2.1 bundle's
+  `keySource` is still enforced. `maf attest verify` without `MAF_SIGNING_KEY` (or with it empty or set to
+  the development value) checks against the development key and says so in a note of its own.
+- **`maf inprocess-demo`**: its policy now escalates the scripted `fs.delete` rather than denying it, and
+  the demo always runs headless, so the call is refused, recorded under the fixture's
+  `.maf/approvals/pending/` and in the bundle's `approvals`; it behaves the same offline, unattended and in
+  CI. Its bundle is an in-toto Statement with the coder's diff as its subject.
+- **Failure records.** A failed node is a `Task` joined to its `Failure`; the post-run loop that wrote one
+  bare `Failure` node per failed node is gone. A security refusal still writes its own `Failure` node.
+- **The agent's commits** carry the repository's identity, not the host's global one, and are unsigned.
+- **Tests:** 22 of the 27 workspace packages now have tests (`@maf/approval-gate` joins), and the
+  `@maf/cli` tests drive `maf run` end to end against temporary repositories with the scripted adapter.
+  Tests that open the LCM store skip where `better-sqlite3` does not load, and cannot skip in CI. Still
+  without tests: `@maf/blackboard`, `@maf/lcm`, `@maf/lcm-adapter`, `@maf/prompt-injector`,
+  `@maf/transcript`.
+
+Breaking for code that calls the packages directly:
+
+- `@maf/roles`: `RoleDispatcherConfig` gains `allowUngoverned`, `approvalGate`, `reviewGate` and `stderr`;
+  `effectiveTier`, `isWriterForLock` and `harnessRoleSetFromRegistry` are exported; `RoleConfig` gains
+  `expectsChange`. A writer that would run on the `cli` tier throws unless `allowUngoverned` is set.
+- `@maf/types`: `NodeFailure` reason `no_change`; `ReviewRefused` (extends `GateRefused`);
+  `ApprovalAsk`, `ApprovalOutcome`, `ApprovalGateHandle`; `FailureRecorder`, `NodeFailureRecord`;
+  `canonicalJson` (moved from `@maf/harness-config`, which re-exports it, unchanged, so no harness sha
+  moves).
+- `@maf/approval-gate` is rewritten: `createApprovalGate`, `ApprovalProvider` (with `queues` and an
+  `asking` callback that starts the timeout), the terminal and headless providers, `approvalRequestHash`.
+  `ApprovalTimeoutError`, `ApprovalRejectedError` and `GithubPrReviewer` are removed.
+- `@maf/git-ops`: `WorktreeManager` is per run (`createForRun`, `finish` returning a `FinishResult` whose
+  `kind` is `merge`, `no-change`, `refused` or `failure`, and `remove`); the per-task API and
+  `WorktreeInfo` are gone; `resolveWorkingDir` is new. `ReviewGate.review` takes the diff and a reviewer
+  function (`Reviewer`, `ReviewRequest`, `ReviewDecision`); `ReviewResult` is gone. `RollbackManager` takes
+  the run's worktree and refuses any reset outside it. `BranchIsolator` has no merge operation.
+- `@maf/attestation`: `parseBundle`, `Attestor.report`, `componentId`, `mafVersion`, `DEV_SIGNING_KEY`,
+  `MAF_RUN_PREDICATE_TYPE`, `makeInTotoStatement`. `BundleSigner('')` means the development key, as in the
+  `Attestor`.
+- `@maf/harness-config`: `resolveHarnessRef`, `HarnessStore.configSource`, `LEGACY_DEFAULT_ID`;
+  `HarnessStore.setCurrent` refuses as described above; `HarnessConfig` gains `reviewGate`.
+- `@maf/dag-runner`: `DagRunnerOptions.failureRecorder` and `failureRecordTimeoutMs`.
+  `@maf/memory-graph`: `recallFailures`, and `MemoryGraph` implements `FailureRecorder`.
+  `@maf/planning-agent`: every planned node carries `metadata.runTitle`.
+- `@maf/policy-engine`: `parseYamlDocument` and `YamlSyntaxError` are exported.
+- `@maf/eval-harness`: `ScriptedAdapter`, the judge module, `computeCorpusSha`, `checkUnmodified`.
+- `@maf/cli`: `ConfigLoader.load` validates and throws; `MafConfig` lost `circuit`, `policyPath` and
+  `dag.timeoutMs` and gained `timeouts`; `resolveConfig` and `applyDagSettings` are new.
+
+### Documentation
+
+- README: the Status table flips to *shipped* every row this release landed, each naming its tests, and
+  marks the rows the CI `e2e` job also runs; prose describes the governed default, the approval and review
+  gates, worktrees, config precedence and its migration, which harness a run uses, the Claude Code CLI flags
+  MAF passes, and what `--no-worktree` gives up. Planned: `allowPartial` from specs or the planner, the
+  toolchain floor, Docker, npm; experimental: LCM and the evolver.
+- `docs/POLICY.md`, `docs/ROLES.md` and `docs/SECURITY.md` describe the code as of this release: the
+  approval gate, the review gate and its construction rules, worktree isolation and what it does not
+  separate, the tier default and the backend isolation flags, the agent's git tools and their limits,
+  `roles.yaml` as YAML, the dispatch flow, and an `Escalate` rule's `requiresApproval`, which the engine
+  does not read.
+- `docs/DECISIONS.md` records D-33 to D-40; `docs/BUILD_PLAN.md` records the Phase 2 statuses, WP-2.14 and
+  WP-2.15, and the deviations.
+
 ## [0.2.1] - 2026-10-08
 
 Correctness fixes from an independent audit of v0.2.0 (2026-10-08) and from the independent review of
