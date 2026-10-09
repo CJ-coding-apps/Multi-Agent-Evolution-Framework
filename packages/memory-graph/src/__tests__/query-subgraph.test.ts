@@ -32,7 +32,7 @@ test('matches written after more than maxNodes * 3 other nodes are still found',
   for (let i = 0; i < 130; i++) {
     await graph.addNode({ kind: 'Run', label: `filler ${i}`, properties: { i }, runId });
   }
-  const one = await graph.addNode({ kind: 'Task', label: 'tune the zeppelin cache', properties: {}, runId });
+  const one = await graph.addNode({ kind: 'Task', label: 'Tune the ZEPPELIN cache', properties: {}, runId });
   const two = await graph.addNode({ kind: 'Task', label: 'zeppelin cache eviction', properties: { area: 'zeppelin' }, runId });
   const props = await graph.addNode({ kind: 'File', label: 'src/cache.ts', properties: { note: 'ZEPPELIN' }, runId });
 
@@ -42,8 +42,17 @@ test('matches written after more than maxNodes * 3 other nodes are still found',
     'every node naming a keyword is found, wherever it sits in storage order');
   assert.equal(sub.nodes[0]?.id, two, 'the node matching both keywords ranks first');
   assert.equal(sub.relevanceScores.get(two), 2);
-  assert.equal(sub.relevanceScores.get(one), 1);
+  assert.equal(sub.relevanceScores.get(one), 1, 'the label is searched ignoring case');
   assert.equal(sub.relevanceScores.get(props), 1, 'properties are searched too, ignoring case');
+});
+
+test('a keyword matches a node kind, ignoring case', async () => {
+  const runId = makeRunId('run-subgraph-kind');
+  const approval = await graph.addNode({ kind: 'Approval', label: 'merge allowed', properties: {}, runId });
+
+  const sub = await graph.querySubgraph('approval', 10);
+
+  assert.deepEqual(sub.nodes.map((n) => n.id), [approval], 'only the kind names the keyword');
 });
 
 test('the limit applies to the matches, best first', async () => {

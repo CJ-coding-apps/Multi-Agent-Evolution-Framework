@@ -118,6 +118,17 @@ test('recall finds a planned step by the title of the run it was planned for', a
   assert.deepEqual(await recallFailures(graph, { title: 'Throttle the signup endpoint', limit: 5 }), []);
 });
 
+test('a Task joined to a Failure by any relation but CAUSED_FAILURE is not recalled', async () => {
+  // F3: `RESOLVED_BY` is a declared relation that can join a Task to a Failure; only the
+  // relation's value tells the two apart.
+  const runId = makeRunId('run-resolved-by');
+  const task = await graph.addNode({ kind: 'Task', label: 'Reindex the search shards', properties: {}, runId });
+  const failure = await graph.addNode({ kind: 'Failure', label: 'n9', properties: { reason: 'adapter_failed' }, runId });
+  await graph.addEdge({ fromId: task, toId: failure, relation: 'RESOLVED_BY', weight: 1, metadata: {} });
+
+  assert.deepEqual(await recallFailures(graph, { title: 'Reindex the search shards', limit: 5 }), []);
+});
+
 test('recall returns the most recent failures first, up to the limit', async () => {
   const runId = makeRunId('run-recency');
   for (const n of [1, 2, 3]) {
