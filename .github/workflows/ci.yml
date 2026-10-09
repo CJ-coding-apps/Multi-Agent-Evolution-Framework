@@ -186,14 +186,11 @@ jobs:
           pnpm -r test > "$RUNNER_TEMP/test.log" 2>&1
           code=$?
           end=$(date +%s)
-          first=$(grep -n -m1 -E '^not ok|^ *not ok' "$RUNNER_TEMP/test.log" | cut -d: -f1)
-          {
-            echo "pnpm -r test exit=$code in $((end - start))s; nproc=$(nproc); node=$(node --version)"
-            grep -nE 'not ok|failureType|signal:|error:|malloc|corrupt|timed out|Failed|ELIFECYCLE|# (tests|pass|fail|cancelled|skipped) ' "$RUNNER_TEMP/test.log" | head -60
-            if [ -n "$first" ]; then
-              echo "---- context around line $first ----"
-              sed -n "$((first > 40 ? first - 40 : 1)),$((first + 30))p" "$RUNNER_TEMP/test.log"
-            fi
-          } > "$RUNNER_TEMP/summary.txt"
-          msg=$(sed -e 's/%/%25/g' "$RUNNER_TEMP/summary.txt" | awk '{printf "%s%%0A", $0}' | cut -c1-60000)
-          echo "::warning title=diag::${msg}"
+          log="$RUNNER_TEMP/test.log"
+          annotate() { local t=$1; shift; local m; m=$(sed -e 's/%/%25/g' | cut -c1-220 | awk '{printf "%s%%0A", $0}' | cut -c1-2300); echo "::warning title=${t}::${m}"; }
+          { echo "exit=$code in $((end - start))s nproc=$(nproc) node=$(node --version)"; grep -nE 'not ok|Failed|ELIFECYCLE|# fail [1-9]|# cancelled [1-9]' "$log" | head -25; } | annotate diag-summary
+          n=0
+          for first in $(grep -n -E 'not ok' "$log" | cut -d: -f1 | head -4); do
+            n=$((n + 1))
+            sed -n "$((first > 12 ? first - 12 : 1)),$((first + 18))p" "$log" | annotate "diag-ctx-$n-line-$first"
+          done
