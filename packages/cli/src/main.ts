@@ -1,5 +1,6 @@
 #!/usr/bin/env node --max-old-space-size=8192
 import { Command } from 'commander';
+import { mafVersion } from '@maf/attestation';
 import { createAdapterRegistry } from './AdapterRegistry.js';
 import { registerRunCommand } from './commands/run.js';
 import { registerHarnessCommand } from './commands/harness.js';
@@ -13,7 +14,7 @@ const program = new Command();
 program
   .name('maf')
   .description('Multi-Agent Framework — CLI-agnostic orchestration with LCM memory')
-  .version('0.2.1');
+  .version(mafVersion());
 
 registerRunCommand(program);
 registerHarnessCommand(program);

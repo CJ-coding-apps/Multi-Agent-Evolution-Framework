@@ -9,6 +9,7 @@ import type { CliAdapter, RunStatus } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { buildTurnSystemPrompt } from '@maf/adapter-base';
+import { componentId } from '@maf/attestation';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { runIsolatedGit } from '@maf/git-ops';
 import { buildRunStack } from '../wiring.js';
@@ -143,7 +144,7 @@ export function registerInProcessDemoCommand(program: Command): void {
       } finally {
         // produce a signed attestation bundle for the run (records are already redacted at record-time)
         await stack.attestor.bundle(
-          { id: '@maf/inprocess-demo@0.1.0', modelVersion: adapter.name },
+          { id: componentId('@maf/inprocess-demo'), modelVersion: adapter.name },
           { configSource: { uri: 'inprocess-demo', digest: { sha256: harness.sha } }, parameters: { harnessId: harness.id }, environment: {} },
           [],
           { status: demoStatus, unscheduled: [] },

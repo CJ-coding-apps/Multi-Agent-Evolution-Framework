@@ -6,7 +6,7 @@ import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
-import { Attestor } from '@maf/attestation';
+import { Attestor, componentId } from '@maf/attestation';
 import { PolicyLoader } from '@maf/policy-engine';
 import { RollbackManager, SecurityReviewGate } from '@maf/git-ops';
 import { DagRunner } from '@maf/dag-runner';
@@ -212,7 +212,7 @@ export function registerRunCommand(program: Command): void {
       // Bundle attestation — the harness IS the build's config source (signed):
       // configSource.uri points at the on-disk harness file, digest is its sha.
       const bundle = await attestor.bundle(
-        { id: `@maf/adapter-${opts.adapter}@0.1.0`, modelVersion: opts.model ?? 'default' },
+        { id: componentId(`@maf/adapter-${opts.adapter}`), modelVersion: opts.model ?? 'default' },
         {
           configSource: {
             uri:    path.join(mafDir, 'harnesses', `${harness.sha}.yaml`),

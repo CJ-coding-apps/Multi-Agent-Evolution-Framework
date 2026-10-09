@@ -3,6 +3,7 @@ import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
+import { componentId } from '@maf/attestation';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { makeRunId } from '@maf/types';
 import type { CliAdapter, RunId, RunStatus } from '@maf/types';
@@ -153,7 +154,7 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
         },
       }).run();
       await stack.attestor.bundle(
-        { id: `@maf/adapter-${o.agent.name}@0.1.0`, modelVersion: o.model ?? 'default' },
+        { id: componentId(`@maf/adapter-${o.agent.name}`), modelVersion: o.model ?? 'default' },
         {
           configSource: { uri: o.harnessSource, digest: { sha256: o.harness.sha } },
           parameters: { harnessId: o.harness.id, eval: 'goldens' },
