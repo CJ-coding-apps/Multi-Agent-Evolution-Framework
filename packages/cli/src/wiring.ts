@@ -103,8 +103,11 @@ export async function buildRunStack(cfg: {
         adapter: cfg.adapter, projectRoot: workDir, securityPrompt: stack.securityPrompt,
         ...(cfg.model ? { model: cfg.model } : {}),
       });
+      // Bound to this task's directory so the git tools learn its repository root before the agent
+      // acts (WP-2.17); the shared `baseTools` above only validates role allowlists.
+      const taskTools = createDefaultRegistry({ projectRoot: workDir });
       const dispatcher = new RoleDispatcher({
-        adapter: cfg.adapter, baseTools, roles, injector, policy,
+        adapter: cfg.adapter, baseTools: taskTools, roles, injector, policy,
         attestor, approvalGate, graph, transcript, lcmBridge, securityGate: gate,
         cwd: workDir, sessionId: cfg.runId, runId: cfg.runId, harness,
         ...(cfg.allowUngoverned === true ? { allowUngoverned: true } : {}),

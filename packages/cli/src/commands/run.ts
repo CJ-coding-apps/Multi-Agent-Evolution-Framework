@@ -229,6 +229,10 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   const { cwd, isolated, warning } = resolveWorkingDir({ dir, worktree: cfg.worktree, run, offBy: cfg.worktree ? undefined : inPlaceBy });
   if (warning) warn(`[maf] warning: ${warning}`);
   if (run) say(`[maf] worktree: ${run.path} (branch ${run.branch}, from ${run.baseCommit.slice(0, 12)})`);
+  // The registry the agent gets is bound to the run's working directory now that it exists: the
+  // git tools learn the repository root here, before any agent action, so a `.git` the agent later
+  // removes or rewrites cannot redirect them (WP-2.17). `baseTools` above only validated the roles.
+  const agentTools = createDefaultRegistry({ projectRoot: cwd });
 
   let succeeded = false;
   let refusal: string | undefined;
@@ -288,7 +292,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     const dispatcher = new RoleDispatcher({
       adapter,
-      baseTools,
+      baseTools: agentTools,
       roles,
       injector,
       policy,
