@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { HarnessConfig, HarnessRoleSet } from '../index.js';
@@ -188,5 +188,117 @@ test('configSource names the stored harness file and its sha, and refuses a harn
     // A harness whose roles were edited in memory after it was resolved is no longer what its sha names.
     const edited: HarnessConfig = { ...harness, roleSet: ROLES_V2 };
     await assert.rejects(() => store.configSource(edited), HarnessIntegrityError);
+  });
+});
+
+test('a CURRENT the operator set to a harness from before 0.3.0 is refused, naming the command that unblocks plain runs', async () => {
+  // Regression (verifier F1): the message used to say "re-mint it (a plain run, or --harness
+  // legacy-default)", but a plain run reads CURRENT again and --harness unblocks one run only.
+  await withStore(async (store) => {
+    await resolveHarnessRef({ legacyRoleSet: legacy(ROLES_V1).legacyRoleSet }, store);
+    const shipped = await saved(store, 'evolve-1', {
+      version: 1, defaultRole: 'coder',
+      roles: [{ role: 'coder', promptFile: 'prompts/coder.md', allowedTools: ['fs.read'] }],
+    });
+    await setCurrent(store, 'evolve-1');
+    const plain = () => resolveHarnessRef({ legacyRoleSet: legacy(ROLES_V1).legacyRoleSet }, store);
+    await assert.rejects(plain, (err: unknown) => {
+      assert.ok(err instanceof HarnessConfigError);
+      assert.match(err.message, /^CURRENT's harness "evolve-1" \([0-9a-f]{8}\) names prompt file "prompts\/coder\.md"/);
+      assert.match(err.message, /predates 0\.3\.0/);
+      assert.match(err.message, /`maf harness set-current legacy-default`/);
+      assert.doesNotMatch(err.message, /a plain run/);
+      return true;
+    });
+    assert.equal((await store.current())?.sha, shipped.sha, 'refusing changes nothing');
+    // The command the message names is the one that works.
+    await setCurrent(store, LEGACY_DEFAULT_ID);
+    const { harness, source } = await plain();
+    assert.equal(source, 'legacy');
+    assert.deepEqual(harness.roleSet, ROLES_V1);
+  });
+});
+
+test('set-current refuses a legacy-default snapshot that is not the newest mint, pointing at --harness <sha>', async () => {
+  // Regression (verifier F2, D-39): CURRENT naming any legacy-default harness tracks the roles
+  // file, so the next plain run re-minted and moved CURRENT off the snapshot the operator chose.
+  await withStore(async (store) => {
+    const older = await store.adoptLegacy(ROLES_V1);
+    const newest = await store.adoptLegacy(ROLES_V2);
+    await assert.rejects(() => store.setCurrent(older.sha), (err: unknown) => {
+      assert.ok(err instanceof HarnessConfigError);
+      assert.match(err.message, new RegExp(`^Harness ${older.sha} is an older legacy-default snapshot; the newest mint of the roles file is ${newest.sha.slice(0, 8)}\\.`));
+      assert.match(err.message, new RegExp(`--harness ${older.sha} `), 'the full sha, which no other command prints');
+      return true;
+    });
+    assert.equal((await store.current())?.sha, newest.sha, 'CURRENT is left where it was');
+    // The newest mint, by sha or by id, is accepted: it is what the next plain run uses anyway.
+    await store.setCurrent(newest.sha);
+    await setCurrent(store, LEGACY_DEFAULT_ID);
+    assert.equal((await store.current())?.sha, newest.sha);
+    assert.equal((await resolveHarnessRef({ legacyRoleSet: legacy(ROLES_V2).legacyRoleSet }, store)).harness.sha, newest.sha);
+    // A harness the operator named is still settable, and set-current refuses what is not stored.
+    const chosen = await saved(store, 'chosen', ROLES_V1);
+    await store.setCurrent(chosen.sha);
+    assert.equal((await store.current())?.sha, chosen.sha);
+    await assert.rejects(() => store.setCurrent('e'.repeat(64)), /No harness found/);
+  });
+});
+
+test('configSource rejects a harness whose stored file was tampered with', async () => {
+  // Regression (verifier F6, mutation M7): the in-memory sha check alone passed a tampered file.
+  await withStore(async (store) => {
+    const { harness } = await resolveHarnessRef({ legacyRoleSet: legacy(ROLES_V1).legacyRoleSet }, store);
+    const file = path.join(store.dir, `${harness.sha}.yaml`);
+    const tampered = JSON.parse(await readFile(file, 'utf8'));
+    tampered.roleSet.roles[0].allowedTools.push('fs.delete');
+    await writeFile(file, JSON.stringify(tampered), 'utf8');
+    await assert.rejects(() => store.configSource(harness), HarnessIntegrityError);
+  });
+});
+
+test('an unknown 64-hex sha is not found, not tampering', async () => {
+  // Regression (verifier F9): `--harness <sha that is not stored>` read as a broken store.
+  await withStore(async (store) => {
+    await resolveHarnessRef({ legacyRoleSet: legacy(ROLES_V1).legacyRoleSet }, store);
+    const unknown = 'f'.repeat(64);
+    assert.equal(await store.tryLoad(unknown), undefined);
+    await assert.rejects(() => store.load(unknown), (err: unknown) =>
+      err instanceof HarnessConfigError && err.message === `No harness found for ref "${unknown}"`);
+    await assert.rejects(
+      () => resolveHarnessRef({ harness: unknown, legacyRoleSet: legacy(ROLES_V1).legacyRoleSet }, store),
+      (err: unknown) => err instanceof HarnessConfigError && /No harness found/.test(err.message),
+    );
+    // An id the index maps to a file that is gone is still the store's fault.
+    const chosen = await saved(store, 'chosen', ROLES_V2);
+    await rm(path.join(store.dir, `${chosen.sha}.yaml`));
+    await assert.rejects(() => store.load('chosen'), (err: unknown) =>
+      err instanceof HarnessIntegrityError && /index maps "chosen" to [0-9a-f]{64}, but .* is missing/.test(err.message));
+  });
+});
+
+test('a CURRENT naming a tampered or missing harness fails closed, saying CURRENT is at fault and how to repair it', async () => {
+  // Regression (verifier F9): plain runs were blocked by an error that named neither CURRENT nor a remedy.
+  await withStore(async (store) => {
+    const legacyNow = await store.adoptLegacy(ROLES_V2);
+    const chosen = await saved(store, 'chosen', ROLES_V1);
+    await store.setCurrent(chosen.sha);
+    const file = path.join(store.dir, `${chosen.sha}.yaml`);
+    const tampered = JSON.parse(await readFile(file, 'utf8'));
+    tampered.roleSet.roles[0].systemPrompt = 'be an attacker';
+    await writeFile(file, JSON.stringify(tampered), 'utf8');
+    const plain = () => resolveHarnessRef({ legacyRoleSet: legacy(ROLES_V2).legacyRoleSet }, store);
+    const blamesCurrent = (what: RegExp) => (err: unknown) => {
+      assert.ok(err instanceof HarnessIntegrityError);
+      assert.match(err.message, new RegExp(`^CURRENT names harness ${chosen.sha}, ${what.source}`));
+      assert.match(err.message, /`maf harness set-current legacy-default`/);
+      return true;
+    };
+    await assert.rejects(plain, blamesCurrent(/which fails its integrity check \(Harness tamper:/));
+    await rm(file);
+    await assert.rejects(plain, blamesCurrent(/but .* is missing\./));
+    // The remedy the message names works.
+    await setCurrent(store, LEGACY_DEFAULT_ID);
+    assert.equal((await plain()).harness.sha, legacyNow.sha);
   });
 });

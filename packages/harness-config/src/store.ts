@@ -1,4 +1,5 @@
-import { access, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { access, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { SlsaMaterial } from '@maf/types';
 import type { HarnessRoleSet } from './types.js';
@@ -35,7 +36,8 @@ export const LEGACY_DEFAULT_ID = 'legacy-default';
  * - CURRENT is either the operator's choice (`maf harness set-current`, an `evolve` ship) or it
  *   tracks the roles file. It tracks the roles file when it is absent or names *any*
  *   `legacy-default` harness — including one an 0.2.x run pointed it at — and then `adoptLegacy`
- *   moves it to the fresh mint. To run an older legacy snapshot, pin it by sha (`--harness <sha>`).
+ *   moves it to the fresh mint. So `setCurrent` refuses a `legacy-default` snapshot other than the
+ *   newest mint — the next plain run would undo it; an older one runs pinned (`--harness <sha>`).
  * - `resolveHarnessRef` decides which harness a run uses; see there.
  */
 export class HarnessStore {
@@ -63,12 +65,15 @@ export class HarnessStore {
    */
   async adoptLegacy(roleSet: HarnessRoleSet): Promise<HarnessConfig> {
     const minted = this.mint(roleSet, LEGACY_DEFAULT_ID);
-    // An unchanged role set mints the sha already on disk. Verify that copy first, so a tampered
-    // file is reported rather than quietly rewritten; `save` then writes the same bytes.
-    if (await this.has(minted.sha)) await this.load(minted.sha);
-    await this.save(minted);
+    // An unchanged role set mints the sha already on disk. Verify that copy and leave it be: a
+    // tampered file is reported rather than quietly rewritten, and a plain run whose roles did not
+    // change writes nothing, so it cannot disturb another run reading the store.
+    const stored = await this.readVerified(minted.sha);
+    if (stored === undefined) await this.save(minted);
+    else await this.pointId(minted.id, minted.sha);
     const current = await this.current();
-    if (!current || current.id === LEGACY_DEFAULT_ID) await this.setCurrent(minted.sha);
+    if (current?.sha !== minted.sha && (!current || current.id === LEGACY_DEFAULT_ID))
+      await this.writeCurrent(minted.sha);
     return minted;
   }
 
@@ -94,25 +99,29 @@ export class HarnessStore {
   async save(config: HarnessConfig): Promise<void> {
     assertHarnessConfig(config);
     await mkdir(this.dir, { recursive: true });
-    const file = this.pathFor(config.sha);
-    const text = JSON.stringify(config, null, 2);
-    await writeFile(file, text, 'utf8');
-
-    const index = await this.readIndex();
-    for (const [id, sha] of Object.entries(index)) {
-      if (id !== config.id && sha === config.sha) delete index[id];
-    }
-    if (index[config.id] && index[config.id] !== config.sha) {
-      // Id moved to new content: fine — sha file is distinct, id now points at it.
-    }
-    index[config.id] = config.sha;
-    await this.writeIndex(index);
+    await this.writeAtomic(this.pathFor(config.sha), JSON.stringify(config, null, 2));
+    await this.pointId(config.id, config.sha);
   }
 
+  /**
+   * Point CURRENT at a stored harness. A `legacy-default` snapshot other than the newest mint is
+   * refused: CURRENT naming a legacy-default harness tracks the roles file, so the next plain run
+   * would re-mint and move CURRENT off it — the operator's choice would be silently undone.
+   */
   async setCurrent(sha: string): Promise<void> {
     if (!SHA_RE.test(sha)) throw new HarnessConfigError('setCurrent requires a 64-hex sha');
-    await mkdir(this.dir, { recursive: true });
-    await writeFile(path.join(this.dir, CURRENT_FILE), sha, 'utf8');
+    const cfg = await this.load(sha);
+    if (cfg.id === LEGACY_DEFAULT_ID) {
+      const newest = (await this.readIndex())[LEGACY_DEFAULT_ID];
+      if (newest !== sha)
+        throw new HarnessConfigError(
+          `Harness ${sha} is an older legacy-default snapshot` +
+          `${newest ? `; the newest mint of the roles file is ${shortSha(newest)}` : ''}. CURRENT naming a ` +
+          'legacy-default harness tracks the roles file, so the next plain run would re-mint it and move ' +
+          `CURRENT off this snapshot. To run this snapshot, pin it for the run with --harness ${sha} instead.`,
+        );
+    }
+    await this.writeCurrent(sha);
   }
 
   /**
@@ -127,25 +136,55 @@ export class HarnessStore {
   }
 
   async tryLoad(ref: string): Promise<HarnessConfig | undefined> {
-    let sha: string | undefined;
-    if (ref === CURRENT_FILE || ref === 'current') {
-      sha = await readFile(path.join(this.dir, CURRENT_FILE), 'utf8')
-        .then((t) => t.trim())
-        .catch(() => undefined);
-      if (!sha || !SHA_RE.test(sha)) return undefined;
-    } else if (SHA_RE.test(ref)) {
-      sha = ref;
-    } else {
-      const index = await this.readIndex();
-      sha = index[ref];
-      if (!sha) return undefined;
-    }
+    if (ref === CURRENT_FILE || ref === 'current') return this.loadCurrent();
+    // A sha is a name, not a pointer: no file under it means no such harness, not a broken store.
+    if (SHA_RE.test(ref)) return this.readVerified(ref);
+    const sha = (await this.readIndex())[ref];
+    if (!sha) return undefined;
+    const found = await this.readVerified(sha);
+    if (!found)
+      throw new HarnessIntegrityError(
+        `Harness index maps ${JSON.stringify(ref)} to ${sha}, but ${this.pathFor(sha)} is missing`,
+      );
+    return found;
+  }
 
+  /**
+   * CURRENT, failing closed when it names a harness that is missing or fails its integrity check —
+   * with an error that says it is CURRENT at fault and how to repair it, because plain runs read it.
+   */
+  private async loadCurrent(): Promise<HarnessConfig | undefined> {
+    const sha = await readFile(path.join(this.dir, CURRENT_FILE), 'utf8')
+      .then((t) => t.trim())
+      .catch(() => undefined);
+    if (!sha || !SHA_RE.test(sha)) return undefined;
+    const remedy =
+      'Plain runs read CURRENT, so they are refused until it names an intact harness: ' +
+      '`maf harness set-current legacy-default` (or another id or sha), or restore the file.';
+    let found: HarnessConfig | undefined;
+    try {
+      found = await this.readVerified(sha);
+    } catch (err: unknown) {
+      throw new HarnessIntegrityError(
+        `CURRENT names harness ${sha}, which fails its integrity check ` +
+        `(${err instanceof Error ? err.message : String(err)}). ${remedy}`,
+      );
+    }
+    if (!found)
+      throw new HarnessIntegrityError(`CURRENT names harness ${sha}, but ${this.pathFor(sha)} is missing. ${remedy}`);
+    return found;
+  }
+
+  /** The harness stored under `sha`, integrity-checked; undefined when there is no file. */
+  private async readVerified(sha: string): Promise<HarnessConfig | undefined> {
     let text: string;
     try {
       text = await readFile(this.pathFor(sha), 'utf8');
-    } catch {
-      throw new HarnessIntegrityError(`Harness index points at ${sha} but the config file is missing`);
+    } catch (err: unknown) {
+      if (isNotFound(err)) return undefined;
+      throw new HarnessIntegrityError(
+        `Harness file ${sha}.yaml could not be read: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     let parsed: unknown;
@@ -216,9 +255,41 @@ export class HarnessStore {
     }
   }
 
-  private async writeIndex(index: Record<string, string>): Promise<void> {
-    await writeFile(path.join(this.dir, INDEX_FILE), JSON.stringify(index, null, 2), 'utf8');
+  /** Point `id` at `sha` in the index (and no other id at it), writing only if that changes it. */
+  private async pointId(id: string, sha: string): Promise<void> {
+    const index = await this.readIndex();
+    const others = Object.entries(index).filter(([k, v]) => k !== id && v === sha);
+    if (index[id] === sha && others.length === 0) return;
+    for (const [k] of others) delete index[k];
+    // An id that named other content now names this sha; the earlier file stays under its own sha.
+    index[id] = sha;
+    await this.writeAtomic(path.join(this.dir, INDEX_FILE), JSON.stringify(index, null, 2));
   }
+
+  private async writeCurrent(sha: string): Promise<void> {
+    await mkdir(this.dir, { recursive: true });
+    await this.writeAtomic(path.join(this.dir, CURRENT_FILE), sha);
+  }
+
+  /**
+   * Write beside the target, then rename over it. A rename within one directory is atomic, so a
+   * concurrent run reads the old file or the new one — never a truncated one it would report as
+   * tampered.
+   */
+  private async writeAtomic(file: string, text: string): Promise<void> {
+    const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+    try {
+      await writeFile(tmp, text, 'utf8');
+      await rename(tmp, file);
+    } catch (err: unknown) {
+      await rm(tmp, { force: true });
+      throw err;
+    }
+  }
+}
+
+function isNotFound(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT';
 }
 
 export { computeHarnessSha, mintHarnessConfig };
@@ -270,9 +341,17 @@ export async function resolveHarnessRef(
       'Build it with harnessRoleSetFromRegistry (@maf/roles), which inlines the text.');
     resolved = { harness: await store.adoptLegacy(roleSet), source: 'legacy' };
   }
-  const { harness } = resolved;
-  assertPromptsCarried(harness.roleSet, `Harness ${JSON.stringify(harness.id)} (${shortSha(harness.sha)})`,
-    'Re-mint it from the roles file (a plain run, or --harness legacy-default), which inlines the text.');
+  const { harness, source } = resolved;
+  const named = `${JSON.stringify(harness.id)} (${shortSha(harness.sha)})`;
+  if (source === 'current')
+    // Re-minting does not help here: a plain run keeps reading CURRENT. Only moving CURRENT does.
+    assertPromptsCarried(harness.roleSet, `CURRENT's harness ${named}`,
+      'It predates 0.3.0, which carries each prompt\'s text in the harness, so every plain run is refused ' +
+      'while CURRENT names it. Run `maf harness set-current legacy-default` to hand plain runs back to the ' +
+      'roles file, or point CURRENT at another harness.');
+  else
+    assertPromptsCarried(harness.roleSet, `Harness ${named}`,
+      'Re-mint it from the roles file (a plain run, or --harness legacy-default), which inlines the text.');
   return resolved;
 }
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { HarnessRoleSet } from '../index.js';
@@ -91,6 +91,43 @@ test('adoptLegacy: an unchanged role set reuses the stored harness and sets CURR
     assert.equal(again.sha, first.sha);
     assert.equal((await store.current())?.sha, first.sha);
     assert.equal((await store.list()).length, 1);
+  });
+});
+
+/** Inode and mtime of each file, so a test can tell "left alone" from "rewritten with the same bytes". */
+async function fingerprints(files: string[]): Promise<Array<{ file: string; ino: bigint; mtimeNs: bigint }>> {
+  return Promise.all(files.map(async (file) => {
+    const s = await stat(file, { bigint: true });
+    return { file: path.basename(file), ino: s.ino, mtimeNs: s.mtimeNs };
+  }));
+}
+
+test('adoptLegacy: an unchanged role set writes nothing; the stored file, index and CURRENT are left alone', async () => {
+  // Regression (verifier F3): every plain run re-saved the unchanged harness, truncating a file a
+  // concurrent run was verifying, which then reported it as tampered.
+  await withTempDir(async (dir) => {
+    const store = new HarnessStore(dir);
+    const first = await store.adoptLegacy(ROLE_SET);
+    const files = [`${first.sha}.yaml`, 'index.json', 'CURRENT'].map((f) => path.join(dir, 'harnesses', f));
+    const before = await fingerprints(files);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal((await store.adoptLegacy(ROLE_SET)).sha, first.sha);
+    assert.deepEqual(await fingerprints(files), before);
+  });
+});
+
+test('adoptLegacy: returning to an earlier role set re-points the index and CURRENT without rewriting its file', async () => {
+  await withTempDir(async (dir) => {
+    const store = new HarnessStore(dir);
+    const v1 = await store.adoptLegacy(ROLE_SET);
+    const v1File = path.join(dir, 'harnesses', `${v1.sha}.yaml`);
+    const before = await fingerprints([v1File]);
+    await store.adoptLegacy({ ...ROLE_SET, defaultRole: 'tester' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await store.adoptLegacy(ROLE_SET);
+    assert.deepEqual(await fingerprints([v1File]), before);
+    assert.equal((await store.load(LEGACY_DEFAULT_ID)).sha, v1.sha);
+    assert.equal((await store.current())?.sha, v1.sha);
   });
 });
 
