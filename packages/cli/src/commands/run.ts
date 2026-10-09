@@ -307,6 +307,9 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       board,
       executor: (node) => dispatcher.runNode(node),
       isWriter: writerLock(roles, adapter, baseTools),
+      // Each failed node leaves a Task and its Failure joined by CAUSED_FAILURE, which the planner
+      // recalls by the run's title (D-16, D-37); the recorder's wait is bounded.
+      failureRecorder: graph,
       onNodeStart: (id) => say(`[maf] → node ${id} started`),
       onNodeEnd:   (id, status) => {
         // The baseline commit captured for a writer node is held until the node ends, so a
@@ -315,22 +318,6 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
         say(`[maf] ← node ${id} ${status}`);
       },
     });
-
-    // Every failed node leaves a Failure node behind. Until now only the security
-    // gate wrote one, so no other kind of failure left a trace in the graph.
-    for (const node of outcome.nodes ?? []) {
-      if (node.status !== 'Failed') continue;
-      await graph.addNode({
-        kind:       'Failure',
-        label:      node.nodeId,
-        properties: {
-          nodeId: node.nodeId,
-          role:   dag.nodes.get(node.nodeId)?.agentRole ?? 'unknown',
-          error:  node.error ?? 'unknown',
-        },
-        runId,
-      });
-    }
 
     // Bundle attestation — the harness IS the build's config source (signed): the stored file and
     // its sha, re-verified now, so the digest names what was dispatched.
@@ -383,12 +370,13 @@ export function writerLock(roles: RoleRegistry, adapter: CliAdapter, baseTools: 
 
 /**
  * Whether the user has work the run's worktree, started from HEAD, will not have. MAF's own
- * `.maf/` under `dir` is left out: the run reads it from `dir`, not from the worktree.
+ * `.maf/` under `dir` is left out: the run reads it from `dir`, not from the worktree. No optional
+ * locks: a plain `git status` may refresh and rewrite the user's index, and a run leaves it as it was.
  */
 async function hasWorkOutsideHead(dir: string): Promise<boolean> {
   try {
     const { stdout } = await runIsolatedGit(dir, ['status', '--porcelain', '--', ':(top)', ':(exclude).maf'],
-      { env: { GIT_LITERAL_PATHSPECS: '0' } });
+      { env: { GIT_LITERAL_PATHSPECS: '0', GIT_OPTIONAL_LOCKS: '0' } });
     return stdout.trim() !== '';
   } catch {
     return false; // not a repository: createForRun refuses it with the reason

@@ -1,7 +1,11 @@
+import { readdir, readFile, utimes, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { Command } from 'commander';
 import type { AdapterName, CliAdapter } from '@maf/types';
 import { LcmEngine } from '@maf/lcm';
+import { runIsolatedGit } from '@maf/git-ops';
+import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { registerRunCommand } from '../commands/run.js';
 import type { RunDeps } from '../commands/run.js';
 
@@ -88,4 +92,73 @@ function lcmLoads(): boolean {
   } catch {
     return false;
   }
+}
+
+// ── A user's repository ──────────────────────────────────────────────────────────────────────
+
+export const BUGGY_SUM = 'module.exports = (a, b) => a - b;\n';
+export const FIXED_SUM = 'module.exports = (a, b) => a + b;\n';
+
+/**
+ * The demo's buggy repository under `<root>/repo`, committed, with work the user has not committed:
+ * a staged edit, an unstaged edit and an untracked file — what a run must neither see nor touch.
+ * package.json is touched but unchanged, so a plain `git status` would refresh the index and write
+ * it: a run that read the user's status that way would change the index's bytes.
+ */
+export async function dirtyUserRepo(root: string): Promise<string> {
+  const repo = await createDemoFixture(root);
+  await writeFile(path.join(repo, 'test.js'), `${await readFile(path.join(repo, 'test.js'), 'utf8')}// staged by the user\n`, 'utf8');
+  await runIsolatedGit(repo, ['add', 'test.js']);
+  await writeFile(path.join(repo, 'config.txt'), 'db_host=localhost\nport=6543\n', 'utf8');
+  await writeFile(path.join(repo, 'notes.txt'), 'my own notes, never committed\n', 'utf8');
+  const anHourAgo = new Date(Date.now() - 3_600_000);
+  await utimes(path.join(repo, 'package.json'), anHourAgo, anHourAgo);
+  return repo;
+}
+
+/** Everything of the user's a run could disturb, read without taking git's optional locks. */
+export interface UserState {
+  head:     string;
+  branch:   string;
+  status:   string[];
+  files:    Record<string, string>;
+  gitFiles: Record<string, string>;
+}
+
+/**
+ * HEAD and its branch, `git status` (MAF's own `.maf/` left out: a run keeps its state there by
+ * design), the bytes of every file outside `.git/` and `.maf/`, and the raw bytes of the index,
+ * `.git/HEAD` and `.git/config`.
+ */
+export async function userState(repo: string): Promise<UserState> {
+  const git = async (...args: string[]) => (await runIsolatedGit(repo, args, { env: { GIT_OPTIONAL_LOCKS: '0' } })).stdout;
+  const files: Record<string, string> = {};
+  const walk = async (rel: string): Promise<void> => {
+    for (const entry of await readdir(path.join(repo, rel), { withFileTypes: true })) {
+      const child = path.join(rel, entry.name);
+      if (child === '.git' || child === '.maf') continue;
+      if (entry.isDirectory()) await walk(child);
+      else files[child] = (await readFile(path.join(repo, child))).toString('base64');
+    }
+  };
+  await walk('');
+  const gitFiles: Record<string, string> = {};
+  for (const f of ['index', 'HEAD', 'config']) gitFiles[f] = (await readFile(path.join(repo, '.git', f))).toString('base64');
+  return {
+    head:   (await git('rev-parse', 'HEAD')).trim(),
+    branch: (await git('symbolic-ref', '-q', 'HEAD')).trim(),
+    status: (await git('status', '--porcelain=v1', '-z', '--untracked-files=all')).split('\0').filter((e) => e && !e.slice(3).startsWith('.maf/')),
+    files,
+    gitFiles,
+  };
+}
+
+/** A policy file outside the repository: escalate a write to a lock file, allow the rest. */
+export async function lockFilePolicy(root: string): Promise<string> {
+  const file = path.join(root, 'policy.json');
+  await writeFile(file, JSON.stringify({ rules: [{
+    id: 'lock-files-need-a-human', description: 'a lock file changes only with a human\'s approval', priority: 95,
+    predicate: { toolId: 'fs.write', pathGlob: '**/*.lock' }, action: { kind: 'Escalate', requiresApproval: true },
+  }] }), 'utf8');
+  return file;
 }
