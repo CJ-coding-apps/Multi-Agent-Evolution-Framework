@@ -2,7 +2,7 @@ import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { RunId } from '@maf/types';
 import { resolveInside } from '@maf/types';
-import { MAF_RUNTIME_STATE, runIsolatedGit, snapshotDiff } from './SnapshotDiff.js';
+import { MAF_RUNTIME_STATE, runIsolatedGit, runtimeStateExcludes, snapshotDiff } from './SnapshotDiff.js';
 
 /**
  * One run's own checkout (D-03): `<project>/.maf/worktrees/<runId>` on branch `maf/<runId>`,
@@ -188,12 +188,14 @@ export class WorktreeManager {
     const cwd = await assertOnRunBranch(wtPath, { path: wtPath, branch });
     const prefix = await git(this.projectRoot, ['rev-parse', '--show-prefix']);
     const runtimeState = MAF_RUNTIME_STATE.map((s) => `${prefix}.maf/${s}`);
-    // The security gate's pathspec (D-29), so this commit adds nothing that the gate's diff leaves
-    // out. It does not make the branch reviewed: what the run committed itself, or wrote after the
-    // last gate, reaches it without passing through this filter — hence the check below.
-    const pathspec = ['--', ':(top)', ...runtimeState.map((p) => `:(top,exclude)${p}`)];
     const env = { ...RUN_COMMIT_ENV, GIT_LITERAL_PATHSPECS: '0' };
     try {
+      // The security gate's pathspec (D-29), so this commit adds nothing that the gate's diff leaves
+      // out — built by the gate's own rule, which leaves out an exclusion a `.gitignore` already covers,
+      // since `git add` refuses one that names an ignored path. It does not make the branch reviewed:
+      // what the run committed itself, or wrote after the last gate, reaches it without passing through
+      // this filter — hence the check below, on every entry, ignored or not.
+      const pathspec = ['--', ':(top)', ...(await runtimeStateExcludes(cwd, env, prefix))];
       await runIsolatedGit(cwd, ['add', '-A', ...pathspec], { env });
       if (!(await gitTest(cwd, ['diff', '--cached', '--quiet']))) {
         await runIsolatedGit(cwd, ['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', `maf run ${runId}`], { env });
