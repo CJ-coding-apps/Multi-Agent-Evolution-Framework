@@ -1,17 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFile, rm } from 'node:fs/promises';
+import { access, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { AttestationBundle } from '@maf/types';
 import { Attestor, MAF_RUN_PREDICATE_TYPE, componentId, parseBundle } from '@maf/attestation';
 import type { InTotoStatement } from '@maf/attestation';
 import { needsLcm } from './runFixture.js';
 
-// ORACLE: WP-2.10 acceptance, the demo half (BUILD_PLAN §6, D-24) — `maf inprocess-demo` runs its
-// coder in-process through the stack goldens and evolve share, the security gate reviews the diff,
-// and the run leaves a signed in-toto statement with keySource inside the signed predicate, the
-// coder's diff as a subject and the approvals list, under the version the packages ship as.
+// ORACLE: WP-2.10 acceptance, the demo half (BUILD_PLAN §6, D-24, verifier F5) — `maf inprocess-demo`
+// runs its coder in-process through the stack goldens and evolve share, its escalated delete is
+// refused headless (D-02) and that refusal is in the bundle's approvals with a pending record beside
+// it, the security gate reviews the diff, and the run leaves a signed in-toto statement with
+// keySource inside the signed predicate and the coder's diff as a subject, under the version the
+// packages ship as.
 
 const MAIN = path.join(__dirname, '..', 'main.js');
 const KEY = 'demo-signing-key';
@@ -39,7 +41,11 @@ test('maf inprocess-demo: in-process coder, security gate, signed in-toto attest
     assert.equal(predicate.keySource, 'env');
     assert.equal(predicate.outcome.status, 'Succeeded');
     assert.equal(predicate.provenance.builder.id, componentId('@maf/inprocess-demo'));
-    assert.ok(Array.isArray(predicate.approvals), 'the approvals list is part of the signed predicate');
+    // The escalated delete: refused headless, recorded in the signed approvals, left as a pending record.
+    assert.deepEqual(predicate.approvals.map((a) => [a.decision.status, a.decision.reviewer]), [['Rejected', 'headless']]);
+    const refusal = predicate.approvals[0];
+    assert.ok(refusal);
+    await access(path.join(fixture, '.maf', 'approvals', 'pending', `${refusal.requestId}.json`));
 
     // The coder's tool calls were made in-process, through the gate: each one is on the record.
     const tools = predicate.toolCalls.map((c) => [String(c.toolId), c.result.metadata['refused'] === true]);

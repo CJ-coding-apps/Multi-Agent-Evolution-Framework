@@ -39,11 +39,11 @@ export function goldenRunStatus(result: GoldenSuiteResult): RunStatus {
 }
 
 /**
- * The harness a golden run evaluates: `--harness` (a stored ref, or a harness file), else
- * CURRENT, else the committed `.maf/harnesses/default-<sha>.json` — which is all a fresh clone
- * that has never run maf has. The committed default also answers to its id and (short) sha, and
- * is read in place, not imported into the store. A stored ref and CURRENT go through `run`'s own
- * resolution (`resolveRunHarness`).
+ * The harness a golden run evaluates and `evolve` starts from: `--harness` (a stored ref, or a
+ * harness file), else CURRENT, else the committed `.maf/harnesses/default-<sha>.json` — which is
+ * all a fresh clone that has never run maf has. The committed default also answers to its id and
+ * (short) sha, and is read in place, not imported into the store. A stored ref and CURRENT go
+ * through `run`'s own resolution (`resolveRunHarness`).
  */
 export async function resolveGoldensHarness(mafDir: string, ref?: string): Promise<{ harness: HarnessConfig; source: string }> {
   const store = new HarnessStore(mafDir);
@@ -64,8 +64,10 @@ export async function resolveGoldensHarness(mafDir: string, ref?: string): Promi
         'Pass --harness, or run maf once to mint one.',
       );
     }
+    // Located by its sha, like a typed ref, so `evolve` starting from it and `goldens` measuring it
+    // name one harness; a copy `run` imported into the store is the same content.
     const file = defaults[0] as string;
-    return { harness: await loadHarnessFile(file), source: file };
+    return locateStoredHarness(store, path.basename(file).slice('default-'.length, -'.json'.length));
   }
   // Everything else is resolved as `run` resolves it, so a CURRENT that tracks the roles file
   // evaluates the roles file now, and a harness whose prompts are not in its sha is refused.
@@ -115,6 +117,8 @@ export interface GoldenSuiteOptions {
   attempts: number;
   policyPath: string;
   runId: RunId;
+  /** `--allow-ungoverned`: a writer role may run on the cli tier, outside MAF's gates (D-01). */
+  allowUngoverned?: boolean;
 }
 
 /**
@@ -139,6 +143,7 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
     const stack = await buildRunStack({
       cwd: o.cwd, mafDir: evalDir, policyPath: o.policyPath, adapter: o.agent, runId: o.runId,
       harnessSha: o.harness.sha, headless: true, ...model,
+      ...(o.allowUngoverned === true ? { allowUngoverned: true } : {}),
     });
     let result: GoldenSuiteResult;
     try {
@@ -251,7 +256,7 @@ async function loadGoldenResult(resultsDir: string, ref: string): Promise<Golden
 
 interface GoldenOpts {
   adapter: string; model?: string; judgeAdapter?: string; judgeModel?: string;
-  dir: string; corpus: string; harness?: string; attempts: string; policy: string;
+  dir: string; corpus: string; harness?: string; attempts: string; policy: string; allowUngoverned?: boolean;
 }
 
 export function registerGoldensCommand(program: Command): void {
@@ -268,6 +273,7 @@ export function registerGoldensCommand(program: Command): void {
     .option('--harness <ref>', 'Harness id/sha/file (default: current, else the committed default)')
     .option('--attempts <k>', 'pass@k attempts per task', '2')
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
+    .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .description('Run the golden corpus under a harness, isolated from past runs (temperature pinned to 0 where the backend supports it)')
     .action(async (opts: GoldenOpts) => {
       const cwd = path.resolve(opts.dir);
@@ -287,6 +293,7 @@ export function registerGoldensCommand(program: Command): void {
         cwd, corpusRoot, harness, harnessSource: source, agent, ...(opts.model ? { model: opts.model } : {}),
         judge: { adapter: judgeAdapter, ...(judgeModel ? { model: judgeModel } : {}) },
         attempts: Number(opts.attempts) || 2, policyPath: path.resolve(cwd, opts.policy), runId,
+        ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
       });
 
       // The score goes into the project's memory for the evolver's digest; nothing reads it back

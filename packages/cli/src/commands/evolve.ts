@@ -13,7 +13,8 @@ import { createDefaultRegistry } from '@maf/tools';
 import { createDefaultProcessorRegistry } from '@maf/processors';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
-import { buildRunStack, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
+import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
+import { resolveGoldensHarness } from './goldens.js';
 
 /**
  * Evolve's smoke check: one attempt of the task it names. It ran the whole corpus and judged
@@ -27,7 +28,7 @@ export async function smokeCheck(runner: { run(only?: readonly string[]): Promis
 
 interface EvolveCliOpts {
   adapter: string; model?: string; dir: string; corpus: string; harness?: string;
-  rounds: string; patience: string; policy: string; approveSensitive: boolean;
+  rounds: string; patience: string; policy: string; approveSensitive: boolean; allowUngoverned?: boolean;
 }
 
 export function registerEvolveCommand(program: Command): void {
@@ -38,11 +39,12 @@ export function registerEvolveCommand(program: Command): void {
     .option('-m, --model <model>', 'Meta-agent model')
     .option('-d, --dir <path>', 'Working directory', process.cwd())
     .option('--corpus <path>', 'Golden corpus root', '.maf/goldens')
-    .option('--harness <ref>', 'Starting harness (default: current)')
+    .option('--harness <ref>', 'Starting harness id/sha/file (default: current, else the committed default)')
     .option('--rounds <n>', 'Max evolution rounds', '10')
     .option('--patience <n>', 'Consecutive no-ship rounds before stopping', '3')
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
     .option('--approve-sensitive', 'Pre-approve edits to safety-adjacent roles (security/reviewer)', false)
+    .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .action(async (opts: EvolveCliOpts) => {
       const cwd = path.resolve(opts.dir);
       const mafDir = path.join(cwd, '.maf');
@@ -50,15 +52,15 @@ export function registerEvolveCommand(program: Command): void {
       const runId = makeRunId(crypto.randomUUID());
 
       const store = new HarnessStore(mafDir);
-      const { harness: base } = await resolveRunHarness({
-        store, ref: opts.harness, rolesPath: path.join(mafDir, 'roles.yaml'), mafDir, baseTools: createDefaultRegistry(),
-      });
+      // The harness `goldens run` would measure, so a fresh clone evolves from the one it evaluates.
+      const { harness: base } = await resolveGoldensHarness(mafDir, opts.harness);
       console.log(`[maf] evolve ${runId} | base: ${base.id} (${shortSha(base.sha)}) | rounds=${opts.rounds} patience=${opts.patience}`);
 
       const adapter = await resolveAdapter(opts.adapter, createAdapterRegistry());
       const stack = await buildRunStack({
         cwd, mafDir, policyPath: path.resolve(cwd, opts.policy), adapter, runId,
         harnessSha: base.sha, headless: true, ...(opts.model ? { model: opts.model } : {}),
+        ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
       });
 
       const corpus: GoldenTask[] = JSON.parse(await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'));
