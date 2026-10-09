@@ -13,7 +13,7 @@ reproduction is worth more than a description.
 
 ## Supported versions
 
-MAF is pre-1.0 (currently 0.2.1). Only the most recent release is supported; fixes land there and are not
+MAF is pre-1.0 (currently 0.3.0). Only the most recent release is supported; fixes land there and are not
 backported. Please reproduce against the latest version, on Node 22 — the version CI builds and tests
 on — before reporting.
 
@@ -22,8 +22,10 @@ on — before reporting.
 Worth stating plainly, because it decides what is and is not a vulnerability here.
 
 - **It runs on your machine and opens no port.** MAF is a command-line orchestrator: it starts no server
-  and listens on no socket. It mounts no MCP servers of its own; a backend CLI may run its own, under
-  that CLI's configuration.
+  and listens on no socket. It mounts no MCP servers of its own, and it spawns `claude` with
+  `--strict-mcp-config` and an empty `--mcp-config`, so `claude` starts none of yours either; `gemini` is
+  given an MCP allowlist that names no configured server (not checked against a live `gemini`), and
+  `codex` is given no MCP flag, so MAF does nothing to stop the servers its configuration names.
 - **It drives coding agents you already have, with your credentials.** A node's work is handed to a
   backend: a CLI (Claude Code, Gemini, Codex), which runs as you, or an HTTP API (OpenRouter, a local
   Ollama server). Either sends its traffic to that provider under that provider's terms. That is the
@@ -33,12 +35,11 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
 - **The attestation bundle is written locally, in the clear**, at `.maf/attestations/<runId>.bundle.json`.
   It is an in-toto Statement (`_type: https://in-toto.io/Statement/v0.1`). Its subjects are the changes
   the run's writer nodes left: one per node, named `<nodeId>.diff`, whose digest is the sha256 of the diff
-  taken where the post-task security gate takes it (on the in-process tier, when the harness runs the
-  `security-gate` processor, as the default does); a run that changed nothing has none. Its predicate
+  the post-task security gate reviewed, on either tier; a run that changed nothing has none. Its predicate
   (`predicateType: https://maf.dev/attestation/run/v1`) records each in-process tool call's input and
-  result — refused calls included, with the verdict and, where a rule decided, the rule's id — the
-  security findings and the run's outcome. Its `approvals` field is always empty: nothing fills it yet.
-  Before either the bundle or the
+  result — refused calls included, with the verdict and, where a rule decided, the rule's id — every
+  decision the approval gate and the review gate made (in `approvals`), the security findings and the
+  run's outcome. Before either the bundle or the
   memory graph sees a tool call, credentials are stripped from its input and from the result's stdout,
   stderr and metadata (`gatedExec.ts`). The scrubber is **format-based and shallow**, and both limits
   are deliberate: it knows eight credential shapes (AWS, Anthropic, OpenAI, Google, a GitHub PAT, a Slack token, a bearer
@@ -49,8 +50,11 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
   run outcome and the memory graph, are masked the same way: a failed node's output tail with those eight
   formats, and a backend's stderr or HTTP error-body tail with five of them (bearer tokens, `sk-` keys,
   Google, GitHub and AWS keys).
-- **On the default execution tier, no tool call is recorded at all.** Redaction describes the `in-process`
-  path above. A `cli`-tier role's tools run inside the backend CLI, so there is nothing to record — see
+- **A refused escalation leaves a record in the clear** at `.maf/approvals/pending/<id>.json` when no one
+  could be asked: the approval request (its id, the run, the task, the tool and the rule), the request's
+  hash, the declared paths, a timestamp and the reason. The tool's input is not written there.
+- **On the `cli` tier, no tool call is recorded at all.** Redaction describes the `in-process` path
+  above. A `cli`-tier role's tools run inside the backend CLI, so there is nothing to record — see
   *The execution-tier boundary* below.
 
 How a bundle is signed, and what a signature does **not** establish today, stated rather than implied:
@@ -65,11 +69,13 @@ How a bundle is signed, and what a signature does **not** establish today, state
   predicate's `diffHashes` (same names, same digests, each once) does not verify. `maf attest verify
   <bundle>` checks a bundle and prints `valid`, the `keySource` it checked against, the number of
   subjects, and `legacy` when the signature matched as a 0.2.x bundle's; it exits 1 with the reason
-  when the bundle does not verify.
+  when the bundle does not verify, cannot be read, or is not a bundle.
 - **Without `MAF_SIGNING_KEY`, a valid signature is evidence of nothing.** The key is `MAF_SIGNING_KEY`.
-  When that is unset — or empty, or set to the published development value — a run (and `maf attest
-  verify`) prints one warning line to stderr and uses the public development key `'dev-secret'`
-  (`packages/attestation/src/Attestor.ts`). The bundle then says `keySource: "dev"` in its predicate,
+  When that is unset — or empty, or set to the published development value — a run prints one warning
+  line to stderr and signs with the public development key `'dev-secret'`
+  (`packages/attestation/src/Attestor.ts`), and `maf attest verify` checks against that key after a note
+  of its own on stderr (`verifying with the public development key; set MAF_SIGNING_KEY to verify against
+  yours`). The bundle then says `keySource: "dev"` in its predicate,
   inside the signed statement, so the label cannot be stripped or flipped without breaking the
   signature. `Attestor.verify(bundle, { secret })` returns `true` only when the signature matches that
   key *and* the bundle's `keySource` names that kind of key; `Attestor.inspect` returns
@@ -78,17 +84,17 @@ How a bundle is signed, and what a signature does **not** establish today, state
   `keySource: "env"`. Set `MAF_SIGNING_KEY` to a secret of your own before treating a bundle as evidence
   of authorship.
 - **A 0.2.x bundle is custom JSON, signed over `JSON.stringify` in the order its fields were written.**
-  It still verifies, against the key you supply, and `inspect` reports it as `legacy: true`; a 0.2.1
+  It still verifies, against the key you supply, and is reported as `legacy`; a 0.2.1
   bundle's `keySource` is held to the rule above. A 0.2.0 bundle carries no `keySource`, so it verifies
   on its signature alone, and verifying one with the development key proves only that it was signed
   with the development key.
 - **The key is not hidden from the agent.** The backend CLIs and every tool that starts a process —
   `test.run`, the `git.*` tools, `grep` (rg or grep) and `patch.apply` — inherit MAF's whole environment,
-  `MAF_SIGNING_KEY` included. `test.run` runs project code with it. The `git.*` tools run git with hooks
-  off (`core.hooksPath` and `core.fsmonitor` pinned) and the host's git configuration ignored, so they
-  never run a hook, even one the agent wrote. So an agent that can run a command — directly, through a test it
-  wrote, or through a hook — can read the key and sign a bundle of its own. A signature shows that whoever made the bundle held the
-  key; on a run whose agent could run commands, that includes the agent.
+  `MAF_SIGNING_KEY` included. `test.run` runs project code with it. The `git.*` tools never run a hook,
+  even one the agent wrote (see *The agent's git tools* below). So an agent that can run a command —
+  directly, or through a test it wrote — can read the key and sign a bundle of its own. A signature
+  shows that whoever made the bundle held the key; on a run whose agent could run commands, that
+  includes the agent.
 - **It is signed, not sealed.** Anyone who can write to the bundle's directory can replace it with one
   they signed with the same key.
 
@@ -110,22 +116,29 @@ boundaries are implemented; anything not written here is not a guarantee.
 
 Every writer role's change is reviewed by `SecurityReviewGate` before the node completes. A writer is a
 role that holds `fs.write`, `fs.delete`, `patch.apply`, `git.commit`, `git.reset` or `git.add`; the role's
-name plays no part, so a tester holding `patch.apply` is reviewed like a coder. When the review runs:
+name plays no part, so a tester holding `patch.apply` is reviewed like a coder. The review runs once per
+attempt, at the first of these that reaches it:
 
 - **`cli` tier:** `RoleDispatcher` runs it after the backend returns, whether the result was a success, a
   failure or empty output.
 - **`in-process` tier:** the `security-gate` processor runs it at `task_end`, whatever outcome the loop
   returns (completed, `budget_exhausted`, failed). The default processor bundle includes that
-  processor; a harness whose `processorBundles` leaves it out gets no end-of-task review.
+  processor; for a harness whose `processorBundles` leaves it out, the dispatcher runs the same review
+  right after the loop returns.
 - **Either tier, when the backend or the loop throws** — a timed-out turn, a backend that never started:
   the dispatcher runs the review on whatever the agent left in the tree before the error propagates. A
   refusal outranks the error; a clean or empty diff lets the original error through for the scheduler
-  to classify ([D-31](DECISIONS.md)). On the in-process tier this is the only review a throw gets, since
-  the loop never reaches `task_end`.
+  to classify ([D-31](DECISIONS.md)). In-process, the dispatcher fires `task_end` for a loop that threw,
+  so the processor's review runs there.
+
+The reviewer is the run's backend, called on the `cli` tier (one prompt, one answer) in the directory
+the run works in; with `claude`, that call keeps Claude Code's own tools (see *The execution-tier
+boundary*).
 
 The gate reviews **a diff of the whole repository's working tree against the commit the node started
 from**, computed by `snapshotDiff` (`packages/git-ops/src/SnapshotDiff.ts`) with the `:(top)` pathspec,
-so a change anywhere in the repository is in it even when MAF was pointed at a subdirectory.
+so a change anywhere in the repository is in it even when MAF was pointed at a subdirectory. In a run
+with worktree isolation the repository is the run's own worktree (see *Worktree isolation* below).
 
 "Against the commit the node started from, not `HEAD`" is load-bearing: an agent that commits its own
 work — normal behaviour for a CLI coding agent — would otherwise diff clean, and an empty diff passes
@@ -144,6 +157,8 @@ What the diff therefore contains:
 | A change elsewhere in the repository than the directory MAF was pointed at | yes — the pathspec is the whole repository |
 | MAF's configuration under `.maf/`: `policy.yaml`, `roles.yaml`, `config.yaml`, `prompts/` | yes — an agent could rewrite it to shape the next run |
 | **This run's runtime state under `<cwd>/.maf/`**: `runs/`, `cache/`, `memory.kuzu`, `lcm.db*`, `transcripts/`, `attestations/`, `harnesses/`, `goldens/results/`, `evolve/` | **no** — excluded by name ([D-29](DECISIONS.md)): MAF writes it, it grows during the run, and it would push an honest diff past the gate's cap. A `.maf/` directory elsewhere in the repository is ordinary content |
+| `.maf/worktrees/` — earlier runs' worktrees | **no** — it carries a `.gitignore` of its own that ignores everything in it ([D-35](DECISIONS.md)) |
+| Anything else under `<cwd>/.maf/`, such as `approvals/pending/` | yes — it is not on the runtime-state list. In a run with worktree isolation MAF writes `approvals/` in the target directory, outside the reviewed worktree; with isolation off, a pending record written during the run is in the next writer's diff |
 | Anything outside the repository | no — it is not in the tree at all |
 
 #### Limits, stated rather than implied
@@ -164,11 +179,11 @@ runtime-state path are not reviewed.
 
 **An oversized diff is an error, never a truncated review.** There are two caps, and neither truncates.
 `snapshotDiff` fails the node when the diff passes 8 MB. `SecurityReviewGate` refuses a diff longer than
-its own cap — `maxDiffChars`, 60,000 characters by default, set where the gate is constructed (no CLI flag
-sets it in 0.2.1) — by throwing `GateRefused`, which names the diff's size and the cap, before any model
-call. The refusal is recorded in the bundle's security findings and as a `Failure` node, and it is never
-retried. Reviewing a truncated diff would report the cut portion as reviewed, which is the same fail-open
-the diff exists to close, reached a third way.
+its own cap — `maxDiffChars`, 60,000 characters by default, set where the gate is constructed (no flag or
+`.maf/config.yaml` key sets it) — by throwing `GateRefused`, which names the diff's size and the cap,
+before any model call. The refusal is recorded in the bundle's security findings and as a `Failure` node,
+and it is never retried. Reviewing a truncated diff would report the cut portion as reviewed, which is
+the same fail-open the diff exists to close, reached a third way.
 
 **The verdict comes from the severities, not from the reviewer's say-so.** Any `critical` or `high`
 finding fails the node with `GateRefused`; the reviewing model's own `passed` boolean is ignored, because
@@ -184,13 +199,16 @@ fails closed as a refusal.
 
 **A `cli`-tier role that holds no write tool is not reviewed**, although its backend CLI has file tools of
 its own. On the `cli` tier the allowlist is not passed to the backend, so it does not limit what the agent
-can do — it only decides whether the gate runs.
+can do — it only decides whether the gate runs. The built-in `security` and `reviewer` roles are such
+roles; what they write in the run's tree is reviewed by no gate, and on success it is committed to the
+run's branch with everything else (see *Worktree isolation*).
 
 #### A missing repository is an error
 
 If there is no usable repository to diff in, the gate fails the node and says how to fix it — it does not
 report a clean diff. `git init` with no commits is *not* this case: the empty tree is a valid base, so the
-first change in a fresh repository is reviewable.
+first change in a fresh repository is reviewable (with `--no-worktree`; a worktree needs a commit to
+start from).
 
 ### The human review gate
 
@@ -203,19 +221,30 @@ any reviewer is asked; the gate takes the diff itself, and an empty one handed t
 never an approval.
 
 `maf run` constructs the gate only when the harness requires review or the operator asks for it with
-`--review`. Otherwise no gate is wired: nobody is asked, nothing is recorded, and no writer waits on a
-reviewer.
+`--review` ([D-34](DECISIONS.md)). Otherwise no gate is wired: nobody is asked, nothing is recorded, and
+no writer waits on a reviewer. The reviewer `run` builds is the terminal: when stdin is a terminal and
+`MAF_HEADLESS=1` is not set, it writes to stderr the node, its role, the commit the diff was taken
+against, the diff's sha256 and the diff itself — up to 200 lines or 20 KB, counting what it leaves out,
+with control characters escaped — and reads one line. Only `approve` approves; `deny`, any other line,
+and the end of input deny. A line typed before the prompt appeared is discarded rather than taken as the
+answer, and one prompt is shown at a time.
 
 Only an approval from a named reviewer is an approval. A denial, no answer within the gate's timeout
-(10 minutes by default, set where the gate is constructed), a reviewer that fails before deciding, and
-an answer that is not a decision are all non-approvals.
+(10 minutes by default, set where the gate is constructed; `run` sets none, so the default applies), a
+reviewer that fails before deciding, and an answer that is not a decision are all non-approvals.
 
-- **Required** (`reviewGate: { required: true }`): the node waits for the decision, and anything but
-  an approval fails it with `ReviewRefused` — a verdict, never retried. Like a security refusal, a
-  denial of what a throwing backend left behind outranks the backend's error.
+- **Required** (`reviewGate: { required: true }` in the harness): the node waits for the decision, and
+  anything but an approval fails it with `ReviewRefused` — a verdict, never retried. Like a security
+  refusal, a denial of what a throwing backend left behind outranks the backend's error.
 - **Advisory** (the default, so what `--review` builds for a harness that does not require review):
   the node waits for the decision too, bounded by the gate's timeout, so the outcome is on the record
   before the bundle is signed, but completes whatever the decision is.
+
+When no reviewer is available — stdin is not a terminal, or `MAF_HEADLESS=1` — `--review` alone prints
+one line and the run goes on without a gate. A harness that requires review gets no gate either, and
+then each writer's change is refused with `ReviewRefused`: fail closed. With worktree isolation off and
+uncommitted or untracked changes already in the tree, `--review` is refused before anything runs,
+because the reviewer would be shown the user's own edits as the run's change.
 
 Either way the request and its outcome go into the bundle's `approvals`: the request id; the decision
 (`Approved`, `Rejected` or `TimedOut`), who made it and their comment; the commit the diff was taken
@@ -224,38 +253,122 @@ against; the diff's sha256; and an in-toto Statement binding the decision to tha
 `reviewGate` is part of the harness, so the harness sha says whether review was required. A harness
 that says `required: true` is never run with an advisory gate or with none: each writer's change is
 refused with `ReviewRefused` instead, since the bundle would otherwise name a configuration that
-required a review nobody was asked for.
+required a review nobody was asked for. A `legacy-default` harness minted from `roles.yaml` never sets
+`reviewGate`; a harness file that does is brought in with `maf harness import` and run with
+`--harness <id>` or `maf harness set-current`. `maf evolve` carries a parent harness's `reviewGate` into
+every candidate it builds.
+
+### Escalated tool calls
+
+An `Escalate` verdict is the one policy refusal a person can lift, one call at a time, on a terminal; a
+run with no terminal, or with `MAF_HEADLESS=1`, refuses it and writes the pending record described above
+([D-02](DECISIONS.md)). Each decision is bound to a hash of the tool id, its input, the declared paths and
+the rule id, so an approval cannot be replayed for another call or for an input changed while the person
+was deciding, and every decision is attested. [POLICY.md](POLICY.md#escalate-asking-a-person) has the
+prompt, the confirmation code, the timeout and the records. `maf goldens`, `maf evolve` and
+`maf inprocess-demo` always run headless.
 
 ### The execution-tier boundary
 
 A role runs in one of two tiers:
 
-- **`in-process`** — maf drives every turn and every tool call through the policy engine and processor
-  pipeline. Governance is real here.
-- **`cli`** (the default) — maf hands the backend CLI one prompt and reads back one result. The agent
+- **`in-process`** — maf drives every turn and every tool call through the policy engine, the approval
+  gate and the processor pipeline. Governance is real here. With `claude`, each turn is spawned with
+  `--tools ""`, so the backend has no built-in tool of its own, and with `--strict-mcp-config` and an
+  empty `--mcp-config`, so it has no MCP tool either: the only tools in the loop are MAF's
+  ([D-33](DECISIONS.md)).
+- **`cli`** — maf hands the backend CLI one prompt and reads back one result. The agent
   runs its own tools, so maf sees **no individual tool call**: not the arguments, not the policy verdict,
-  not the path.
+  not the path. MAF passes no permission or hook flags, so the backend acts under its own permission
+  settings. `claude` is still given the empty, strict MCP configuration; `gemini` an MCP allowlist that
+  names no configured server; `codex` nothing.
 
 The writer-role diff above is the one thing maf still observes on the `cli` tier, and it observes it only
-*after* the node finishes — and only for a role that holds a write tool. Policy refusals, redaction and
-tool-call records exist on the `in-process` tier alone.
+*after* the node finishes — and only for a role that holds a write tool. Policy refusals, approved
+escalations, redaction and tool-call records exist on the `in-process` tier alone; the human review gate
+reviews a writer's diff on either tier. The planner's call and the security
+reviewer's call are `cli`-tier calls in this sense, whatever tier the roles run on.
 
 A role's `execution` field defaults by the tools it holds ([D-01](DECISIONS.md)): `in-process` for a role
 that holds a write tool, `cli` for any other. A writer lands on the `cli` tier only by its own
 `execution: cli` or because the adapter cannot run the in-process loop (`codex`, `gemini`, `ollama`,
 `openrouter`), and then only under `--allow-ungoverned`, which prints an `UNGOVERNED` banner; without it
-maf refuses to start the writer. So **maf's default posture is governed for writers; a read-only role
+`maf run` refuses before planning. So **maf's default posture is governed for writers; a read-only role
 still runs on the ungoverned `cli` tier unless it sets `execution: in-process`.**
 
-The tier is *not* yet recorded in the attestation bundle: today it is a local in `RoleDispatcher`, so a
-bundle says what a run produced but not how each node was executed. Until it is recorded per role, the
-only way to know a run's posture is to read the role set it was dispatched with.
+The tier is *not* yet recorded in the attestation bundle, and neither is `--allow-ungoverned`: a bundle
+says what a run produced but not how each node was executed. The harness it names carries each role's
+`execution` setting, if any, and the builder id names the adapter; together they say which tier each role
+was meant to get.
+
+### Worktree isolation
+
+`maf run` works in a git worktree of its own ([D-03](DECISIONS.md)): `createForRun` checks out the
+current HEAD at `.maf/worktrees/<runId>` on a new branch `maf/<runId>`, and the agents, the planner and
+the security reviewer work there — in the same subdirectory of it when MAF was pointed at a subdirectory.
+What that separates, and what it does not:
+
+- **Your checkout is not touched.** Your files, index, `HEAD` and `.git/config` are byte-identical after
+  a run (`cli/run-acceptance.test.ts` and `git-ops/WorktreeManager.isolation.test.ts` check exactly
+  that, on a checkout with staged, unstaged and untracked work); MAF reads your status with
+  `GIT_OPTIONAL_LOCKS=0` so git does not refresh your index. What a run adds to the repository is the
+  branch `maf/<runId>`, git's record of the worktree, and the run's state under `.maf/`. A run never
+  deletes its worktree or its branch.
+- **The run does not see your uncommitted work.** It starts from HEAD and says so when there is
+  uncommitted or untracked work.
+- **MAF's configuration and state stay in the target directory.** The policy, roles, config, prompts,
+  harnesses, memory graph, transcripts, attestations and pending approvals are read and written under
+  the target directory's `.maf/`, not the worktree's. In-process tools are confined to the worktree (it is
+  their project root), so they cannot reach any of it.
+- **Confinement is MAF's, not the operating system's.** A `cli`-tier backend acts with its own tools
+  wherever its permission settings let it, inside or outside the worktree, and the worktree shares the
+  repository's objects and refs with your checkout.
+- **The hand-over.** When the run succeeds, MAF commits what it left uncommitted to `maf/<runId>` —
+  through the security diff's pathspec, so no runtime state is added — as `maf <maf@maf.invalid>`,
+  unsigned, with hooks off, and prints `git merge maf/<runId>`. It merges nothing. A branch still at its
+  base gets no merge command. A branch whose commits bring in runtime state (anything on the D-29 list),
+  for example because the agent committed it, is refused: no merge command, the paths named, and the run
+  exits non-zero ([D-35](DECISIONS.md)). A failed run keeps its worktree as it was and prints its path.
+- **Review the branch before you merge it.** Each writer node's change was reviewed when the node ended,
+  but nobody reviews the branch as a whole: work done after a node's review — by a read-only `cli`-tier
+  role, which is never reviewed — reaches the branch too.
+- **Rollbacks are not on the run path.** `RollbackManager`, which refuses any reset outside a run's
+  worktree, is not used by `maf run` in 0.3.0. The coder's own `git.reset` tool can reset `--hard`, and it
+  acts on whatever the run works in: in a worktree, the run's branch.
+
+With isolation off — `--no-worktree`, or `worktree: false` in `.maf/config.yaml` — the run works in the
+target directory itself, on its checked-out branch, after a warning. Then the security gate and any
+reviewer see your uncommitted changes as the run's own (`maf run` warns when there are some, and refuses
+`--review`), a refused change is left in place with yours, and the coder's `git.commit` and `git.reset`
+act on your branch.
+
+### The agent's git tools
+
+The `git.*` tools (`packages/tools/src/plugins/git.ts`) run every git command with
+`-c core.hooksPath=/dev/null -c core.fsmonitor= -c commit.gpgsign=false`, which outrank the repository's
+own configuration, and with `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1` set and the
+host's `GIT_CONFIG`, `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_COUNT`/`_KEY_<n>`/`_VALUE_<n>` variables
+dropped. So no hook runs — not one in `.git/hooks`, not one an agent wrote under a
+relative `core.hooksPath` such as husky's `.husky` — no fsmonitor program runs, no commit is signed, and
+the host's git configuration does not apply. `git.commit` uses the repository's own `user.name` and
+`user.email` and fills in `maf` / `maf@maf.invalid` only for one the repository leaves unset. Paths are
+literal (`GIT_LITERAL_PATHSPECS=1`), and git never prompts.
+
+What this does not cover: repository configuration that names a program still runs it — `diff.external`
+or a diff driver's `textconv` on `git.diff`, a filter driver's `clean`/`process` (chosen by an
+agent-writable `.gitattributes`) on `git.add`, and `gpg.program` with `log.showSignature` on `git.log`.
+On the in-process tier the shipped policy denies tool writes under `.git/`, so an agent cannot add such
+configuration itself; a relative program path that the repository's configuration already names is a
+file the agent can write. MAF's own git calls (`runIsolatedGit`: the security diff, the worktree, the
+hand-over) pin `core.hooksPath` and ignore the host's configuration files, but do not pin
+`core.fsmonitor`.
 
 ### Path confinement
 
 Every path a tool declares for a call is resolved against the project root and proven to lie inside it
-before anything acts on it — `resolveInside` (`packages/types/src/paths.ts`). For the `fs.*` tools its
-result is the value both the policy engine checks and the tool executes with; for the other
+before anything acts on it — `resolveInside` (`packages/types/src/paths.ts`). The project root is the
+directory the run works in: its worktree, or the target directory with `--no-worktree`. For the `fs.*`
+tools the result is the value both the policy engine checks and the tool executes with; for the other
 path-declaring tools, see the paragraph after the table.
 
 What this refuses:
