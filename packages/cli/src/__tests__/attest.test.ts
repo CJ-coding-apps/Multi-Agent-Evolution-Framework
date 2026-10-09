@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { makeRunId } from '@maf/types';
-import { Attestor } from '@maf/attestation';
+import { Attestor, DEV_SIGNING_KEY } from '@maf/attestation';
 import type { SigningOptions } from '@maf/attestation';
 import { attestVerify } from '../commands/attest.js';
 
@@ -128,11 +128,61 @@ test('maf attest verify: exit 0 on a bundle and on its key-reordered copy; exit 
   });
 });
 
-test('maf attest verify: with MAF_SIGNING_KEY unset it checks against the dev key and warns as run does', async () => {
+test('maf attest verify: with MAF_SIGNING_KEY unset it checks against the dev key and says so in its own words', async () => {
+  // Verifier F5: the run's warning is about signing; this command only checks.
+  const NOTE = '[maf] verifying with the public development key; set MAF_SIGNING_KEY to verify against yours\n';
   await withDir(async (dir) => {
-    const result = maf(['attest', 'verify', await signedBundle(dir, {})], undefined);
+    const file = await signedBundle(dir, {});
+    for (const key of [undefined, '', DEV_SIGNING_KEY]) {
+      const result = maf(['attest', 'verify', file], key);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /^valid: true\nkeySource: dev /);
+      assert.equal(result.stderr, NOTE, `MAF_SIGNING_KEY=${String(key)}: the note, once, and not the run's warning`);
+    }
+  });
+});
+
+test('maf attest verify: the signed bytes are RFC 8785, so array-index keys sort as strings', async () => {
+  // Verifier F1: a statement a third party wrote, and its RFC 8785 bytes, both by hand.
+  await withDir(async (dir) => {
+    const digest = 'a'.repeat(64);
+    const statement = {
+      _type: 'https://in-toto.io/Statement/v0.1',
+      subject: [{ name: 'n1.diff', digest: { sha256: digest } }],
+      predicateType: 'https://maf.dev/attestation/run/v1',
+      predicate: {
+        runId: 'r-jcs', keySource: 'env', diffHashes: { 'n1.diff': digest },
+        toolCalls: [{ input: { headers: { '10': 'y', '2': 'x', '!': 'z', '1': 'w' } } }],
+      },
+    };
+    const rfc8785 = '{"_type":"https://in-toto.io/Statement/v0.1","predicate":{"diffHashes":{"n1.diff":"' + digest +
+      '"},"keySource":"env","runId":"r-jcs","toolCalls":[{"input":{"headers":{"!":"z","1":"w","10":"y","2":"x"}}}]},' +
+      '"predicateType":"https://maf.dev/attestation/run/v1","subject":[{"digest":{"sha256":"' + digest + '"},"name":"n1.diff"}]}';
+    const signature = crypto.createHmac('sha256', 's3cret').update(rfc8785, 'utf8').digest('hex');
+    const file = path.join(dir, 'third-party.json');
+    await writeFile(file, JSON.stringify({ ...statement, signature }, null, 2), 'utf8');
+    const result = maf(['attest', 'verify', file], 's3cret');
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^valid: true\nkeySource: dev /);
-    assert.equal(result.stderr.split('\n').filter((l) => /WARNING: MAF_SIGNING_KEY/.test(l)).length, 1);
+    assert.equal(result.stdout, 'valid: true\nkeySource: env (checked against MAF_SIGNING_KEY)\nsubjects: 1\n');
+  });
+});
+
+test('verify: "a 0.2.x bundle" is printed only when the 0.2.x signature matched', async () => {
+  // Verifier F6.
+  await withDir(async (dir) => {
+    const body = { runId: 'r-old', keySource: 'env', toolCalls: [], approvals: [], diffHashes: {}, outcome: { status: 'Succeeded', unscheduled: [] } };
+    const signature = crypto.createHmac('sha256', 's3cret').update(JSON.stringify(body)).digest('hex');
+    const file = path.join(dir, 'old.bundle.json');
+    await writeFile(file, JSON.stringify({ ...body, signature }, null, 2), 'utf8');
+    for (const signing of [{ secret: 'another' }, {}] satisfies SigningOptions[]) {
+      const outcome = await attestVerify(file, signing);
+      assert.equal(outcome.lines[0], 'valid: false');
+      assert.ok(!outcome.lines.some((l) => l.includes('0.2.x')), outcome.lines.join(' | '));
+    }
+    const forged = path.join(dir, 'forged.bundle.json');
+    await writeFile(forged, JSON.stringify({ ...body, signature: 'f'.repeat(64) }), 'utf8');
+    const outcome = await attestVerify(forged, { secret: 's3cret' });
+    assert.ok(!outcome.lines.some((l) => l.includes('0.2.x')), outcome.lines.join(' | '));
+    assert.match(outcome.failure ?? '', /does not match the bundle's content/);
   });
 });

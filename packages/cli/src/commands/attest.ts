@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { Attestor, parseBundle } from '@maf/attestation';
+import { Attestor, DEV_SIGNING_KEY, parseBundle } from '@maf/attestation';
 import type { AnyBundle, SigningOptions } from '@maf/attestation';
 
 export interface AttestVerifyOutcome {
@@ -50,8 +50,12 @@ export function registerAttestCommand(program: Command): void {
     .command('verify <bundle>')
     .description('Verify a bundle against MAF_SIGNING_KEY (the public development key when it is unset)')
     .action(async (bundlePath: string) => {
-      // The same resolution `run` signs with, so an unset key warns here exactly as it does there.
-      const outcome = await attestVerify(path.resolve(bundlePath), Attestor.resolveSigningSecret(process.env));
+      // Not the run's warning, which is about signing: this command only checks.
+      const secret = process.env['MAF_SIGNING_KEY'];
+      if (!secret || secret === DEV_SIGNING_KEY) {
+        process.stderr.write('[maf] verifying with the public development key; set MAF_SIGNING_KEY to verify against yours\n');
+      }
+      const outcome = await attestVerify(path.resolve(bundlePath), { secret });
       for (const line of outcome.lines) console.log(line);
       if (outcome.failure !== undefined) throw new Error(outcome.failure);
     });
