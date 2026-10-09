@@ -7,8 +7,8 @@ import type {
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
   RunOutcome, KeySource,
 } from '@maf/types';
-import { canonicalJson } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
+import { jcs } from './jcs.js';
 import { IN_TOTO_STATEMENT_TYPE, makeInTotoStatement } from './InTotoStatement.js';
 import type { InTotoStatement, InTotoSubject } from './InTotoStatement.js';
 
@@ -34,8 +34,9 @@ export interface SigningOptions {
 
 export interface VerifyResult {
   /**
-   * True for a 0.2.x bundle (custom JSON, signed over insertion-order `JSON.stringify`). A 0.2.0
-   * one carries no `keySource`, so its key is whatever verified it.
+   * True when the signature matched as a 0.2.x bundle's does (custom JSON, signed over
+   * insertion-order `JSON.stringify`). A 0.2.0 one carries no `keySource`, so its key is whatever
+   * verified it.
    */
   legacy:    boolean;
   /** The signature matches AND the bundle's own `keySource` names the key that checked it. */
@@ -63,7 +64,7 @@ export type RunPredicate = Omit<AttestationBundle, 'signature'>;
  * reviewed, and beside it the signature over the statement's canonical JSON.
  */
 export interface SignedRunStatement extends InTotoStatement<RunPredicate> {
-  /** HMAC-SHA256, lowercase hex, over `canonicalJson` of every other field of this object. */
+  /** HMAC-SHA256, lowercase hex, over the RFC 8785 form (`jcs`) of every other field of this object. */
   signature: string;
 }
 
@@ -79,11 +80,11 @@ export interface BundleReport extends VerifyResult {
 
 /**
  * The bytes a signature covers. Through JSON first, so a statement held in memory (`Date`s) and
- * the same statement read back from disk (ISO strings) sign alike; then canonical, so key order
- * and whitespace are not content and a third party can reproduce the bytes.
+ * the same statement read back from disk (ISO strings) sign alike; then RFC 8785, so key order
+ * and whitespace are not content and a third party with any JCS library can reproduce the bytes.
  */
 function signedBytes(statement: object): string {
-  return canonicalJson(JSON.parse(JSON.stringify(statement)));
+  return jcs(JSON.parse(JSON.stringify(statement)));
 }
 
 function hmacHex(secret: string, payload: string): string {
@@ -177,11 +178,46 @@ function judge(
   return { valid: false, ...check, reason };
 }
 
+/**
+ * Why a statement's subjects are not exactly its predicate's `diffHashes`, or `undefined` when
+ * they are. Only the key holder can sign such a statement, but a reader counting its subjects
+ * should not have to trust that they are the diffs the run recorded.
+ */
+function subjectMismatch(subject: unknown, diffHashes: unknown): string | undefined {
+  if (!Array.isArray(subject)) return `The statement's subject is ${JSON.stringify(subject)}, not a list.`;
+  if (diffHashes === null || typeof diffHashes !== 'object' || Array.isArray(diffHashes)) {
+    return `The predicate's diffHashes is ${JSON.stringify(diffHashes)}; expected an object of name to sha256.`;
+  }
+  const recorded = diffHashes as Record<string, unknown>;
+  const seen = new Set<string>();
+  for (const entry of subject as unknown[]) {
+    const { name, digest } = (entry ?? {}) as { name?: unknown; digest?: { sha256?: unknown } | null };
+    const sha256 = digest?.sha256;
+    if (typeof name !== 'string' || typeof sha256 !== 'string') {
+      return `The statement has a subject that is not {name, digest: {sha256}}: ${JSON.stringify(entry)}.`;
+    }
+    if (seen.has(name)) return `The statement names the subject ${JSON.stringify(name)} twice.`;
+    seen.add(name);
+    if (!Object.hasOwn(recorded, name)) {
+      return `The statement's subject ${JSON.stringify(name)} is not in its predicate's diffHashes.`;
+    }
+    if (recorded[name] !== sha256) {
+      return `The statement's subject ${JSON.stringify(name)} has sha256 ${sha256}, and its predicate's ` +
+        `diffHashes records ${JSON.stringify(recorded[name])}.`;
+    }
+  }
+  const unnamed = Object.keys(recorded).filter((name) => !seen.has(name));
+  return unnamed.length === 0 ? undefined
+    : `The predicate's diffHashes records ${unnamed.map((n) => JSON.stringify(n)).join(', ')}, which the ` +
+      'statement does not name as a subject.';
+}
+
 function examine(bundle: AnyBundle, signing: SigningOptions): BundleReport {
   const { secret, keySource } = signingKey(signing);
   if (isStatement(bundle)) {
     const { signature, ...statement } = bundle;
-    const claimed: unknown = (statement.predicate as { keySource?: unknown } | undefined)?.keySource;
+    const predicate = statement.predicate as { keySource?: unknown; diffHashes?: unknown } | null | undefined;
+    const claimed: unknown = predicate?.keySource;
     const subjects = Array.isArray(statement.subject) ? statement.subject : [];
     const check = { keySource, legacy: false, subjects };
     // Signed bytes of another statement type would still match; MAF vouches only for its own.
@@ -192,7 +228,9 @@ function examine(bundle: AnyBundle, signing: SigningOptions): BundleReport {
       const reason = `The statement's ${field} is ${JSON.stringify(found)}; MAF signs ${JSON.stringify(expected)}.`;
       return { valid: false, ...check, reason };
     }
-    return judge(check, claimed, signatureMatches(secret, signedBytes(statement), signature));
+    const report = judge(check, claimed, signatureMatches(secret, signedBytes(statement), signature));
+    const mismatch = report.valid ? subjectMismatch(statement.subject, predicate?.diffHashes) : undefined;
+    return mismatch === undefined ? report : { valid: false, ...check, reason: mismatch };
   }
   const { signature, ...predicate } = bundle;
   const claimed: unknown = (predicate as { keySource?: unknown }).keySource;
@@ -202,9 +240,11 @@ function examine(bundle: AnyBundle, signing: SigningOptions): BundleReport {
   if (signatureMatches(secret, signedBytes(runStatement(predicate)), signature)) {
     return judge({ keySource, legacy: false, subjects }, claimed, true);
   }
-  // The 0.2.x layout: the same fields, signed over `JSON.stringify` in insertion order.
-  const legacyOk = signatureMatches(secret, JSON.stringify(predicate), signature);
-  return judge({ keySource, legacy: true, subjects }, claimed, legacyOk);
+  // The 0.2.x layout: the same fields, signed over `JSON.stringify` in insertion order. Legacy
+  // only when that signature is the one that matched; a bundle matching neither is not known to
+  // be a 0.2.x bundle.
+  const legacy = signatureMatches(secret, JSON.stringify(predicate), signature);
+  return judge({ keySource, legacy, subjects }, claimed, legacy);
 }
 
 export class Attestor implements AttestorHandle {

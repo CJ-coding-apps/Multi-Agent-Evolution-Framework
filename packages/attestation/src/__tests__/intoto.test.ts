@@ -47,7 +47,9 @@ async function attestedRun(signing: SigningOptions, diffs = true): Promise<Attes
     const attestor = new Attestor(runId, stubGraph, dir, signing);
     const base = {
       toolId: makeToolId('fs.write'), agentId: makeAgentId('a1'), runId, taskId: makeTaskId('t1'),
-      input: { path: 'src/a.ts', content: 'x' }, invokedAt: new Date(0), durationMs: 3,
+      // Array-index keys: JS lists them first, in numeric order; RFC 8785 sorts them as strings.
+      input: { path: 'src/a.ts', content: 'x', headers: { '2': 'x', '10': 'y', '!': 'z', '1': 'w' } },
+      invokedAt: new Date(0), durationMs: 3,
     };
     await attestor.record({
       ...base,
@@ -141,7 +143,9 @@ test('a run that changed nothing has no subjects, and its statement still verifi
 test('the signature is HMAC-SHA256 over canonical JSON, reproducible without MAF', async () => {
   const { fileText } = await attestedRun({ secret: 's3cret' });
   const { signature, ...statement } = JSON.parse(fileText) as SignedRunStatement;
-  const reproduced = crypto.createHmac('sha256', 's3cret').update(thirdPartyCanonical(statement), 'utf8').digest('hex');
+  const canonical = thirdPartyCanonical(statement);
+  assert.ok(canonical.includes('"headers":{"!":"z","1":"w","10":"y","2":"x"}'), 'RFC 8785 key order, written by hand');
+  const reproduced = crypto.createHmac('sha256', 's3cret').update(canonical, 'utf8').digest('hex');
   assert.equal(reproduced, signature);
 });
 
@@ -257,6 +261,64 @@ test('a statement of another type or predicate does not verify, and the report s
 
   const tampered = Attestor.report({ ...signed, subject: [] }, { secret: 's3cret' });
   assert.match(tampered.reason ?? '', /does not match the bundle's content/);
+});
+
+test('a 0.3.0 statement with no keySource does not verify, in either shape, though its signature matches', async () => {
+  // Verifier F3: only a 0.2.0 bundle may lack keySource, and that is the legacy layout.
+  for (const signing of [{ secret: 's3cret' }, {}] satisfies SigningOptions[]) {
+    const { signed } = await attestedRun(signing);
+    const { signature: _s, ...statement } = signed;
+    const { keySource: _k, ...unlabelled } = statement.predicate;
+    const bare = { ...statement, predicate: unlabelled as SignedRunStatement['predicate'] };
+    const resigned: SignedRunStatement = { ...bare, signature: new BundleSigner(signing.secret ?? '').sign(bare) };
+    const report = Attestor.report(resigned, signing);
+    assert.deepEqual({ valid: report.valid, legacy: report.legacy }, { valid: false, legacy: false });
+    assert.match(report.reason ?? '', /names no keySource/);
+
+    // The `bundle()` shape: the predicate, with the signature of the statement that wraps it.
+    const view = { ...unlabelled, signature: resigned.signature } as AttestationBundle;
+    const viewReport = Attestor.report(view, signing);
+    assert.deepEqual({ valid: viewReport.valid, legacy: viewReport.legacy }, { valid: false, legacy: false });
+    assert.match(viewReport.reason ?? '', /names no keySource/);
+  }
+});
+
+test('legacy is reported only when the 0.2.x signature matched', async () => {
+  // Verifier F6: a bundle-shaped object that matches neither signature is not known to be 0.2.x.
+  const { view } = await attestedRun({ secret: 's3cret' });
+  const bad = Attestor.report({ ...view, signature: 'f'.repeat(64) }, { secret: 's3cret' });
+  assert.deepEqual({ valid: bad.valid, legacy: bad.legacy }, { valid: false, legacy: false });
+  assert.match(bad.reason ?? '', /does not match the bundle's content/);
+  assert.equal(Attestor.inspect(view, {}).legacy, false, 'the wrong key: neither signature matched');
+
+  const { signature: _s, ...rest } = JSON.parse(JSON.stringify(view)) as AttestationBundle;
+  const old = { ...rest, signature: crypto.createHmac('sha256', 's3cret').update(JSON.stringify(rest)).digest('hex') };
+  assert.equal(Attestor.inspect(old, { secret: 's3cret' }).legacy, true);
+  assert.deepEqual(Attestor.inspect(old, { secret: 'other' }), { valid: false, keySource: 'env', legacy: false });
+});
+
+test("a signed statement whose subjects are not its predicate's diffHashes does not verify, and says why", async () => {
+  // Verifier F6: the subject count `maf attest verify` prints must be the diffs the run recorded.
+  const { signed } = await attestedRun({ secret: 's3cret' });
+  const { signature: _s, ...statement } = signed;
+  const [first, second] = statement.subject;
+  assert.ok(first && second);
+  const check = (subject: unknown, diffHashes: unknown = statement.predicate.diffHashes): string => {
+    const body = { ...statement, subject, predicate: { ...statement.predicate, diffHashes } } as Omit<SignedRunStatement, 'signature'>;
+    const report = Attestor.report({ ...body, signature: new BundleSigner('s3cret').sign(body) }, { secret: 's3cret' });
+    assert.equal(report.valid, false, JSON.stringify(subject));
+    return report.reason ?? '';
+  };
+  assert.match(check([first, first, second]), /names the subject "n1\.diff" twice/);
+  assert.match(check([first]), /diffHashes records "n2\.diff", which the statement does not name as a subject/);
+  assert.match(check([first, second, { name: 'n3.diff', digest: { sha256: 'a'.repeat(64) } }]),
+    /subject "n3\.diff" is not in its predicate's diffHashes/);
+  assert.match(check([first, { name: second.name, digest: { sha256: 'a'.repeat(64) } }]),
+    /subject "n2\.diff" has sha256 a{64}, and its predicate's diffHashes records "[0-9a-f]{64}"/);
+  assert.match(check([first, { name: 'n2.diff' }]), /a subject that is not \{name, digest: \{sha256\}\}/);
+  assert.match(check('n1.diff'), /subject is "n1\.diff", not a list/);
+  assert.match(check([], null), /diffHashes is null; expected an object/);
+  assert.equal(Attestor.verify(signed, { secret: 's3cret' }), true, 'the statement as written is consistent');
 });
 
 test('parseBundle refuses what is not a bundle, with a sentence saying what it found', () => {

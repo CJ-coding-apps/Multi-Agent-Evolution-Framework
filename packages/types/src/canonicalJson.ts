@@ -19,8 +19,12 @@ function sortKeys(value: unknown): unknown {
 }
 
 /**
- * Keys sorted by UTF-16 code unit at every depth, no whitespace, strings and numbers as
- * `JSON.stringify` writes them — RFC 8785's form for a value that is already plain JSON.
+ * Keys sorted at every depth, no whitespace, strings and numbers as `JSON.stringify` writes them.
+ * Not RFC 8785: the sorted keys are rebuilt into a JS object, which lists array-index keys
+ * (canonical integers 0 to 2³²−2) first in numeric order and the rest by UTF-16 code unit —
+ * `{"10":1,"2":2,"!":3}` comes out
+ * `{"2":2,"10":1,"!":3}`, where RFC 8785 writes `{"!":3,"10":1,"2":2}` — and drops a `"__proto__"`
+ * key. The attestation signs with RFC 8785 (`@maf/attestation`'s `jcs.ts`), not with this.
  *
  * Plain JSON only: an object's own enumerable keys are what is sorted, so a `Date` (which has
  * none) becomes `{}`. A caller holding live objects round-trips through `JSON.parse(JSON.stringify(…))`

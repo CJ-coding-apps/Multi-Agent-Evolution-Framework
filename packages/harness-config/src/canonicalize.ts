@@ -2,8 +2,8 @@ import crypto from 'node:crypto';
 import { canonicalJson } from '@maf/types';
 import type { HarnessConfig } from './types.js';
 
-// Moved to @maf/types, which the attestation signs with too; re-exported so this package's
-// surface — and every harness sha — is unchanged.
+// Moved to @maf/types; re-exported so this package's surface — and every harness sha — is
+// unchanged. The attestation does not sign with it (it needs RFC 8785; see canonicalJson's note).
 export { canonicalJson };
 
 /** The hashed payload excludes `sha` itself. */

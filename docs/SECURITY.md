@@ -56,11 +56,15 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
 How a bundle is signed, and what a signature does **not** establish today, stated rather than implied:
 
 - **What is signed is the statement's canonical JSON, so anyone holding the key can check it.** The
-  bundle's `signature` is HMAC-SHA256, lowercase hex, over every other field of the file serialized with
-  keys sorted (by UTF-16 code unit) at every depth and no whitespace — RFC 8785's form for plain JSON. So
-  re-serializing a bundle, in any key order or indentation, does not break it, and changing any byte of
-  the statement does. `maf attest verify <bundle>` checks a bundle and prints `valid`, the `keySource` it
-  checked against, the number of subjects, and `legacy` for a 0.2.x bundle; it exits 1 with the reason
+  bundle's `signature` is HMAC-SHA256, lowercase hex, over every other field of the file serialized by
+  RFC 8785 (the JSON Canonicalization Scheme, `packages/attestation/src/jcs.ts`): keys sorted by UTF-16
+  code unit at every depth (so `"10"` before `"2"`), numbers as ECMAScript writes them, no whitespace.
+  A string holding a lone UTF-16 surrogate, which RFC 8785 does not admit, is written as a `\u` escape,
+  as `JSON.stringify` writes it. So re-serializing a bundle, in any key order or indentation, does not
+  break it, and changing any byte of the statement does. A statement whose subjects are not exactly its
+  predicate's `diffHashes` (same names, same digests, each once) does not verify. `maf attest verify
+  <bundle>` checks a bundle and prints `valid`, the `keySource` it checked against, the number of
+  subjects, and `legacy` when the signature matched as a 0.2.x bundle's; it exits 1 with the reason
   when the bundle does not verify.
 - **Without `MAF_SIGNING_KEY`, a valid signature is evidence of nothing.** The key is `MAF_SIGNING_KEY`.
   When that is unset — or empty, or set to the published development value — a run (and `maf attest
