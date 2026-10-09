@@ -948,3 +948,10 @@ export function estimateTokens(text: string): number {
  */
 export { resolveInside, PathEscapeError } from './paths.js';
 export type { ConfinedPath } from './paths.js';
+
+/**
+ * Canonical JSON lives here for the reason path confinement does: the harness sha and the
+ * attestation signature (D-13) both need the one serializer, and both packages already depend
+ * on this one, where an `attestation → harness-config` edge would be a new dependency.
+ */
+export { canonicalJson } from './canonicalJson.js';

@@ -1,43 +1,37 @@
-import crypto from 'node:crypto';
-import type { AttestationBundle, KeySource } from '@maf/types';
-import { DEV_SIGNING_KEY } from './devKey.js';
+import type { AttestationBundle } from '@maf/types';
+import { Attestor, signBundle } from './Attestor.js';
+import type { AnyBundle, SignedRunStatement } from './Attestor.js';
 
+type Unsigned = Omit<AttestationBundle, 'signature'> | Omit<SignedRunStatement, 'signature'>;
+
+/**
+ * Signs and checks bundles with one fixed secret by the Attestor's rules — the same bytes signed
+ * and the same `keySource` rule on verify — so the two cannot disagree about a bundle. As in the
+ * Attestor, an empty secret is no secret: it means the development key.
+ */
 export class BundleSigner {
   constructor(private readonly secret: string) {}
 
-  sign(payload: Omit<AttestationBundle, 'signature'>): string {
-    return crypto
-      .createHmac('sha256', this.secret)
-      .update(JSON.stringify(payload))
-      .digest('hex');
+  /** The signature for an unsigned bundle in either shape: HMAC over the canonical statement. */
+  sign(payload: Unsigned): string {
+    return signBundle(payload, { secret: this.secret });
   }
 
   /**
    * Whether the signature matches this signer's secret AND the bundle's own `keySource` names
-   * that kind of key — the same rule `Attestor.verify` applies, so a bundle re-signed with the
-   * public development key cannot pass here while claiming `"env"`. A bundle with no
-   * `keySource` (0.2.0) is checked on its signature alone.
+   * that kind of key — `Attestor.verify`, so a bundle re-signed with the public development key
+   * cannot pass here while claiming `"env"`. A bundle with no `keySource` (0.2.0) is checked on
+   * its signature alone.
    */
-  verify(bundle: AttestationBundle): boolean {
-    const { signature, ...rest } = bundle;
-    const expected = this.sign(rest);
-    let matches: boolean;
-    try {
-      matches = crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex'));
-    } catch {
-      return false;
-    }
-    const claimed = (bundle as { keySource?: KeySource }).keySource;
-    if (claimed === undefined) return matches;
-    const actual: KeySource = this.secret === DEV_SIGNING_KEY ? 'dev' : 'env';
-    return matches && claimed === actual;
+  verify(bundle: AnyBundle): boolean {
+    return Attestor.verify(bundle, { secret: this.secret });
   }
 
-  static signStatic(payload: Omit<AttestationBundle, 'signature'>, secret: string): string {
+  static signStatic(payload: Unsigned, secret: string): string {
     return new BundleSigner(secret).sign(payload);
   }
 
-  static verifyStatic(bundle: AttestationBundle, secret: string): boolean {
+  static verifyStatic(bundle: AnyBundle, secret: string): boolean {
     return new BundleSigner(secret).verify(bundle);
   }
 }

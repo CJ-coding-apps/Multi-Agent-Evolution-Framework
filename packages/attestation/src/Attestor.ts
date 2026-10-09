@@ -8,6 +8,9 @@ import type {
   RunOutcome, KeySource,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
+import { jcs } from './jcs.js';
+import { IN_TOTO_STATEMENT_TYPE, makeInTotoStatement } from './InTotoStatement.js';
+import type { InTotoStatement, InTotoSubject } from './InTotoStatement.js';
 
 /** The public development key. Anyone can sign with it, which is why a bundle says when it was used. */
 export { DEV_SIGNING_KEY } from './devKey.js';
@@ -30,7 +33,11 @@ export interface SigningOptions {
 }
 
 export interface VerifyResult {
-  /** True for a bundle written before `keySource` existed (0.2.0): its key is whatever verified it. */
+  /**
+   * True when the signature matched as a 0.2.x bundle's does (custom JSON, signed over
+   * insertion-order `JSON.stringify`). A 0.2.0 one carries no `keySource`, so its key is whatever
+   * verified it.
+   */
   legacy:    boolean;
   /** The signature matches AND the bundle's own `keySource` names the key that checked it. */
   valid:     boolean;
@@ -45,6 +52,199 @@ function signingKey(signing: SigningOptions): { secret: string; keySource: KeySo
   return secret && secret !== DEV_SIGNING_KEY
     ? { secret, keySource: 'env' }
     : { secret: DEV_SIGNING_KEY, keySource: 'dev' };
+}
+
+/** MAF's predicate type: the predicate is the run as a 0.2.x bundle recorded it, less the signature. */
+export const MAF_RUN_PREDICATE_TYPE = 'https://maf.dev/attestation/run/v1';
+
+export type RunPredicate = Omit<AttestationBundle, 'signature'>;
+
+/**
+ * The bundle a run writes from 0.3.0: an in-toto Statement whose subjects are the diffs the run
+ * reviewed, and beside it the signature over the statement's canonical JSON.
+ */
+export interface SignedRunStatement extends InTotoStatement<RunPredicate> {
+  /** HMAC-SHA256, lowercase hex, over the RFC 8785 form (`jcs`) of every other field of this object. */
+  signature: string;
+}
+
+/** What `verify` reads: a 0.3.0 statement, or a bundle in the 0.2.x layout (see `bundle()`). */
+export type AnyBundle = AttestationBundle | SignedRunStatement;
+
+export interface BundleReport extends VerifyResult {
+  /** The statement's subjects; for the 0.2.x layout, its `diffHashes` in that shape. */
+  subjects: InTotoSubject[];
+  /** Why `valid` is false, as a sentence. Absent when it is true. */
+  reason?: string;
+}
+
+/**
+ * The bytes a signature covers. Through JSON first, so a statement held in memory (`Date`s) and
+ * the same statement read back from disk (ISO strings) sign alike; then RFC 8785, so key order
+ * and whitespace are not content and a third party with any JCS library can reproduce the bytes.
+ */
+function signedBytes(statement: object): string {
+  return jcs(JSON.parse(JSON.stringify(statement)));
+}
+
+function hmacHex(secret: string, payload: string): string {
+  return crypto.createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
+}
+
+/** Constant-time, and exact: an uppercase, truncated or padded rendering of the digest is not it. */
+function signatureMatches(secret: string, payload: string, given: unknown): boolean {
+  if (typeof given !== 'string') return false;
+  const expected = Buffer.from(hmacHex(secret, payload), 'utf8');
+  const actual = Buffer.from(given, 'utf8');
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function runStatement(predicate: RunPredicate): InTotoStatement<RunPredicate> {
+  // `?? {}`: a bundle read from disk is whatever the file says, and a malformed one must be
+  // judged invalid, not crash the judge.
+  return makeInTotoStatement(predicate.diffHashes ?? {}, MAF_RUN_PREDICATE_TYPE, predicate);
+}
+
+function isStatement<T extends object>(bundle: T): bundle is Extract<T, { _type: string }> {
+  return '_type' in bundle;
+}
+
+/** The signature `finalize` would write for `unsigned` under `signing`, in either shape. */
+export function signBundle(
+  unsigned: Omit<AttestationBundle, 'signature'> | Omit<SignedRunStatement, 'signature'>,
+  signing: SigningOptions,
+): string {
+  const statement = isStatement(unsigned) ? unsigned : runStatement(unsigned);
+  return hmacHex(signingKey(signing).secret, signedBytes(statement));
+}
+
+/**
+ * A bundle file's text, as either shape `verify` reads. Refuses, with a sentence, what is not
+ * JSON, not an object, or carries no signature; everything else is the signature's to judge.
+ */
+export function parseBundle(text: string): AnyBundle {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (err: unknown) {
+    throw new Error(`The bundle is not JSON (${err instanceof Error ? err.message : String(err)}).`);
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    const found = Array.isArray(value) ? 'an array' : value === null ? 'null' : typeof value;
+    throw new Error(`The file is not an attestation bundle: expected a JSON object, found ${found}.`);
+  }
+  const signature = (value as { signature?: unknown }).signature;
+  if (typeof signature !== 'string') {
+    const found = signature === undefined ? 'undefined' : JSON.stringify(signature);
+    throw new Error(`The file is not an attestation bundle: expected a string "signature", found ${found}.`);
+  }
+  return value as AnyBundle;
+}
+
+const KEY_NAME: Record<KeySource, string> = {
+  env: 'a key of your own (MAF_SIGNING_KEY)',
+  dev: 'the public development key',
+};
+const keyName = (claim: unknown): string =>
+  claim === 'env' || claim === 'dev' ? KEY_NAME[claim] : `an unknown key source ${JSON.stringify(claim)}`;
+
+/**
+ * Valid when the signature matched and the bundle's own `keySource` names the key that checked
+ * it. A 0.2.0 bundle (`legacy`, no `keySource`) says nothing about its key, so it verifies on its
+ * signature against whichever key the caller supplies, and the result says legacy so a reader
+ * cannot mistake "verified with the dev key because that is what I tried" for "signed with mine".
+ */
+function judge(
+  check: { keySource: KeySource; legacy: boolean; subjects: InTotoSubject[] },
+  claimed: unknown,
+  signatureOk: boolean,
+): BundleReport {
+  const claimOk = claimed === undefined ? check.legacy : claimed === check.keySource;
+  if (signatureOk && claimOk) return { valid: true, ...check };
+  let reason: string;
+  if (signatureOk) {
+    reason = claimed === undefined
+      ? 'The bundle names no keySource; every bundle since 0.2.1 carries one inside its signed payload.'
+      : `The signature matches ${keyName(check.keySource)}, but the bundle claims ${keyName(claimed)}: ` +
+        'its claim about the key that signed it is false.';
+  } else if (claimed !== undefined && claimed !== check.keySource) {
+    reason = `The bundle says ${keyName(claimed)} signed it, and this check used ${keyName(check.keySource)}: ` +
+      (claimed === 'dev' ? 'unset MAF_SIGNING_KEY to check it against the development key.'
+                         : 'set MAF_SIGNING_KEY to the key that signed it.');
+  } else {
+    reason = `The signature does not match the bundle's content under ${keyName(check.keySource)}: ` +
+      'the bundle was changed after it was signed, or a different key signed it.';
+  }
+  return { valid: false, ...check, reason };
+}
+
+/**
+ * Why a statement's subjects are not exactly its predicate's `diffHashes`, or `undefined` when
+ * they are. Only the key holder can sign such a statement, but a reader counting its subjects
+ * should not have to trust that they are the diffs the run recorded.
+ */
+function subjectMismatch(subject: unknown, diffHashes: unknown): string | undefined {
+  if (!Array.isArray(subject)) return `The statement's subject is ${JSON.stringify(subject)}, not a list.`;
+  if (diffHashes === null || typeof diffHashes !== 'object' || Array.isArray(diffHashes)) {
+    return `The predicate's diffHashes is ${JSON.stringify(diffHashes)}; expected an object of name to sha256.`;
+  }
+  const recorded = diffHashes as Record<string, unknown>;
+  const seen = new Set<string>();
+  for (const entry of subject as unknown[]) {
+    const { name, digest } = (entry ?? {}) as { name?: unknown; digest?: { sha256?: unknown } | null };
+    const sha256 = digest?.sha256;
+    if (typeof name !== 'string' || typeof sha256 !== 'string') {
+      return `The statement has a subject that is not {name, digest: {sha256}}: ${JSON.stringify(entry)}.`;
+    }
+    if (seen.has(name)) return `The statement names the subject ${JSON.stringify(name)} twice.`;
+    seen.add(name);
+    if (!Object.hasOwn(recorded, name)) {
+      return `The statement's subject ${JSON.stringify(name)} is not in its predicate's diffHashes.`;
+    }
+    if (recorded[name] !== sha256) {
+      return `The statement's subject ${JSON.stringify(name)} has sha256 ${sha256}, and its predicate's ` +
+        `diffHashes records ${JSON.stringify(recorded[name])}.`;
+    }
+  }
+  const unnamed = Object.keys(recorded).filter((name) => !seen.has(name));
+  return unnamed.length === 0 ? undefined
+    : `The predicate's diffHashes records ${unnamed.map((n) => JSON.stringify(n)).join(', ')}, which the ` +
+      'statement does not name as a subject.';
+}
+
+function examine(bundle: AnyBundle, signing: SigningOptions): BundleReport {
+  const { secret, keySource } = signingKey(signing);
+  if (isStatement(bundle)) {
+    const { signature, ...statement } = bundle;
+    const predicate = statement.predicate as { keySource?: unknown; diffHashes?: unknown } | null | undefined;
+    const claimed: unknown = predicate?.keySource;
+    const subjects = Array.isArray(statement.subject) ? statement.subject : [];
+    const check = { keySource, legacy: false, subjects };
+    // Signed bytes of another statement type would still match; MAF vouches only for its own.
+    if (statement._type !== IN_TOTO_STATEMENT_TYPE || statement.predicateType !== MAF_RUN_PREDICATE_TYPE) {
+      const [field, found, expected] = statement._type !== IN_TOTO_STATEMENT_TYPE
+        ? ['_type', statement._type, IN_TOTO_STATEMENT_TYPE]
+        : ['predicateType', statement.predicateType, MAF_RUN_PREDICATE_TYPE];
+      const reason = `The statement's ${field} is ${JSON.stringify(found)}; MAF signs ${JSON.stringify(expected)}.`;
+      return { valid: false, ...check, reason };
+    }
+    const report = judge(check, claimed, signatureMatches(secret, signedBytes(statement), signature));
+    const mismatch = report.valid ? subjectMismatch(statement.subject, predicate?.diffHashes) : undefined;
+    return mismatch === undefined ? report : { valid: false, ...check, reason: mismatch };
+  }
+  const { signature, ...predicate } = bundle;
+  const claimed: unknown = (predicate as { keySource?: unknown }).keySource;
+  const subjects = runStatement(predicate).subject;
+  // `bundle()` hands its caller the predicate with the statement's signature: re-wrapped, it is
+  // the statement that was signed.
+  if (signatureMatches(secret, signedBytes(runStatement(predicate)), signature)) {
+    return judge({ keySource, legacy: false, subjects }, claimed, true);
+  }
+  // The 0.2.x layout: the same fields, signed over `JSON.stringify` in insertion order. Legacy
+  // only when that signature is the one that matched; a bundle matching neither is not known to
+  // be a 0.2.x bundle.
+  const legacy = signatureMatches(secret, JSON.stringify(predicate), signature);
+  return judge({ keySource, legacy, subjects }, claimed, legacy);
 }
 
 export class Attestor implements AttestorHandle {
@@ -104,8 +304,12 @@ export class Attestor implements AttestorHandle {
     });
   }
 
-  recordDiffHash(filePath: string, diffContent: string): void {
-    this.diffHashes[filePath] = crypto.createHash('sha256').update(diffContent).digest('hex');
+  /**
+   * Makes `name` a subject of the run's statement, with the sha256 of `diffContent`. A second
+   * call for the same name replaces the first: a retried node's subject is the diff that stood.
+   */
+  recordDiffHash(name: string, diffContent: string): void {
+    this.diffHashes[name] = crypto.createHash('sha256').update(diffContent).digest('hex');
   }
 
   addApproval(attestation: ReviewAttestation): void {
@@ -116,13 +320,17 @@ export class Attestor implements AttestorHandle {
     this.securityFindings.push({ nodeId, result });
   }
 
-  async bundle(
+  /**
+   * Signs the run and writes it to `<attestationsDir>/<runId>.bundle.json`: an in-toto Statement
+   * (subjects: the recorded diffs; predicate: the run) with its signature beside it.
+   */
+  async finalize(
     builder: SlsaBuilder,
     invocation: SlsaInvocation,
     materials: SlsaMaterial[],
     outcome: RunOutcome,
     goldens?: GoldensSection,
-  ): Promise<AttestationBundle> {
+  ): Promise<SignedRunStatement> {
     const provenance: SlsaProvenance = {
       buildType:  'https://maf.dev/build/v1',
       builder,
@@ -135,7 +343,7 @@ export class Attestor implements AttestorHandle {
       },
     };
 
-    const unsignedBundle = {
+    const predicate: RunPredicate = {
       runId:            this.runId,
       keySource:        this.keySource,
       provenance,
@@ -147,53 +355,54 @@ export class Attestor implements AttestorHandle {
       ...(goldens ? { goldens } : {}),
       bundledAt:        new Date(),
     };
-    const signature = crypto.createHmac('sha256', this.signingSecret)
-      .update(JSON.stringify(unsignedBundle)).digest('hex');
+    const statement = runStatement(predicate);
+    const signature = hmacHex(this.signingSecret, signedBytes(statement));
+    const signed: SignedRunStatement = { ...statement, signature };
 
-    const bundle: AttestationBundle = { ...unsignedBundle, signature };
-
-    await this.persist(bundle);
-    return bundle;
-  }
-
-  private async persist(bundle: AttestationBundle): Promise<void> {
     await mkdir(this.attestationsDir, { recursive: true });
-    const filePath = path.join(this.attestationsDir, `${bundle.runId}.bundle.json`);
-    await writeFile(filePath, JSON.stringify(bundle, null, 2), 'utf8');
+    const filePath = path.join(this.attestationsDir, `${this.runId}.bundle.json`);
+    await writeFile(filePath, JSON.stringify(signed, null, 2), 'utf8');
+    return signed;
   }
 
   /**
-   * Checks `bundle` against the key `signing` names (no secret: the development key). The claim
-   * has to agree as well as the signature: anyone holding the public development key can sign a
-   * bundle that says `keySource: 'env'`, and that bundle must not pass as one.
+   * `finalize`, returned in the 0.2.x layout its callers read fields from: the predicate, with
+   * the statement's signature. `verify` accepts it (it re-wraps the predicate to check); the file
+   * on disk is the statement.
    */
+  async bundle(
+    builder: SlsaBuilder,
+    invocation: SlsaInvocation,
+    materials: SlsaMaterial[],
+    outcome: RunOutcome,
+    goldens?: GoldensSection,
+  ): Promise<AttestationBundle> {
+    const { predicate, signature } = await this.finalize(builder, invocation, materials, outcome, goldens);
+    return { ...predicate, signature };
+  }
+
   /**
-   * Whether `bundle` was signed with the key `signing` names, and by that key alone. A bundle
-   * that says `keySource: "env"` must verify with the env key; one that says `"dev"` with the
-   * development key — so a bundle re-signed with the public key cannot claim a real one.
+   * Whether `bundle` was signed with the key `signing` names (no secret: the development key),
+   * and says so: a bundle that claims `keySource: "env"` must verify with the env key, one that
+   * claims `"dev"` with the development key — so a bundle re-signed with the public key cannot
+   * claim a real one. Either shape: the statement a run writes, or the layout `bundle()` returns
+   * and 0.2.x wrote.
    *
    * A boolean, so `if (!Attestor.verify(…))` means what it says. `inspect` returns the detail.
    */
-  static verify(bundle: AttestationBundle, signing: SigningOptions): boolean {
-    return Attestor.inspect(bundle, signing).valid;
+  static verify(bundle: AnyBundle, signing: SigningOptions): boolean {
+    return examine(bundle, signing).valid;
   }
 
   /** `verify`, with the key source the check was made against and whether the bundle is legacy. */
-  static inspect(bundle: AttestationBundle, signing: SigningOptions): VerifyResult {
-    const { secret, keySource } = signingKey(signing);
-    const { signature, ...rest } = bundle;
-    const payload = JSON.stringify(rest);
-    const expected = crypto.createHmac('sha256', secret).update(payload).digest();
-    const given = Buffer.from(signature, 'hex');
-    // timingSafeEqual throws on unequal lengths; a truncated signature is simply not this one.
-    const signatureMatches = given.length === expected.length && crypto.timingSafeEqual(given, expected);
-    // A bundle from before keySource existed (0.2.0) says nothing about its key. It verifies
-    // against whichever key the caller supplies, and the result says so, so a reader cannot
-    // mistake "verified with the dev key because that is what I tried" for "signed with mine".
-    if ((bundle as { keySource?: KeySource }).keySource === undefined) {
-      return { valid: signatureMatches, keySource, legacy: true };
-    }
-    return { valid: signatureMatches && bundle.keySource === keySource, keySource, legacy: false };
+  static inspect(bundle: AnyBundle, signing: SigningOptions): VerifyResult {
+    const { valid, keySource, legacy } = examine(bundle, signing);
+    return { valid, keySource, legacy };
+  }
+
+  /** `inspect`, with the bundle's subjects and, when it is invalid, why. */
+  static report(bundle: AnyBundle, signing: SigningOptions): BundleReport {
+    return examine(bundle, signing);
   }
 }
 

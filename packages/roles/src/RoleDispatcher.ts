@@ -533,6 +533,7 @@ export class RoleDispatcher {
     // Handed back before anything else: an empty diff is also D-32's evidence (no_change).
     onDiff(diff);
     if (!diff.trim()) return;
+    this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff); // a subject of the run's statement (D-13)
 
     const securityGate = this.config.securityGate;
     if (!securityGate) return this.runReviewGate(node, startCommit, diff);

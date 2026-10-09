@@ -31,9 +31,14 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
 - **The memory graph is local.** It is a Kuzu database on disk, at `.maf/memory.kuzu` in the target
   directory.
 - **The attestation bundle is written locally, in the clear**, at `.maf/attestations/<runId>.bundle.json`.
-  It records each in-process tool call's input and result — refused calls included, with the verdict and,
-  where a rule decided, the rule's id — the security findings and the run's outcome. Its `approvals` and
-  `diffHashes` fields are always empty in 0.2.1: nothing fills them. Before either the bundle or the
+  It is an in-toto Statement (`_type: https://in-toto.io/Statement/v0.1`). Its subjects are the changes
+  the run's writer nodes left: one per node, named `<nodeId>.diff`, whose digest is the sha256 of the diff
+  taken where the post-task security gate takes it (on the in-process tier, when the harness runs the
+  `security-gate` processor, as the default does); a run that changed nothing has none. Its predicate
+  (`predicateType: https://maf.dev/attestation/run/v1`) records each in-process tool call's input and
+  result — refused calls included, with the verdict and, where a rule decided, the rule's id — the
+  security findings and the run's outcome. Its `approvals` field is always empty: nothing fills it yet.
+  Before either the bundle or the
   memory graph sees a tool call, credentials are stripped from its input and from the result's stdout,
   stderr and metadata (`gatedExec.ts`). The scrubber is **format-based and shallow**, and both limits
   are deliberate: it knows eight credential shapes (AWS, Anthropic, OpenAI, Google, a GitHub PAT, a Slack token, a bearer
@@ -50,20 +55,33 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
 
 How a bundle is signed, and what a signature does **not** establish today, stated rather than implied:
 
-- **Without `MAF_SIGNING_KEY`, a valid signature is evidence of nothing.** The bundle is signed with
-  HMAC-SHA256 over its JSON, keyed by `MAF_SIGNING_KEY`. When that is unset — or empty, or set to the
-  published development value — a run prints one warning line to stderr and signs with the public
-  development key `'dev-secret'` (`packages/attestation/src/Attestor.ts`). The bundle then says
-  `keySource: "dev"`, inside the signed payload, so the label cannot be stripped or flipped without
-  breaking the signature. `Attestor.verify(bundle, { secret })` returns `true` only when the signature
-  matches that key *and* the bundle's `keySource` names that kind of key; `Attestor.inspect` returns
+- **What is signed is the statement's canonical JSON, so anyone holding the key can check it.** The
+  bundle's `signature` is HMAC-SHA256, lowercase hex, over every other field of the file serialized by
+  RFC 8785 (the JSON Canonicalization Scheme, `packages/attestation/src/jcs.ts`): keys sorted by UTF-16
+  code unit at every depth (so `"10"` before `"2"`), numbers as ECMAScript writes them, no whitespace.
+  A string holding a lone UTF-16 surrogate, which RFC 8785 does not admit, is written as a `\u` escape,
+  as `JSON.stringify` writes it. So re-serializing a bundle, in any key order or indentation, does not
+  break it, and changing any byte of the statement does. A statement whose subjects are not exactly its
+  predicate's `diffHashes` (same names, same digests, each once) does not verify. `maf attest verify
+  <bundle>` checks a bundle and prints `valid`, the `keySource` it checked against, the number of
+  subjects, and `legacy` when the signature matched as a 0.2.x bundle's; it exits 1 with the reason
+  when the bundle does not verify.
+- **Without `MAF_SIGNING_KEY`, a valid signature is evidence of nothing.** The key is `MAF_SIGNING_KEY`.
+  When that is unset — or empty, or set to the published development value — a run (and `maf attest
+  verify`) prints one warning line to stderr and uses the public development key `'dev-secret'`
+  (`packages/attestation/src/Attestor.ts`). The bundle then says `keySource: "dev"` in its predicate,
+  inside the signed statement, so the label cannot be stripped or flipped without breaking the
+  signature. `Attestor.verify(bundle, { secret })` returns `true` only when the signature matches that
+  key *and* the bundle's `keySource` names that kind of key; `Attestor.inspect` returns
   `{ valid, keySource, legacy }`; `BundleSigner.verify` applies the same rule. So a dev-signed bundle
   verifies, and anyone can produce one, and a bundle re-signed with the development key cannot pass as
   `keySource: "env"`. Set `MAF_SIGNING_KEY` to a secret of your own before treating a bundle as evidence
   of authorship.
-- **A 0.2.0 bundle carries no `keySource`.** It verifies on its signature alone, against whatever key
-  you supply, and `inspect` reports it as `legacy: true`. Verifying one with the development key
-  proves only that it was signed with the development key.
+- **A 0.2.x bundle is custom JSON, signed over `JSON.stringify` in the order its fields were written.**
+  It still verifies, against the key you supply, and `inspect` reports it as `legacy: true`; a 0.2.1
+  bundle's `keySource` is held to the rule above. A 0.2.0 bundle carries no `keySource`, so it verifies
+  on its signature alone, and verifying one with the development key proves only that it was signed
+  with the development key.
 - **The key is not hidden from the agent.** The backend CLIs and every tool that starts a process —
   `test.run`, the `git.*` tools, `grep` (rg or grep) and `patch.apply` — inherit MAF's whole environment,
   `MAF_SIGNING_KEY` included. `test.run` runs project code with it, and `git.commit` runs the
