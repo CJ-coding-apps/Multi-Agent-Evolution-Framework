@@ -86,3 +86,23 @@ test('a "__proto__" key is an own key of the value, never its prototype', () => 
   assert.ok(Object.keys(value).includes('__proto__'), 'a loader sees the key, so it can refuse it');
   assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
 });
+
+test('a "<<" merge key is refused at any depth, naming the line, rather than loaded as an ordinary key', () => {
+  // YAML 1.2 has no merge keys: this used to load as a role with a literal "<<" field and no
+  // `execution`, so the role ran on the cli tier and nothing said so (verifier finding F2).
+  const probe = ['b: &b {execution: in-process}', 'roles:', '  - <<: *b', '    role: x', ''].join('\n');
+  const err = syntaxError(probe);
+  assert.equal(err.line, 3);
+  assert.equal(err.column, 5);
+  assert.match(err.reason, /"<<"/);
+  assert.match(err.reason, /merge/);
+  assert.match(err.message, /"\/p\/x\.yaml" is not valid YAML at line 3, column 5: /);
+
+  // A YAML 1.1 document would perform the merge; it is refused all the same, so one rule holds.
+  assert.equal(syntaxError(`%YAML 1.1\n---\n${probe}`).line, 5);
+  // Quoted, as JSON writes it; deep inside a flow mapping; and through an alias used as a key.
+  assert.equal(syntaxError('{\n  "a": { "b": { "<<": { "x": 1 } } }\n}\n').line, 2);
+  assert.equal(syntaxError('k: &k "<<"\nm:\n  *k : 1\n').line, 3);
+  // "<<" as a value, or inside a longer key, is not a merge key.
+  assert.deepEqual(parseYamlDocument('a: "<<"\n"<<b": 1\n', '/p').value, { a: '<<', '<<b': 1 });
+});

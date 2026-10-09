@@ -1,5 +1,5 @@
 import { lstat, readFile } from 'node:fs/promises';
-import { LineCounter, isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument } from 'yaml';
+import { LineCounter, isAlias, isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, visit } from 'yaml';
 import type { GraphQueryRunner, PolicyAction, PolicyPredicate, PolicyRule } from '@maf/types';
 import { makeToolId } from '@maf/types';
 import { PolicyEngine } from './PolicyEngine.js';
@@ -404,7 +404,10 @@ export interface YamlDocument {
 /**
  * Parses `text` as exactly one YAML document, or throws a {@link YamlSyntaxError}. Like `parse`, it
  * refuses a repeated key, a second document and an alias bomb; unlike it, it also refuses on a
- * warning — an unresolved tag, which `parse` reports and then reads as a plain string.
+ * warning — an unresolved tag, which `parse` reports and then reads as a plain string — and on a
+ * `<<` key at any depth. YAML 1.2 has no merge keys, so `<<: *base` would load as an ordinary key
+ * named `<<` and the keys it was written to merge would be silently missing; a schema that checks
+ * only the keys it needs would never notice.
  */
 export function parseYamlDocument(text: string, sourcePath: string): YamlDocument {
   const counter = new LineCounter();
@@ -419,6 +422,18 @@ export function parseYamlDocument(text: string, sourcePath: string): YamlDocumen
 
   const first = doc.errors[0] ?? doc.warnings[0];
   if (first !== undefined) fail(first.pos[0], first.message);
+  visit(doc, {
+    Pair(_, pair) {
+      // An alias used as a key is checked as the key it stands for, and placed where it is used.
+      const key = isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
+      if (isScalar(key) && isMergeKey(key.value)) {
+        fail(
+          isNode(pair.key) ? (pair.key.range?.[0] ?? 0) : 0,
+          'the key "<<" asks for a YAML merge, which MAF does not perform; write the merged keys out in full.',
+        );
+      }
+    },
+  });
   let value: unknown;
   try {
     value = doc.toJS({ maxAliasCount: 100 });
@@ -451,4 +466,9 @@ export function parseYamlDocument(text: string, sourcePath: string): YamlDocumen
       return line;
     },
   };
+}
+
+/** `<<` as written, or as a `%YAML 1.1` document resolves it: the merge-key symbol. */
+function isMergeKey(value: unknown): boolean {
+  return value === '<<' || (typeof value === 'symbol' && value.description === '<<');
 }

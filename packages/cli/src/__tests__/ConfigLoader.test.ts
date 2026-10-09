@@ -124,6 +124,12 @@ test('every problem in the file is reported, each with its line', async () => {
   });
 });
 
+test('a "<<" merge key is refused by the parser, naming the line', async () => {
+  await withConfig('base: &b {maxConcurrent: 1}\ndag:\n  <<: *b\n', async (file) => {
+    await rejectsWith(ConfigLoader.load(file), quoted(file), /line 3, column 3/, /"<<"/, /cannot start/);
+  });
+});
+
 test('an unknown key is an error, at the top level and inside a section', async () => {
   await withConfig('adaptor: claude\n', async (file) => {
     await rejectsWith(ConfigLoader.load(file), /line 1: unknown key "adaptor"/, /adapter/);

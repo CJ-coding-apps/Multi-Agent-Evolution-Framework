@@ -145,3 +145,29 @@ test('the JSON form with "#" comment lines, as roles files have always been writ
     assert.equal(await reg.loadPrompt(reg.getDefault()), 'c # not a comment');
   });
 });
+
+test('a role that pulls its fields in through a "<<" merge key refuses, naming the file and the line', async () => {
+  // Verifier probe (F2): YAML 1.2 reads `<<` as an ordinary key, so this role loaded with a
+  // literal "<<" field and no `execution`, and ran on the cli tier instead of in-process.
+  await withDir(async (dir) => {
+    const file = path.join(dir, 'roles.yaml');
+    await writeFile(file, [
+      'version: 1',
+      'defaultRole: r',
+      'base: &b {execution: in-process}',
+      'roles:',
+      '  - <<: *b',
+      '    role: r',
+      '    systemPrompt: x',
+      '    allowedTools: [fs.read]',
+      '',
+    ].join('\n'), 'utf8');
+    await refuses(
+      RoleRegistry.fromYamlOrDefault(file, dir, BASE_TOOLS),
+      new RegExp(escapeRegExp(JSON.stringify(file))),
+      /line 5, column 5/,
+      /"<<"/,
+      /write the merged keys out in full/,
+    );
+  });
+});
