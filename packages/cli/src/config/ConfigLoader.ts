@@ -176,7 +176,7 @@ const LCM_FIELDS:      Section<'lcm'>      = { mode: true, contextThreshold: tru
 const DAG_FIELDS:      Section<'dag'>      = { maxConcurrent: true, retry: true };
 const RETRY_FIELDS:    Record<keyof RetryPolicy, true> = { maxAttempts: true, backoffMs: true, backoffFactor: true, jitterMs: true };
 const TIMEOUTS_FIELDS: Section<'timeouts'> = { planMs: true, securityReviewMs: true };
-// Node's timers fire after 1 ms for any delay above this, so a larger timeout would mean "at once".
+// Node's timers fire after 1 ms for any delay above this, so a larger timeout or backoff would mean "at once".
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 interface Problem { at: string[]; message: string }
@@ -190,7 +190,7 @@ const lcmMode: Check<LcmMode> = (v) => (v === 'Upward' || v === 'Dolt' ? v : und
 const fraction: Check<number> = (v) => (typeof v === 'number' && v > 0 && v <= 1 ? v : undefined);
 const count: Check<number> = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
 const positive: Check<number> = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 1 ? v : undefined);
-const millis: Check<number> = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined);
+const millis: Check<number> = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_TIMER_MS ? v : undefined);
 const factor: Check<number> = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 1 ? v : undefined);
 const timeout: Check<number> = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 1 && v <= MAX_TIMER_MS ? v : undefined);
 
@@ -222,11 +222,12 @@ function readConfig(raw: unknown, problems: Problem[]): MafConfig {
     const retry = section(own(dag, 'retry'), ['dag', 'retry'], RETRY_FIELDS, problems);
     if (retry !== undefined) {
       const at = ['dag', 'retry'];
+      const ms = `a number of milliseconds from 0 to ${MAX_TIMER_MS}`;
       config.dag.retry = {};
       read(config.dag.retry, 'maxAttempts', retry, at, positive, 'a positive integer (1 means no retry)', problems);
-      read(config.dag.retry, 'backoffMs', retry, at, millis, 'a number of milliseconds, 0 or more', problems);
+      read(config.dag.retry, 'backoffMs', retry, at, millis, ms, problems);
       read(config.dag.retry, 'backoffFactor', retry, at, factor, 'a number, 1 or more', problems);
-      read(config.dag.retry, 'jitterMs', retry, at, millis, 'a number of milliseconds, 0 or more', problems);
+      read(config.dag.retry, 'jitterMs', retry, at, millis, ms, problems);
     }
   }
   const timeouts = section(own(top, 'timeouts'), ['timeouts'], TIMEOUTS_FIELDS, problems);

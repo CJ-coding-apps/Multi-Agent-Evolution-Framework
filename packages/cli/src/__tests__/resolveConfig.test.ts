@@ -67,6 +67,14 @@ checkPrecedence<number>({
   flag: 0, file: 5000, dflt: DEFAULT_RETRY_POLICY.backoffMs,
 });
 checkPrecedence<number>({
+  name: 'dag.retry.backoffFactor', set: (backoffFactor) => ({ dag: { retry: { backoffFactor } } }), get: (c) => c.dag.retry.backoffFactor,
+  flag: 1, file: 3, dflt: DEFAULT_RETRY_POLICY.backoffFactor,
+});
+checkPrecedence<number>({
+  name: 'dag.retry.jitterMs', set: (jitterMs) => ({ dag: { retry: { jitterMs } } }), get: (c) => c.dag.retry.jitterMs,
+  flag: 0, file: 2000, dflt: DEFAULT_RETRY_POLICY.jitterMs,
+});
+checkPrecedence<number>({
   name: 'timeouts.planMs', set: (planMs) => ({ timeouts: { planMs } }), get: (c) => c.timeouts.planMs,
   flag: 30_000, file: 600_000, dflt: 120_000,
 });
@@ -81,6 +89,10 @@ checkPrecedence<LcmMode>({
 checkPrecedence<number>({
   name: 'lcm.contextThreshold', set: (contextThreshold) => ({ lcm: { contextThreshold } }), get: (c) => c.lcm.contextThreshold,
   flag: 0.5, file: 0.9, dflt: 0.75,
+});
+checkPrecedence<number>({
+  name: 'lcm.freshTailCount', set: (freshTailCount) => ({ lcm: { freshTailCount } }), get: (c) => c.lcm.freshTailCount,
+  flag: 0, file: 128, dflt: 64,
 });
 
 test('the defaults are the values maf run hard-codes today, so a run without a config file is unchanged', () => {

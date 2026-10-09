@@ -124,6 +124,21 @@ test('every problem in the file is reported, each with its line', async () => {
   });
 });
 
+test('a retry backoff or jitter beyond the timer range is refused, not honoured as "no wait"', async () => {
+  // Node fires a timer after 1 ms for any delay above 2^31 - 1 ms, so `backoffMs: 1e300` meant no
+  // backoff at all (verifier finding F4). The bound is the one `timeouts` already had.
+  await withConfig('dag:\n  retry:\n    backoffMs: 1e300\n    jitterMs: 2147483648\n', async (file) => {
+    await rejectsWith(
+      ConfigLoader.load(file),
+      /line 3: dag\.retry\.backoffMs must be a number of milliseconds from 0 to 2147483647; found 1e\+300\./,
+      /line 4: dag\.retry\.jitterMs must be a number of milliseconds from 0 to 2147483647; found 2147483648\./,
+    );
+  });
+  await withConfig('dag:\n  retry:\n    backoffMs: 2147483647\n    jitterMs: 2147483647\n', async (file) => {
+    assert.deepEqual(await ConfigLoader.load(file), { dag: { retry: { backoffMs: 2147483647, jitterMs: 2147483647 } } });
+  });
+});
+
 test('a "<<" merge key is refused by the parser, naming the line', async () => {
   await withConfig('base: &b {maxConcurrent: 1}\ndag:\n  <<: *b\n', async (file) => {
     await rejectsWith(ConfigLoader.load(file), quoted(file), /line 3, column 3/, /"<<"/, /cannot start/);
