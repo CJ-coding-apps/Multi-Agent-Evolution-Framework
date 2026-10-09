@@ -6,7 +6,7 @@ import { makeRunId } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { GoldenRunner, describeJudge, makeLlmJudge } from '@maf/eval-harness';
-import type { GoldenTask } from '@maf/eval-harness';
+import type { GoldenSuiteResult, GoldenTask } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
 import { evolve } from '@maf/evolver';
 import { createDefaultRegistry } from '@maf/tools';
@@ -14,6 +14,17 @@ import { createDefaultProcessorRegistry } from '@maf/processors';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
+import { loadStoredHarness } from './harness.js';
+
+/**
+ * Evolve's smoke check: one attempt of the task it names. It ran the whole corpus and judged
+ * `tasks[0]`, so a candidate was accepted or refused on whichever task happened to be first.
+ */
+export async function smokeCheck(runner: { run(only?: readonly string[]): Promise<GoldenSuiteResult> }, taskId: string): Promise<void> {
+  const res = await runner.run([taskId]);
+  const error = res.tasks.find((t) => t.taskId === taskId)?.attempts[0]?.error;
+  if (error) throw new Error(error);
+}
 
 interface EvolveCliOpts {
   adapter: string; model?: string; dir: string; corpus: string; harness?: string;
@@ -40,7 +51,7 @@ export function registerEvolveCommand(program: Command): void {
       const runId = makeRunId(crypto.randomUUID());
 
       const store = new HarnessStore(mafDir);
-      const base = await store.load(opts.harness ?? 'current');
+      const base = await loadStoredHarness(store, opts.harness ?? 'current');
       console.log(`[maf] evolve ${runId} | base: ${base.id} (${shortSha(base.sha)}) | rounds=${opts.rounds} patience=${opts.patience}`);
 
       const adapter = await resolveAdapter(opts.adapter, createAdapterRegistry());
@@ -92,12 +103,7 @@ export function registerEvolveCommand(program: Command): void {
 
       const runGoldensFor = (harness: HarnessConfig) => runnerFor(harness, 2).run();
 
-      const runSmoke = async (harness: HarnessConfig, taskId: string) => {
-        const task = corpus.find((t) => t.id === taskId);
-        if (!task) throw new Error(`smoke target ${taskId} not in corpus`);
-        const res = await runnerFor(harness, 1).run();
-        if (res.tasks[0]?.attempts[0]?.error) throw new Error(res.tasks[0].attempts[0].error);
-      };
+      const runSmoke = (harness: HarnessConfig, taskId: string) => smokeCheck(runnerFor(harness, 1), taskId);
 
       // Static registry membership = the allowlist (§10.2; registry-driven, not hardcoded here)
       const processorNames = new Set(createDefaultProcessorRegistry().names());

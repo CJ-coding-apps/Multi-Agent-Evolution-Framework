@@ -15,5 +15,5 @@ export {
 } from './judge.js';
 export type { ScriptedStep, ScriptedTask, ScriptedExchange } from './ScriptedAdapter.js';
 export {
-  ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SCRIPTED_JUDGE_RATIONALE,
+  ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SCRIPTED_JUDGE_RATIONALE, SCRIPTED_FILE, loadScriptedTasks,
 } from './ScriptedAdapter.js';

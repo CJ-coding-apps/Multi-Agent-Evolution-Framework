@@ -13,7 +13,11 @@ export interface JudgeDisclosure {
   adapter:  string;
   /** The model the judge was asked for, or 'default' for the adapter's own default. */
   model:    string;
-  /** True when the judge is a different adapter or model from the agent under evaluation. */
+  /**
+   * True only when the judge is shown to be another model: a different adapter, or the same
+   * adapter with both sides naming a model explicitly and the names differing. An adapter's
+   * default model is unnamed, so it may be the very model the other side names.
+   */
   distinct: boolean;
   note?:    string;
 }
@@ -69,13 +73,15 @@ export interface ModelRef {
 /** Discloses who judged relative to who was judged. */
 export function describeJudge(agent: ModelRef, judge: ModelRef): JudgeDisclosure {
   const model = judge.model ?? 'default';
-  const distinct = judge.adapter !== agent.adapter || model !== (agent.model ?? 'default');
-  return {
-    adapter: judge.adapter, model, distinct,
-    ...(distinct ? {} : {
-      note: 'No second model was available: the agent\'s own adapter and model judged its output.',
-    }),
-  };
+  const named = agent.model !== undefined && judge.model !== undefined;
+  const distinct = judge.adapter !== agent.adapter || (named && judge.model !== agent.model);
+  if (distinct) return { adapter: judge.adapter, model, distinct };
+  const note = agent.model === judge.model
+    ? 'No second model was available: the agent\'s own adapter and model judged its output.'
+    : `The judge ran on the agent's own adapter (${judge.adapter}) and only one side named a model ` +
+      `(agent: ${agent.model ?? 'the adapter default'}, judge: ${judge.model ?? 'the adapter default'}), ` +
+      'so it may be the agent\'s own model and is not counted as a distinct judge.';
+  return { adapter: judge.adapter, model, distinct, note };
 }
 
 /**

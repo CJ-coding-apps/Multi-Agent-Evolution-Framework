@@ -1,9 +1,10 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, AssistantTurn,
   ToolInput, ToolPlugin, TurnAdapter, TurnMessage,
 } from '@maf/types';
+import type { GoldenTask } from './GoldenTask.js';
 import { JUDGE_SYSTEM_PROMPT, formatJudgeVerdict } from './judge.js';
 
 /** One tool call the scripted model makes, in order. */
@@ -156,4 +157,47 @@ async function applyEffect(workingDir: string, step: ScriptedStep): Promise<void
   }
   await mkdir(path.dirname(target), { recursive: true });
   await writeFile(target, content, 'utf8');
+}
+
+// ─── script files ────────────────────────────────────────────────────────────
+
+/** The file a corpus keeps its scripts in, beside corpus.json. */
+export const SCRIPTED_FILE = 'scripted.json';
+
+/**
+ * Reads `<corpusRoot>/scripted.json` — `{ version: 1, tasks: { <taskId>: { steps, final } } }` —
+ * and returns the scripts keyed by the prompt each task hands the model. Scripts are written
+ * per task id because that is what a corpus author knows; the model only ever sees the prompt.
+ */
+export async function loadScriptedTasks(corpusRoot: string, corpus: readonly GoldenTask[]): Promise<ScriptedTask[]> {
+  const file = path.join(corpusRoot, SCRIPTED_FILE);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(file, 'utf8'));
+  } catch (err) {
+    throw new Error(`The scripted adapter reads its scripts from ${file}, which could not be read as JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const fail = (msg: string): never => { throw new Error(`${file}: ${msg}`); };
+  const o = parsed as Record<string, unknown> | null;
+  if (!o || typeof o !== 'object' || o['version'] !== 1) fail('expected { "version": 1, "tasks": { ... } }');
+  const tasks = (o as Record<string, unknown>)['tasks'];
+  if (!tasks || typeof tasks !== 'object' || Array.isArray(tasks)) fail('"tasks" must be an object keyed by task id');
+
+  const byId = new Map(corpus.map((t) => [t.id, t]));
+  const out: ScriptedTask[] = [];
+  for (const [id, raw] of Object.entries(tasks as Record<string, unknown>)) {
+    const task = byId.get(id);
+    if (!task) fail(`script "${id}" names no task in the corpus`);
+    const s = raw as Record<string, unknown> | null;
+    if (!s || typeof s !== 'object' || !Array.isArray(s['steps']) || typeof s['final'] !== 'string')
+      fail(`script "${id}" needs a "steps" array and a string "final"`);
+    const steps = (s as { steps: unknown[] }).steps.map((st, i): ScriptedStep => {
+      const step = st as Record<string, unknown> | null;
+      if (!step || typeof step['tool'] !== 'string' || !step['input'] || typeof step['input'] !== 'object' || Array.isArray(step['input']))
+        fail(`script "${id}" step ${i} needs a string "tool" and an object "input"`);
+      return { tool: (step as { tool: string }).tool, input: (step as { input: ToolInput }).input };
+    });
+    out.push({ prompt: (task as GoldenTask).prompt, steps, final: (s as { final: string }).final });
+  }
+  return out;
 }
