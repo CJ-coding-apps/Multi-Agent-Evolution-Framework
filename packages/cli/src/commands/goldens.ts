@@ -7,7 +7,7 @@ import { makeRunId } from '@maf/types';
 import type { RunStatus } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import {
-  GoldenRunner, ScoreRecorder, seesawDecision,
+  GoldenRunner, ScoreRecorder, seesawDecision, describeJudge, makeLlmJudge,
 } from '@maf/eval-harness';
 import type { GoldenSuiteResult, TaskDispatcher } from '@maf/eval-harness';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
@@ -74,6 +74,7 @@ export function registerGoldensCommand(program: Command): void {
       const dispatch: TaskDispatcher = async (task, workDir, { timeoutMs, temperature }) =>
         stack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature);
 
+      const agent = { adapter: adapter.name, ...(opts.model ? { model: opts.model } : {}) };
       const runner = new GoldenRunner({
         corpusRoot,
         harnessSha: harness.sha,
@@ -81,7 +82,11 @@ export function registerGoldensCommand(program: Command): void {
         attempts: Number(opts.attempts) || 2,
         temperature: 0,
         dispatch,
-        llmJudge: (rubric, subject) => stack.judge(rubric, subject),
+        ...agent,
+        llmJudge: {
+          verdict: makeLlmJudge({ adapter, ...(opts.model ? { model: opts.model } : {}) }, cwd),
+          disclosure: describeJudge(agent, agent),
+        },
         securityScore: async (diff) => {
           if (!diff.trim()) return 'none';
           const gate = new SecurityReviewGate({

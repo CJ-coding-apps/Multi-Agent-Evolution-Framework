@@ -5,13 +5,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { makeRunId } from '@maf/types';
-import type {
-  CliAdapter, TurnAdapter, TurnMessage, AssistantTurn,
-  AdapterInvokeOptions, AdapterInvokeResult, AdapterCapabilities, ToolCallRecord, RunStatus,
-} from '@maf/types';
+import type { CliAdapter, RunStatus } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { buildTurnSystemPrompt } from '@maf/adapter-base';
+import { ScriptedAdapter } from '@maf/eval-harness';
 import { runIsolatedGit } from '@maf/git-ops';
 import { buildRunStack } from '../wiring.js';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
@@ -40,59 +38,23 @@ const CODER_PROMPT =
   'fix the source so the test passes, then run the tests. Use only the provided tools.';
 
 /**
- * Deterministic stand-in for the model. Picks its action by how many tool
- * results are already in the history, so it walks a fixed script:
+ * The deterministic stand-in for the model walks this script, one tool call per turn:
  *   1. fs.read config.txt   (shows redaction of the result the model sees)
  *   2. fs.delete sum.js      (blocked by policy — demonstrates the gate)
  *   3. fs.write sum.js fix   (real file effect)
  *   4. test.run              (real execution)
  *   5. finish (no tool calls)
  */
-class ScriptedCoderAdapter implements TurnAdapter {
-  readonly name = 'scripted';
-  capturedSystemPrompt = '';
-  toolResultsSeen: string[] = [];
-
-  capabilities(): AdapterCapabilities {
-    return {
-      supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: false,
-      inProcessLoop: true, maxConcurrentTasks: 1, nativePlugins: [],
-    };
-  }
-  async isAvailable(): Promise<boolean> { return true; }
-
-  // Used by SecurityReviewGate at task_end — report a clean diff.
-  async invoke(_o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
-    return {
-      success: true,
-      output: '{"findings":[],"summary":"no issues in demo diff","passed":true}',
-      toolCallLog: [], exitCode: 0, duration: 1,
-    };
-  }
-  async *stream(_o: AdapterInvokeOptions): AsyncGenerator<string> { yield ''; }
-
-  async sendTurn(history: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
-    // Compose the system block exactly as a real TurnAdapter does, so the
-    // captured prompt reflects the tool catalog (by id) the loop handed us (H1).
-    if (!this.capturedSystemPrompt) this.capturedSystemPrompt = buildTurnSystemPrompt(opts.systemPrompt, opts.tools);
-    const toolMsgs = history.filter((m) => m.kind === 'tool');
-    const last = toolMsgs[toolMsgs.length - 1];
-    if (last && last.kind === 'tool') this.toolResultsSeen.push(last.content);
-
-    const call = (toolName: string, input: Record<string, unknown>): AssistantTurn => ({
-      text: `step ${toolMsgs.length + 1}`,
-      toolCalls: [{ toolUseId: crypto.randomUUID(), toolName, input }],
-    });
-
-    switch (toolMsgs.length) {
-      case 0: return call('fs.read', { path: 'config.txt' });
-      case 1: return call('fs.delete', { path: 'sum.js' });          // policy denies
-      case 2: return call('fs.write', { path: 'sum.js', content: SUM_FIXED });
-      case 3: return call('test.run', {});
-      default: return { text: 'Fixed sum.js (a - b → a + b); tests pass.', toolCalls: [] };
-    }
-  }
-}
+const DEMO_SCRIPT = {
+  prompt: CODER_PROMPT,
+  steps: [
+    { tool: 'fs.read', input: { path: 'config.txt' } },
+    { tool: 'fs.delete', input: { path: 'sum.js' } },          // policy denies
+    { tool: 'fs.write', input: { path: 'sum.js', content: SUM_FIXED } },
+    { tool: 'test.run', input: {} },
+  ],
+  final: 'Fixed sum.js (a - b → a + b); tests pass.',
+};
 
 /**
  * Writes the demo's buggy repository under `<tmpDir>/repo` and commits it as the baseline;
@@ -159,7 +121,7 @@ export function registerInProcessDemoCommand(program: Command): void {
         processorBundles: [], // empty ⇒ RoleDispatcher uses the default bundle (incl. secret-redact + security-gate)
       });
 
-      const scripted = new ScriptedCoderAdapter();
+      const scripted = new ScriptedAdapter([DEMO_SCRIPT]);
       const adapter: CliAdapter = opts.live
         ? await resolveAdapter('claude', createAdapterRegistry())
         : scripted;
@@ -202,12 +164,18 @@ export function registerInProcessDemoCommand(program: Command): void {
 
       console.log('\n──────── end-to-end result ────────');
       if (!opts.live) {
-        const catalogLine = scripted.capturedSystemPrompt.split('\n').find((l) => l.includes('fs.write')) ?? '(not found)';
+        // The system block exactly as a real TurnAdapter composes it from what the loop handed
+        // the model, so the line shows the tool catalog (by id) the model saw (H1).
+        const turns = scripted.exchanges.filter((e) => e.via === 'turn');
+        const firstTurn = turns[0];
+        const shownPrompt = firstTurn ? buildTurnSystemPrompt(firstTurn.systemPrompt, firstTurn.tools) : '';
+        const catalogLine = shownPrompt.split('\n').find((l) => l.includes('fs.write')) ?? '(not found)';
         console.log(`H1   model saw the tool catalog (by id):    ${catalogLine.trim()}`);
-        const redacted = scripted.toolResultsSeen.find((r) => r.includes('REDACTED')) ?? '(none)';
+        const toolResultsSeen = turns.flatMap((e) => (e.lastToolResult !== undefined ? [e.lastToolResult] : []));
+        const redacted = toolResultsSeen.find((r) => r.includes('REDACTED')) ?? '(none)';
         console.log(`L1   model's fs.read result redacted:       ${JSON.stringify(redacted)}`);
         console.log(`     └─ surrounding lines kept faithful:    ${redacted.includes('db_host=localhost') && redacted.includes('port=5432')}`);
-        const policyDenied = scripted.toolResultsSeen.some((r) => /policy|not permitted|Deny/i.test(r));
+        const policyDenied = toolResultsSeen.some((r) => /policy|not permitted|Deny/i.test(r));
         console.log(`gate policy blocked fs.delete in-loop:      ${policyDenied}`);
       }
       console.log(`tools sum.js fixed (a - b → a + b):         ${sumAfter.trim() === SUM_FIXED.trim()}`);
