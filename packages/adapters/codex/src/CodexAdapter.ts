@@ -59,6 +59,10 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
    * `--system-prompt` flag, so the system block (role prompt + protocol + tool
    * catalog) is prepended to the serialized history on stdin. Intentionally does
    * NOT pass --full-auto: on this path MAF drives tool execution, not Codex.
+   *
+   * Native tools: still on. D-33 has a governed turn spawn its backend with every built-in
+   * tool off (Claude: `--tools ""`), but no Codex CLI flag is known to turn off its shell and
+   * file tools, so none is passed — one more reason `inProcessLoop` stays false above.
    */
   async sendTurn(history: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
     const systemBlock = buildTurnSystemPrompt(opts.systemPrompt, opts.tools);

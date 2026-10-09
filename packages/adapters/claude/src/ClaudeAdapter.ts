@@ -27,6 +27,23 @@ const CLAUDE_MCP_ISOLATION_ARGS: readonly string[] = [
 ];
 
 /**
+ * Isolation for a governed turn (`sendTurn`, the in-process tier): the MCP isolation above plus
+ * `--tools ""` ("restrict which built-in tools Claude can use. Use `""` to disable all"), so the
+ * spawned `claude` has no native tool of its own (D-33). In the governed loop MAF is the only
+ * thing that runs a tool: the model asks in the wire protocol and each call goes through the
+ * policy gate, the processors and the attestor. A backend with its own Read, Edit or Bash would
+ * act inside a single turn, before its answer reaches MAF — and edit files outside policy and
+ * attestation wherever the user's `permissions.allow` lets it. `--tools` leaves MCP tools alone;
+ * the empty strict MCP set removes those, and with none left `""` removes every built-in tool.
+ * The empty string is one argv element (`spawn` runs without a shell). `invoke` and `stream`
+ * are the cli tier, where the backend is meant to act with its own tools, so they keep them.
+ */
+const CLAUDE_TURN_ISOLATION_ARGS: readonly string[] = [
+  '--tools', '',
+  ...CLAUDE_MCP_ISOLATION_ARGS,
+];
+
+/**
  * The functions the adapter runs the `claude` binary through. Injectable so a test can stand in
  * for the binary and its failures; production uses the real spawner.
  */
@@ -66,7 +83,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       ...opts,
       prompt: serializeHistory(history),
       systemPrompt,
-    }), {
+    }, CLAUDE_TURN_ISOLATION_ARGS), {
       cwd: opts.workingDir,
       timeoutMs: opts.timeoutMs,
       env: { ...process.env },
@@ -85,7 +102,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
 
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const start = Date.now();
-    const args = this.buildArgs(options);
+    const args = this.buildArgs(options, CLAUDE_MCP_ISOLATION_ARGS);
 
     const result = await this.spawn('claude', args, {
       cwd: options.workingDir,
@@ -107,13 +124,13 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
   }
 
   override async *stream(options: AdapterInvokeOptions): AsyncGenerator<string> {
-    const args = [...this.buildArgs(options), '--stream'];
+    const args = [...this.buildArgs(options, CLAUDE_MCP_ISOLATION_ARGS), '--stream'];
     for await (const chunk of this.spawnStreaming('claude', args, { cwd: options.workingDir })) {
       yield chunk;
     }
   }
 
-  private buildArgs(options: AdapterInvokeOptions): string[] {
+  private buildArgs(options: AdapterInvokeOptions, isolation: readonly string[]): string[] {
     const args: string[] = ['--print'];
     if (options.systemPrompt) args.push('--system-prompt', options.systemPrompt);
     if (options.model)        args.push('--model', options.model);
@@ -123,7 +140,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     // opts.temperature are intentionally ignored here (contract: adapters that cannot honour
     // a knob must ignore it, never error). The in-process loop enforces tokenBudget itself;
     // golden determinism on the CLI path relies on the model default, not a pinned temperature.
-    args.push(...CLAUDE_MCP_ISOLATION_ARGS);
+    args.push(...isolation);
     args.push('-p', options.prompt);
     return args;
   }
