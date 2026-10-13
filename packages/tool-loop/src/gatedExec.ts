@@ -2,7 +2,7 @@ import type {
   ToolPlugin, ToolInput, ToolResult, ToolContext,
   PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalAsk, ApprovalGateHandle, ApprovalOutcome,
 } from '@maf/types';
-import { PathConfinementError } from '@maf/types';
+import { PathConfinementError, PathEscapeError, toolFailureMessage, toolInputProblem } from '@maf/types';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
 
@@ -21,12 +21,17 @@ export interface GatedExecDeps {
  * InProcessAgentLoop: no behavior duplication between them (README.md,
  * "In-process execution & the tool-call protocol").
  *
- * Order is load-bearing: policy FIRST — anything but Allow (or an Escalate the
+ * Order is load-bearing: the input FIRST — a call whose input does not match the tool's
+ * `inputSchema` is answered with a failed result (attested, returned, not thrown) and nothing
+ * else happens — then policy — anything but Allow (or an Escalate the
  * approval gate approves) is attested as a refusal and then thrown as
  * PolicyViolationError, and nothing executes — then tool.execute, then
- * attestation. A tool's built-in confinement (`PathConfinementError`, from
- * `declaredPaths` or from `execute` before it acts) is refused the same way, as a
- * `Deny` under rule id `builtin:git-dir`. Processor-mediated input edits happen upstream of this function —
+ * attestation. A tool that throws while it runs is answered the same way a tool that
+ * returns a failure is: a failed result, `<tool id> failed: <message>`, recorded with the
+ * verdict the policy gave and returned. A tool's built-in confinement (`PathConfinementError`, from
+ * `declaredPaths` or from `execute` before it acts) is refused the same way policy refuses, as a
+ * `Deny` under rule id `builtin:git-dir`; so is a path the tool resolved outside the project root
+ * as it ran (`PathEscapeError`), under `builtin:path-escape`. Processor-mediated input edits happen upstream of this function —
  * policy always sees the final input.
  *
  * Secret redaction (L1): policy evaluation and execution use the REAL input, but
@@ -49,6 +54,16 @@ export async function executeToolGated(
   // to a frozen input now throws instead, and throws loudly.
   deepFreeze(input);
 
+  // The input before anything reads it. A field the tool does not take, or one it needs and was not
+  // given, is a call the model can correct, not one to judge: `{path, patch}` for patch.apply declared
+  // no paths (so policy allowed it) and then threw a TypeError from `writeFile(tmp, undefined)`, which
+  // ended the node. Answered, not thrown, so the loop hands it back and goes on; a tool with no schema
+  // is not checked.
+  if (tool.inputSchema !== undefined) {
+    const problem = toolInputProblem(String(tool.id), tool.inputSchema, input);
+    if (problem !== undefined) return answerMalformed(redactSecrets(problem), tool, input, ctx, deps);
+  }
+
   // The tool's own declaration, computed before any rule is consulted. An error here (a tool
   // that does not declare, a declaration that throws) propagates: failing to evaluate policy
   // is not permission to skip it. The one exception is the tool's built-in confinement refusing
@@ -57,7 +72,8 @@ export async function executeToolGated(
   try {
     declaredPaths = tool.declaredPaths(input);
   } catch (err: unknown) {
-    if (err instanceof PathConfinementError) return refuse(confinementDeny(err), undefined, tool, input, ctx, deps, new Date(), Date.now());
+    const deny = confinementDeny(err);
+    if (deny !== undefined) return refuse(deny, undefined, tool, input, ctx, deps, new Date(), Date.now());
     throw err;
   }
 
@@ -81,13 +97,25 @@ export async function executeToolGated(
   }
 
   // The same confinement, on the path the tool resolved as it ran (a link inside the root that leads
-  // into `.git`): the tool refuses before it touches anything, and the call is refused as above.
+  // into `.git`, or one swapped in after policy confined the spelling that now leads out of the root):
+  // the tool refuses before it touches anything, and the call is refused as above — a refusal, never
+  // a failed call recorded under the `Allow` the spelling had earned.
   let rawResult: ToolResult;
   try {
     rawResult = await tool.execute(input, ctx);
   } catch (err: unknown) {
-    if (err instanceof PathConfinementError) return refuse(confinementDeny(err), undefined, tool, input, ctx, deps, invokedAt, start);
-    throw err;
+    const deny = confinementDeny(err);
+    if (deny !== undefined) return refuse(deny, undefined, tool, input, ctx, deps, invokedAt, start);
+    // A refusal raised inside a tool is still a refusal, and keeps the refusal's path.
+    if (err instanceof PolicyViolationError) throw err;
+    // Anything else is the tool failing while it ran — `fs.read` of a file that is not there, a bug in
+    // the tool itself — and the model can act on that. Thrown, it ended the node: a model checking
+    // whether `hello.js` existed before writing it failed the run. Answered as a failed call instead,
+    // and recorded, with the verdict that let it run, like any call that ran and failed.
+    rawResult = {
+      stdout: '', stderr: toolFailureMessage(String(tool.id), err), exitCode: 1,
+      duration: Date.now() - start, metadata: { threw: true },
+    };
   }
   const result: ToolResult = {
     ...rawResult,
@@ -111,12 +139,55 @@ export async function executeToolGated(
   return result;
 }
 
-/** The rule id a built-in confinement refusal is recorded under: it is no policy file's rule. */
+/** The rule ids a built-in confinement refusal is recorded under: they are no policy file's rules. */
 const BUILTIN_GIT_DIR_RULE = 'builtin:git-dir';
+const BUILTIN_PATH_ESCAPE_RULE = 'builtin:path-escape';
 
-/** A tool's own confinement refusal, as the `Deny` it is recorded and reported as. */
-function confinementDeny(err: PathConfinementError): Refusal {
-  return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_GIT_DIR_RULE };
+/** The rule id a call whose input does not match the tool's schema is recorded under. */
+const BUILTIN_INPUT_SCHEMA_RULE = 'builtin:input-schema';
+
+/**
+ * Records a call whose input the tool does not take, and returns the failed result the model is
+ * handed: `problem` as stderr, exit code 1. Recorded as `Indeterminate` — the policy was not asked,
+ * because a call it cannot read is no call it could judge, and `Allow` would say it had been — with
+ * `metadata.refused`, as every call that did not run is marked.
+ */
+async function answerMalformed(
+  problem: string,
+  tool: ToolPlugin,
+  input: ToolInput,
+  ctx: ToolContext,
+  deps: GatedExecDeps,
+): Promise<ToolResult> {
+  const result: ToolResult = {
+    stdout:   '',
+    stderr:   problem,
+    exitCode: 1,
+    duration: 0,
+    metadata: { refused: true, ruleId: BUILTIN_INPUT_SCHEMA_RULE },
+  };
+  await deps.attestor.record({
+    toolId:         tool.id,
+    agentId:        ctx.agentId,
+    runId:          ctx.runId,
+    taskId:         ctx.taskId,
+    input:          redactCredentialsRecord(input),
+    result,
+    invokedAt:      new Date(),
+    durationMs:     0,
+    policyDecision: { verdict: 'Indeterminate', reason: problem, ruleId: BUILTIN_INPUT_SCHEMA_RULE },
+  });
+  return result;
+}
+
+/**
+ * A tool's own confinement refusal, as the `Deny` it is recorded and reported as: a path into `.git`,
+ * or a path that resolves outside the project root. `undefined` for any other error.
+ */
+function confinementDeny(err: unknown): Refusal | undefined {
+  if (err instanceof PathConfinementError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_GIT_DIR_RULE };
+  if (err instanceof PathEscapeError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_PATH_ESCAPE_RULE };
+  return undefined;
 }
 
 /**

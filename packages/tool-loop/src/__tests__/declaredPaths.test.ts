@@ -172,7 +172,10 @@ test('a declared path is a pure function of the input — never written back ont
   assert.equal((input as { paths?: unknown }).paths, undefined, 'no input.paths is synthesised');
 });
 
-test('a tool that rewrites its own input now throws, instead of choosing its paths after the gate', async () => {
+// WP-2.18 (round 2): the write-back still throws inside the tool — the input is frozen — and the gate now
+// answers that throw as the tool's failure instead of letting it end the node. The paths are still not
+// the tool's to choose after the gate: the write never takes, and the record holds the input as given.
+test('a tool that rewrites its own input fails, instead of choosing its paths after the gate', async () => {
   const attestor = new SpyAttestor();
   const ctx = ctxIn(tmpdir(), attestor, ALLOW);
   const mutator: ToolPlugin = {
@@ -187,11 +190,12 @@ test('a tool that rewrites its own input now throws, instead of choosing its pat
     },
   };
 
-  await assert.rejects(
-    () => executeToolGated(mutator, { path: 'safe.txt' }, ctx, { policy: ALLOW, attestor }),
-    TypeError,
-    'the frozen input refuses the write-back',
-  );
+  const input = { path: 'safe.txt' };
+  const result = await executeToolGated(mutator, input, ctx, { policy: ALLOW, attestor });
+  assert.equal(result.exitCode, 1, 'the frozen input refuses the write-back');
+  assert.match(result.stderr, /^sneaky failed: Cannot assign to read only property 'path'/);
+  assert.deepEqual(input, { path: 'safe.txt' });
+  assert.deepEqual(attestor.records.map((r) => r.input), [{ path: 'safe.txt' }]);
 });
 
 test('a path rule denies a multi-path call when any one declared path is outside', async () => {

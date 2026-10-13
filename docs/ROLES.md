@@ -67,7 +67,7 @@ Fields:
 | `tokenBudget`       | no       | Token cap. Enforced on the in-process path (real usage if reported, else estimated) and sent as `max_tokens`/`num_predict` by the HTTP adapters; the `claude`, `codex` and `gemini` CLIs have no such flag, so a `cli`-tier node ignores it. |
 | `maxToolIterations` | no       | Cap on tool-call iterations (turns) in the loop. |
 | `execution`         | no       | `'in-process'` or `'cli'`. Default: `'in-process'` for a [writer](#writer-roles), `'cli'` for any other role ([D-01](DECISIONS.md)). `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair) and needs a `TurnAdapter` with the `inProcessLoop` capability. Without one, a read-only role falls back to `cli` and notes the fallback in the run's transcript, while a writer refuses to start unless the run allows ungoverned writers (`--allow-ungoverned`). A writer set to `'cli'` needs the same flag. Any other value is a `RoleConfigError`. See the README "In-process execution" section. |
-| `expectsChange`     | no       | `true` when the role's job is to change the tree ([D-32](DECISIONS.md)). A `cli`-tier node of such a role that answers and exits 0 but leaves no diff against its start commit fails with `no_change`, the output tail in the error — what a backend that refused the edit under its own permission settings looks like. Only a writer may set it; on any other role it is a `RoleConfigError`. The built-in `coder` and this repository's `.maf/roles.yaml` coder set it; the tester does not, because a tester that adds no test has often done its job. |
+| `expectsChange`     | no       | `true` when the role's job is to change the tree ([D-32](DECISIONS.md)). A node of such a role that finishes with an answer — a `cli`-tier backend that exits 0, or an in-process loop that completes — but leaves no diff against its start commit fails with `no_change`, the output tail (in-process, the loop's last text) in the error. On the `cli` tier that is what a backend that refused the edit under its own permission settings looks like; in-process, a coder whose every tool call failed and that said so. An in-process loop that stops any other way keeps its own failure (`budget_exhausted`, `loop_failed`). Only a writer may set it; on any other role it is a `RoleConfigError`. The built-in `coder` and this repository's `.maf/roles.yaml` coder set it; the tester does not, because a tester that adds no test has often done its job. |
 
 ### YAML or JSON?
 
@@ -106,7 +106,8 @@ RoleDispatcher.runNode(node):
      in-process tier: InProcessAgentLoop.run() — every tool call through executeToolGated, where an
                       Escalate verdict goes to the approval gate;
                       for a writer, the security-gate processor runs the step-7 review at task_end;
-                      a tool or backend turn that throws still fires task_end, once
+                      a tool that throws while running is answered as a failed call;
+                      a backend turn that throws still fires task_end, once
      if either throws (a timed-out turn, a backend that never started) and the role is a writer:
                       run the step-7 review now if it has not run, then rethrow — a GateRefused
                       or ReviewRefused outranks the error
@@ -125,7 +126,8 @@ RoleDispatcher.runNode(node):
   8. fail the node: a cli result that carried a transport failure → TransportError (may be retried);
      one that reported failure, or a writer's empty output → NodeFailure;
      a loop that ended budget_exhausted without node.allowPartial → NodeFailure
-  9. otherwise, cli tier, role.expectsChange and the step-7 diff is empty:
+  9. otherwise, either tier — a cli answer, or a loop that completed —, role.expectsChange and the
+     step-7 diff is empty:
        throw NodeFailure('no_change')                // the output tail in the message (D-32)
 ```
 
@@ -135,7 +137,7 @@ A node that fails, after its last attempt, is handed to the failure recorder: th
 
 The diff base is the commit captured in step 2, not `HEAD` at review time, so a writer that commits its own work is still reviewed. `RoleDispatcher.endNode(nodeId)`, called from the scheduler's `onNodeEnd`, forgets it.
 
-On the `in-process` tier the dispatcher never bypasses policy: the loop advertises only the role's allowed tools, answers a call to any other tool with an error, and sends every allowed call through `executeToolGated` (in `@maf/tool-loop`), which asks the policy engine first and puts an `Escalate` verdict to the approval gate (see [POLICY.md](POLICY.md#escalate-asking-a-person)). A role with `fs.write` in its allowlist can still be denied by a path-glob rule. On the `cli` tier none of this applies: the backend CLI runs its own tools, and MAF sees only a writer role's diff afterwards.
+On the `in-process` tier the dispatcher never bypasses policy: the loop advertises only the role's allowed tools, each with its input schema, answers a call to any other tool with an error, and sends every allowed call through `executeToolGated` (in `@maf/tool-loop`), which answers a call whose input does not match the tool's schema with an error naming the input it expects, without executing it, then asks the policy engine and puts an `Escalate` verdict to the approval gate (see [POLICY.md](POLICY.md#escalate-asking-a-person)). A role with `fs.write` in its allowlist can still be denied by a path-glob rule. On the `cli` tier none of this applies: the backend CLI runs its own tools, and MAF sees only a writer role's diff afterwards.
 
 ### Where policy sees the role
 
@@ -147,9 +149,9 @@ A role is a writer when it holds any of `fs.write`, `fs.delete`, `patch.apply`, 
 
 - runs it on the `in-process` tier unless its `execution` is `'cli'` ([D-01](DECISIONS.md)): policy verdicts, secret redaction, attested tool calls and processor hooks exist only there. A writer that would land on the `cli` tier — by its own `execution: 'cli'`, or because the adapter cannot run the in-process loop (`codex`, `gemini`, `ollama` and `openrouter` cannot; only `claude` can) — refuses to start, before it captures anything or calls a model, with an error naming `--allow-ungoverned`. With that flag it runs on the `cli` tier, the run prints an `UNGOVERNED` banner on stderr once, and the transcript notes each such node. There a CLI backend (`claude`, `codex`, `gemini`) edits the tree with its own tools under its own permission settings, while an HTTP backend (`ollama`, `openrouter`) has no file tools and cannot change the tree at all, so a role with `expectsChange` cannot succeed on it (`no_change`). `effectiveTier(role, adapter)` says which tier a role gets;
 - captures the start commit before the node runs, so the target directory must be a git repository;
-- security-reviews the diff once per attempt: on the `cli` tier after the backend returns, whatever it returned; on the `in-process` tier at `task_end` through the `security-gate` processor, or right after the loop when a harness's own bundle leaves that processor out; and, on either tier, before an error thrown by the backend or the loop propagates ([D-31](DECISIONS.md)). A tool or a backend turn that throws inside the loop still fires `task_end`, so every processor sees the task end. A non-empty diff is a subject of the run's attestation;
+- security-reviews the diff once per attempt: on the `cli` tier after the backend returns, whatever it returned; on the `in-process` tier at `task_end` through the `security-gate` processor, or right after the loop when a harness's own bundle leaves that processor out; and, on either tier, before an error thrown by the backend or the loop propagates ([D-31](DECISIONS.md)). A backend turn that throws inside the loop still fires `task_end`, so every processor sees the task end; a tool that throws while running does not end the loop at all — `executeToolGated` answers it to the model as a failed call. A non-empty diff is a subject of the run's attestation;
 - puts a diff the security gate passed to the human review gate, when the run has one or the harness requires review ([D-34](DECISIONS.md); see [SECURITY.md](SECURITY.md#the-human-review-gate));
-- fails the node on the `cli` tier if the backend returns empty output, or — for a role with `expectsChange` — if it answers and leaves the tree unchanged against the start commit (`no_change`, [D-32](DECISIONS.md)).
+- fails the node on the `cli` tier if the backend returns empty output, and on either tier — for a role with `expectsChange` — if it answers and leaves the tree unchanged against the start commit (`no_change`, [D-32](DECISIONS.md)): in-process, when its loop completed.
 
 The scheduler's writer lock — which stops two nodes editing the tree at once — uses a broader test, `isWriterForLock(role, adapter, baseTools)`: every role that runs on the `cli` tier counts as a writer there, because its backend CLI has file tools of its own whatever the allowlist says — including a read-only role that asked for `in-process` on an adapter that cannot run it — and an `in-process` role counts as one if it holds any tool that is not read-only.
 

@@ -286,7 +286,9 @@ A role runs in one of two tiers:
   gate and the processor pipeline. Governance is real here. With `claude`, each turn is spawned with
   `--tools ""`, so the backend has no built-in tool of its own, and with `--strict-mcp-config` and an
   empty `--mcp-config`, so it has no MCP tool either: the only tools in the loop are MAF's
-  ([D-33](DECISIONS.md)).
+  ([D-33](DECISIONS.md)). The catalog the model is shown carries each tool's input schema, and a call
+  whose input does not match it is answered with an error and not executed — no paths declared, no policy
+  asked — and recorded as `Indeterminate` under rule id `builtin:input-schema`.
 - **`cli`** — maf hands the backend CLI one prompt and reads back one result. The agent
   runs its own tools, so maf sees **no individual tool call**: not the arguments, not the policy verdict,
   not the path. MAF passes no hook flags, and no permission flags but one: Codex is invoked with
@@ -439,15 +441,18 @@ What this refuses:
 
 The check happens in two places, and neither is redundant. In the **policy engine** it runs before the
 rule list, so a path outside the root is refused with a `Deny` even when no rule is loaded — confinement
-is not a rule and an empty policy file does not turn it off. In each **fs tool's `execute`** the same
-function runs again, so a tool called directly, without passing through the policy engine, is confined
-identically. For the `fs.*` tools the checked path and the executed path are the same value because both
-come from that one call, which is what stops a spelling from being confined in one place and not the
-other. `git.diff` declares and diffs one list (`paths`). `git.add`, `grep` and `patch.apply` are confined
-by the policy engine only: it checks the resolved form of what they declare, and the tool then hands its
-own input to git (with literal pathspecs), to rg or grep (after `--`), or to `patch`. That is the same
-input, but not one resolved value, and a direct call that skips the policy engine gets no confinement
-from MAF.
+is not a rule and an empty policy file does not turn it off. In each **fs tool's and `grep`'s `execute`** the
+same function runs again, so a tool called directly, without passing through the policy engine, is
+confined identically (`grep` answers a path outside the root with a failed result). Through the gate, a
+path an fs tool resolves outside the root as it runs — a link swapped in after the policy engine confined
+the spelling — is refused as a `Deny` under rule id `builtin:path-escape`, attested and reported like a
+policy refusal, never recorded as a call the policy allowed. For these tools the
+checked path and the executed path are the same value because both come from that one call, which is
+what stops a spelling from being confined in one place and not the other. `git.diff` declares and diffs
+one list (`paths`). `git.add` and `patch.apply` are confined by the policy engine only: it checks the
+resolved form of what they declare, and the tool then hands its own input to git (with literal
+pathspecs) or to `patch`. That is the same input, but not one resolved value, and a direct call that
+skips the policy engine gets no confinement from MAF.
 
 Three things this does **not** cover, so none is mistaken for it:
 

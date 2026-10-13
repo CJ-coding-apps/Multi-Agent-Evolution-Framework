@@ -129,7 +129,9 @@ test('git.log passes a checked count as -N, defaulting to 10', async () => {
   }
 });
 
-test('git.log rejects any n that is not a positive safe integer, before anything is spawned', async () => {
+// WP-2.18: a failed result rather than a throw — through the gate a throw ended the node, where the
+// model, told why, can ask again. Still before anything is spawned.
+test('git.log refuses any n that is not a positive safe integer, before anything is spawned', async () => {
   const { exec, calls } = spy();
   const tool: ToolPlugin = new GitLogTool(exec);
   const refused: unknown[] = [
@@ -137,11 +139,9 @@ test('git.log rejects any n that is not a positive safe integer, before anything
     Number.MAX_SAFE_INTEGER + 1, null, true, [3], { n: 3 },
   ];
   for (const n of refused) {
-    await assert.rejects(
-      () => tool.execute({ n }, ctxIn(CWD)),
-      /git\.log expects "n" to be a positive whole number of commits, but got /,
-      `n = ${String(n)}`,
-    );
+    const result = await tool.execute({ n }, ctxIn(CWD));
+    assert.equal(result.exitCode, 1, `n = ${String(n)}`);
+    assert.match(result.stderr, /^git\.log expects "n" to be a positive whole number of commits, but got /, `n = ${String(n)}`);
   }
   assert.equal(calls.length, 0, 'no refused count reached git');
 });
@@ -168,7 +168,7 @@ test('git.reset ends its argv with -- so a checked revision is read as a revisio
   }
 });
 
-test('git.reset rejects a "to" that is not a plain revision, before anything is spawned', async () => {
+test('git.reset refuses a "to" that is not a plain revision, before anything is spawned', async () => {
   const { exec, calls } = spy();
   const tool: ToolPlugin = new GitResetTool(exec);
   const refused: unknown[] = [
@@ -177,11 +177,13 @@ test('git.reset rejects a "to" that is not a plain revision, before anything is 
     5, null, undefined, true, ['HEAD'], { to: 'HEAD' },
   ];
   for (const to of refused) {
-    await assert.rejects(
-      () => tool.execute({ to, hard: true }, ctxIn(CWD)),
-      /git\.reset expects "to" to be a commit hash, HEAD, HEAD~N, HEAD\^N, or a branch or tag name/,
-      `to = ${typeof to === 'string' ? JSON.stringify(to) : String(to)}`,
-    );
+    const result = await tool.execute({ to, hard: true }, ctxIn(CWD));
+    const shown = `to = ${typeof to === 'string' ? JSON.stringify(to) : String(to)}`;
+    assert.equal(result.exitCode, 1, shown);
+    // A string is judged as a revision; anything else is missing or mistyped, and named as such.
+    assert.match(result.stderr, typeof to === 'string'
+      ? /^git\.reset expects "to" to be a commit hash, HEAD, HEAD~N, HEAD\^N, or a branch or tag name/
+      : /^git\.reset expects input \{"to": string \(required\), "hard": boolean\}; "to" is /, shown);
   }
   assert.equal(calls.length, 0, 'no refused revision reached git');
 });

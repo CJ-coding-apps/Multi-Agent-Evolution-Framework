@@ -83,13 +83,13 @@ Two things follow, and both are the point:
   before a glob is matched. A glob is written against a path, so before this it matched only the
   spellings a caller happened to use: `**/.env*` denied `.env` and allowed `./.env` and `../.env`.
 
-The fs tools apply the same check in `execute` (`packages/tools/src/plugins/fs.ts`), so a direct tool
-call that never went through the policy engine is no less confined. For the `fs.*` tools the checked
-path and the executed path are the same value, because both come from `resolveInside` on the same
-input. `git.diff` declares and diffs one list (`paths`). `git.add`, `grep` and `patch.apply` are
-confined by the policy engine only: it checks the resolved form of what they declare, and the tool then
-passes its own input to git (with literal pathspecs), to rg or grep (after `--`), or to `patch`. That is
-the same input, but not one resolved value.
+The fs tools and `grep` apply the same check in `execute` (`packages/tools/src/plugins/fs.ts`,
+`grep.ts`), so a direct tool call that never went through the policy engine is no less confined; `grep`
+answers a path outside the root with a failed result. For these tools the checked path and the executed
+path are the same value, because both come from `resolveInside` on the same input. `git.diff` declares
+and diffs one list (`paths`). `git.add` and `patch.apply` are confined by the policy engine only: it
+checks the resolved form of what they declare, and the tool then passes its own input to git (with
+literal pathspecs) or to `patch`. That is the same input, but not one resolved value.
 
 ### `pathGlob`
 
@@ -257,6 +257,8 @@ Each example is one entry in the file's `rules:` list.
 
 ```
 executeToolGated(tool, input, ctx)                 // @maf/tool-loop
+  → input does not match tool.inputSchema : attestor.record(Indeterminate, builtin:input-schema)
+                                            → return a failed result   ← policy not asked
   ↓ declaredPaths = tool.declaredPaths(input)
 PolicyEngine.evaluate(toolId, input, ctx, declaredPaths)
   → confine every declared path against ctx.projectRoot
@@ -275,6 +277,12 @@ PolicyEngine.evaluate(toolId, input, ctx, declaredPaths)
 verdict === 'Escalate', with a gate : approvalGate.decide → approved: run as Allow does
 verdict !== 'Allow', not approved   : attestor.record(refusal) → throw PolicyViolationError
 verdict === 'Allow'                 : tool.execute → redact secrets → attestor.record(call)
+                                      tool.execute throws a confinement refusal (a path into .git,
+                                        or one that resolves outside the root as the tool runs):
+                                        attestor.record(Deny, builtin:git-dir | builtin:path-escape)
+                                        → throw PolicyViolationError
+                                      tool.execute throws anything else: a failed result, recorded
+                                        the same way as a call that ran
 ```
 
-Anything but `Allow`, and an `Escalate` the gate did not approve, is attested as a refusal (`metadata.refused: true`, with the rule id where a rule decided) and then thrown as `PolicyViolationError`, which the in-process loop reports to the model as an error. An `Allow` verdict lets the tool run; the call is then recorded in the attestation bundle and as a `ToolInvocation` node on the memory graph (via `Attestor.record`), as a refusal is.
+Anything but `Allow`, and an `Escalate` the gate did not approve, is attested as a refusal (`metadata.refused: true`, with the rule id where a rule decided) and then thrown as `PolicyViolationError`, which the in-process loop reports to the model as an error. Two calls are answered with an error result instead of thrown: a call whose input does not match the tool's input schema, recorded as `Indeterminate` under rule id `builtin:input-schema` before policy is asked, and a call whose tool fails while running (it throws anything but a refusal — a path into `.git`, or a path the tool resolved outside the root as it ran, is a refusal: a `Deny` under `builtin:git-dir` or `builtin:path-escape`), recorded as the failed call it is, with the verdict that let it run and stderr `<tool id> failed: <message>`. The loop hands either to the model and goes on. An `Allow` verdict lets the tool run; the call is then recorded in the attestation bundle and as a `ToolInvocation` node on the memory graph (via `Attestor.record`), as a refusal is.

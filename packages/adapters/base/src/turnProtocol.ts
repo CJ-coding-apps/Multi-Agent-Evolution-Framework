@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { TurnMessage, AssistantTurn, ToolCallRequest, ToolPlugin } from '@maf/types';
+import { describeToolInput } from '@maf/types';
 
 /**
  * MAF's in-process tool-call wire protocol, shared by every TurnAdapter
@@ -15,6 +16,8 @@ export const TOOL_PROTOCOL = [
   '{"toolName":"<tool-id>","input":{...}}',
   '```',
   'Use the exact tool id from the AVAILABLE TOOLS list as "toolName".',
+  '"input" must be an object with exactly the fields its AVAILABLE TOOLS entry lists, under those names and with those types, and with every field marked (required).',
+  'A call whose input does not match is answered with an error and not run.',
   'Wait for the tool_result block before continuing. Do NOT claim effects you did not observe.',
 ].join('\n');
 
@@ -23,12 +26,22 @@ export const TOOL_PROTOCOL = [
  * calls by tool *id* (toolByName = Map(tools.map(t => [t.id, t]))), so the id is
  * what the model must emit — advertise the id, with name/description/permission
  * as context. Without this the model is blind to which tools exist.
+ *
+ * Each entry also states the tool's input, field by field, and under it one line per field
+ * saying what it means (a `timeout` in milliseconds, an `offset` in lines). Without them the
+ * model guessed field names: the live proof of 0.3.0 sent `patch.apply` a `{path, patch}`.
+ * The input is rendered by `describeToolInput`, as the error for a malformed call quotes it.
+ * A tool that declares no `inputSchema` is listed without one.
  */
 export function serializeTools(tools: ReadonlyArray<ToolPlugin> | undefined): string {
   if (!tools || tools.length === 0) return 'AVAILABLE TOOLS: (none)';
-  const lines = tools.map(
-    (t) => `- ${String(t.id)} [${t.permissionLevel}]: ${t.description}`,
-  );
+  const lines = tools.flatMap((t) => {
+    const entry = `- ${String(t.id)} [${t.permissionLevel}]: ${t.description}`;
+    if (t.inputSchema === undefined) return [entry];
+    const fields = Object.entries(t.inputSchema.properties)
+      .map(([name, field]) => `    ${JSON.stringify(name)}: ${field.description}`);
+    return [`${entry} — input: ${describeToolInput(t.inputSchema)}`, ...fields];
+  });
   return ['AVAILABLE TOOLS (use the id as "toolName"):', ...lines].join('\n');
 }
 

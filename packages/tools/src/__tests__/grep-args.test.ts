@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolContext, PolicyDecision, PolicyEngineHandle, AttestorHandle } from '@maf/types';
@@ -75,21 +76,50 @@ test('grep hands rg the pattern after -e and the path after --, so an option-sha
 });
 
 test('grep binds every model-supplied flag value to its flag, so none of them stands alone', async () => {
-  const { spawn, calls } = spy(() => FOUND);
-  await new GrepTool(spawn).execute({
-    pattern:    'needle',
-    path:       'src',
-    glob:       '--pre=sh',
-    ignoreCase: true,
-    maxResults: 5,
-    context:    2,
-  }, ctxIn(CWD));
+  // A real root: a named path is resolved inside it (WP-2.18), which the filesystem has to answer.
+  const root = realpathSync(await mkdtemp(path.join(tmpdir(), 'maf-grep-flags-')));
+  try {
+    await mkdir(path.join(root, 'src'));
+    const { spawn, calls } = spy(() => FOUND);
+    await new GrepTool(spawn).execute({
+      pattern:    'needle',
+      path:       'src',
+      glob:       '--pre=sh',
+      ignoreCase: true,
+      maxResults: 5,
+      context:    2,
+    }, ctxIn(root));
 
-  assert.deepEqual(calls.map((c) => c.args), [[
-    '--line-number', '--no-heading',
-    '--ignore-case', '--max-count=5', '--context=2', '--glob=--pre=sh',
-    '-e', 'needle', '--', path.resolve(CWD, 'src'),
-  ]]);
+    assert.deepEqual(calls.map((c) => c.args), [[
+      '--line-number', '--no-heading',
+      '--ignore-case', '--max-count=5', '--context=2', '--glob=--pre=sh',
+      '-e', 'needle', '--', path.join(root, 'src'),
+    ]]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// WP-2.18: grep's path is resolved inside the project root like every other tool's. It was
+// `path.resolve(ctx.cwd, …)`, so a direct call searched wherever `../` or an absolute path led.
+test('grep refuses a path that leaves the project root with a failed result, and searches nothing', async () => {
+  const parent = realpathSync(await mkdtemp(path.join(tmpdir(), 'maf-grep-confine-')));
+  try {
+    const root = path.join(parent, 'root');
+    await mkdir(root);
+    await mkdir(path.join(parent, 'outside'));
+    await symlink(path.join(parent, 'outside'), path.join(root, 'link'));
+    for (const escape of ['../outside', path.join(parent, 'outside'), 'link']) {
+      const { spawn, calls } = spy(() => FOUND);
+      const r = await new GrepTool(spawn).execute({ pattern: 'secret', path: escape }, ctxIn(root));
+      assert.equal(r.exitCode, 1, escape);
+      assert.equal(r.stdout, '');
+      assert.match(r.stderr, /^grep failed: Path ".*" is outside the project root /, escape);
+      assert.deepEqual(calls, [], `${escape}: nothing was searched`);
+    }
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
 });
 
 test('the grep fallback takes the same -e/-- shape when rg is not installed', async () => {

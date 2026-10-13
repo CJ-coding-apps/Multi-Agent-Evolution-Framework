@@ -95,17 +95,39 @@ class CapabilityWithoutSendTurn implements CliAdapter {
   async *stream(): AsyncGenerator<string> { yield 'x'; }
 }
 
-/** A writer tool that changes the tree and then crashes, as a real tool can. */
+/**
+ * A writer tool that cannot say which paths it would touch. A tool that throws while *running* is
+ * answered to the model as a failed call (WP-2.18), but failing to declare is failing to evaluate
+ * policy, which the gate still lets propagate — so this is the throw that still ends the loop.
+ */
 function crashingTool(): ToolPlugin {
   return {
-    id: makeToolId('boom'), name: 'boom', description: 'writes a file, then throws',
+    id: makeToolId('boom'), name: 'boom', description: 'cannot declare its paths',
     permissionLevel: 'write',
-    declaredPaths: () => ['crashed.txt'],
+    declaredPaths: (): string[] => { throw new Error('the boom tool crashed half-way'); },
+    execute: async (): Promise<ToolResult> => { throw new Error('boom must never run'); },
+  };
+}
+
+/** A writer tool that changes the tree and then throws while running, as a real tool can. */
+function failingTool(): ToolPlugin {
+  return {
+    id: makeToolId('halfway'), name: 'halfway', description: 'writes a file, then throws',
+    permissionLevel: 'write',
+    declaredPaths: () => ['halfway.txt'],
     execute: async (_input, ctx: ToolContext): Promise<ToolResult> => {
-      await writeFile(path.join(ctx.cwd, 'crashed.txt'), 'left behind by a crashing tool', 'utf8');
-      throw new Error('the boom tool crashed half-way');
+      await writeFile(path.join(ctx.cwd, 'halfway.txt'), 'left behind by a tool that failed', 'utf8');
+      throw new Error('the halfway tool failed half-way');
     },
   };
+}
+
+/** Leaves `crashed.txt` behind through the gated fs.write, then calls boom. */
+function writeThenCrash(): AssistantTurn[] {
+  return [
+    { text: 'writing', toolCalls: [{ toolUseId: 'u0', toolName: 'fs.write', input: { path: 'crashed.txt', content: 'left behind before the crash' } }] },
+    { text: 'trying boom', toolCalls: [{ toolUseId: 'u1', toolName: 'boom', input: {} }] },
+  ];
 }
 
 const WRITE_TOOLS = ['fs.read', 'fs.write'];
@@ -158,6 +180,7 @@ async function makeFixture(opts: {
   }
   const baseTools = createDefaultRegistry();
   baseTools.register(crashingTool());
+  baseTools.register(failingTool());
   const roleSet = { version: 1 as const, defaultRole: opts.role.role, roles: [opts.role] };
   const reviewed: string[] = [];
   const stderr: string[] = [];
@@ -431,13 +454,28 @@ function taskEnds(fx: Fixture): string[] {
 
 test('a tool that throws inside the in-process loop still fires task_end, and its diff is reviewed once', async () => {
   const adapter = new TurnStub();
-  adapter.turns = [{ text: 'trying boom', toolCalls: [{ toolUseId: 'u1', toolName: 'boom', input: {} }] }];
+  adapter.turns = writeThenCrash();
   const fx = await makeFixture({ adapter, role: role('coder', ['fs.read', 'fs.write', 'boom']) });
   try {
     await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), /the boom tool crashed half-way/);
     assert.deepEqual(taskEnds(fx), ['task_end: failed'], 'the transcript processor saw the task end');
     assert.equal(fx.reviewed.length, 1, 'the security-gate processor reviewed it, and nothing reviewed it again');
     assert.match(fx.reviewed[0] ?? '', /crashed\.txt/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a tool that throws while running is answered: the node goes on, and what it left is reviewed once', async () => {
+  const adapter = new TurnStub();
+  adapter.turns = [{ text: 'trying halfway', toolCalls: [{ toolUseId: 'u1', toolName: 'halfway', input: {} }] }];
+  const fx = await makeFixture({ adapter, role: role('coder', ['fs.read', 'fs.write', 'halfway']) });
+  try {
+    await fx.dispatcher.runNode(nodeFor('coder'));
+    assert.equal(adapter.turnsTaken, 2, 'the model was asked again after the failure');
+    assert.deepEqual(taskEnds(fx), ['task_end: completed']);
+    assert.equal(fx.reviewed.length, 1);
+    assert.match(fx.reviewed[0] ?? '', /halfway\.txt/);
   } finally {
     await fx.cleanup();
   }
@@ -458,7 +496,7 @@ test('a backend turn that throws inside the in-process loop still fires task_end
 
 test('a refusal at the task_end a throw reaches outranks the original error', async () => {
   const adapter = new TurnStub();
-  adapter.turns = [{ text: 'trying boom', toolCalls: [{ toolUseId: 'u1', toolName: 'boom', input: {} }] }];
+  adapter.turns = writeThenCrash();
   const fx = await makeFixture({
     adapter, role: role('coder', ['fs.read', 'fs.write', 'boom']),
     gate: () => ({ findings: [{ severity: 'critical', category: 'x', file: 'crashed.txt', rationale: 'r', remediation: 'm' }], summary: 'blocked', passed: false }),

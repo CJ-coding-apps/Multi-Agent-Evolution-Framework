@@ -26,7 +26,7 @@ import type { RoleConfig } from '../RoleConfig.js';
 import { DEFAULT_ROLE_SET } from '../defaults.js';
 import { roleSetFromHarness } from '../harnessBridge.js';
 
-// ORACLE: D-32 — a role says whether it is expected to change the tree. A cli-tier backend that
+// ORACLE: D-32 — a role says whether it is expected to change the tree, on either tier. A cli-tier backend that
 // runs under the user's own permission settings can refuse the edit, say so, and exit 0; D-04
 // read that as success. A node whose role expects a change and whose diff against the start
 // commit is empty now fails with NodeFailure('no_change'), the output tail in the error. Only the
@@ -58,10 +58,28 @@ class ScriptedCli implements CliAdapter {
   async *stream(): AsyncGenerator<string> { yield 'x'; }
 }
 
-/** An in-process backend that answers at once without calling a tool. */
-class SilentTurns extends ScriptedCli implements TurnAdapter {
+/** An in-process backend that plays `turns`, one per call, then answers with `final`. */
+class ScriptedTurns extends ScriptedCli implements TurnAdapter {
+  constructor(private readonly turns: AssistantTurn[] = [], private readonly final = 'nothing to do') { super(); }
   override capabilities(): AdapterCapabilities { return { ...CAPS, inProcessLoop: true }; }
-  async sendTurn(): Promise<AssistantTurn> { return { text: 'nothing to do', toolCalls: [] }; }
+  async sendTurn(): Promise<AssistantTurn> { return this.turns.shift() ?? { text: this.final, toolCalls: [] }; }
+}
+
+/** One turn making one tool call. */
+function calling(toolName: string, input: Record<string, unknown>, n: number): AssistantTurn {
+  return { text: `call ${n}`, toolCalls: [{ toolUseId: `u${n}`, toolName, input }] };
+}
+
+/**
+ * Three calls that each fail without changing the tree, as WP-2.18 answers them: a read of a file
+ * that is not there, a write into a directory that is not there, a write with a field misnamed.
+ */
+function failingCalls(): AssistantTurn[] {
+  return [
+    calling('fs.read', { path: 'missing.txt' }, 1),
+    calling('fs.write', { path: 'nowhere/hello.txt', content: 'hi' }, 2),
+    calling('fs.write', { path: 'hello.txt', text: 'hi' }, 3),
+  ];
 }
 
 const WRITER_TOOLS = ['fs.read', 'fs.write', 'git.commit'];
@@ -245,11 +263,65 @@ test('no_change judges only an otherwise successful answer', async () => {
   }
 });
 
-test('on the in-process tier expectsChange is not judged: every tool call is on the record', async () => {
-  const fx = await makeFixture(CODER, new SilentTurns());
+// ─── the in-process tier (WP-2.18) ───────────────────────────────────────────
+// A failed tool call is answered to the model rather than ending the node, so a coder whose every
+// call failed can complete and say so. D-32 judges that answer as it judges a cli-tier one.
+
+const IN_PROCESS_TAIL = 'I could not write the file, so hello.txt is unchanged.';
+
+test('an in-process coder whose calls all fail, and that then answers in text, fails with no_change and the loop\'s last text', async () => {
+  const fx = await makeFixture(CODER, new ScriptedTurns(failingCalls(), IN_PROCESS_TAIL));
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
+    assert.equal(failure.reason, 'no_change');
+    assert.equal(failure.exitCode, undefined, 'no process exited');
+    assert.match(failure.message, /^role "coder" expects to change the tree, so its in-process loop on adapter "scripted-cli" was expected to leave a diff against the node's start commit [0-9a-f]{12}, but the loop completed and changed nothing/);
+    assert.ok(failure.message.endsWith(`Output tail: ${JSON.stringify(IN_PROCESS_TAIL)}`), failure.message);
+    assert.deepEqual(fx.reviewed, [], 'an empty diff is not sent for review');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('an in-process coder that answers at once, calling no tool, fails with no_change too', async () => {
+  const fx = await makeFixture(CODER, new ScriptedTurns());
+  try {
+    assert.equal((await failureOf(fx.dispatcher.runNode(nodeFor('coder')))).reason, 'no_change');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('the same in-process coder with one successful write succeeds, and its diff is reviewed once', async () => {
+  const turns = [...failingCalls(), calling('fs.write', { path: 'hello.txt', content: 'hello, changed' }, 4)];
+  const fx = await makeFixture(CODER, new ScriptedTurns(turns, 'changed hello.txt'));
   try {
     const out = await fx.dispatcher.runNode(nodeFor('coder'));
-    assert.deepEqual(out['output'], { kind: 'string', value: 'nothing to do' });
+    assert.deepEqual(out['output'], { kind: 'string', value: 'changed hello.txt' });
+    assert.equal(fx.reviewed.length, 1);
+    assert.match(fx.reviewed[0] ?? '', /\+hello, changed/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('an in-process tester that changes nothing succeeds: it does not expect a change', async () => {
+  const tester = roleNamed('tester', { allowedTools: ['fs.read', 'patch.apply', 'test.run'].map(makeToolId) });
+  const fx = await makeFixture(tester, new ScriptedTurns([calling('fs.read', { path: 'missing.txt' }, 1)], 'no test to add'));
+  try {
+    const out = await fx.dispatcher.runNode(nodeFor('tester'));
+    assert.deepEqual(out['output'], { kind: 'string', value: 'no test to add' });
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('an in-process loop that stops any other way keeps its own failure, not no_change', async () => {
+  // Out of turns before it answers: budget_exhausted, which a node may accept with allowPartial.
+  const coder = roleNamed('coder', { expectsChange: true, maxToolIterations: 2 });
+  const fx = await makeFixture(coder, new ScriptedTurns(failingCalls()));
+  try {
+    assert.equal((await failureOf(fx.dispatcher.runNode(nodeFor('coder')))).reason, 'budget_exhausted');
   } finally {
     await fx.cleanup();
   }

@@ -6,7 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
-import { BaseTool } from '../ToolPlugin.js';
+import { BaseTool, closedInput } from '../ToolPlugin.js';
 import { makeToolId, resolveInside } from '@maf/types';
 import { gitDirRefusal, namesGitDir, refuseGitDirPaths } from './fs.js';
 
@@ -62,6 +62,11 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
   readonly name = 'patch.apply';
   readonly description = 'Apply a unified diff patch to the working tree. Use dryRun to verify before applying.';
   readonly permissionLevel = 'write' as const;
+  readonly inputSchema = closedInput({
+    diff:   { type: 'string', description: 'the unified diff to apply, with ---/+++ file headers' },
+    strip:  { type: 'number', description: 'leading path components to strip from its file names, as patch -p (default 1)' },
+    dryRun: { type: 'boolean', description: 'check that the diff applies without changing anything (default false)' },
+  }, ['diff']);
 
   /**
    * A pure function of the diff — the same value the policy layer is handed, computed the
@@ -78,6 +83,8 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
 
   async execute(input: PatchInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     await refuseGitDirTargets(this.name, ctx, this.declaredPaths(input));
     const tmpFile = path.join(tmpdir(), `maf-patch-${crypto.randomUUID()}.diff`);
 

@@ -153,6 +153,50 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
    * resolve it the same way — see `resolveInside`.
    */
   declaredPaths(input: I): string[];
+
+  /**
+   * The input `execute` reads, field by field. The in-process loop advertises it in the tool
+   * catalog, and `executeToolGated` answers a call that does not match it with a failed result,
+   * before `declaredPaths` and before policy, so nothing runs. Without it the model was told a
+   * tool's id and description and left to guess its field names: it sent `patch.apply` a
+   * `{path, patch}`, the tool read an undefined `diff`, and the node failed on a TypeError.
+   *
+   * Optional so that a tool written against an earlier version still compiles; a tool without
+   * one is advertised without its input and its calls are not checked. Every built-in tool has one.
+   */
+  inputSchema?: ToolInputSchema;
+}
+
+/** The value types a tool input field can have: JSON's, without `null`. */
+export type ToolInputType = 'string' | 'number' | 'boolean' | 'array' | 'object';
+
+/** What every element of an `array` field must be. */
+export interface ToolInputItems {
+  type:  Exclude<ToolInputType, 'array'>;
+  enum?: ReadonlyArray<string | number>;
+}
+
+/** One field of a tool's input. `number` means a finite number. */
+export interface ToolInputProperty {
+  type:        ToolInputType;
+  description: string;
+  /** The only values the field takes. */
+  enum?:       ReadonlyArray<string | number>;
+  /** For an `array` field: what each element must be. */
+  items?:      ToolInputItems;
+}
+
+/**
+ * A tool's input as a small subset of JSON Schema: an object of named fields, each with one type.
+ * Small on purpose — it is written by hand beside the code that reads the input, rendered into the
+ * system prompt, and checked by `toolInputProblem`, and each of those has to agree on what it means.
+ */
+export interface ToolInputSchema {
+  type:        'object';
+  properties:  { readonly [name: string]: ToolInputProperty };
+  required:    readonly string[];
+  /** `false`: a field not in `properties` makes the input malformed. Every built-in tool says `false`. */
+  additionalProperties?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -585,11 +629,15 @@ export type PolicyDecision =
   | { verdict: 'Escalate'; reason: string; approvalRequest: ApprovalRequest }
   /**
    * The policy could not be evaluated, so no verdict about the call is available — and the call
-   * does not proceed. Today this is one thing: a rule's `memoryPattern` query failed, so a
+   * does not proceed. The policy engine answers it when a rule's `memoryPattern` query failed, so a
    * `Deny` rule that might have matched did not get to say so. Answering `Allow` there is the
    * fail-open D-08 names, and it is the easiest state for an attacker to induce (break the
    * graph, then act). Distinct from `Escalate`: nothing is being asked of a human, because
    * there is no decision to approve.
+   *
+   * `executeToolGated` also records it, under rule id `builtin:input-schema`, for a call whose
+   * input does not match the tool's `inputSchema`: the policy was never asked, because there was
+   * no call it could judge. That call is answered to the model as a failed result, not thrown.
    */
   | { verdict: 'Indeterminate'; reason: string; ruleId?: string };
 
@@ -1046,3 +1094,12 @@ export type { ConfinedPath } from './paths.js';
  * on this one, where an `attestation → harness-config` edge would be a new dependency.
  */
 export { canonicalJson } from './canonicalJson.js';
+
+/**
+ * A tool's input schema rendered and checked here, where both readers already depend: the turn
+ * protocol (`@maf/adapter-base`) writes the catalog with `describeToolInput`, and the gate
+ * (`@maf/tool-loop`) and the tools themselves check a call with `toolInputProblem`. One renderer,
+ * so the error a malformed call gets quotes the input exactly as the catalog advertised it.
+ */
+export { describeToolInput, toolInputProblem, toolFailureMessage } from './toolInput.js';
+export type { ToolInputCheckOptions } from './toolInput.js';

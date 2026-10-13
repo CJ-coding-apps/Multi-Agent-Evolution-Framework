@@ -1,9 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
-import { BaseTool } from '../ToolPlugin.js';
-import { makeToolId } from '@maf/types';
+import { BaseTool, closedInput } from '../ToolPlugin.js';
+import { makeToolId, resolveInside } from '@maf/types';
 
 interface GrepInput {
   pattern:     string;
@@ -40,6 +39,14 @@ export class GrepTool extends BaseTool<GrepInput> {
   readonly name = 'grep';
   readonly description = 'Search for a pattern in files using ripgrep. Returns matching lines with file paths and line numbers.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    pattern:    { type: 'string', description: 'the regular expression to search for' },
+    path:       { type: 'string', description: 'the file or directory to search, relative to the working directory (default: all of it)' },
+    glob:       { type: 'string', description: 'search only files matching this glob, e.g. "*.ts"' },
+    ignoreCase: { type: 'boolean', description: 'match regardless of case (default false)' },
+    maxResults: { type: 'number', description: 'at most this many matching lines per file' },
+    context:    { type: 'number', description: 'lines of context to show around each match' },
+  }, ['pattern']);
 
   constructor(private readonly spawn: GrepSpawn = spawnSearch) { super(); }
 
@@ -54,7 +61,19 @@ export class GrepTool extends BaseTool<GrepInput> {
 
   async execute(input: GrepInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const searchPath = input.path ? path.resolve(ctx.cwd, input.path) : ctx.cwd;
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
+    // Resolved inside the project root, as the fs tools resolve theirs: `path.resolve(ctx.cwd, …)`
+    // searched wherever `../` or an absolute path led a caller that bypassed the gate. A path that
+    // leaves the root, or a root that cannot be resolved, is a failed result.
+    let searchPath = ctx.cwd;
+    if (input.path) {
+      try {
+        searchPath = (await resolveInside(ctx.projectRoot, input.path)).absolute;
+      } catch (err: unknown) {
+        return this.failed(err, t);
+      }
+    }
 
     // Every model-supplied value is either bound to its flag (`--glob=…`) or placed after `-e` and
     // `--`, so none of them can stand as an option. A bare pattern of `--pre=sh` was read by rg as

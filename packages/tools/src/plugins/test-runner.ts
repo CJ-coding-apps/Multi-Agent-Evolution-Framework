@@ -1,15 +1,16 @@
 import { spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
-import { BaseTool } from '../ToolPlugin.js';
+import { BaseTool, closedInput } from '../ToolPlugin.js';
 import { makeToolId } from '@maf/types';
 
-type TestRunner = 'auto' | 'bun' | 'node' | 'npm' | 'pnpm' | 'vitest' | 'jest' | 'pytest' | 'cargo';
+const RUNNERS = ['auto', 'bun', 'node', 'npm', 'pnpm', 'vitest', 'jest', 'pytest', 'cargo'] as const;
+type TestRunner = typeof RUNNERS[number];
 
+/** No `coverage`: it was declared here and read nowhere, so the schema does not offer it. */
 interface TestInput {
   runner?:   TestRunner;
   filter?:   string;
-  coverage?: boolean;
   timeout?:  number;
   [k: string]: unknown;
 }
@@ -39,6 +40,11 @@ export class TestRunnerTool extends BaseTool<TestInput> {
   readonly name = 'test.run';
   readonly description = 'Run the project test suite. Auto-detects runner (bun/vitest/jest/pytest/cargo). Returns pass/fail summary.';
   readonly permissionLevel = 'execute' as const;
+  readonly inputSchema = closedInput({
+    runner:  { type: 'string', description: 'which runner to use (default "auto": detected from the project)', enum: RUNNERS },
+    filter:  { type: 'string', description: 'run only the tests matching this; ignored when the runner is npm, node or pnpm' },
+    timeout: { type: 'number', description: 'milliseconds before the run is stopped (default 120000)' },
+  });
 
   /**
    * No path argument, so there is no path to declare. What test.run can reach is governed by
@@ -49,6 +55,8 @@ export class TestRunnerTool extends BaseTool<TestInput> {
 
   async execute(input: TestInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const runner = input.runner === 'auto' || !input.runner
       ? await detectRunner(ctx.cwd)
       : input.runner;
