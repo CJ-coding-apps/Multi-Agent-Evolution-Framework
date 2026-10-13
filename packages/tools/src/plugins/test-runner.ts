@@ -79,6 +79,15 @@ export class TestRunnerTool extends BaseTool<TestInput> {
         resolve({ stdout, stderr: stderr + '\n[TIMEOUT]', exitCode: 124, duration: performance.now() - t, metadata: { runner } });
       }, timeoutMs);
 
+      // A runner that is not installed (`bun`, `python`, `cargo` …) fails the spawn, not the run.
+      // Node emits `error` for that, and an unhandled `error` on a ChildProcess is fatal to the whole
+      // process: one missing binary ended a live run with an attestation-less death, not a failed node.
+      // Answer it the way WP-2.18 answers a tool that fails while running — with a result.
+      proc.on('error', (err: Error) => {
+        clearTimeout(timer);
+        resolve(this.failed(err, t));
+      });
+
       proc.on('close', (code: number | null) => {
         clearTimeout(timer);
         resolve({ stdout, stderr, exitCode: code ?? 1, duration: performance.now() - t, metadata: { runner } });
@@ -90,6 +99,11 @@ export class TestRunnerTool extends BaseTool<TestInput> {
 function buildCommand(runner: TestRunner, input: TestInput): string[] {
   switch (runner) {
     case 'bun':     return ['bun', 'test', ...(input.filter ? ['--filter', input.filter] : [])];
+    // `node` and `pnpm` are both in the schema's enum, so a model may ask for either. With no case
+    // they fell through to `npm test` — the one runner the `node:test` fixture wanted ran npm
+    // instead. `node --test` takes no `filter`; the schema's description already says so.
+    case 'node':    return ['node', '--test'];
+    case 'pnpm':    return ['pnpm', 'test'];
     case 'vitest':  return ['npx', 'vitest', 'run', ...(input.filter ? ['--reporter=verbose', input.filter] : [])];
     case 'jest':    return ['npx', 'jest', '--forceExit', ...(input.filter ? ['--testPathPattern', input.filter] : [])];
     case 'pytest':  return ['python', '-m', 'pytest', ...(input.filter ? ['-k', input.filter] : [])];
