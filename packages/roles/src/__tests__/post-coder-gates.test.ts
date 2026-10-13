@@ -142,7 +142,7 @@ test('no repository in the working dir: the gate errors instead of reporting a c
     // Both halves matter: that it refused, and that it says what to do about it.
     await assert.rejects(
       () => fx.dispatcher.runNode(CODER_NODE),
-      /cannot review the coder diff — no usable git repository[\s\S]*run "git init" in/,
+      /cannot diff the node's turn — no usable git repository[\s\S]*run "git init" in/,
     );
     assert.deepEqual(fx.reviews, [], 'no review happened, and none is claimed');
   } finally {
@@ -334,11 +334,12 @@ test('a custom role holding only git.commit has its start commit captured and is
   }
 });
 
-test('a role with no write tool is not gated, and needs no repository', async () => {
-  // The other direction: the predicate is "holds a write tool", not "every role". A reader in
-  // a directory with no repository must not hit the start-commit capture at all.
-  const workDir = await mkdtemp(path.join(tmpdir(), 'maf-gates-reader-'));
-  await writeFile(path.join(workDir, 'hello.txt'), 'hello', 'utf8');
+test('a role with no write tool is not gated: the security gate never sees its turn', async () => {
+  // The other direction: the gate's predicate is "holds a write tool", not "every role". A reader
+  // reaches no security review — but its turn is still diffed against the start commit it shares
+  // with a writer (F7), so it does need the repository that commit comes from; the bare-directory
+  // refusal is covered beside the reader tests in tier-default.test.ts.
+  const workDir = await makeRepoDir();
   const seen: string[] = [];
   const fx = await makeFixture({
     workDir,
@@ -347,7 +348,7 @@ test('a role with no write tool is not gated, and needs no repository', async ()
   });
   try {
     await fx.dispatcher.runNode(nodeFor('reviewer'));
-    assert.deepEqual(seen, []);
+    assert.deepEqual(seen, [], 'a reader reaches no security gate');
     assert.deepEqual(fx.reviews, []);
   } finally {
     await fx.cleanup();

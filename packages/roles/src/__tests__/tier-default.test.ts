@@ -8,7 +8,7 @@ import path from 'node:path';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, ToolPlugin, ToolContext, ToolResult, SecurityReviewResult,
-  ToolId,
+  ToolId, ExecutionTierRecord,
 } from '@maf/types';
 import { makeNodeId, makeRunId, makeToolId, GateRefused, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
@@ -156,6 +156,8 @@ interface Fixture {
   /** Everything written to the dispatcher's stderr. */
   stderr:     string[];
   transcript: Array<{ role: string; content: string }>;
+  /** Every tier record the dispatcher handed the attestor (F7). */
+  tiers:      ExecutionTierRecord[];
   cleanup:    () => Promise<void>;
 }
 
@@ -185,6 +187,7 @@ async function makeFixture(opts: {
   const reviewed: string[] = [];
   const stderr: string[] = [];
   const transcript: Array<{ role: string; content: string }> = [];
+  const tiers: ExecutionTierRecord[] = [];
   const dispatcher = new RoleDispatcher({
     adapter: opts.adapter,
     baseTools,
@@ -194,6 +197,7 @@ async function makeFixture(opts: {
     attestor: {
       record: async () => {},
       recordSecurityFindings: () => {},
+      recordExecutionTier: (record: ExecutionTierRecord) => { tiers.push(record); },
     } as unknown as Attestor,
     graph: { addNode: async () => 'n' } as unknown as MemoryGraph,
     transcript: {
@@ -221,7 +225,7 @@ async function makeFixture(opts: {
     ...(opts.allowUngoverned !== undefined ? { allowUngoverned: opts.allowUngoverned } : {}),
   });
   return {
-    dispatcher, workDir, reviewed, stderr, transcript,
+    dispatcher, workDir, reviewed, stderr, transcript, tiers,
     cleanup: () => rm(workDir, { recursive: true, force: true }),
   };
 }
@@ -289,6 +293,7 @@ test('a writer role with no execution set runs in-process by default', async () 
     assert.equal(fx.reviewed.length, 1, 'the security-gate processor reviewed the change at task_end');
     assert.match(fx.reviewed[0] ?? '', /written in-process/);
     assert.deepEqual(fx.stderr, [], 'a governed run prints no banner');
+    assert.deepEqual(fx.tiers, [{ nodeId: 'n1', role: 'coder', tier: 'in-process', adapter: 'turn-stub' }]);
   } finally {
     await fx.cleanup();
   }
@@ -296,12 +301,30 @@ test('a writer role with no execution set runs in-process by default', async () 
 
 test('a read-only role with no execution set still runs on the cli tier, with no banner', async () => {
   const adapter = new TurnStub();
-  const fx = await makeFixture({ adapter, role: role('reviewer', READ_TOOLS), noRepository: true });
+  const fx = await makeFixture({ adapter, role: role('reviewer', READ_TOOLS) });
   try {
     await fx.dispatcher.runNode(nodeFor('reviewer'));
     assert.equal(adapter.invoked, 1);
     assert.equal(adapter.turnsTaken, 0);
     assert.deepEqual(fx.stderr, []);
+    // A reader on the cli tier by its own default: recorded, and with no fallback to name (F7).
+    assert.deepEqual(fx.tiers, [{ nodeId: 'n1', role: 'reviewer', tier: 'cli', adapter: 'turn-stub' }]);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a read-only role outside a repository is refused on the start commit it would be diffed against', async () => {
+  const adapter = new TurnStub();
+  // A reader's turn is diffed now (F7), so the start commit a reader shares with a writer is
+  // where a bare directory stops it — the same refusal, whether the node writes or only reads.
+  const fx = await makeFixture({ adapter, role: role('reviewer', READ_TOOLS), noRepository: true });
+  try {
+    await assert.rejects(
+      () => fx.dispatcher.runNode(nodeFor('reviewer')),
+      /cannot diff the node's turn — no usable git repository[\s\S]*run "git init" in/,
+    );
+    assert.equal(adapter.invoked, 0, 'nothing ran without a repository to diff the turn against');
   } finally {
     await fx.cleanup();
   }
@@ -435,12 +458,19 @@ test('allowUngoverned changes nothing for a writer that can run in-process', asy
 
 test('a read-only in-process role on a cli-only adapter still falls back with a transcript note and no banner', async () => {
   const adapter = new CliOnly();
-  const fx = await makeFixture({ adapter, role: role('reader', READ_TOOLS, 'in-process'), noRepository: true });
+  const fx = await makeFixture({ adapter, role: role('reader', READ_TOOLS, 'in-process') });
   try {
     await fx.dispatcher.runNode(nodeFor('reader'));
     assert.equal(adapter.invoked, 1);
     assert.ok(fx.transcript.some((e) => e.content.includes('falling back to CLI dispatch')));
-    assert.deepEqual(fx.stderr, [], 'a reader cannot change the tree through MAF, so no banner');
+    // The banner is for the writer who lost its governed loop; a reader prints none — but its
+    // turn is diffed all the same (F7), so this fallback is not the ungoverned hole it was.
+    assert.deepEqual(fx.stderr, []);
+    // The record names the fallback, so a bundle reader sees the node is not on the tier the
+    // role asked for — the half a Deny rule scoped to an in-process reader could never show.
+    assert.deepEqual(fx.tiers, [
+      { nodeId: 'n1', role: 'reader', tier: 'cli', adapter: 'cli-only', fellBackFrom: 'in-process' },
+    ]);
   } finally {
     await fx.cleanup();
   }

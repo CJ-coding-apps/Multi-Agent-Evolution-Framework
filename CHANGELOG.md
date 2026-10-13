@@ -33,6 +33,14 @@ are optional, so a bundle written by 0.3.0 still parses and verifies.
   case that stays silent), the rule count, every rule as `(id, effect, matcher)`, and the Allow/Deny/
   Escalate/Indeterminate counts the engine reached. Every command that writes a bundle records it: `run`,
   `goldens` and `inprocess-demo`.
+- **A bundle records the tier each node ran on, and whether it fell back** (F7). `recordExecutionTier` keeps
+  one `{nodeId, role, tier, adapter, fellBackFrom?}` per node — last-wins, like `securityFindings` — in an
+  optional `executionTiers` array, so a bundle written before this still parses. The tier matters because the
+  two are not equally governed: on the `cli` tier MAF hands over one opaque prompt and sees no individual
+  tool call, so a policy rule scoped to a `cli`-tier role is in force and unreachable, and this is the half of
+  that a reader cannot get from the policy's rule list alone. `fellBackFrom: 'in-process'` separates a role
+  that asked for the governed loop and did not get it from one that asked for `cli` — the D-06 fallback the
+  transcript had only warned about once.
 - **`test.run` answers an absent test runner** (F1 — lands with `#29`, a separate PR, not in this change-set).
   Asking for a runner the host does not have —
   `bun`, `python`, `cargo` — failed the *spawn*, and an unhandled `error` on a `ChildProcess` kills the whole
@@ -52,6 +60,34 @@ are optional, so a bundle written by 0.3.0 still parses and verifies.
 
 ### Fixed
 
+- **A read-only role that changes the tree fails the node instead of being attested as having done nothing**
+  (F7). On the `cli` tier MAF hands the backend one prompt and never sends the role's allowlist, so a
+  "read-only" role keeps whatever file tools the backend has. A live run had a read-only `reviewer`, with a
+  Deny rule written against its writes, edit a tracked file: the node reported `Succeeded` with no subject,
+  no diff and no finding, and the Deny rule was never reached — a false attestation and an inert policy at
+  once. Now a node that holds no write tool is diffed at the end too, not only the writers: a non-writer
+  whose turn changed the tree fails with `unexpected_change`, the mirror of `no_change`, and the change is
+  recorded as a subject of the run's signed statement. The message names the files and prints the
+  `git diff` / `git checkout --` lines; MAF does not revert the change — in the default run, and under
+  `--no-worktree`, that working tree is the user's own checkout. On the `claude` backend a `cli`-tier reader is
+  handed only the reading tools (`--tools Read,Glob,Grep`); `codex` and `gemini` have no known flag for that,
+  so for them this diff guard is the only defence, and the README says so. The role prompts
+  (`REVIEWER_PROMPT`, `SECURITY_PROMPT`, `.maf/prompts/reviewer.md`) now say what is enforced — "a change you
+  make fails this node" — rather than "No writes", which nothing enforced. (The committed
+  `legacy-default` snapshot still carries the old text; changing it moves its content hash and the golden
+  baseline, so it is left as is for a separate decision.)
+- **The reader guard is attributed to the reader's own turn, not to the tree it found** (F7 follow-up). The
+  guard first diffed the whole working tree against the node's start commit, so a reader run after a writer
+  that had left uncommitted work in the shared worktree — no node commits between DAG nodes — failed on the
+  *writer's* change. That turned the planner's ordinary `coder` → `reviewer` plan into a false
+  `unexpected_change`, and under `--no-worktree` it blamed the reader for the user's own dirty checkout. A
+  reader's node now brackets its turn with two working-tree snapshots (`snapshotTree`) and diffs those
+  (`diffTrees`); what the tree already carried when the turn began sits in both snapshots and cancels out,
+  so only the node's own change is judged and recorded. A writer is still diffed against its start commit.
+  For a clean start tree the recorded diff is
+  byte-for-byte the same as before, so no existing evidence moves. One case the bracket cannot separate —
+  a writer editing the tree *concurrently* with the reader's turn — is documented in
+  [docs/SECURITY.md](docs/SECURITY.md) rather than papered over.
 - **The approval gate's timeout is testable without racing a wall clock** (0.3.0 audit follow-up). The test
   that pins "a request is pending while it waits" used a 25 ms budget and lost to the timer under load.
   Rather than widen the number past the point it still tests the timeout, the gate takes an injectable clock;

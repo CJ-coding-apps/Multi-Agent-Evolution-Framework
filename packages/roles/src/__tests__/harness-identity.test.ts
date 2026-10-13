@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import path from 'node:path';
 import type {
   CliAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, AttestationBundle,
@@ -54,12 +56,41 @@ function rolesYaml(description: string): string {
   });
 }
 
+const execFileAsync = promisify(execFile);
+
+/** A git command in the fixture repo, with an identity and no signing so it runs anywhere. */
+function git(root: string, ...args: string[]): Promise<void> {
+  return execFileAsync(
+    'git',
+    ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args],
+    { cwd: root },
+  ).then(() => undefined);
+}
+
+/**
+ * Writes a file in the fixture's `.maf` and commits it. Every node is diffed against the commit it
+ * started from (F7), so the tree a run dispatches in has to be clean — as a real user's is when
+ * they run maf. Without the commit, a test that edits a prompt file between runs would fail the
+ * next reader node with `unexpected_change` for a change the test made.
+ */
+async function writeCommitted(mafDir: string, relPath: string, content: string): Promise<void> {
+  await writeFile(path.join(mafDir, relPath), content, 'utf8');
+  const root = path.dirname(mafDir);
+  await git(root, 'add', '-A');
+  await git(root, 'commit', '-qm', 'config change');
+}
+
 async function withMafDir(fn: (mafDir: string) => Promise<void>): Promise<void> {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-harness-identity-'));
   const mafDir = path.join(root, '.maf');
   await mkdir(path.join(mafDir, 'prompts'), { recursive: true });
   await writeFile(path.join(mafDir, 'roles.yaml'), rolesYaml('reads code'), 'utf8');
   await writeFile(path.join(mafDir, 'prompts', 'analyst.md'), 'You are the analyst, v1.', 'utf8');
+  // The analyst is a reader, and a reader's turn is diffed (F7): the fixture is a repository with
+  // one commit, so a run that changes nothing diffs clean.
+  await git(root, 'init', '-q');
+  await git(root, 'add', '-A');
+  await git(root, 'commit', '-qm', 'base');
   try {
     await fn(mafDir);
   } finally {
@@ -179,7 +210,7 @@ test('a plain run: the attestation digest is the dispatched harness, and editing
       'the harness the attestation names hands out exactly the prompt that was dispatched');
 
     // Edit only the prompt file.
-    await writeFile(path.join(mafDir, 'prompts', 'analyst.md'), 'You are the analyst, v2.', 'utf8');
+    await writeCommitted(mafDir, 'prompts/analyst.md', 'You are the analyst, v2.');
     const second = await plainRun(mafDir, 'run-2');
     const digest2 = second.bundle.provenance.invocation.configSource.digest.sha256;
     assert.equal(digest2, second.harness.sha);
@@ -190,7 +221,7 @@ test('a plain run: the attestation digest is the dispatched harness, and editing
     assert.equal(await promptNamedBy(second.store, digest1, mafDir), 'You are the analyst, v1.');
 
     // Edit only roles.yaml.
-    await writeFile(path.join(mafDir, 'roles.yaml'), rolesYaml('reads code carefully'), 'utf8');
+    await writeCommitted(mafDir, 'roles.yaml', rolesYaml('reads code carefully'));
     const third = await plainRun(mafDir, 'run-3');
     const digest3 = third.bundle.provenance.invocation.configSource.digest.sha256;
     assert.equal(digest3, third.harness.sha);
@@ -208,7 +239,7 @@ test('a plain run: the attestation digest is the dispatched harness, and editing
 test('a pinned harness dispatches the prompt text it carries, whatever the prompt file says now', async () => {
   await withMafDir(async (mafDir) => {
     const first = await plainRun(mafDir, 'run-1');
-    await writeFile(path.join(mafDir, 'prompts', 'analyst.md'), 'You are the analyst, v2.', 'utf8');
+    await writeCommitted(mafDir, 'prompts/analyst.md', 'You are the analyst, v2.');
     const pinned = await plainRun(mafDir, 'run-2', first.harness.sha);
     assert.equal(pinned.harness.sha, first.harness.sha);
     assert.equal(pinned.dispatchedPrompt, 'You are the analyst, v1.');

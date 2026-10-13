@@ -225,6 +225,30 @@ test('invoke with nativeTools: false spawns claude with its native tools off', a
   assert.equal(calls[1]?.args.includes('--tools'), false, 'nativeTools: true is the default: tools stay on');
 });
 
+// ORACLE (F7 of the 0.3.1 audit). A role holding no write tool is a reader, and on the cli tier MAF
+// hands over one opaque prompt and never sends the role's allowlist — so such a role kept claude's
+// whole toolset, `Edit` and `Write` and `Bash` among it. A live run had a read-only reviewer edit a
+// tracked file and maf report `Succeeded` having attested nothing. `nativeTools: 'read-only'` gives
+// it the reading tools and none of the writing ones. Codex and Gemini have no such flag, so for them
+// the diff guard is the only defence, and the README says so.
+
+test("invoke with nativeTools: 'read-only' spawns claude with only the reading tools", async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  const adapter = new ClaudeAdapter({ spawn });
+  await adapter.invoke({ ...CALL, systemPrompt: 'be brief', nativeTools: 'read-only' });
+
+  assert.deepEqual(calls[0]?.args, [
+    '--print', '--system-prompt', 'be brief',
+    '--tools', 'Read,Glob,Grep',
+    ...MCP_ISOLATION,
+    '-p', '--', 'say hi',
+  ]);
+  const tools = calls[0]?.args[(calls[0]?.args.indexOf('--tools') ?? -2) + 1] ?? '';
+  for (const writing of ['Edit', 'Write', 'NotebookEdit', 'Bash']) {
+    assert.equal(tools.split(',').includes(writing), false, `${writing} is unreachable to a reader`);
+  }
+});
+
 test('stream with nativeTools: false spawns claude with its native tools off', async () => {
   const seen: string[][] = [];
   async function* spawnStreaming(_cmd: string, args: string[]): AsyncGenerator<string> {

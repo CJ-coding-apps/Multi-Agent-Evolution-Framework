@@ -75,8 +75,8 @@ export interface AdapterCall {
   timeoutMs:  number;
   /** Its entry in the inner adapter's `exchanges`, which says what the request was. */
   exchange:   number;
-  /** `false` when the caller asked for no backend tools of its own (the planner, the security review). */
-  nativeTools?: boolean;
+  /** What the caller asked of the backend's own tools: `false` = none, `'read-only'` = a reader's set. */
+  nativeTools?: boolean | 'read-only';
 }
 
 /**

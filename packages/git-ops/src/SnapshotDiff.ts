@@ -185,3 +185,66 @@ export async function snapshotDiff(cwd: string, startCommit: string): Promise<st
     await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
   }
 }
+
+/**
+ * The id of the tree the working tree currently hashes to, taken through the same throwaway index
+ * and the same pathspec as `snapshotDiff`, so the two always describe the same content.
+ *
+ * Two calls around a role's turn give that turn's own change: equal ids mean the turn changed
+ * nothing, and `diffTrees(start, end)` is the change itself — with whatever the tree already
+ * carried when the turn began left out. That is the point of it. A reader must fail for a change
+ * *it* made, not for a sibling writer's uncommitted work in the shared worktree or for the user's
+ * own dirty checkout under `--no-worktree`; diffing against `HEAD` would blame the reader for both.
+ * The user's index, HEAD and branch are never opened: `GIT_INDEX_FILE` names only the scratch file.
+ */
+export async function snapshotTree(cwd: string): Promise<string> {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'maf-snapshot-'));
+  const env = { GIT_INDEX_FILE: path.join(scratch, 'index') };
+  try {
+    const magicEnv = { ...env, GIT_LITERAL_PATHSPECS: '0' };
+    const pathspec = ['--', ':(top)', ...(await runtimeStateExcludes(cwd, magicEnv))];
+    // Start from the empty tree: `write-tree` records the whole index, so an index that kept a
+    // previous entry would leak it into the snapshot. Every kept path is (re)added next.
+    await runIsolatedGit(cwd, ['read-tree', '--empty'], { env });
+    await runIsolatedGit(cwd, ['add', '-A', ...pathspec], { env: magicEnv });
+    const { stdout } = await runIsolatedGit(cwd, ['write-tree'], { env });
+    return stdout.trim();
+  } catch (err: unknown) {
+    throw new Error(
+      `cannot snapshot the working tree in ${cwd} ` +
+      `(git said: ${err instanceof Error ? err.message : String(err)})`,
+    );
+  } finally {
+    await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * The change between two `snapshotTree` ids, as a diff. Both trees hold only the paths
+ * `snapshotTree` kept, so no pathspec is needed here. `--text --no-ext-diff --no-textconv` are,
+ * for the reason `snapshotDiff` gives: an agent-written `.gitattributes` must not change how its
+ * own change reads. An oversized result is an error, never a truncation (D-07).
+ */
+export async function diffTrees(cwd: string, from: string, to: string): Promise<string> {
+  try {
+    const { stdout } = await runIsolatedGit(
+      cwd,
+      ['diff', '--text', '--no-ext-diff', '--no-textconv', from, to],
+      { maxBuffer: MAX_DIFF_BYTES },
+    );
+    return stdout;
+  } catch (err: unknown) {
+    if ((err as { code?: string }).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      throw new Error(
+        `cannot compute the change between two working-tree snapshots in ${cwd}: it is larger than ` +
+        `${MAX_DIFF_BYTES} bytes. Reviewing a truncated diff would report the part that was cut as ` +
+        `reviewed, so this fails instead; raise MAX_DIFF_BYTES in packages/git-ops/src/SnapshotDiff.ts ` +
+        `if a change is genuinely this large.`,
+      );
+    }
+    throw new Error(
+      `cannot compute the change between two working-tree snapshots in ${cwd} ` +
+      `(git said: ${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+}
