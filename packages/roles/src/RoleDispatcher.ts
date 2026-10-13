@@ -120,24 +120,40 @@ function cliShortfall(
   return undefined;
 }
 
+/** A node that finished with an answer: what D-32 judges, on the tier it ran on. */
+type Answer =
+  | { readonly tier: 'cli'; readonly result: AdapterInvokeResult }
+  | { readonly tier: 'in-process'; readonly finalText: string };
+
 /**
- * D-32: a role that expects to change the tree answered, exited 0 and left no diff against the
+ * D-32: a role that expects to change the tree finished with an answer and left no diff against the
  * node's start commit. On the cli tier that is what a backend looks like when its own permission
- * settings refused the edit and it said so; read as success, `Succeeded` would mean two things.
+ * settings refused the edit and it said so. In-process it is a loop that completed after its tool
+ * calls failed, or after it made none — survivable since a failed call is answered rather than
+ * ending the node (WP-2.18). Read as success either way, `Succeeded` would mean two things.
  */
 function noChangeShortfall(
   role: RoleConfig,
   adapterName: string,
-  result: AdapterInvokeResult,
+  answer: Answer,
   startCommit: string,
 ): NodeFailure {
+  const expected = `role "${role.role}" expects to change the tree, so`;
+  const base = `leave a diff against the node's start commit ${startCommit.slice(0, 12)}`;
+  if (answer.tier === 'cli') {
+    return new NodeFailure(
+      'no_change',
+      `${expected} adapter "${adapterName}" was expected to ${base}, but it answered ` +
+      `(exit code ${answer.result.exitCode}) and changed nothing — a backend running under its own ` +
+      `permission settings may have refused the edit. Output tail: ${outputTail(answer.result.output)}`,
+      answer.result.exitCode,
+    );
+  }
   return new NodeFailure(
     'no_change',
-    `role "${role.role}" expects to change the tree, so adapter "${adapterName}" was expected to ` +
-    `leave a diff against the node's start commit ${startCommit.slice(0, 12)}, but it answered ` +
-    `(exit code ${result.exitCode}) and changed nothing — a backend running under its own ` +
-    `permission settings may have refused the edit. Output tail: ${outputTail(result.output)}`,
-    result.exitCode,
+    `${expected} its in-process loop on adapter "${adapterName}" was expected to ${base}, but the ` +
+    `loop completed and changed nothing — every tool call it made, each failed one included, is in the ` +
+    `run's attestation. Output tail: ${outputTail(answer.finalText)}`,
   );
 }
 
@@ -340,17 +356,21 @@ export class RoleDispatcher {
     // a diff left behind is reviewed whatever the outcome — the in-process tier does the same
     // at task_end, where the gate runs on budget_exhausted too.
     let shortfall: NodeFailure | TransportError | undefined;
-    let cliResult: AdapterInvokeResult | undefined;
+    // Set when the node finished with an answer: a cli-tier result, or an in-process loop that
+    // completed. A loop that stopped any other way has its own failure, and keeps it.
+    let answer: Answer | undefined;
     const ranInProcess = resolved.tier === 'in-process';
     try {
       if (ranInProcess) {
         const loop = await this.runInProcess(role, invokeOpts, taskId, review);
         outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
         shortfall = loopShortfall(role, loop);
+        if (loop.outcome === 'completed') answer = { tier: 'in-process', finalText: loop.finalText };
       } else {
-        cliResult = await adapter.invoke(invokeOpts);
+        const cliResult = await adapter.invoke(invokeOpts);
         outputForMemory = cliResult.output.slice(0, MAX_STORED_OUTPUT_CHARS);
         shortfall = cliShortfall(role, adapter.name, cliResult);
+        answer = { tier: 'cli', result: cliResult };
       }
     } catch (err: unknown) {
       // The loop or the adapter threw — a turn timed out, a backend never started. Tools may
@@ -375,12 +395,13 @@ export class RoleDispatcher {
     if (review) await review.run();
 
     // D-32, judged after the gate so that a refusal still wins, and only where nothing else
-    // already failed the node: a cli-tier answer from a role that expects a change, whose diff
-    // against the start commit — the one the gate just read — is empty. In-process, every tool
-    // call is on the record, and D-04's budget rules judge the loop.
-    if (shortfall === undefined && cliResult !== undefined && role.expectsChange === true &&
+    // already failed the node: an answer, on either tier, from a role that expects a change, whose
+    // diff against the start commit — the one the gate just read — is empty. In-process it was
+    // left to the record until WP-2.18 made a run of failed tool calls survivable: a coder whose
+    // every write failed, and that then said so, would otherwise succeed with nothing done.
+    if (shortfall === undefined && answer !== undefined && role.expectsChange === true &&
         startCommit !== undefined && review?.diff?.trim() === '') {
-      shortfall = noChangeShortfall(role, adapter.name, cliResult, startCommit);
+      shortfall = noChangeShortfall(role, adapter.name, answer, startCommit);
     }
 
     if (shortfall) {
@@ -473,7 +494,8 @@ export class RoleDispatcher {
     try {
       result = await loop.run();
     } catch (err: unknown) {
-      // A tool or the backend threw mid-loop, so the loop never reached task_end, where the
+      // The backend, a processor, or a tool that could not declare its paths threw mid-loop (a tool
+      // that fails while running is answered, not thrown), so the loop never reached task_end, where the
       // processors observe the end of the task: the transcript records it, the security gate
       // reviews what the agent left. Fired here instead; a refusal it reaches outranks the
       // original error (D-31). Not when the throw came from task_end itself — a GateRefused, or

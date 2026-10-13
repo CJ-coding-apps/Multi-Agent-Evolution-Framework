@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { realpathSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type {
@@ -114,6 +114,118 @@ test('a PolicyViolationError from execute is rethrown as itself, not answered as
   const tool = throwing(async () => { throw refusal; });
   await assert.rejects(() => executeToolGated(tool, {}, ctxIn(tmpdir(), attestor, policy), { policy, attestor }), (err: unknown) => err === refusal);
   assert.equal(attestor.records.length, 0, 'it took the refusal\'s path, which is not this one');
+});
+
+// ── round 3: a path that escapes the root as the tool runs is a refusal, not a failure ──────────
+// Policy confines the spelling it is handed; a symlink swapped in after that, and before the tool
+// resolves the path, leads out of the root. The tool's `resolveInside` throws PathEscapeError. Answered
+// as a failed call it would sit in the bundle under the `Allow` the spelling earned; it is a `Deny`
+// under `builtin:path-escape`, attested and thrown as PolicyViolationError, as `builtin:git-dir` is.
+
+/** A root with `notes.txt` and an empty `out/` inside it, and a secret beside it. */
+async function racyProject(t: TestContext): Promise<{ root: string; outside: string }> {
+  const parent = realpathSync(await mkdtemp(path.join(tmpdir(), 'maf-path-escape-')));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'root');
+  const outside = path.join(parent, 'outside');
+  await mkdir(path.join(root, 'out'), { recursive: true });
+  await mkdir(outside);
+  await writeFile(path.join(root, 'notes.txt'), 'inside\n', 'utf8');
+  await writeFile(path.join(outside, 'secret.txt'), 'the secret\n', 'utf8');
+  return { root, outside };
+}
+
+/** Allows, and while it is being asked, replaces `rel` in the root with a link to `target`. */
+function swappingAllow(root: string, rel: string, target: string): PolicyEngineHandle & { asked: () => number } {
+  let asked = 0;
+  return {
+    async evaluate(): Promise<PolicyDecision> {
+      asked++;
+      await rm(path.join(root, rel), { recursive: true, force: true });
+      await symlink(target, path.join(root, rel));
+      return { verdict: 'Allow' };
+    },
+    asked: () => asked,
+  };
+}
+
+function assertEscapeDeny(record: Omit<ToolCallRecord, 'id'> | undefined, toolId: string): void {
+  assert.ok(record, 'the refusal is in the attestation');
+  assert.equal(record.toolId, toolId);
+  assert.equal(record.policyDecision.verdict, 'Deny');
+  assert.equal(record.policyDecision.verdict === 'Deny' ? record.policyDecision.ruleId : undefined, 'builtin:path-escape');
+  assert.match(record.policyDecision.reason, /is outside the project root/);
+  assert.deepEqual([record.result.metadata['refused'], record.result.metadata['ruleId']], [true, 'builtin:path-escape']);
+  assert.equal(record.result.metadata['threw'], undefined, 'a refusal, not a failed call');
+  assert.match(record.result.stderr, /^policy Deny: Path "/);
+}
+
+test('a symlink swapped in after policy ran: fs.read and fs.write are refused as a Deny under builtin:path-escape', async (t) => {
+  const { root, outside } = await racyProject(t);
+  const cases: Array<[ToolPlugin, Record<string, unknown>, string, string]> = [
+    [new FsReadTool(), { path: 'notes.txt' }, 'notes.txt', path.join(outside, 'secret.txt')],
+    [new FsWriteTool(), { path: 'out/planted.txt', content: 'planted\n' }, 'out', outside],
+  ];
+  for (const [tool, input, swapped, target] of cases) {
+    const attestor = new SpyAttestor();
+    const policy = swappingAllow(root, swapped, target);
+    let recordedWhenThrown = -1;
+    await assert.rejects(
+      async () => {
+        try {
+          await executeToolGated(tool, input, ctxIn(root, attestor, policy), { policy, attestor });
+        } finally {
+          recordedWhenThrown = attestor.records.length;
+        }
+      },
+      (err: unknown) => err instanceof PolicyViolationError && err.decision.verdict === 'Deny'
+        && err.decision.ruleId === 'builtin:path-escape',
+      String(tool.id),
+    );
+    assert.equal(policy.asked(), 1, 'the spelling went past policy');
+    assert.equal(recordedWhenThrown, 1, 'recorded before the refusal reached the caller');
+    assertEscapeDeny(attestor.records[0], String(tool.id));
+    assert.doesNotMatch(JSON.stringify(attestor.records), /the secret/, 'nothing outside the root was read');
+  }
+  assert.deepEqual(await readdir(outside), ['secret.txt'], 'nothing was written outside the root');
+});
+
+test('in the loop, the path-escape refusal is reported as a policy Deny and the next step runs', async (t) => {
+  const { root, outside } = await racyProject(t);
+  const attestor = new SpyAttestor();
+  let first = true;
+  const policy: PolicyEngineHandle = {
+    async evaluate(): Promise<PolicyDecision> {
+      if (first) {
+        first = false;
+        await rm(path.join(root, 'notes.txt'));
+        await symlink(path.join(outside, 'secret.txt'), path.join(root, 'notes.txt'));
+      }
+      return { verdict: 'Allow' };
+    },
+  };
+  const adapter = new ScriptedAdapter([
+    call('u1', 'fs.read', { path: 'notes.txt' }),
+    call('u2', 'fs.write', { path: 'hello.js', content: 'hi\n' }),
+  ]);
+  const loop = new InProcessAgentLoop(
+    {
+      role: 'coder', harnessSha: 'a'.repeat(64), systemPrompt: 'sys', userPrompt: 'read the notes',
+      tools: [new FsReadTool(), new FsWriteTool()], maxTurns: 5, timeoutMs: 10_000,
+      workingDir: root, projectRoot: root, sessionId: 's1',
+    },
+    { adapter, policy, attestor, runId: makeRunId('r1'), taskId: makeTaskId('t1') },
+  );
+
+  const result = await loop.run();
+
+  assert.equal(result.outcome, 'completed');
+  const refused = told(adapter, 'u1');
+  assert.ok(refused && refused.kind === 'tool');
+  assert.equal(refused.isError, true);
+  assert.match(refused.content, /^policy Deny: Path "notes\.txt" is outside the project root /);
+  assert.equal(await readFile(path.join(root, 'hello.js'), 'utf8'), 'hi\n', 'the step after the refusal ran');
+  assertEscapeDeny(attestor.records[0], 'fs.read');
 });
 
 // ── the loop goes on ─────────────────────────────────────────────────────────────────────────────

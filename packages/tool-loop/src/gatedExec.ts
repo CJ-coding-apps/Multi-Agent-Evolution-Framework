@@ -2,7 +2,7 @@ import type {
   ToolPlugin, ToolInput, ToolResult, ToolContext,
   PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalAsk, ApprovalGateHandle, ApprovalOutcome,
 } from '@maf/types';
-import { PathConfinementError, toolFailureMessage, toolInputProblem } from '@maf/types';
+import { PathConfinementError, PathEscapeError, toolFailureMessage, toolInputProblem } from '@maf/types';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
 
@@ -29,8 +29,9 @@ export interface GatedExecDeps {
  * attestation. A tool that throws while it runs is answered the same way a tool that
  * returns a failure is: a failed result, `<tool id> failed: <message>`, recorded with the
  * verdict the policy gave and returned. A tool's built-in confinement (`PathConfinementError`, from
- * `declaredPaths` or from `execute` before it acts) is refused the same way, as a
- * `Deny` under rule id `builtin:git-dir`. Processor-mediated input edits happen upstream of this function —
+ * `declaredPaths` or from `execute` before it acts) is refused the same way policy refuses, as a
+ * `Deny` under rule id `builtin:git-dir`; so is a path the tool resolved outside the project root
+ * as it ran (`PathEscapeError`), under `builtin:path-escape`. Processor-mediated input edits happen upstream of this function —
  * policy always sees the final input.
  *
  * Secret redaction (L1): policy evaluation and execution use the REAL input, but
@@ -71,7 +72,8 @@ export async function executeToolGated(
   try {
     declaredPaths = tool.declaredPaths(input);
   } catch (err: unknown) {
-    if (err instanceof PathConfinementError) return refuse(confinementDeny(err), undefined, tool, input, ctx, deps, new Date(), Date.now());
+    const deny = confinementDeny(err);
+    if (deny !== undefined) return refuse(deny, undefined, tool, input, ctx, deps, new Date(), Date.now());
     throw err;
   }
 
@@ -95,12 +97,15 @@ export async function executeToolGated(
   }
 
   // The same confinement, on the path the tool resolved as it ran (a link inside the root that leads
-  // into `.git`): the tool refuses before it touches anything, and the call is refused as above.
+  // into `.git`, or one swapped in after policy confined the spelling that now leads out of the root):
+  // the tool refuses before it touches anything, and the call is refused as above — a refusal, never
+  // a failed call recorded under the `Allow` the spelling had earned.
   let rawResult: ToolResult;
   try {
     rawResult = await tool.execute(input, ctx);
   } catch (err: unknown) {
-    if (err instanceof PathConfinementError) return refuse(confinementDeny(err), undefined, tool, input, ctx, deps, invokedAt, start);
+    const deny = confinementDeny(err);
+    if (deny !== undefined) return refuse(deny, undefined, tool, input, ctx, deps, invokedAt, start);
     // A refusal raised inside a tool is still a refusal, and keeps the refusal's path.
     if (err instanceof PolicyViolationError) throw err;
     // Anything else is the tool failing while it ran — `fs.read` of a file that is not there, a bug in
@@ -134,8 +139,9 @@ export async function executeToolGated(
   return result;
 }
 
-/** The rule id a built-in confinement refusal is recorded under: it is no policy file's rule. */
+/** The rule ids a built-in confinement refusal is recorded under: they are no policy file's rules. */
 const BUILTIN_GIT_DIR_RULE = 'builtin:git-dir';
+const BUILTIN_PATH_ESCAPE_RULE = 'builtin:path-escape';
 
 /** The rule id a call whose input does not match the tool's schema is recorded under. */
 const BUILTIN_INPUT_SCHEMA_RULE = 'builtin:input-schema';
@@ -174,9 +180,14 @@ async function answerMalformed(
   return result;
 }
 
-/** A tool's own confinement refusal, as the `Deny` it is recorded and reported as. */
-function confinementDeny(err: PathConfinementError): Refusal {
-  return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_GIT_DIR_RULE };
+/**
+ * A tool's own confinement refusal, as the `Deny` it is recorded and reported as: a path into `.git`,
+ * or a path that resolves outside the project root. `undefined` for any other error.
+ */
+function confinementDeny(err: unknown): Refusal | undefined {
+  if (err instanceof PathConfinementError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_GIT_DIR_RULE };
+  if (err instanceof PathEscapeError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_PATH_ESCAPE_RULE };
+  return undefined;
 }
 
 /**

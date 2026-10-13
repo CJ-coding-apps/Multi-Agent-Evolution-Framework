@@ -60,9 +60,12 @@ test('a run branch that commits MAF runtime state is refused a merge, naming the
     await runIsolatedGit(repo, ['add', '.maf/NOTES.md']);
     await runIsolatedGit(repo, ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'notes']);
     const before = await userState(repo);
+    // The fix as well as the state: a coder whose only change is runtime state the gate's diff leaves
+    // out changed nothing the gate can see, and fails with no_change on either tier (D-32, WP-2.18).
     const scripted = new ScriptedAdapter([onePlannedNode(TASK), { prompt: TASK, final: 'done', steps: [
+      { tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } },
       { tool: 'fs.write', input: { path: '.maf/lcm.db', content: 'not a database: whatever the next run loads from here\n' } },
-      { tool: 'git.add', input: { paths: ['.maf/lcm.db'] } },
+      { tool: 'git.add', input: { paths: ['sum.js', '.maf/lcm.db'] } },
       { tool: 'git.commit', input: { message: 'add state' } },
     ] }]);
     const run = await driveRun([TASK, '--dir', repo, '--adapter', 'scripted', '--policy', await lockFilePolicy(root)],
