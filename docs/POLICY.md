@@ -277,7 +277,12 @@ PolicyEngine.evaluate(toolId, input, ctx, declaredPaths)
 verdict === 'Escalate', with a gate : approvalGate.decide → approved: run as Allow does
 verdict !== 'Allow', not approved   : attestor.record(refusal) → throw PolicyViolationError
 verdict === 'Allow'                 : tool.execute → redact secrets → attestor.record(call)
-                                      tool.execute throws: a failed result, recorded the same way
+                                      tool.execute throws a confinement refusal (a path into .git,
+                                        or one that resolves outside the root as the tool runs):
+                                        attestor.record(Deny, builtin:git-dir | builtin:path-escape)
+                                        → throw PolicyViolationError
+                                      tool.execute throws anything else: a failed result, recorded
+                                        the same way as a call that ran
 ```
 
-Anything but `Allow`, and an `Escalate` the gate did not approve, is attested as a refusal (`metadata.refused: true`, with the rule id where a rule decided) and then thrown as `PolicyViolationError`, which the in-process loop reports to the model as an error. Two calls are answered with an error result instead of thrown: a call whose input does not match the tool's input schema, recorded as `Indeterminate` under rule id `builtin:input-schema` before policy is asked, and a call whose tool fails while running (it throws anything but a refusal), recorded as the failed call it is, with the verdict that let it run and stderr `<tool id> failed: <message>`. The loop hands either to the model and goes on. An `Allow` verdict lets the tool run; the call is then recorded in the attestation bundle and as a `ToolInvocation` node on the memory graph (via `Attestor.record`), as a refusal is.
+Anything but `Allow`, and an `Escalate` the gate did not approve, is attested as a refusal (`metadata.refused: true`, with the rule id where a rule decided) and then thrown as `PolicyViolationError`, which the in-process loop reports to the model as an error. Two calls are answered with an error result instead of thrown: a call whose input does not match the tool's input schema, recorded as `Indeterminate` under rule id `builtin:input-schema` before policy is asked, and a call whose tool fails while running (it throws anything but a refusal — a path into `.git`, or a path the tool resolved outside the root as it ran, is a refusal: a `Deny` under `builtin:git-dir` or `builtin:path-escape`), recorded as the failed call it is, with the verdict that let it run and stderr `<tool id> failed: <message>`. The loop hands either to the model and goes on. An `Allow` verdict lets the tool run; the call is then recorded in the attestation bundle and as a `ToolInvocation` node on the memory graph (via `Attestor.record`), as a refusal is.

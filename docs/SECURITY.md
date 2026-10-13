@@ -443,7 +443,10 @@ The check happens in two places, and neither is redundant. In the **policy engin
 rule list, so a path outside the root is refused with a `Deny` even when no rule is loaded — confinement
 is not a rule and an empty policy file does not turn it off. In each **fs tool's and `grep`'s `execute`** the
 same function runs again, so a tool called directly, without passing through the policy engine, is
-confined identically (`grep` answers a path outside the root with a failed result). For these tools the
+confined identically (`grep` answers a path outside the root with a failed result). Through the gate, a
+path an fs tool resolves outside the root as it runs — a link swapped in after the policy engine confined
+the spelling — is refused as a `Deny` under rule id `builtin:path-escape`, attested and reported like a
+policy refusal, never recorded as a call the policy allowed. For these tools the
 checked path and the executed path are the same value because both come from that one call, which is
 what stops a spelling from being confined in one place and not the other. `git.diff` declares and diffs
 one list (`paths`). `git.add` and `patch.apply` are confined by the policy engine only: it checks the

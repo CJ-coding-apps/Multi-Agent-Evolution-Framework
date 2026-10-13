@@ -128,9 +128,12 @@ the README's Status table lists both as planned.
 - **`--allow-ungoverned`** on `maf run`, `maf goldens run` and `maf evolve` (D-01; see Security).
 - **`expectsChange` and `no_change`** (D-32). A role that sets `expectsChange: true` — in the built-in
   set and this repository's `.maf/roles.yaml`, only `coder` — fails with `NodeFailure('no_change')` when
-  its `cli`-tier node answers, exits 0 and leaves no diff against its start commit, the output tail in the
-  error. That is what a backend that refused the edit under its own permission settings looks like, and
-  0.2.1 reported it `Succeeded`. Only a writer may set it.
+  its node answers and leaves no diff against its start commit, on either tier, the output tail in the
+  error. On the `cli` tier that is a backend that exits 0 after refusing the edit under its own permission
+  settings, which 0.2.1 reported `Succeeded`. In-process it is a loop that completes with nothing changed
+  — judged since WP-2.18 made a run of failed tool calls survivable, so a coder whose every write failed
+  no longer succeeds by saying so. A loop that stops any other way keeps its own failure. Only a writer
+  may set it.
 - **The human review gate** (D-34). `maf run` builds it when the harness sets
   `reviewGate: { required: true }` or `--review` is given. The terminal reviewer shows the node, its role,
   the base commit, the diff's sha256 and the diff (up to 200 lines or 20 KB), and reads `approve` or
@@ -210,7 +213,10 @@ the README's Status table lists both as planned.
   anything but a policy refusal, so a model checking whether `hello.js` existed before writing it failed
   the run — as did `fs.write` into a directory not yet made. A tool that throws anything but a refusal
   is now answered as a failed call, `fs.read failed: ENOENT: …` (credentials redacted), recorded with the
-  verdict that let it run, and the loop goes on. The five `fs` tools also answer their own filesystem errors that way, and `grep` resolves its
+  verdict that let it run, and the loop goes on; a coder that then changes nothing fails with
+  `no_change` (D-32, now on either tier). A path the tool resolves outside the project root as it runs —
+  a link swapped in after policy confined the spelling — is not a failure but a refusal: a `Deny` under
+  `builtin:path-escape`, attested and reported like `builtin:git-dir`. The five `fs` tools also answer their own filesystem errors that way, and `grep` resolves its
   `path` inside the project root as the other tools do, answering a path outside it with a failed
   result; it searched wherever `path.resolve(cwd, path)` led.
 - **Kùzu query results are closed as they are read** (WP-2.15). `KuzuDriver` never closed a
