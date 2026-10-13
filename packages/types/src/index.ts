@@ -1101,5 +1101,5 @@ export { canonicalJson } from './canonicalJson.js';
  * (`@maf/tool-loop`) and the tools themselves check a call with `toolInputProblem`. One renderer,
  * so the error a malformed call gets quotes the input exactly as the catalog advertised it.
  */
-export { describeToolInput, toolInputProblem } from './toolInput.js';
+export { describeToolInput, toolInputProblem, toolFailureMessage } from './toolInput.js';
 export type { ToolInputCheckOptions } from './toolInput.js';

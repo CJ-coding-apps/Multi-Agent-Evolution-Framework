@@ -2,7 +2,7 @@ import type {
   ToolPlugin, ToolInput, ToolResult, ToolContext,
   PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalAsk, ApprovalGateHandle, ApprovalOutcome,
 } from '@maf/types';
-import { PathConfinementError, toolInputProblem } from '@maf/types';
+import { PathConfinementError, toolFailureMessage, toolInputProblem } from '@maf/types';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
 
@@ -26,7 +26,9 @@ export interface GatedExecDeps {
  * else happens — then policy — anything but Allow (or an Escalate the
  * approval gate approves) is attested as a refusal and then thrown as
  * PolicyViolationError, and nothing executes — then tool.execute, then
- * attestation. A tool's built-in confinement (`PathConfinementError`, from
+ * attestation. A tool that throws while it runs is answered the same way a tool that
+ * returns a failure is: a failed result, `<tool id> failed: <message>`, recorded with the
+ * verdict the policy gave and returned. A tool's built-in confinement (`PathConfinementError`, from
  * `declaredPaths` or from `execute` before it acts) is refused the same way, as a
  * `Deny` under rule id `builtin:git-dir`. Processor-mediated input edits happen upstream of this function —
  * policy always sees the final input.
@@ -99,7 +101,16 @@ export async function executeToolGated(
     rawResult = await tool.execute(input, ctx);
   } catch (err: unknown) {
     if (err instanceof PathConfinementError) return refuse(confinementDeny(err), undefined, tool, input, ctx, deps, invokedAt, start);
-    throw err;
+    // A refusal raised inside a tool is still a refusal, and keeps the refusal's path.
+    if (err instanceof PolicyViolationError) throw err;
+    // Anything else is the tool failing while it ran — `fs.read` of a file that is not there, a bug in
+    // the tool itself — and the model can act on that. Thrown, it ended the node: a model checking
+    // whether `hello.js` existed before writing it failed the run. Answered as a failed call instead,
+    // and recorded, with the verdict that let it run, like any call that ran and failed.
+    rawResult = {
+      stdout: '', stderr: toolFailureMessage(String(tool.id), err), exitCode: 1,
+      duration: Date.now() - start, metadata: { threw: true },
+    };
   }
   const result: ToolResult = {
     ...rawResult,

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ToolInputSchema } from '../index.js';
-import { describeToolInput, toolInputProblem } from '../index.js';
+import { describeToolInput, toolInputProblem, toolFailureMessage } from '../index.js';
 
 // ORACLE: WP-2.18, from the maintainer's live proof of 0.3.0 — the model sent `patch.apply` a
 // `{path, patch}` because the catalog never said the field is `diff`. These pin the one rendering
@@ -124,4 +124,13 @@ test('requiredOnly checks just the required fields: presence and type, nothing o
   assert.match(toolInputProblem('patch.apply', PATCH, { path: 'a' }, only) ?? '', /; "diff" is missing\.$/);
   assert.match(toolInputProblem('patch.apply', PATCH, { diff: 3 }, only) ?? '', /; "diff" is a number, not a string\.$/);
   assert.match(toolInputProblem('patch.apply', PATCH, null, only) ?? '', /; the input is null, not an object\.$/);
+});
+
+test('toolFailureMessage: the tool id, "failed:", and what was thrown', () => {
+  const enoent = Object.assign(new Error("ENOENT: no such file or directory, open '/w/hello.js'"), { code: 'ENOENT' });
+  assert.equal(toolFailureMessage('fs.read', enoent), "fs.read failed: ENOENT: no such file or directory, open '/w/hello.js'");
+  assert.equal(toolFailureMessage('probe', new TypeError('x is not a function')), 'probe failed: x is not a function');
+  assert.equal(toolFailureMessage('probe', new Error('')), 'probe failed: Error', 'an empty message still names something');
+  assert.equal(toolFailureMessage('probe', 'a bare string'), 'probe failed: a bare string');
+  assert.equal(toolFailureMessage('probe', Object.create(null)), 'probe failed: a thrown object');
 });

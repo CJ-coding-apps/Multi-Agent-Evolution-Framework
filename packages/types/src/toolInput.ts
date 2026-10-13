@@ -162,3 +162,27 @@ export function toolInputProblem(
   }
   return parts.length === 0 ? undefined : `${expects}; ${joined(parts)}.`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TOOL FAILURES
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** What was thrown, as a message: an Error's own message, anything else as a string. */
+function thrownMessage(err: unknown): string {
+  if (err instanceof Error) return err.message || err.name;
+  try {
+    return String(err);
+  } catch {
+    // An object with no usable `toString` (a null prototype) still failed the call.
+    return `a thrown ${typeof err}`;
+  }
+}
+
+/**
+ * A tool's failure while it ran, as the model and the bundle are told it: `fs.read failed: ENOENT: no
+ * such file or directory, open '…/hello.js'`. One shape whether the tool caught its own error or
+ * `executeToolGated` caught what it threw.
+ */
+export function toolFailureMessage(toolId: string, err: unknown): string {
+  return `${toolId} failed: ${thrownMessage(err)}`;
+}

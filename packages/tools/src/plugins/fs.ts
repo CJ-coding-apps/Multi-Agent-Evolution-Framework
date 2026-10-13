@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import type { Dirent, Stats } from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
@@ -24,9 +25,9 @@ function onePath(input: { path?: unknown }): string[] {
  * syscall is a value that was checked, and the string a path rule matched is a description of
  * that same file.
  *
- * It throws rather than returning a failed `ToolResult`. `fs.read` on a missing file already
- * throws, and a path outside the root is the same kind of thing: the tool has no answer to give,
- * and a result saying otherwise would be a result it did not obtain. Through the gate the policy
+ * It throws rather than returning a failed `ToolResult`: a path outside the root is a refusal, not
+ * something the tool met while running — a file that is not there is that, and each tool answers it
+ * with a failed result. Through the gate the policy
  * engine's own confinement has already refused with a `Deny`, so the model sees a policy refusal
  * and the run continues; this is the second line, and it is what keeps a direct
  * `tool.execute(...)` — one that never went past the gate — no less confined.
@@ -109,7 +110,12 @@ export class FsReadTool extends BaseTool<ReadInput> {
     const unusable = this.unusable(input, t);
     if (unusable !== undefined) return unusable;
     const abs = await confinedPath(ctx, input.path);
-    const content = await fs.readFile(abs, 'utf8');
+    let content: string;
+    try {
+      content = await fs.readFile(abs, 'utf8');
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     const lines = content.split('\n');
     const slice = lines.slice(input.offset ?? 0, input.limit ? (input.offset ?? 0) + input.limit : undefined);
     return this.ok(slice.join('\n'), performance.now() - t, { lines: lines.length });
@@ -142,8 +148,12 @@ export class FsWriteTool extends BaseTool<WriteInput> {
     const unusable = this.unusable(input, t);
     if (unusable !== undefined) return unusable;
     const abs = await writablePath(ctx, this.name, input.path);
-    if (input.createDirs) await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, input.content, 'utf8');
+    try {
+      if (input.createDirs) await fs.mkdir(path.dirname(abs), { recursive: true });
+      await fs.writeFile(abs, input.content, 'utf8');
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     return this.ok(`Wrote ${input.content.length} bytes to ${input.path}`, performance.now() - t);
   }
 }
@@ -173,7 +183,11 @@ export class FsDeleteTool extends BaseTool<DeleteInput> {
     const unusable = this.unusable(input, t);
     if (unusable !== undefined) return unusable;
     const abs = await writablePath(ctx, this.name, input.path);
-    await fs.rm(abs, { recursive: input.recursive ?? false });
+    try {
+      await fs.rm(abs, { recursive: input.recursive ?? false });
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     return this.ok(`Deleted ${input.path}`, performance.now() - t);
   }
 }
@@ -198,7 +212,12 @@ export class FsStatTool extends BaseTool<StatInput> {
     const unusable = this.unusable(input, t);
     if (unusable !== undefined) return unusable;
     const abs = await confinedPath(ctx, input.path);
-    const st = await fs.stat(abs);
+    let st: Stats;
+    try {
+      st = await fs.stat(abs);
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     return this.ok(JSON.stringify({
       isFile: st.isFile(), isDirectory: st.isDirectory(),
       size: st.size, mtime: st.mtime.toISOString(),
@@ -227,7 +246,12 @@ export class FsListTool extends BaseTool<ListInput> {
     const unusable = this.unusable(input, t);
     if (unusable !== undefined) return unusable;
     const abs = await confinedPath(ctx, input.path);
-    const entries = await fs.readdir(abs, { withFileTypes: true, recursive: input.recursive });
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(abs, { withFileTypes: true, recursive: input.recursive });
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     const names = entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
     return this.ok(names.join('\n'), performance.now() - t, { count: names.length });
   }

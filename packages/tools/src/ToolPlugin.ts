@@ -2,7 +2,7 @@ import { performance } from 'node:perf_hooks';
 import type {
   ToolId, ToolInput, ToolInputSchema, ToolResult, ToolContext, ToolPlugin, PermissionLevel,
 } from '@maf/types';
-import { toolInputProblem } from '@maf/types';
+import { toolFailureMessage, toolInputProblem } from '@maf/types';
 
 /** A closed input: these fields, `required` among them, and no others. Every built-in tool's shape. */
 export function closedInput(properties: ToolInputSchema['properties'], required: readonly string[] = []): ToolInputSchema {
@@ -38,6 +38,15 @@ export abstract class BaseTool<I extends ToolInput = ToolInput> implements ToolP
   protected unusable(input: ToolInput, started: number): ToolResult | undefined {
     const problem = toolInputProblem(String(this.id), this.inputSchema, input, { requiredOnly: true });
     return problem === undefined ? undefined : this.err(problem, performance.now() - started);
+  }
+
+  /**
+   * What the tool met while running — a file that is not there, a directory where a file was
+   * expected — as the failed result the model is handed: `<id> failed: <message>`, the shape
+   * `executeToolGated` gives a throw, so a caller that bypassed the gate is answered the same.
+   */
+  protected failed(err: unknown, started: number): ToolResult {
+    return this.err(toolFailureMessage(String(this.id), err), performance.now() - started);
   }
 
   protected ok(stdout: string, duration: number, metadata: Record<string, unknown> = {}): ToolResult {

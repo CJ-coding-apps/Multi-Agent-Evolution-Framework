@@ -1,9 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
 import { BaseTool, closedInput } from '../ToolPlugin.js';
-import { makeToolId } from '@maf/types';
+import { makeToolId, resolveInside } from '@maf/types';
 
 interface GrepInput {
   pattern:     string;
@@ -64,7 +63,17 @@ export class GrepTool extends BaseTool<GrepInput> {
     const t = performance.now();
     const unusable = this.unusable(input, t);
     if (unusable !== undefined) return unusable;
-    const searchPath = input.path ? path.resolve(ctx.cwd, input.path) : ctx.cwd;
+    // Resolved inside the project root, as the fs tools resolve theirs: `path.resolve(ctx.cwd, …)`
+    // searched wherever `../` or an absolute path led a caller that bypassed the gate. A path that
+    // leaves the root, or a root that cannot be resolved, is a failed result.
+    let searchPath = ctx.cwd;
+    if (input.path) {
+      try {
+        searchPath = (await resolveInside(ctx.projectRoot, input.path)).absolute;
+      } catch (err: unknown) {
+        return this.failed(err, t);
+      }
+    }
 
     // Every model-supplied value is either bound to its flag (`--glob=…`) or placed after `-e` and
     // `--`, so none of them can stand as an option. A bare pattern of `--pre=sh` was read by rg as
