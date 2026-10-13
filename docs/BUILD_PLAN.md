@@ -28,7 +28,7 @@ Status legend for work packages: `todo` · `in-progress` · `in-review` · `merg
 |---|---|---|
 | **0.2.1** | Correctness fixes (P0) and the documentation truth pass. No behaviour the README describes changes; the README changes to match the code. | Fresh-clone proof; README Status table honest as of the commit. |
 | **0.3.0** | The governed-by-default execution model and the wirings: in-process default, approval, review gate, worktrees, YAML/config, planner recall, offline goldens, in-toto attestation, harness import. Toolchain floor. | e2e CI job green; every 0.3.0 Status row shipped with a regression check. |
-| **0.4.0** | LCM built properly, patch-test strategy, run persistence with pause/resume, provider failover, DAG-from-spec, evolver as claimed, Kùzu 0.11.3, hardening, consolidation. | Exit criteria 1–3 of §1. |
+| **0.4.0** | LCM built properly, patch-test strategy, run persistence with pause/resume, provider failover, DAG-from-spec, evolver as claimed, Kùzu 0.11.3, hardening, consolidation. | Exit criteria 1–3 of §1, and a whole-branch audit (§3.7). |
 | **0.5.0** | Port from maf-v1: `mcp-tools` bridge (with its known fixes), `resolveHarnessForRun`, encryption at rest (E1), prompt-injector test script. Scoped after 0.4.0 from the v1 checklist. | — |
 
 Semantics: pre-1.0 SemVer. Behaviour changes bump the minor; 0.2.1 is the only patch release because it changes no documented behaviour.
@@ -41,7 +41,7 @@ Semantics: pre-1.0 SemVer. Behaviour changes bump the minor; 0.2.1 is the only p
 
 - **Architect** (one, strongest model): turns each work package below into a one-page spec — acceptance test first, then files, then steps — before any implementer starts; owns this file and `DECISIONS.md`; reviews every PR description for a D-nn citation; runs the integration PRs on the maintainer's machine.
 - **Implementers** (4–6, model per §3.4): one work package at a time, confined to the package(s) the WP names, in their own git worktree and branch.
-- **Verifier** (one per PR, strongest model, fresh context): receives the spec, the diff, and a clean checkout — never the implementer's conversation. Runs the tests, then tries to break the change with inputs the spec names and ones it invents. Reports pass/fail with evidence. A PR is not mergeable without a verifier pass.
+- **Verifier** (one per PR, strongest model, fresh context): receives the spec, the diff, and a clean checkout — never the implementer's conversation. Runs the tests, then tries to break the change with inputs the spec names and ones it invents. Reports pass/fail with evidence. A PR is not mergeable without a verifier pass. **When the PR touches the model-facing surface — the tool catalogue serialized into the prompt (`packages/adapters/base/src/turnProtocol.ts`), a tool's input schema or `declaredPaths`, prompt assembly, or an adapter's request/response mapping — the brief must include a live-model row: a real `run --adapter claude` on a scratch repository, with the transcript and bundle it produced as the evidence.** A scripted adapter already knows every tool's field names, so no scripted test can fail on a catalogue that omits a schema: in Phase 2 a real model guessed `{path, patch}` for a tool that takes `{diff}` and killed the node, and 947 passing tests had nothing to say about it (WP-2.18).
 - **Maintainer** (CJ): approves `DECISIONS.md`, the integration PRs (§3.3), releases, and any stop-and-ask.
 
 ### 3.2 Branch and PR rules
@@ -72,6 +72,14 @@ An agent stops and reports — it does not proceed, retry another route, or "fix
 ### 3.6 Reporting
 
 End of every WP: merge SHA, CI run id, verifier verdict, the acceptance test's name, and anything deliberately not done. End of every day: this file's status column updated in a docs-only commit on the architect's branch.
+
+**Each verifier writes its result to disk the moment it finishes, before any synthesis runs.** Phase 2's first attempt lost nine verifiers to a session limit with nothing written down, and their findings had to be re-derived. One file per verifier in the run's artifact directory, named for the WP and the aspect it covered; the synthesizer reads those files, never a session that may already be gone. Losing the synthesizer is cheap; losing nine verifiers is not.
+
+### 3.7 The whole-branch audit is a gate, not a one-off
+
+A lane verifier sees one package. That is what lets it run at all, and it is also the bound on what it can find. In Phase 2 the lane verifiers produced 61 findings between them; the single whole-branch audit that followed produced 2 HIGH that every one of them missed, because each could only see the package in front of it. Those two are the ones that would have cost a release.
+
+So the audit is a standing gate rather than a one-off: **before a phase's release PR is opened, one reviewer with no prior context on the branch audits the whole branch — the diff from the phase's branch point, not the last integration WP — to the same evidence bar a lane verifier meets.** It runs after the integration WP (WP-3.10) and before the release WP (WP-3.12); a release PR without an attached whole-branch audit is not mergeable. Its findings are triaged into the phase's exit criteria or into the next phase's carried list; none are fixed “while in there” without a work package (§3.3).
 
 ---
 
@@ -243,6 +251,19 @@ Status table rows flipped to *shipped* only for behaviour landed in this phase, 
 
 ## 7. Phase 3 — release 0.4.0
 
+### WP-3.0 Carried into Phase 3 — not a lane
+
+Phase 2 closed at 0.3.0 and carried these four out with it. Each is cheap now and expensive later, so they land before Phase 3's first lane, not after its last.
+
+| Carried item | State | Whose |
+|---|---|---|
+| **WP-2.11 — the toolchain floor:** `engines`, `packageManager: pnpm@10.x` and `pnpm.onlyBuiltDependencies` in the root `package.json`, `pnpm-lock.yaml` at v9, pnpm 10 in `ci.yml`, the README prerequisites, and the `packages/cli/src/main.ts` shebang | **not done.** Regenerating the lockfile needs registry access the fleet host does not have, and the host has no `corepack`; it lands from the maintainer's machine | maintainer |
+| Dependabot PRs on docugraph (#12) and cognitive-fabric (#4) | open | coder reviews, maintainer merges |
+| ghcr packages set to Public visibility | a settings change (D-27) | maintainer |
+| The maintainer's local tooling: the dead GitHub MCP token, the misconfigured custom connector, Serena's dashboard auto-opening on spawn | | maintainer |
+
+WP-2.11 gets no lane of its own — its files are D-26 maintainer-reserved and two of them *are* the CI configuration — and its own note already records why the fleet cannot do the lockfile half. Until it lands the README Status row stays *planned*, which is the honest state.
+
 ### WP-3.1 LCM built properly — `todo` [core] · D-17 · audit §eval 27
 **Files:** `packages/lcm/src/{LcmEngine.ts,LcmStore.ts,operators/*,GhostCueBuilder.ts,SessionMerger.ts}`, `packages/lcm-adapter/src/*`, `packages/transcript/src/{TranscriptLogger.ts,CompressionAgent.ts}`, `packages/prompt-injector/src/GraphAwareInjector.ts`, first tests for all four packages.
 **Acceptance:** summaries are produced by the run's adapter with a configurable model and counted against the node budget; both modes are selectable from config and tested; the fresh tail returns the newest N messages; compaction summarizes exactly the entries it drops (ids match) and a test proves no entry is lost; ghost cues reach the injector and change the prompt; `LlmMap`/`AgenticMap`/`SessionMerger`/`CompressionAgent` are reachable from `run` and tested; one nightly live test exercises a real summarization. Until merged, the README row stays *experimental*.
@@ -306,6 +327,7 @@ Port from `maf-v1` into the public trunk (owner decision 7): `@maf/mcp-tools` wi
 | In-process default breaks non-Claude users | `--allow-ungoverned` with a clear message; README Status row says which adapters are governed |
 | Worktrees on repositories with submodules or LFS | WP-2.4 tests include a submodule fixture; document unsupported cases |
 | Live validation flakiness masks regressions | nightly results compared as trends; a single flaky night does not fail `main` |
+| A defect only a real model can reach (the model-facing surface) | §3.1's live-model row in the verifier brief for any PR touching that surface; the nightly live goldens as the backstop (WP-3.11) |
 | Review bandwidth | PR size cap; lanes sized to 3–5 PRs/day; integration serialized |
 | Agents "fixing" beyond scope | stop-and-ask list (§3.3); verifier checks the diff against the WP's file list |
 | Budget overrun | per-PR caps with stop-at-cap; workspace spend limits as the hard stop |
