@@ -77,7 +77,7 @@ End of every WP: merge SHA, CI run id, verifier verdict, the acceptance test's n
 
 ### 3.7 The whole-branch audit is a gate, not a one-off
 
-A lane verifier sees one package. That is what lets it run at all, and it is also the bound on what it can find. In Phase 2 the lane verifiers produced 61 findings between them; the single whole-branch audit that followed produced 2 HIGH that every one of them missed, because each could only see the package in front of it. Those two are the ones that would have cost a release.
+A lane verifier sees one package. That is what lets it run at all, and it is also the bound on what it can find. In Phase 2 the lane verifiers produced 65 findings between them; the single whole-branch audit that followed produced 2 HIGH that every one of them missed, because each could only see the package in front of it. Those two are the ones that would have cost a release.
 
 So the audit is a standing gate rather than a one-off: **before a phase's release PR is opened, one reviewer with no prior context on the branch audits the whole branch — the diff from the phase's branch point, not the last integration WP — to the same evidence bar a lane verifier meets.** It runs after the integration WP (WP-3.10) and before the release WP (WP-3.12); a release PR without an attached whole-branch audit is not mergeable. Its findings are triaged into the phase's exit criteria or into the next phase's carried list; none are fixed “while in there” without a work package (§3.3).
 
@@ -253,16 +253,18 @@ Status table rows flipped to *shipped* only for behaviour landed in this phase, 
 
 ### WP-3.0 Carried into Phase 3 — not a lane
 
-Phase 2 closed at 0.3.0 and carried these four out with it. Each is cheap now and expensive later, so they land before Phase 3's first lane, not after its last.
+Phase 2 closed at 0.3.0 and carried these six out with it. Each is cheap now and expensive later, so they land before Phase 3's first lane, not after its last.
 
 | Carried item | State | Whose |
 |---|---|---|
 | **WP-2.11 — the toolchain floor:** `engines`, `packageManager: pnpm@10.x` and `pnpm.onlyBuiltDependencies` in the root `package.json`, `pnpm-lock.yaml` at v9, pnpm 10 in `ci.yml`, the README prerequisites, and the `packages/cli/src/main.ts` shebang | **not done.** Regenerating the lockfile needs registry access the fleet host does not have, and the host has no `corepack`; it lands from the maintainer's machine | maintainer |
+| **F3 — the read-only role (`analyst`):** a fifth built-in role holding `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.status`, `git.diff`, `git.log` — no `test.run` (a writer tool: it runs the project's own code), no `expectsChange`, and `execution: 'in-process'` set explicitly (a reader defaults to the `cli` tier, where "read-only" is a request, not a guarantee); and `writes`/`expectsChange` rendered from config on the planner's role block, so "(read-only)" is not prose a role author has to remember. Without it a read-only task is handed to `coder` and scored `Failed` on `no_change` — 4 of the 9 v0.3.0 sweep runs, every one of them the correct answer. Opens Phase 3 as **WP-3.0b**. | not done — 0.3.1 documents the `.maf/roles.yaml` workaround and ships no new role | coder |
+| **F7 — the reader-tree guard:** snapshot every role's tree each turn and fail a reader (a role holding no write tool) whose turn left a diff with `unexpected_change` — the mirror of `no_change`. On the `cli` tier a backend keeps its own tools, so a reader role there can write ungoverned wherever the operator's `permissions.allow` lets it; the README's cli-tier paragraph already says so, which is why this is a gap to close and not a false claim. Claude-only extra: a read-only `--tools` list on cli-tier reader turns, flag syntax verified against `claude --help` first. | open — one live run required before any code | coder |
 | Dependabot PRs on docugraph (#12) and cognitive-fabric (#4) | open | coder reviews, maintainer merges |
 | ghcr packages set to Public visibility | a settings change (D-27) | maintainer |
 | The maintainer's local tooling: the dead GitHub MCP token, the misconfigured custom connector, Serena's dashboard auto-opening on spawn | | maintainer |
 
-WP-2.11 gets no lane of its own — its files are D-26 maintainer-reserved and two of them *are* the CI configuration — and its own note already records why the fleet cannot do the lockfile half. Until it lands the README Status row stays *planned*, which is the honest state.
+WP-2.11 gets no lane of its own — its files are D-26 maintainer-reserved and two of them *are* the CI configuration — and its own note already records why the fleet cannot do the lockfile half. Until it lands the README Status row stays *planned*, which is the honest state. F3 does get a lane and is Phase 3's first: WP-3.0b lands before WP-3.1, because a read-only task is one the planner already routes today and it routes it wrong.
 
 ### WP-3.1 LCM built properly — `todo` [core] · D-17 · audit §eval 27
 **Files:** `packages/lcm/src/{LcmEngine.ts,LcmStore.ts,operators/*,GhostCueBuilder.ts,SessionMerger.ts}`, `packages/lcm-adapter/src/*`, `packages/transcript/src/{TranscriptLogger.ts,CompressionAgent.ts}`, `packages/prompt-injector/src/GraphAwareInjector.ts`, first tests for all four packages.
