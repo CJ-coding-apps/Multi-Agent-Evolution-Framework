@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolInput, ToolResult } from '@maf/types';
-import { BaseTool } from '../ToolPlugin.js';
+import { BaseTool, closedInput } from '../ToolPlugin.js';
 import { makeToolId } from '@maf/types';
 
 const execFileAsync = promisify(execFile);
@@ -335,12 +335,15 @@ export class GitStatusTool extends GitTool<Record<string, never>> {
   readonly name = 'git.status';
   readonly description = 'Show the working tree status (staged, unstaged, untracked files).';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({});
 
   /** No path argument: operates on the repository as a whole. */
   declaredPaths(): string[] { return []; }
 
-  async execute(_: Record<string, never>, ctx: ToolContext): Promise<ToolResult> {
+  async execute(input: Record<string, never>, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const r = await this.git(['status', '--porcelain=v2', '--branch'], ctx);
     return { stdout: r.stdout, stderr: r.stderr, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
@@ -356,11 +359,18 @@ export class GitDiffTool extends GitTool<DiffInput> {
   readonly name = 'git.diff';
   readonly description = 'Show diffs of unstaged or staged changes.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    staged: { type: 'boolean', description: 'show staged changes instead of unstaged ones (default false)' },
+    paths:  { type: 'array', description: 'diff only these files, relative to the working directory', items: { type: 'string' } },
+    path:   { type: 'string', description: 'one file to diff; the same as a one-element "paths"' },
+  });
 
   declaredPaths(input: DiffInput): string[] { return diffPaths(input); }
 
   async execute(input: DiffInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const args = ['diff'];
     if (input.staged) args.push('--staged');
     const paths = diffPaths(input);
@@ -379,11 +389,16 @@ export class GitAddTool extends GitTool<AddInput> {
   readonly name = 'git.add';
   readonly description = 'Stage files for commit.';
   readonly permissionLevel = 'write' as const;
+  readonly inputSchema = closedInput({
+    paths: { type: 'array', description: 'the files to stage, relative to the working directory', items: { type: 'string' } },
+  }, ['paths']);
 
   declaredPaths(input: AddInput): string[] { return namedPaths(input); }
 
   async execute(input: AddInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const r = await this.git(['add', '--', ...input.paths], ctx);
     return { ...r, exitCode: r.code, duration: performance.now() - t, metadata: {} };
   }
@@ -421,12 +436,18 @@ export class GitCommitTool extends GitTool<CommitInput> {
   readonly name = 'git.commit';
   readonly description = 'Create a git commit with the staged changes.';
   readonly permissionLevel = 'write' as const;
+  readonly inputSchema = closedInput({
+    message:    { type: 'string', description: 'the commit message' },
+    allowEmpty: { type: 'boolean', description: 'commit even when nothing is staged (default false)' },
+  }, ['message']);
 
   /** Commits whatever is staged. The staged set is not in the input, so it is not declared here. */
   declaredPaths(): string[] { return []; }
 
   async execute(input: CommitInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const args = [...await fallbackIdentity((a) => this.git(a, ctx)), 'commit', '-m', input.message];
     if (input.allowEmpty) args.push('--allow-empty');
     const r = await this.git(args, ctx);
@@ -445,16 +466,23 @@ export class GitLogTool extends GitTool<LogInput> {
   readonly name = 'git.log';
   readonly description = 'Show recent git commits.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    n:       { type: 'number', description: 'how many commits to show, a positive whole number (default 10)' },
+    oneline: { type: 'boolean', description: 'one line per commit (default true)' },
+  });
 
   declaredPaths(): string[] { return []; }
 
   async execute(input: LogInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     // Checked against what arrives, not what the type promises: `-${n}` with n = "-output=/tmp/x"
-    // is `--output=/tmp/x`, which git obeys by writing the log to that file.
+    // is `--output=/tmp/x`, which git obeys by writing the log to that file. A failed result, not a
+    // throw: through the gate a throw here ended the node, where the model could have asked again.
     const n: unknown = input.n === undefined ? 10 : input.n;
     if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 1) {
-      throw new Error(`git.log expects "n" to be a positive whole number of commits, but got ${asWritten(input.n)}.`);
+      return this.err(`git.log expects "n" to be a positive whole number of commits, but got ${asWritten(input.n)}.`, performance.now() - t);
     }
     const args = ['log', `-${n}`];
     if (input.oneline !== false) args.push('--oneline');
@@ -479,17 +507,25 @@ export class GitResetTool extends GitTool<ResetInput> {
   readonly name = 'git.reset';
   readonly description = 'Reset HEAD to a specific commit. Use hard=true to discard working tree changes.';
   readonly permissionLevel = 'dangerous' as const;
+  readonly inputSchema = closedInput({
+    to:   { type: 'string', description: 'the commit to reset to: a hash, HEAD, HEAD~N, HEAD^N, or a branch or tag name' },
+    hard: { type: 'boolean', description: 'also discard working tree changes (default false: a soft reset)' },
+  }, ['to']);
 
   /** `to` is a revision, not a path. */
   declaredPaths(): string[] { return []; }
 
   async execute(input: ResetInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
+    // A failed result for the same reason as git.log's count: the model can name another revision.
     const to: unknown = input.to;
     if (typeof to !== 'string' || !REVISION.test(to)) {
-      throw new Error(
+      return this.err(
         `git.reset expects "to" to be a commit hash, HEAD, HEAD~N, HEAD^N, or a branch or tag name ` +
         `that does not start with "-", but got ${asWritten(input.to)}.`,
+        performance.now() - t,
       );
     }
     // A trailing `--` as well as the pattern: git then reads `to` as a revision by position

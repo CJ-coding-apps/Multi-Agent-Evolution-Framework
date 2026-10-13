@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
-import { BaseTool } from '../ToolPlugin.js';
+import { BaseTool, closedInput } from '../ToolPlugin.js';
 import { makeToolId, resolveInside, PathConfinementError } from '@maf/types';
 
 /**
@@ -96,11 +96,18 @@ export class FsReadTool extends BaseTool<ReadInput> {
   readonly name = 'fs.read';
   readonly description = 'Read a file from disk. Returns its text content.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    path:   { type: 'string', description: 'the file to read, relative to the project root' },
+    offset: { type: 'number', description: 'the first line to return, counting from 0 (default 0)' },
+    limit:  { type: 'number', description: 'how many lines to return (default: to the end of the file)' },
+  }, ['path']);
 
   declaredPaths(input: ReadInput): string[] { return onePath(input); }
 
   async execute(input: ReadInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const abs = await confinedPath(ctx, input.path);
     const content = await fs.readFile(abs, 'utf8');
     const lines = content.split('\n');
@@ -118,6 +125,11 @@ export class FsWriteTool extends BaseTool<WriteInput> {
   readonly name = 'fs.write';
   readonly description = 'Write text content to a file, overwriting if it exists.';
   readonly permissionLevel = 'write' as const;
+  readonly inputSchema = closedInput({
+    path:       { type: 'string', description: 'the file to write, relative to the project root' },
+    content:    { type: 'string', description: 'the whole new text of the file' },
+    createDirs: { type: 'boolean', description: 'create missing parent directories first (default false)' },
+  }, ['path', 'content']);
 
   declaredPaths(input: WriteInput): string[] {
     const paths = onePath(input);
@@ -127,6 +139,8 @@ export class FsWriteTool extends BaseTool<WriteInput> {
 
   async execute(input: WriteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const abs = await writablePath(ctx, this.name, input.path);
     if (input.createDirs) await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, input.content, 'utf8');
@@ -143,6 +157,10 @@ export class FsDeleteTool extends BaseTool<DeleteInput> {
   readonly name = 'fs.delete';
   readonly description = 'Delete a file or directory.';
   readonly permissionLevel = 'dangerous' as const;
+  readonly inputSchema = closedInput({
+    path:      { type: 'string', description: 'the file or directory to delete, relative to the project root' },
+    recursive: { type: 'boolean', description: 'delete a directory and everything in it (default false)' },
+  }, ['path']);
 
   declaredPaths(input: DeleteInput): string[] {
     const paths = onePath(input);
@@ -152,6 +170,8 @@ export class FsDeleteTool extends BaseTool<DeleteInput> {
 
   async execute(input: DeleteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const abs = await writablePath(ctx, this.name, input.path);
     await fs.rm(abs, { recursive: input.recursive ?? false });
     return this.ok(`Deleted ${input.path}`, performance.now() - t);
@@ -167,11 +187,16 @@ export class FsStatTool extends BaseTool<StatInput> {
   readonly name = 'fs.stat';
   readonly description = 'Stat a file or directory — returns size, type, mtime.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    path: { type: 'string', description: 'the file or directory, relative to the project root' },
+  }, ['path']);
 
   declaredPaths(input: StatInput): string[] { return onePath(input); }
 
   async execute(input: StatInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const abs = await confinedPath(ctx, input.path);
     const st = await fs.stat(abs);
     return this.ok(JSON.stringify({
@@ -190,11 +215,17 @@ export class FsListTool extends BaseTool<ListInput> {
   readonly name = 'fs.list';
   readonly description = 'List files in a directory.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    path:      { type: 'string', description: 'the directory, relative to the project root ("." for the root itself)' },
+    recursive: { type: 'boolean', description: 'list everything below it, not only its own entries (default false)' },
+  }, ['path']);
 
   declaredPaths(input: ListInput): string[] { return onePath(input); }
 
   async execute(input: ListInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const abs = await confinedPath(ctx, input.path);
     const entries = await fs.readdir(abs, { withFileTypes: true, recursive: input.recursive });
     const names = entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));

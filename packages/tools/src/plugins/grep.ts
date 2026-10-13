@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
-import { BaseTool } from '../ToolPlugin.js';
+import { BaseTool, closedInput } from '../ToolPlugin.js';
 import { makeToolId } from '@maf/types';
 
 interface GrepInput {
@@ -40,6 +40,14 @@ export class GrepTool extends BaseTool<GrepInput> {
   readonly name = 'grep';
   readonly description = 'Search for a pattern in files using ripgrep. Returns matching lines with file paths and line numbers.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    pattern:    { type: 'string', description: 'the regular expression to search for' },
+    path:       { type: 'string', description: 'the file or directory to search, relative to the working directory (default: all of it)' },
+    glob:       { type: 'string', description: 'search only files matching this glob, e.g. "*.ts"' },
+    ignoreCase: { type: 'boolean', description: 'match regardless of case (default false)' },
+    maxResults: { type: 'number', description: 'at most this many matching lines per file' },
+    context:    { type: 'number', description: 'lines of context to show around each match' },
+  }, ['pattern']);
 
   constructor(private readonly spawn: GrepSpawn = spawnSearch) { super(); }
 
@@ -54,6 +62,8 @@ export class GrepTool extends BaseTool<GrepInput> {
 
   async execute(input: GrepInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const searchPath = input.path ? path.resolve(ctx.cwd, input.path) : ctx.cwd;
 
     // Every model-supplied value is either bound to its flag (`--glob=…`) or placed after `-e` and
