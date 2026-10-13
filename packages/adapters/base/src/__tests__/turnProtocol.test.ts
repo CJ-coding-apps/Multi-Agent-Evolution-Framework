@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { ToolPlugin, ToolId, ToolContext, ToolResult } from '@maf/types';
+import type { ToolPlugin, ToolId, ToolContext, ToolResult, ToolInputSchema } from '@maf/types';
 import { serializeTools, parseTurn, buildTurnSystemPrompt, serializeHistory } from '../index.js';
 
 function fakeTool(id: string, name: string, description: string): ToolPlugin {
@@ -90,4 +90,53 @@ test('serializeHistory emits [user]/[assistant]/[tool] blocks', () => {
   assert.match(text, /\[assistant\]/);
   assert.match(text, /\[tool\]/);
   assert.match(text, /tool_result/);
+});
+
+// ── WP-2.18: the catalog carries each tool's input ───────────────────────────────────────────
+// The maintainer's live proof of 0.3.0: told only `patch.apply [write]: Apply a unified diff…`, the
+// model sent `{path, patch}`; the field is `diff`. Each entry now states the input, field by field.
+
+function schemaTool(id: string, description: string, inputSchema?: ToolInputSchema): ToolPlugin {
+  return { ...fakeTool(id, id, description), permissionLevel: 'write', ...(inputSchema ? { inputSchema } : {}) };
+}
+
+const PATCH_INPUT: ToolInputSchema = {
+  type: 'object',
+  properties: {
+    diff:   { type: 'string', description: 'the unified diff to apply, with ---/+++ file headers' },
+    dryRun: { type: 'boolean', description: 'check that it applies without changing anything' },
+  },
+  required: ['diff'],
+  additionalProperties: false,
+};
+
+test('serializeTools renders each tool with its input on its own line, then what each field means', () => {
+  const rendered = serializeTools([schemaTool('patch.apply', 'Apply a unified diff patch to the working tree.', PATCH_INPUT)]);
+  const lines = rendered.split('\n');
+  assert.equal(
+    lines[1],
+    '- patch.apply [write]: Apply a unified diff patch to the working tree. — input: {"diff": string (required), "dryRun": boolean}',
+  );
+  assert.equal(lines[2], '    "diff": the unified diff to apply, with ---/+++ file headers');
+  assert.equal(lines[3], '    "dryRun": check that it applies without changing anything');
+  assert.equal(lines.length, 4);
+});
+
+test('a tool with an empty input says so; a tool with no schema is listed as before, without one', () => {
+  const rendered = serializeTools([
+    schemaTool('git.status', 'Show the working tree status.', { type: 'object', properties: {}, required: [], additionalProperties: false }),
+    schemaTool('third.party', 'Declares no input.'),
+  ]);
+  assert.deepEqual(rendered.split('\n').slice(1), [
+    '- git.status [write]: Show the working tree status. — input: {}',
+    '- third.party [write]: Declares no input.',
+  ]);
+});
+
+test('the protocol says the input must use exactly the catalog\'s field names, and that a call that does not is not run', () => {
+  const out = buildTurnSystemPrompt('BASE', [schemaTool('patch.apply', 'Apply a diff.', PATCH_INPUT)]);
+  assert.match(out, /"input" must be an object with exactly the fields its AVAILABLE TOOLS entry lists/);
+  assert.match(out, /every field marked \(required\)/);
+  assert.match(out, /answered with an error and not run/);
+  assert.match(out, /"diff": string \(required\)/);
 });

@@ -2,7 +2,7 @@ import type {
   ToolPlugin, ToolInput, ToolResult, ToolContext,
   PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalAsk, ApprovalGateHandle, ApprovalOutcome,
 } from '@maf/types';
-import { PathConfinementError } from '@maf/types';
+import { PathConfinementError, toolInputProblem } from '@maf/types';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
 
@@ -21,7 +21,9 @@ export interface GatedExecDeps {
  * InProcessAgentLoop: no behavior duplication between them (README.md,
  * "In-process execution & the tool-call protocol").
  *
- * Order is load-bearing: policy FIRST — anything but Allow (or an Escalate the
+ * Order is load-bearing: the input FIRST — a call whose input does not match the tool's
+ * `inputSchema` is answered with a failed result (attested, returned, not thrown) and nothing
+ * else happens — then policy — anything but Allow (or an Escalate the
  * approval gate approves) is attested as a refusal and then thrown as
  * PolicyViolationError, and nothing executes — then tool.execute, then
  * attestation. A tool's built-in confinement (`PathConfinementError`, from
@@ -48,6 +50,16 @@ export async function executeToolGated(
   // its own input inside `execute` decided its own paths after the gate had closed — writing
   // to a frozen input now throws instead, and throws loudly.
   deepFreeze(input);
+
+  // The input before anything reads it. A field the tool does not take, or one it needs and was not
+  // given, is a call the model can correct, not one to judge: `{path, patch}` for patch.apply declared
+  // no paths (so policy allowed it) and then threw a TypeError from `writeFile(tmp, undefined)`, which
+  // ended the node. Answered, not thrown, so the loop hands it back and goes on; a tool with no schema
+  // is not checked.
+  if (tool.inputSchema !== undefined) {
+    const problem = toolInputProblem(String(tool.id), tool.inputSchema, input);
+    if (problem !== undefined) return answerMalformed(redactSecrets(problem), tool, input, ctx, deps);
+  }
 
   // The tool's own declaration, computed before any rule is consulted. An error here (a tool
   // that does not declare, a declaration that throws) propagates: failing to evaluate policy
@@ -113,6 +125,43 @@ export async function executeToolGated(
 
 /** The rule id a built-in confinement refusal is recorded under: it is no policy file's rule. */
 const BUILTIN_GIT_DIR_RULE = 'builtin:git-dir';
+
+/** The rule id a call whose input does not match the tool's schema is recorded under. */
+const BUILTIN_INPUT_SCHEMA_RULE = 'builtin:input-schema';
+
+/**
+ * Records a call whose input the tool does not take, and returns the failed result the model is
+ * handed: `problem` as stderr, exit code 1. Recorded as `Indeterminate` — the policy was not asked,
+ * because a call it cannot read is no call it could judge, and `Allow` would say it had been — with
+ * `metadata.refused`, as every call that did not run is marked.
+ */
+async function answerMalformed(
+  problem: string,
+  tool: ToolPlugin,
+  input: ToolInput,
+  ctx: ToolContext,
+  deps: GatedExecDeps,
+): Promise<ToolResult> {
+  const result: ToolResult = {
+    stdout:   '',
+    stderr:   problem,
+    exitCode: 1,
+    duration: 0,
+    metadata: { refused: true, ruleId: BUILTIN_INPUT_SCHEMA_RULE },
+  };
+  await deps.attestor.record({
+    toolId:         tool.id,
+    agentId:        ctx.agentId,
+    runId:          ctx.runId,
+    taskId:         ctx.taskId,
+    input:          redactCredentialsRecord(input),
+    result,
+    invokedAt:      new Date(),
+    durationMs:     0,
+    policyDecision: { verdict: 'Indeterminate', reason: problem, ruleId: BUILTIN_INPUT_SCHEMA_RULE },
+  });
+  return result;
+}
 
 /** A tool's own confinement refusal, as the `Deny` it is recorded and reported as. */
 function confinementDeny(err: PathConfinementError): Refusal {
