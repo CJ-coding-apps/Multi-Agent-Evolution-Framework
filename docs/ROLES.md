@@ -106,7 +106,8 @@ RoleDispatcher.runNode(node):
      in-process tier: InProcessAgentLoop.run() — every tool call through executeToolGated, where an
                       Escalate verdict goes to the approval gate;
                       for a writer, the security-gate processor runs the step-7 review at task_end;
-                      a tool or backend turn that throws still fires task_end, once
+                      a tool that throws while running is answered as a failed call;
+                      a backend turn that throws still fires task_end, once
      if either throws (a timed-out turn, a backend that never started) and the role is a writer:
                       run the step-7 review now if it has not run, then rethrow — a GateRefused
                       or ReviewRefused outranks the error
@@ -147,7 +148,7 @@ A role is a writer when it holds any of `fs.write`, `fs.delete`, `patch.apply`, 
 
 - runs it on the `in-process` tier unless its `execution` is `'cli'` ([D-01](DECISIONS.md)): policy verdicts, secret redaction, attested tool calls and processor hooks exist only there. A writer that would land on the `cli` tier — by its own `execution: 'cli'`, or because the adapter cannot run the in-process loop (`codex`, `gemini`, `ollama` and `openrouter` cannot; only `claude` can) — refuses to start, before it captures anything or calls a model, with an error naming `--allow-ungoverned`. With that flag it runs on the `cli` tier, the run prints an `UNGOVERNED` banner on stderr once, and the transcript notes each such node. There a CLI backend (`claude`, `codex`, `gemini`) edits the tree with its own tools under its own permission settings, while an HTTP backend (`ollama`, `openrouter`) has no file tools and cannot change the tree at all, so a role with `expectsChange` cannot succeed on it (`no_change`). `effectiveTier(role, adapter)` says which tier a role gets;
 - captures the start commit before the node runs, so the target directory must be a git repository;
-- security-reviews the diff once per attempt: on the `cli` tier after the backend returns, whatever it returned; on the `in-process` tier at `task_end` through the `security-gate` processor, or right after the loop when a harness's own bundle leaves that processor out; and, on either tier, before an error thrown by the backend or the loop propagates ([D-31](DECISIONS.md)). A tool or a backend turn that throws inside the loop still fires `task_end`, so every processor sees the task end. A non-empty diff is a subject of the run's attestation;
+- security-reviews the diff once per attempt: on the `cli` tier after the backend returns, whatever it returned; on the `in-process` tier at `task_end` through the `security-gate` processor, or right after the loop when a harness's own bundle leaves that processor out; and, on either tier, before an error thrown by the backend or the loop propagates ([D-31](DECISIONS.md)). A backend turn that throws inside the loop still fires `task_end`, so every processor sees the task end; a tool that throws while running does not end the loop at all — `executeToolGated` answers it to the model as a failed call. A non-empty diff is a subject of the run's attestation;
 - puts a diff the security gate passed to the human review gate, when the run has one or the harness requires review ([D-34](DECISIONS.md); see [SECURITY.md](SECURITY.md#the-human-review-gate));
 - fails the node on the `cli` tier if the backend returns empty output, or — for a role with `expectsChange` — if it answers and leaves the tree unchanged against the start commit (`no_change`, [D-32](DECISIONS.md)).
 
