@@ -1,13 +1,14 @@
 import { execFile } from 'node:child_process';
+import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord,
-  TurnAdapter, TurnMessage, AssistantTurn,
+  TurnAdapter, TurnMessage, AssistantTurn, ModelSurface, ToolPlugin,
 } from '@maf/types';
 import { BaseAdapter } from '@maf/adapter-base';
 import {
   spawnAndCollect, spawnStreaming, turnStdout,
-  buildTurnSystemPrompt, serializeHistory, parseTurn,
+  buildTurnSystemPrompt, serializeHistory, parseTurn, serializeTools,
 } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
@@ -81,17 +82,22 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     // (by id — the loop resolves calls by tool id). Without the catalog the model
     // is blind to which tools exist.
     const systemPrompt = buildTurnSystemPrompt(opts.systemPrompt, opts.tools);
-    const result = await this.spawn('claude', this.buildArgs({
+    const args = this.buildArgs({
       ...opts,
       prompt: serializeHistory(history),
       systemPrompt,
-    }, CLAUDE_TURN_ISOLATION_ARGS), {
+    }, CLAUDE_TURN_ISOLATION_ARGS);
+    const result = await this.spawn('claude', args, {
       cwd: opts.workingDir,
       timeoutMs: opts.timeoutMs,
       env: { ...process.env },
       ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
     });
-    return parseTurn(turnStdout(this.name, result));
+    const turn = parseTurn(turnStdout(this.name, result));
+    // The surface is recorded where it is assembled (F4): the sha is of the exact bytes the system
+    // block held, and the argv is the one this turn spawned with — so a reader can settle what the
+    // model was shown without re-deriving either.
+    return { ...turn, modelSurface: modelSurfaceOf(systemPrompt, opts.tools, args) };
   }
 
 
@@ -153,4 +159,36 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
 /** A cli-tier call keeps claude's own tools unless its caller needs only text (`nativeTools: false`). */
 function cliTierIsolation(options: AdapterInvokeOptions): readonly string[] {
   return options.nativeTools === false ? CLAUDE_TURN_ISOLATION_ARGS : CLAUDE_MCP_ISOLATION_ARGS;
+}
+
+/** The governed turn's model-facing surface: the system block's digest, the catalogue, the argv. */
+function modelSurfaceOf(systemPrompt: string, tools: ToolPlugin[] | undefined, argv: readonly string[]): ModelSurface {
+  return {
+    systemPromptSha256: sha256Hex(systemPrompt),
+    toolCatalog:        serializeTools(tools),
+    argv:               elidePayloads(argv),
+  };
+}
+
+/**
+ * The argv with its two payload positionals elided: the `--system-prompt` value and the trailing
+ * prompt after `--`. Everything else — the flag names, `--tools`' empty string, the strict-MCP JSON
+ * — is kept verbatim, because that is what the record is for: F4's open question was whether a flag
+ * reached the binary, and a digest of the payload answers "what text" as well as the text would.
+ * Matched by the token the value follows, over the argv this adapter just built.
+ */
+function elidePayloads(argv: readonly string[]): string[] {
+  return argv.map((arg, i) => {
+    if (argv[i - 1] === '--system-prompt') return elided('--system-prompt', arg);
+    if (argv[i - 1] === '--' && i === argv.length - 1) return elided('prompt', arg);
+    return arg;
+  });
+}
+
+function elided(name: string, value: string): string {
+  return `<${name}: ${Buffer.byteLength(value, 'utf8')} bytes, sha256 ${sha256Hex(value)}>`;
+}
+
+function sha256Hex(text: string): string {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }

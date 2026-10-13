@@ -3,9 +3,16 @@ import crypto from 'node:crypto';
 import type {
   PolicyEngineHandle, PolicyRule, PolicyDecision, PolicyAction,
   ToolId, ToolInput, ToolContext, ApprovalRequest, GraphQueryRunner,
+  PolicyInForce, PolicyRuleSummary, PolicyVerdictCounts,
 } from '@maf/types';
 import { resolveInside, PathEscapeError, VerdictError } from '@maf/types';
 import { bindPolicyTemplate } from './policyTemplate.js';
+
+/** Where a rule set came from, and the digest of those bytes when there were bytes to digest. */
+export interface PolicySource {
+  path:    string;
+  sha256?: string;
+}
 
 /**
  * Every declared path, resolved against `root` and proven to lie inside it.
@@ -46,15 +53,54 @@ export class PolicyViolationError extends VerdictError {
 
 export class PolicyEngine implements PolicyEngineHandle {
   private rules: PolicyRule[] = [];
+  private source: PolicySource | undefined;
+  private readonly counts: PolicyVerdictCounts = { allow: 0, deny: 0, escalate: 0, indeterminate: 0 };
 
   constructor(private readonly graph: GraphQueryRunner) {}
 
   // Rules from a file arrive through `PolicyLoader`, which validates them; this takes them as given.
-  loadRules(rules: PolicyRule[]): void {
+  loadRules(rules: PolicyRule[], source?: PolicySource): void {
     this.rules = [...rules].sort((a, b) => b.priority - a.priority);
+    this.source = source;
+  }
+
+  /**
+   * The rules that governed this engine and how its calls fell so far (F6). Read after the run, when
+   * the counts are final. `source.sha256` is absent exactly when no file was read, so a reader can
+   * tell "no policy file" from "a file with no rules" — the two runs F6 says are indistinguishable
+   * from the `toolCalls` and `securityFindings` alone.
+   */
+  inForce(): PolicyInForce {
+    return {
+      ...(this.source ? { source: this.source.path } : {}),
+      ...(this.source?.sha256 !== undefined ? { sha256: this.source.sha256 } : {}),
+      ruleCount: this.rules.length,
+      rules: this.rules.map(summarizeRule),
+      counts: { ...this.counts },
+    };
   }
 
   async evaluate(
+    toolId: ToolId,
+    input: ToolInput,
+    ctx: ToolContext,
+    declaredPaths: readonly string[],
+  ): Promise<PolicyDecision> {
+    return this.tally(await this.decide(toolId, input, ctx, declaredPaths));
+  }
+
+  /** Every call this engine decides is counted once, whatever the verdict — refusals included. */
+  private tally(decision: PolicyDecision): PolicyDecision {
+    switch (decision.verdict) {
+      case 'Allow':         this.counts.allow++;         break;
+      case 'Deny':          this.counts.deny++;          break;
+      case 'Escalate':      this.counts.escalate++;      break;
+      case 'Indeterminate': this.counts.indeterminate++; break;
+    }
+    return decision;
+  }
+
+  private async decide(
     toolId: ToolId,
     input: ToolInput,
     ctx: ToolContext,
@@ -220,4 +266,21 @@ export class PolicyEngine implements PolicyEngineHandle {
 // `secrets/.hidden` and a Deny rule had a hole exactly where configuration and credentials live.
 function matchesGlob(relativePath: string, glob: string): boolean {
   return minimatch(relativePath, glob, { dot: true });
+}
+
+/** A rule's predicate in one line, for the bundle's policy record (F6): what it matches, not prose. */
+function summarizeRule(rule: PolicyRule): PolicyRuleSummary {
+  const p = rule.predicate;
+  const bits: string[] = [];
+  if (p.toolId !== undefined)            bits.push(`toolId=${oneOrList(p.toolId)}`);
+  if (p.pathGlob !== undefined)         bits.push(`pathGlob=${p.pathGlob}`);
+  if (p.allowedPathGlobs !== undefined) bits.push(`allowedPathGlobs=[${p.allowedPathGlobs.join(', ')}]`);
+  if (p.agentRole !== undefined)        bits.push(`agentRole=${oneOrList(p.agentRole)}`);
+  if (p.memoryPattern !== undefined)    bits.push(`memoryPattern=${JSON.stringify(p.memoryPattern.cypher)}`);
+  if (p.minFailureCount !== undefined)  bits.push(`minFailureCount=${p.minFailureCount}`);
+  return { id: rule.id, effect: rule.action.kind, matcher: bits.length > 0 ? bits.join(' ') : '(matches every call)' };
+}
+
+function oneOrList(value: string | string[]): string {
+  return Array.isArray(value) ? `[${value.join(', ')}]` : value;
 }

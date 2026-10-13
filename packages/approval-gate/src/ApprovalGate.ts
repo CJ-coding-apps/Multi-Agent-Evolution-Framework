@@ -48,10 +48,25 @@ export interface ApprovalProvider {
   ask(pending: PendingApproval, signal: AbortSignal, asking: () => void): Promise<ProviderAnswer>;
 }
 
+/**
+ * How the gate arms its timeout: `arm(handler, ms)` runs `handler` after `ms` and returns the
+ * canceller that stops it. Injected so a test can hold the clock still and fire it on demand,
+ * rather than race a wall-clock timer that a loaded machine can lose — which is how the "pending
+ * while it waits" assertion became flaky under a 25 ms budget.
+ */
+export type ApprovalClock = (arm: () => void, ms: number) => () => void;
+
+const SYSTEM_CLOCK: ApprovalClock = (arm, ms) => {
+  const timer = setTimeout(arm, ms);
+  return () => clearTimeout(timer);
+};
+
 export interface ApprovalGateConfig {
   provider:   ApprovalProvider;
   recorder:   ApprovalSink;
   timeoutMs?: number;
+  /** Defaults to the real clock; tests pass a controllable one. */
+  clock?:     ApprovalClock;
 }
 
 interface Settlement {
@@ -73,6 +88,7 @@ export class ApprovalGate implements ApprovalGateHandle {
   private readonly seen = new Set<string>();
   private readonly recorder: AttestationRecorder;
   private readonly timeoutMs: number;
+  private readonly clock: ApprovalClock;
 
   constructor(private readonly config: ApprovalGateConfig) {
     const timeoutMs = config.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
@@ -82,6 +98,7 @@ export class ApprovalGate implements ApprovalGateHandle {
       );
     }
     this.timeoutMs = timeoutMs;
+    this.clock = config.clock ?? SYSTEM_CLOCK;
     this.recorder = new AttestationRecorder(config.recorder);
   }
 
@@ -131,13 +148,13 @@ export class ApprovalGate implements ApprovalGateHandle {
 
   private async waitForAnswer(pending: PendingApproval): Promise<ProviderAnswer | typeof TIMED_OUT | Error> {
     const controller = new AbortController();
-    let timer: NodeJS.Timeout | undefined;
+    let cancel: (() => void) | undefined;
     let done = false;
     let startClock = (): void => undefined;
     const timedOut = new Promise<typeof TIMED_OUT>((resolve) => {
       // Once, and never after the wait is over: a timer set then would hold the process open.
       startClock = (): void => {
-        if (!done) timer ??= setTimeout(() => resolve(TIMED_OUT), this.timeoutMs);
+        if (!done) cancel ??= this.clock(() => resolve(TIMED_OUT), this.timeoutMs);
       };
     });
     if (this.config.provider.queues !== true) startClock();
@@ -149,7 +166,7 @@ export class ApprovalGate implements ApprovalGateHandle {
       return err instanceof Error ? err : new Error(String(err));
     } finally {
       done = true;
-      clearTimeout(timer);
+      cancel?.();
       // Tells the provider to stop listening; a late answer then has nowhere to land.
       controller.abort();
     }

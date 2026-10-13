@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -333,4 +334,27 @@ test('validate() reports missing id, action.kind, and predicate', () => {
 
 test('validate() refuses something that is not a list of rules', () => {
   assert.deepEqual(PolicyLoader.validate({ rules: [] }), ['Expected a list of rules; found a mapping.']);
+});
+
+// ORACLE (F6 of the 0.3.1 sweep). `loadWithSource` returns the sha256 of the bytes it read, so a
+// bundle can name the policy by digest. The digest is absent exactly when no file was read — which
+// is what lets a reader tell "no policy file" from "a file whose rules never matched".
+
+test('loadWithSource returns the sha256 of the bytes it read, and the parsed rules', async () => {
+  const text = 'rules:\n  - id: protect-secrets\n    priority: 100\n    predicate: { pathGlob: ".env" }\n    action: { kind: Deny, reason: "no secrets" }\n';
+  await withTempFile(text, async (file) => {
+    const { rules, sha256 } = await PolicyLoader.loadWithSource(file);
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0]?.id, 'protect-secrets');
+    assert.equal(sha256, createHash('sha256').update(text, 'utf8').digest('hex'), 'the digest is of the file bytes');
+  });
+});
+
+test('loadWithSource omits the sha256 when no policy file was read, so an absent file is not an empty one', async () => {
+  const warnings = await capturingWarnings(async () => {
+    const { rules, sha256 } = await PolicyLoader.loadWithSource('/tmp/maf-does-not-exist-policy.yaml');
+    assert.deepEqual(rules, [], 'running with no policy is a posture MAF supports');
+    assert.equal(sha256, undefined, 'there were no bytes to digest');
+  });
+  assert.equal(warnings.length, 1, 'and the absence is said once');
 });

@@ -5,7 +5,7 @@ import type {
   AttestorHandle, ToolCallRecord, AttestationBundle, SlsaProvenance,
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
-  RunOutcome, KeySource,
+  RunOutcome, KeySource, ModelSurfaceRecord, PolicyInForce,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { jcs } from './jcs.js';
@@ -252,6 +252,8 @@ export class Attestor implements AttestorHandle {
   private approvals: ReviewAttestation[] = [];
   private diffHashes: Record<string, string> = {};
   private securityFindings: SecurityFindingsRecord[] = [];
+  private modelSurfaces: ModelSurfaceRecord[] = [];
+  private policyInForce: PolicyInForce | undefined;
   private readonly signingSecret: string;
   private readonly keySource: KeySource;
 
@@ -321,6 +323,19 @@ export class Attestor implements AttestorHandle {
   }
 
   /**
+   * One governed turn's model-facing surface (F4). Append-only, in call order: every turn is kept,
+   * because the transcript it mirrors has no way back from a lost turn.
+   */
+  recordModelSurface(record: ModelSurfaceRecord): void {
+    this.modelSurfaces.push(record);
+  }
+
+  /** The policy in force for the run (F6), recorded once, after the last call it counted. */
+  recordPolicyInForce(policy: PolicyInForce): void {
+    this.policyInForce = policy;
+  }
+
+  /**
    * Signs the run and writes it to `<attestationsDir>/<runId>.bundle.json`: an in-toto Statement
    * (subjects: the recorded diffs; predicate: the run) with its signature beside it.
    */
@@ -352,6 +367,10 @@ export class Attestor implements AttestorHandle {
       diffHashes:       this.diffHashes,
       securityFindings: this.securityFindings,
       outcome,
+      // Both optional and both omitted when unrecorded, so a bundle without them parses and, more to
+      // the point, a reader can tell "not recorded" from "recorded as empty" (F4, F6).
+      ...(this.policyInForce ? { policyInForce: this.policyInForce } : {}),
+      ...(this.modelSurfaces.length > 0 ? { modelSurfaces: this.modelSurfaces } : {}),
       ...(goldens ? { goldens } : {}),
       bundledAt:        new Date(),
     };

@@ -6,7 +6,7 @@ import {
 import type {
   TurnAdapter, TurnMessage, AssistantTurn, AdapterInvokeOptions, AdapterInvokeResult,
   AdapterCapabilities, ToolPlugin, ToolId, ToolContext, ToolResult, ToolCallRecord,
-  PolicyDecision, PolicyEngineHandle, AttestorHandle,
+  PolicyDecision, PolicyEngineHandle, AttestorHandle, ModelSurfaceRecord,
 } from '@maf/types';
 import {
   ProcessorPipeline, StaticProcessorRegistry, Processor, ContractViolation,
@@ -40,7 +40,9 @@ const ALLOW: PolicyEngineHandle = { async evaluate(): Promise<PolicyDecision> { 
 
 class SpyAttestor implements AttestorHandle {
   records: Array<Omit<ToolCallRecord, 'id'>> = [];
+  surfaces: ModelSurfaceRecord[] = [];
   async record(call: Omit<ToolCallRecord, 'id'>): Promise<void> { this.records.push(call); }
+  recordModelSurface(record: ModelSurfaceRecord): void { this.surfaces.push(record); }
 }
 
 function echoTool(id: string, out: string): ToolPlugin {
@@ -167,4 +169,56 @@ test('L3: a processor split at a serving-loop hook fails loudly (no silent drop)
     { ...baseDeps(new ScriptedAdapter(turns), new SpyAttestor()), pipeline },
   );
   await assert.rejects(() => loop.run(), ContractViolation);
+});
+
+// ORACLE (F4 of the 0.3.1 sweep). What the model was shown each governed turn — the system-prompt
+// digest, the tool catalogue as sent, the argv — must reach the bundle and the transcript. It is
+// recorded before the `after_model` hook, because the evidence is about what the model *was shown*,
+// which no processor that edits the turn can change after the fact, and it is recorded even when a
+// processor then intercepts the turn: a turn that ran is a turn that belongs on the record.
+
+const SURFACE = {
+  systemPromptSha256: 'f'.repeat(64),
+  toolCatalog: 'AVAILABLE TOOLS (use the id as "toolName"):\n- echo [read]: echo echo',
+  argv: ['--print', '--system-prompt', '<--system-prompt: 12 bytes, sha256 ' + 'a'.repeat(64) + '>', '--tools', '', '-p', '--', '<prompt: 4 bytes, sha256 ' + 'b'.repeat(64) + '>'],
+};
+
+test('F4: each turn\'s model surface reaches the attestor and the transcript, numbered from 1', async () => {
+  const attestor = new SpyAttestor();
+  const appended: Array<{ role: string; content: string; metadata?: Record<string, unknown> }> = [];
+  const turns: AssistantTurn[] = [
+    { text: 'step', toolCalls: [{ toolUseId: 'u', toolName: 'echo', input: {} }], modelSurface: SURFACE },
+    { text: 'final', toolCalls: [], modelSurface: { ...SURFACE, argv: [...SURFACE.argv] } },
+  ];
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [echoTool('echo', 'ok')], maxTurns: 5, timeoutMs: 10_000 },
+    {
+      ...baseDeps(new ScriptedAdapter(turns), attestor),
+      transcript: { async append(role, content, metadata) { appended.push({ role, content, ...(metadata ? { metadata } : {}) }); } },
+    },
+  );
+  await loop.run();
+
+  assert.deepEqual(attestor.surfaces, [
+    { role: 'analyst', taskId: makeTaskId('t1'), turn: 1, ...SURFACE },
+    { role: 'analyst', taskId: makeTaskId('t1'), turn: 2, ...SURFACE },
+  ], 'every turn, in order, with the role, task and 1-based turn number');
+  assert.equal(appended.length, 2, 'and each is mirrored into the transcript');
+  assert.equal(appended[0]?.role, 'system');
+  assert.deepEqual(appended[0]?.metadata, {
+    agentRole: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    systemPromptSha256: SURFACE.systemPromptSha256, toolCatalog: SURFACE.toolCatalog, argv: SURFACE.argv,
+  });
+  assert.match(appended[0]?.content ?? '', /\[surface\] turn 1/, 'the transcript line says what it is');
+});
+
+test('F4: a turn the adapter reports no surface for records nothing — the record never invents one', async () => {
+  const attestor = new SpyAttestor();
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    baseDeps(new ScriptedAdapter([{ text: 'final', toolCalls: [] }]), attestor),
+  );
+  await loop.run();
+
+  assert.deepEqual(attestor.surfaces, [], 'a cli-tier-shaped turn has no model-facing surface to record');
 });

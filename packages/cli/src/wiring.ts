@@ -37,6 +37,12 @@ export interface RunStack {
   lcm: LcmEngine;
   securityPrompt: string;
   rolesFor(harness: HarnessConfig): RoleRegistry;
+  /**
+   * Reads the loaded policy's in-force record into the attestor (F6). Call it after the last tool
+   * call and before `bundle`, so the counts are final. Kept on the stack because the policy is
+   * built here, and a caller that reaches into two fields to pair them can pair them wrongly.
+   */
+  recordPolicyInForce(): void;
   dispatchTask(harness: HarnessConfig, role: string, prompt: string, workDir: string, timeoutMs: number, temperature?: number): Promise<string>;
   close(): void;
 }
@@ -79,6 +85,7 @@ export async function buildRunStack(cfg: {
     lcm,
     securityPrompt: SECURITY_REVIEW_FALLBACK_PROMPT,
     rolesFor: (harness) => RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), cfg.mafDir, baseTools),
+    recordPolicyInForce: () => attestor.recordPolicyInForce(policy.inForce()),
     async dispatchTask(harness, role, prompt, workDir, timeoutMs, temperature) {
       const taskId = makeTaskId(crypto.randomUUID());
       const roles = stack.rolesFor(harness);

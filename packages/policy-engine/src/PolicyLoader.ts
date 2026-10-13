@@ -1,4 +1,5 @@
 import { lstat, readFile } from 'node:fs/promises';
+import crypto from 'node:crypto';
 import { LineCounter, isAlias, isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, visit } from 'yaml';
 import type { GraphQueryRunner, PolicyAction, PolicyPredicate, PolicyRule } from '@maf/types';
 import { makeToolId } from '@maf/types';
@@ -22,6 +23,14 @@ export class PolicyLoader {
    * because a policy that exists and is ignored is exactly the fail-open this loader closes.
    */
   static async load(policyPath: string): Promise<PolicyRule[]> {
+    return (await PolicyLoader.loadWithSource(policyPath)).rules;
+  }
+
+  /**
+   * `load`, with the sha256 of the bytes it read (F6). The digest is absent exactly when no file was
+   * read, so a caller recording the policy in force can tell a missing file from an empty one.
+   */
+  static async loadWithSource(policyPath: string): Promise<{ rules: PolicyRule[]; sha256?: string }> {
     let text: string;
     try {
       text = await readFile(policyPath, 'utf8');
@@ -34,20 +43,21 @@ export class PolicyLoader {
           `[maf] policy: no policy file at ${JSON.stringify(policyPath)}; ` +
           'running with no policy rules (path confinement still applies).',
         );
-        return [];
+        return { rules: [] };
       }
       throw new Error(
         `Policy file ${JSON.stringify(policyPath)} exists but could not be read, and a policy ` +
         `that exists is never skipped: ${messageOf(err)}`,
       );
     }
-    return parsePolicy(text, policyPath);
+    return { rules: parsePolicy(text, policyPath), sha256: crypto.createHash('sha256').update(text, 'utf8').digest('hex') };
   }
 
   /** A `PolicyEngine` holding the rules `load` returns, so a call site cannot load one without the other. */
   static async loadEngine(policyPath: string, graph: GraphQueryRunner): Promise<PolicyEngine> {
     const engine = new PolicyEngine(graph);
-    engine.loadRules(await PolicyLoader.load(policyPath));
+    const { rules, sha256 } = await PolicyLoader.loadWithSource(policyPath);
+    engine.loadRules(rules, sha256 === undefined ? { path: policyPath } : { path: policyPath, sha256 });
     return engine;
   }
 

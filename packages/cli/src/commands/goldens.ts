@@ -172,6 +172,8 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
           return (['none', 'low', 'medium', 'high', 'critical'] as const)[worstRank] ?? 'critical';
         },
       }).run();
+      // F6 — the policy the suite ran under, recorded before the bundle so its counts are final.
+      stack.recordPolicyInForce();
       await stack.attestor.bundle(
         { id: componentId(`@maf/adapter-${o.agent.name}`), modelVersion: o.model ?? 'default' },
         {
