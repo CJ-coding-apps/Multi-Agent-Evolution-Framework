@@ -358,3 +358,27 @@ test('loadWithSource omits the sha256 when no policy file was read, so an absent
   });
   assert.equal(warnings.length, 1, 'and the absence is said once');
 });
+
+// ORACLE (F6). The bundle's policy record depends on `loadEngine` handing the source and its digest to
+// the engine it returns — the last hop before `inForce()`. `loadWithSource` is pinned above; this pins
+// the wiring, so a `run` whose policy file was read cannot report a source with no digest.
+
+test('loadEngine wires the source and its digest onto the engine that inForce() reads', async () => {
+  const text = 'rules:\n  - id: protect-secrets\n    priority: 100\n    predicate: { pathGlob: ".env" }\n    action: { kind: Deny, reason: "no secrets" }\n';
+  await withTempFile(text, async (file) => {
+    const force = (await PolicyLoader.loadEngine(file, stubGraph)).inForce();
+    assert.equal(force.source, file, 'the file the rules came from');
+    assert.equal(force.sha256, createHash('sha256').update(text, 'utf8').digest('hex'), 'digested from the bytes it read');
+    assert.equal(force.ruleCount, 1);
+  });
+});
+
+test('loadEngine names a missing policy file on the record but no digest, so a reader is not told one was read', async () => {
+  const warnings = await capturingWarnings(async () => {
+    const force = (await PolicyLoader.loadEngine('/tmp/maf-does-not-exist-policy.yaml', stubGraph)).inForce();
+    assert.equal(force.source, '/tmp/maf-does-not-exist-policy.yaml', 'the path asked for is named');
+    assert.equal('sha256' in force, false, 'no bytes were read, so there is no digest');
+    assert.equal(force.ruleCount, 0);
+  });
+  assert.equal(warnings.length, 1, 'and the absence is said once');
+});

@@ -1126,7 +1126,11 @@ export interface ModelSurface {
 export interface ModelSurfaceRecord extends ModelSurface {
   role:   string;
   taskId: TaskId;
-  /** 1-based model turn within the node. */
+  /**
+   * 1-based loop step within the node. A step whose model call was malformed and retried records one
+   * entry per attempt, all sharing this number; the array is in call order, so a repeated `turn` reads
+   * as a retry, not a duplicate.
+   */
   turn:   number;
 }
 

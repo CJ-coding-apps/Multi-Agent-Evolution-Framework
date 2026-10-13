@@ -215,7 +215,10 @@ test('timeout: no answer in time is TimedOut, attested, the slot cleared and the
   const sink = new SpySink();
   const { provider, signals } = scripted(() => new Promise<ProviderAnswer>(() => undefined));
   const { clock, fire } = manualClock();
-  const gate = new ApprovalGate({ provider, recorder: sink, timeoutMs: 25, clock });
+  // The budget is deliberately far longer than the test could run: with the injected clock the
+  // timeout fires only when `fire()` says so, and if the gate were on the real clock the test would
+  // still be waiting here — which is the property this pins, not merely a shorter wait.
+  const gate = new ApprovalGate({ provider, recorder: sink, timeoutMs: 3_600_000, clock });
 
   const decided = gate.decide(ask('req-1'));
   await new Promise((r) => setImmediate(r));
@@ -225,7 +228,7 @@ test('timeout: no answer in time is TimedOut, attested, the slot cleared and the
 
   assert.equal(outcome.approved, false);
   assert.equal(outcome.status, 'TimedOut');
-  assert.match(outcome.reason, /no decision within 25 ms/);
+  assert.match(outcome.reason, /no decision within 3600000 ms/);
   assert.deepEqual(gate.pendingIds(), [], 'the slot is cleared');
   assert.equal(signals[0]?.aborted, true, 'the provider was told to stop listening');
   assert.equal(sink.approvals[0]?.decision.status, 'TimedOut');

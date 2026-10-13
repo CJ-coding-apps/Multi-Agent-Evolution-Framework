@@ -60,6 +60,22 @@ test('inForce summarises each rule as id, effect and what it matches', () => {
   ], 'highest priority first, and a rule with no predicate says so rather than reading blank');
 });
 
+test('inForce marks a predicate the engine ignores, so the record cannot overstate a rule\'s reach', () => {
+  const engine = new PolicyEngine(stubGraph);
+  engine.loadRules([
+    rule('inert-only',       50, { minFailureCount: 3 },                                  { kind: 'Deny', reason: 'no' }),
+    rule('scoped-plus-inert', 40, { toolId: makeToolId('fs.write'), minFailureCount: 9 }, { kind: 'Deny', reason: 'no' }),
+  ]);
+
+  // `decide` never consults `minFailureCount`, so a rule whose only predicate is that matches every
+  // call. The record names the key — a reader comparing it to the policy file must find it — but
+  // marks it ignored, because this line is a claim about the rule's reach.
+  assert.deepEqual(engine.inForce().rules, [
+    { id: 'inert-only',       effect: 'Deny', matcher: '(matches every call) (ignored: minFailureCount=3)' },
+    { id: 'scoped-plus-inert', effect: 'Deny', matcher: 'toolId=fs.write (ignored: minFailureCount=9)' },
+  ]);
+});
+
 test('inForce counts every verdict the engine reached, refusals included', async () => {
   const failing = { run: async () => { throw new Error('the graph is down'); } } as unknown as GraphQueryRunner;
   const engine = new PolicyEngine(failing);

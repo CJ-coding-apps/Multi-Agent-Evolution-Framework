@@ -268,17 +268,31 @@ function matchesGlob(relativePath: string, glob: string): boolean {
   return minimatch(relativePath, glob, { dot: true });
 }
 
-/** A rule's predicate in one line, for the bundle's policy record (F6): what it matches, not prose. */
+/**
+ * A rule's predicate in one line, for the bundle's policy record (F6): what it matches, not prose.
+ *
+ * A key the engine does not consult is never written as if it narrowed the rule. `minFailureCount` is
+ * parsed and carried but `decide` ignores it, so a rule whose only predicate is this matches every
+ * call — the no-op predicate the G1 deletion list removes. The key is still named, because a reader
+ * comparing the bundle to the policy file must find the same keys, but it is marked ignored, because
+ * this line is a claim about a rule's *reach*, and a reader may act on it.
+ */
 function summarizeRule(rule: PolicyRule): PolicyRuleSummary {
   const p = rule.predicate;
-  const bits: string[] = [];
-  if (p.toolId !== undefined)            bits.push(`toolId=${oneOrList(p.toolId)}`);
-  if (p.pathGlob !== undefined)         bits.push(`pathGlob=${p.pathGlob}`);
-  if (p.allowedPathGlobs !== undefined) bits.push(`allowedPathGlobs=[${p.allowedPathGlobs.join(', ')}]`);
-  if (p.agentRole !== undefined)        bits.push(`agentRole=${oneOrList(p.agentRole)}`);
-  if (p.memoryPattern !== undefined)    bits.push(`memoryPattern=${JSON.stringify(p.memoryPattern.cypher)}`);
-  if (p.minFailureCount !== undefined)  bits.push(`minFailureCount=${p.minFailureCount}`);
-  return { id: rule.id, effect: rule.action.kind, matcher: bits.length > 0 ? bits.join(' ') : '(matches every call)' };
+  const matches: string[] = [];
+  const ignored: string[] = [];
+  if (p.toolId !== undefined)            matches.push(`toolId=${oneOrList(p.toolId)}`);
+  if (p.pathGlob !== undefined)         matches.push(`pathGlob=${p.pathGlob}`);
+  if (p.allowedPathGlobs !== undefined) matches.push(`allowedPathGlobs=[${p.allowedPathGlobs.join(', ')}]`);
+  if (p.agentRole !== undefined)        matches.push(`agentRole=${oneOrList(p.agentRole)}`);
+  if (p.memoryPattern !== undefined)    matches.push(`memoryPattern=${JSON.stringify(p.memoryPattern.cypher)}`);
+  if (p.minFailureCount !== undefined)  ignored.push(`minFailureCount=${p.minFailureCount}`);
+  const matcher = matches.length > 0 ? matches.join(' ') : '(matches every call)';
+  return {
+    id:     rule.id,
+    effect: rule.action.kind,
+    matcher: ignored.length > 0 ? `${matcher} (ignored: ${ignored.join(', ')})` : matcher,
+  };
 }
 
 function oneOrList(value: string | string[]): string {

@@ -33,7 +33,8 @@ are optional, so a bundle written by 0.3.0 still parses and verifies.
   case that stays silent), the rule count, every rule as `(id, effect, matcher)`, and the Allow/Deny/
   Escalate/Indeterminate counts the engine reached. Every command that writes a bundle records it: `run`,
   `goldens` and `inprocess-demo`.
-- **`test.run` answers an absent test runner** (F1, `#29`). Asking for a runner the host does not have —
+- **`test.run` answers an absent test runner** (F1 — lands with `#29`, a separate PR, not in this change-set).
+  Asking for a runner the host does not have —
   `bun`, `python`, `cargo` — failed the *spawn*, and an unhandled `error` on a `ChildProcess` kills the whole
   process: one live run died with `spawn bun ENOENT` and wrote no attestation at all. The tool now answers
   that the way it answers a tool that fails while running: with a failed result, which the node reports with
