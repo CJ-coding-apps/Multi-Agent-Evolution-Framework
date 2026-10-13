@@ -286,7 +286,9 @@ A role runs in one of two tiers:
   gate and the processor pipeline. Governance is real here. With `claude`, each turn is spawned with
   `--tools ""`, so the backend has no built-in tool of its own, and with `--strict-mcp-config` and an
   empty `--mcp-config`, so it has no MCP tool either: the only tools in the loop are MAF's
-  ([D-33](DECISIONS.md)).
+  ([D-33](DECISIONS.md)). The catalog the model is shown carries each tool's input schema, and a call
+  whose input does not match it is answered with an error and not executed — no paths declared, no policy
+  asked — and recorded as `Indeterminate` under rule id `builtin:input-schema`.
 - **`cli`** — maf hands the backend CLI one prompt and reads back one result. The agent
   runs its own tools, so maf sees **no individual tool call**: not the arguments, not the policy verdict,
   not the path. MAF passes no hook flags, and no permission flags but one: Codex is invoked with

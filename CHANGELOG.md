@@ -191,6 +191,19 @@ the README's Status table lists both as planned.
 
 ### Fixed
 
+- **A tool call with the wrong field names is answered, not run, and the run goes on** (WP-2.18). Found by
+  the maintainer's live proof of this release on macOS with `claude`: `maf run "add a hello function"` on a
+  repository with no `.maf/` ended `Failed` with `The "data" argument must be of type string … Received
+  undefined`. The coder sent `patch.apply` a `{path, patch}`; the tool takes `diff`, and the catalog in the
+  system prompt gave each tool's id, permission and description but not its fields. The call declared no
+  paths, policy allowed it, and the tool threw a `TypeError` that ended the node. Every built-in tool now
+  declares an `inputSchema`; the catalog shows each tool's input (`— input: {"diff": string (required), …}`)
+  and what each field means; and `executeToolGated` answers a call with a required field missing, a field
+  of the wrong type or a field the tool does not take with an error naming the input it expects, before
+  `declaredPaths` and policy. Nothing runs, the call is recorded as `Indeterminate` under
+  `builtin:input-schema`, and the model can send it again. A tool's own `execute` answers a missing or
+  mistyped required field the same way instead of throwing, as do `git.log` for a bad count and
+  `git.reset` for a bad revision.
 - **Kùzu query results are closed as they are read** (WP-2.15). `KuzuDriver` never closed a
   `QueryResult`, whose rows live in memory its database owns. When a graph was garbage-collected while
   the process ran on, the database and its last results were finalized in no fixed order, and a result

@@ -135,7 +135,7 @@ A node that fails, after its last attempt, is handed to the failure recorder: th
 
 The diff base is the commit captured in step 2, not `HEAD` at review time, so a writer that commits its own work is still reviewed. `RoleDispatcher.endNode(nodeId)`, called from the scheduler's `onNodeEnd`, forgets it.
 
-On the `in-process` tier the dispatcher never bypasses policy: the loop advertises only the role's allowed tools, answers a call to any other tool with an error, and sends every allowed call through `executeToolGated` (in `@maf/tool-loop`), which asks the policy engine first and puts an `Escalate` verdict to the approval gate (see [POLICY.md](POLICY.md#escalate-asking-a-person)). A role with `fs.write` in its allowlist can still be denied by a path-glob rule. On the `cli` tier none of this applies: the backend CLI runs its own tools, and MAF sees only a writer role's diff afterwards.
+On the `in-process` tier the dispatcher never bypasses policy: the loop advertises only the role's allowed tools, each with its input schema, answers a call to any other tool with an error, and sends every allowed call through `executeToolGated` (in `@maf/tool-loop`), which answers a call whose input does not match the tool's schema with an error naming the input it expects, without executing it, then asks the policy engine and puts an `Escalate` verdict to the approval gate (see [POLICY.md](POLICY.md#escalate-asking-a-person)). A role with `fs.write` in its allowlist can still be denied by a path-glob rule. On the `cli` tier none of this applies: the backend CLI runs its own tools, and MAF sees only a writer role's diff afterwards.
 
 ### Where policy sees the role
 
