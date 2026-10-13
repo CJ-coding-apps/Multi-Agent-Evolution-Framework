@@ -8,7 +8,11 @@
 declare module 'kuzu' {
   class Database {
     constructor(path: string, bufferPoolSize?: number);
-    close(): void;
+    /**
+     * `async` in the binding: the native close runs synchronously inside the call once the
+     * database is initialised; the promise rejects only for an initialisation that failed.
+     */
+    close(): Promise<void>;
   }
 
   /**
@@ -31,13 +35,15 @@ declare module 'kuzu' {
       preparedStatement: PreparedStatement,
       params?: Record<string, KuzuParameter>,
     ): Promise<QueryResult>;
-    close(): void;
+    /** `async` in the binding, like `Database.close`. */
+    close(): Promise<void>;
   }
 
   class QueryResult {
     getAll(): Promise<unknown[]>;
     hasNext(): boolean;
     getNext(): Promise<Record<string, unknown>>;
+    /** Frees the rows, which live in the database's buffer manager — synchronously. */
     close(): void;
   }
 

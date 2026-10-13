@@ -1,4 +1,6 @@
 import type { GraphQueryRunner } from '@maf/types';
+import { recallFailures } from '@maf/memory-graph';
+import type { RecalledFailure } from '@maf/memory-graph';
 
 export interface FailurePattern {
   taskLabel:    string;
@@ -16,48 +18,17 @@ export class FailurePatternDetector {
     const patterns: FailurePattern[] = [];
 
     for (const filePath of filePaths) {
-      const rows = await this.graph.run({
-        cypher: `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
-         MATCH (t)-[:MODIFIED]->(file:MemoryNode {kind: 'File', label: $path})
-         RETURN t.label AS task, f.properties AS failure, file.label AS file, t.created_at AS ts LIMIT 10`,
-        params: { path: filePath },
-      });
-
-      for (const r of rows) {
-        const props = tryParse(r['failure']);
-        patterns.push({
-          taskLabel:   String(r['task'] ?? ''),
-          filePaths:   [String(r['file'] ?? '')],
-          failureType: String(props['type'] ?? 'unknown'),
-          occurrences: 1,
-          lastSeen:    String(r['ts'] ?? ''),
-        });
-      }
+      const failures = await recallFailures(this.graph, { path: filePath, limit: 10 });
+      patterns.push(...failures.map((f) => toPattern(f, [filePath])));
     }
 
     return dedup(patterns);
   }
 
-  // Detect failure patterns from similar task descriptions
+  // Detect failure patterns from similar task descriptions — the planner's own recall query.
   async detectForTitle(title: string): Promise<FailurePattern[]> {
-    const keywords = title.split(/\s+/).slice(0, 3).join(' ');
-    const rows = await this.graph.run({
-      cypher: `MATCH (t:MemoryNode {kind: 'Task'})-[:CAUSED_FAILURE]->(f:MemoryNode {kind: 'Failure'})
-       WHERE t.label CONTAINS $kw
-       RETURN t.label AS task, f.properties AS failure, t.created_at AS ts LIMIT 10`,
-      params: { kw: keywords },
-    });
-
-    return rows.map((r) => {
-      const props = tryParse(r['failure']);
-      return {
-        taskLabel:   String(r['task'] ?? ''),
-        filePaths:   [],
-        failureType: String(props['type'] ?? 'unknown'),
-        occurrences: 1,
-        lastSeen:    String(r['ts'] ?? ''),
-      };
-    });
+    const failures = await recallFailures(this.graph, { title, limit: 10 });
+    return failures.map((f) => toPattern(f, []));
   }
 
   formatAsContext(patterns: FailurePattern[]): string {
@@ -69,9 +40,8 @@ export class FailurePatternDetector {
   }
 }
 
-function tryParse(s: unknown): Record<string, unknown> {
-  if (typeof s === 'object' && s !== null) return s as Record<string, unknown>;
-  try { return JSON.parse(String(s)) as Record<string, unknown>; } catch { return {}; }
+function toPattern(f: RecalledFailure, filePaths: string[]): FailurePattern {
+  return { taskLabel: f.task, filePaths, failureType: f.reason, occurrences: 1, lastSeen: f.recordedAt };
 }
 
 function dedup(patterns: FailurePattern[]): FailurePattern[] {

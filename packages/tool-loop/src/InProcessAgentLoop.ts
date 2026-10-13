@@ -1,7 +1,7 @@
 import { makeAgentId, estimateTokens } from '@maf/types';
 import type {
   RunId, TaskId, TurnAdapter, TurnMessage, ToolPlugin, ToolContext,
-  PolicyEngineHandle, AttestorHandle, AssistantTurn, ToolCallRequest, ToolResult,
+  PolicyEngineHandle, AttestorHandle, AssistantTurn, ToolCallRequest, ToolResult, ApprovalGateHandle,
 } from '@maf/types';
 import { ProcessorInterrupt, ContractViolation } from '@maf/processors';
 import type { ProcessorPipeline, HarnessEvent, HookPoint } from '@maf/processors';
@@ -33,6 +33,8 @@ export interface InProcessLoopDeps {
   runId:      RunId;
   taskId:     TaskId;
   pipeline?:  ProcessorPipeline;
+  /** Asked when the policy escalates a call (D-02); reaches executeToolGated with these deps. */
+  approvalGate?: ApprovalGateHandle | undefined;
 }
 
 export interface InProcessLoopResult {

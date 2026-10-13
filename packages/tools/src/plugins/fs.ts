@@ -1,9 +1,10 @@
 import fs from 'node:fs/promises';
+import type { Dirent, Stats } from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
-import { BaseTool } from '../ToolPlugin.js';
-import { makeToolId, resolveInside } from '@maf/types';
+import { BaseTool, closedInput } from '../ToolPlugin.js';
+import { makeToolId, resolveInside, PathConfinementError } from '@maf/types';
 
 /**
  * The single path a one-path tool declares, or `[]` when the model omitted it — a call with
@@ -24,15 +25,67 @@ function onePath(input: { path?: unknown }): string[] {
  * syscall is a value that was checked, and the string a path rule matched is a description of
  * that same file.
  *
- * It throws rather than returning a failed `ToolResult`. `fs.read` on a missing file already
- * throws, and a path outside the root is the same kind of thing: the tool has no answer to give,
- * and a result saying otherwise would be a result it did not obtain. Through the gate the policy
+ * It throws rather than returning a failed `ToolResult`: a path outside the root is a refusal, not
+ * something the tool met while running — a file that is not there is that, and each tool answers it
+ * with a failed result. Through the gate the policy
  * engine's own confinement has already refused with a `Deny`, so the model sees a policy refusal
  * and the run continues; this is the second line, and it is what keeps a direct
  * `tool.execute(...)` — one that never went past the gate — no less confined.
  */
 async function confinedPath(ctx: ToolContext, p: string): Promise<string> {
   return (await resolveInside(ctx.projectRoot, p)).absolute;
+}
+
+// ── git's own data ────────────────────────────────────────────────────────────
+
+/**
+ * Whether `p` has a `.git` segment at any depth. Compared without case, because a case-insensitive
+ * filesystem (macOS by default) opens `.GIT` as `.git`.
+ */
+export function namesGitDir(p: string): boolean {
+  return p.split(/[\\/]+/).some((segment) => segment.toLowerCase() === '.git');
+}
+
+/**
+ * The refusal every write or delete tool gives for a path into `.git`; `why` says how it got there.
+ * A `PathConfinementError`, which the gate records and reports as a `Deny` rather than letting it
+ * end the node.
+ */
+export function gitDirRefusal(tool: string, p: string, why: string): PathConfinementError {
+  return new PathConfinementError(
+    `${tool} refuses ${JSON.stringify(p)}: ${why}. The run's tools never write or delete git's own ` +
+    `data, because the worktree's .git is what keeps git — and every git tool — on the run's branch ` +
+    `rather than on your repository.`,
+    p,
+    why,
+  );
+}
+
+/**
+ * Refuses a path naming `.git`, before policy: a write or delete tool calls this from
+ * `declaredPaths`, which the gate evaluates before any rule, so no rule set — the empty one included —
+ * and no approval can let one through. Deleting a worktree's `.git` file makes git find the user's
+ * repository above it; rewriting it to `gitdir: <repo>/.git` points every git call at the user's branch.
+ */
+export function refuseGitDirPaths(tool: string, paths: readonly string[]): void {
+  for (const p of paths) {
+    if (namesGitDir(p)) throw gitDirRefusal(tool, p, 'the path names git\'s own data (.git)');
+  }
+}
+
+/**
+ * The same refusal on the resolved path, for a write or delete about to run: a link inside the root
+ * that leads into `.git` passes the check on the spelling and not this one. The root itself is
+ * refused too, since it holds `.git`.
+ */
+async function writablePath(ctx: ToolContext, tool: string, p: string): Promise<string> {
+  refuseGitDirPaths(tool, [p]);
+  const confined = await resolveInside(ctx.projectRoot, p);
+  if (confined.relative === '') throw gitDirRefusal(tool, p, 'it is the project root, which holds git\'s own data (.git)');
+  if (namesGitDir(confined.relative)) {
+    throw gitDirRefusal(tool, p, `it resolves to ${JSON.stringify(confined.relative)}, which is git's own data (.git)`);
+  }
+  return confined.absolute;
 }
 
 // ── fs.read ───────────────────────────────────────────────────────────────────
@@ -44,13 +97,25 @@ export class FsReadTool extends BaseTool<ReadInput> {
   readonly name = 'fs.read';
   readonly description = 'Read a file from disk. Returns its text content.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    path:   { type: 'string', description: 'the file to read, relative to the project root' },
+    offset: { type: 'number', description: 'the first line to return, counting from 0 (default 0)' },
+    limit:  { type: 'number', description: 'how many lines to return (default: to the end of the file)' },
+  }, ['path']);
 
   declaredPaths(input: ReadInput): string[] { return onePath(input); }
 
   async execute(input: ReadInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const abs = await confinedPath(ctx, input.path);
-    const content = await fs.readFile(abs, 'utf8');
+    let content: string;
+    try {
+      content = await fs.readFile(abs, 'utf8');
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     const lines = content.split('\n');
     const slice = lines.slice(input.offset ?? 0, input.limit ? (input.offset ?? 0) + input.limit : undefined);
     return this.ok(slice.join('\n'), performance.now() - t, { lines: lines.length });
@@ -66,14 +131,29 @@ export class FsWriteTool extends BaseTool<WriteInput> {
   readonly name = 'fs.write';
   readonly description = 'Write text content to a file, overwriting if it exists.';
   readonly permissionLevel = 'write' as const;
+  readonly inputSchema = closedInput({
+    path:       { type: 'string', description: 'the file to write, relative to the project root' },
+    content:    { type: 'string', description: 'the whole new text of the file' },
+    createDirs: { type: 'boolean', description: 'create missing parent directories first (default false)' },
+  }, ['path', 'content']);
 
-  declaredPaths(input: WriteInput): string[] { return onePath(input); }
+  declaredPaths(input: WriteInput): string[] {
+    const paths = onePath(input);
+    refuseGitDirPaths(this.name, paths);
+    return paths;
+  }
 
   async execute(input: WriteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const abs = await confinedPath(ctx, input.path);
-    if (input.createDirs) await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, input.content, 'utf8');
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
+    const abs = await writablePath(ctx, this.name, input.path);
+    try {
+      if (input.createDirs) await fs.mkdir(path.dirname(abs), { recursive: true });
+      await fs.writeFile(abs, input.content, 'utf8');
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     return this.ok(`Wrote ${input.content.length} bytes to ${input.path}`, performance.now() - t);
   }
 }
@@ -87,13 +167,27 @@ export class FsDeleteTool extends BaseTool<DeleteInput> {
   readonly name = 'fs.delete';
   readonly description = 'Delete a file or directory.';
   readonly permissionLevel = 'dangerous' as const;
+  readonly inputSchema = closedInput({
+    path:      { type: 'string', description: 'the file or directory to delete, relative to the project root' },
+    recursive: { type: 'boolean', description: 'delete a directory and everything in it (default false)' },
+  }, ['path']);
 
-  declaredPaths(input: DeleteInput): string[] { return onePath(input); }
+  declaredPaths(input: DeleteInput): string[] {
+    const paths = onePath(input);
+    refuseGitDirPaths(this.name, paths);
+    return paths;
+  }
 
   async execute(input: DeleteInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
-    const abs = await confinedPath(ctx, input.path);
-    await fs.rm(abs, { recursive: input.recursive ?? false });
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
+    const abs = await writablePath(ctx, this.name, input.path);
+    try {
+      await fs.rm(abs, { recursive: input.recursive ?? false });
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     return this.ok(`Deleted ${input.path}`, performance.now() - t);
   }
 }
@@ -107,13 +201,23 @@ export class FsStatTool extends BaseTool<StatInput> {
   readonly name = 'fs.stat';
   readonly description = 'Stat a file or directory — returns size, type, mtime.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    path: { type: 'string', description: 'the file or directory, relative to the project root' },
+  }, ['path']);
 
   declaredPaths(input: StatInput): string[] { return onePath(input); }
 
   async execute(input: StatInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const abs = await confinedPath(ctx, input.path);
-    const st = await fs.stat(abs);
+    let st: Stats;
+    try {
+      st = await fs.stat(abs);
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     return this.ok(JSON.stringify({
       isFile: st.isFile(), isDirectory: st.isDirectory(),
       size: st.size, mtime: st.mtime.toISOString(),
@@ -130,13 +234,24 @@ export class FsListTool extends BaseTool<ListInput> {
   readonly name = 'fs.list';
   readonly description = 'List files in a directory.';
   readonly permissionLevel = 'read' as const;
+  readonly inputSchema = closedInput({
+    path:      { type: 'string', description: 'the directory, relative to the project root ("." for the root itself)' },
+    recursive: { type: 'boolean', description: 'list everything below it, not only its own entries (default false)' },
+  }, ['path']);
 
   declaredPaths(input: ListInput): string[] { return onePath(input); }
 
   async execute(input: ListInput, ctx: ToolContext): Promise<ToolResult> {
     const t = performance.now();
+    const unusable = this.unusable(input, t);
+    if (unusable !== undefined) return unusable;
     const abs = await confinedPath(ctx, input.path);
-    const entries = await fs.readdir(abs, { withFileTypes: true, recursive: input.recursive });
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(abs, { withFileTypes: true, recursive: input.recursive });
+    } catch (err: unknown) {
+      return this.failed(err, t);
+    }
     const names = entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
     return this.ok(names.join('\n'), performance.now() - t, { count: names.length });
   }

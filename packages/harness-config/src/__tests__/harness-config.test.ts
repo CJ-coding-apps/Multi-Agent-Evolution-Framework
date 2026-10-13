@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { HarnessRoleSet } from '../index.js';
@@ -9,6 +9,7 @@ import {
   computeHarnessSha,
   mintHarnessConfig,
   HarnessIntegrityError,
+  LEGACY_DEFAULT_ID,
 } from '../index.js';
 
 // ORACLE: canonicalization/round-trip/tamper behavior of computeHarnessSha and HarnessStore.
@@ -82,19 +83,101 @@ test('store: tampering with the file on disk fails integrity on load', async () 
   });
 });
 
-test('adoptLegacy: first mint wins, sets CURRENT, idempotent', async () => {
+test('adoptLegacy: an unchanged role set reuses the stored harness and sets CURRENT', async () => {
   await withTempDir(async (dir) => {
     const store = new HarnessStore(dir);
     const first = await store.adoptLegacy(ROLE_SET);
-    const second = await store.adoptLegacy({
+    const again = await store.adoptLegacy(ROLE_SET);
+    assert.equal(again.sha, first.sha);
+    assert.equal((await store.current())?.sha, first.sha);
+    assert.equal((await store.list()).length, 1);
+  });
+});
+
+/** Inode and mtime of each file, so a test can tell "left alone" from "rewritten with the same bytes". */
+async function fingerprints(files: string[]): Promise<Array<{ file: string; ino: bigint; mtimeNs: bigint }>> {
+  return Promise.all(files.map(async (file) => {
+    const s = await stat(file, { bigint: true });
+    return { file: path.basename(file), ino: s.ino, mtimeNs: s.mtimeNs };
+  }));
+}
+
+test('adoptLegacy: an unchanged role set writes nothing; the stored file, index and CURRENT are left alone', async () => {
+  // Regression (verifier F3): every plain run re-saved the unchanged harness, truncating a file a
+  // concurrent run was verifying, which then reported it as tampered.
+  await withTempDir(async (dir) => {
+    const store = new HarnessStore(dir);
+    const first = await store.adoptLegacy(ROLE_SET);
+    const files = [`${first.sha}.yaml`, 'index.json', 'CURRENT'].map((f) => path.join(dir, 'harnesses', f));
+    const before = await fingerprints(files);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal((await store.adoptLegacy(ROLE_SET)).sha, first.sha);
+    assert.deepEqual(await fingerprints(files), before);
+  });
+});
+
+test('adoptLegacy: returning to an earlier role set re-points the index and CURRENT without rewriting its file', async () => {
+  await withTempDir(async (dir) => {
+    const store = new HarnessStore(dir);
+    const v1 = await store.adoptLegacy(ROLE_SET);
+    const v1File = path.join(dir, 'harnesses', `${v1.sha}.yaml`);
+    const before = await fingerprints([v1File]);
+    await store.adoptLegacy({ ...ROLE_SET, defaultRole: 'tester' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await store.adoptLegacy(ROLE_SET);
+    assert.deepEqual(await fingerprints([v1File]), before);
+    assert.equal((await store.load(LEGACY_DEFAULT_ID)).sha, v1.sha);
+    assert.equal((await store.current())?.sha, v1.sha);
+  });
+});
+
+test('adoptLegacy: a changed role set is re-minted; legacy-default and CURRENT move to it; the old snapshot stays loadable', async () => {
+  // Regression (audit P1 "adoptLegacy first-mint harness staleness"): the first mint used to win
+  // forever, so a run stamped the sha of a role set it no longer ran with.
+  await withTempDir(async (dir) => {
+    const store = new HarnessStore(dir);
+    const stale = await store.adoptLegacy(ROLE_SET);
+    const edited: HarnessRoleSet = {
       ...ROLE_SET,
       roles: [...ROLE_SET.roles, { role: 'reviewer', systemPrompt: 'review', allowedTools: [] }],
-    });
-    assert.equal(first.sha, second.sha, 'adoptLegacy must not re-mint when the id exists');
-    const current = await store.current();
-    assert.equal(current?.sha, first.sha);
-    const all = await store.list();
-    assert.equal(all.length, 1);
+    };
+    const fresh = await store.adoptLegacy(edited);
+    assert.notEqual(fresh.sha, stale.sha);
+    assert.equal(fresh.sha, mintHarnessConfig({ id: LEGACY_DEFAULT_ID, roleSet: edited, processorBundles: [] }).sha);
+    assert.deepEqual(fresh.roleSet, edited);
+    assert.equal((await store.load(LEGACY_DEFAULT_ID)).sha, fresh.sha);
+    assert.equal((await store.current())?.sha, fresh.sha);
+    // Content-addressed: the snapshot an earlier run attested to is still there under its sha.
+    assert.equal((await store.load(stale.sha)).sha, stale.sha);
+    // Reverting the role set returns to the earlier sha rather than minting a third harness.
+    const reverted = await store.adoptLegacy(ROLE_SET);
+    assert.equal(reverted.sha, stale.sha);
+    assert.equal((await store.load(LEGACY_DEFAULT_ID)).sha, stale.sha);
+    assert.equal((await store.list()).length, 2);
+  });
+});
+
+test('adoptLegacy: does not move CURRENT off a harness the operator chose', async () => {
+  await withTempDir(async (dir) => {
+    const store = new HarnessStore(dir);
+    const chosen = mintHarnessConfig({ id: 'evolved-1', roleSet: ROLE_SET, processorBundles: [{ name: 'transcript' }] });
+    await store.save(chosen);
+    await store.setCurrent(chosen.sha);
+    const legacy = await store.adoptLegacy(ROLE_SET);
+    assert.notEqual(legacy.sha, chosen.sha);
+    assert.equal((await store.current())?.sha, chosen.sha);
+  });
+});
+
+test('adoptLegacy: a tampered stored copy of the same content is reported, not silently rewritten', async () => {
+  await withTempDir(async (dir) => {
+    const store = new HarnessStore(dir);
+    const first = await store.adoptLegacy(ROLE_SET);
+    const file = path.join(dir, 'harnesses', `${first.sha}.yaml`);
+    const tampered = JSON.parse(await readFile(file, 'utf8'));
+    tampered.roleSet.roles[0].allowedTools.push('fs.delete');
+    await writeFile(file, JSON.stringify(tampered), 'utf8');
+    await assert.rejects(() => store.adoptLegacy(ROLE_SET), HarnessIntegrityError);
   });
 });
 

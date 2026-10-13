@@ -96,6 +96,9 @@ export const DEFAULT_ROLE_SET: RoleSet = {
       allowedTools:      CODER_TOOLS,
       policyTag:         'coder',
       maxToolIterations: 12,
+      // The only built-in role whose job is the change itself (D-32): a tester that adds no test
+      // has often done its job, and security and reviewer hold no write tool.
+      expectsChange:     true,
     },
     {
       role:              defineRoleName('tester'),

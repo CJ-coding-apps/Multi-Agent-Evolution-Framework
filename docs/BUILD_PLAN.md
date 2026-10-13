@@ -95,7 +95,7 @@ Phase 2 (0.3.0)
   Lane E  memory-graph · planning-agent              WP-2.6
   Lane F  eval-harness · attestation                 WP-2.7  WP-2.8
   Lane G  toolchain                                  WP-2.11
-  Serial  WP-2.10 (run.ts/wiring.ts integration) → WP-2.12 (CI e2e) → WP-2.13 (docs) → release
+  Serial  WP-2.10 (run.ts/wiring.ts integration) → WP-2.12 (CI e2e) → WP-2.14, WP-2.15 → WP-2.13 (docs) → release
 
 Phase 3 (0.4.0)
   Lane A  lcm · lcm-adapter                          WP-3.1
@@ -174,58 +174,70 @@ Proof on `wp/phase-1` (2026-10-08, macOS, Node 25, pnpm 8.15.1): install/build c
 
 ## 6. Phase 2 — release 0.3.0
 
-### WP-2.1 In-process by default for writer roles — `todo` [core] · D-01 · audit §scheduler 10, 11
+> **Deviation recorded 2026-10-09:** Phase 2 was merged into an integration branch, `wp/phase-2`, rather than into `main`: each lane WP was a package PR (#9–#18; WP-2.7 split into #15, the eval-harness core, and #18, the CLI) verified by an independent verifier, whose findings fixers closed on the same PR, before it was merged; WP-2.10 (#19) then wired the lanes into `run.ts`/`wiring.ts`, and WP-2.12 (#20) added the CI `e2e` job. Two work packages the plan did not have were added: WP-2.14 (the agent's git tools ran repository hooks — WP-2.10 verifier F12) and WP-2.15 (an intermittent native crash in CI, found while landing WP-2.12). Integration recorded D-33 to D-40 in `docs/DECISIONS.md`; D-34 replaced WP-2.3's "required: false records the review" (the gate exists only when asked for), and D-36 made WP-2.8's "canonical JSON" RFC 8785. WP-2.2, 2.4, 2.5 and 2.7 went over the ~400-line guide and were accepted as single PRs. WP-2.10's `inprocess-demo` acceptance was narrowed to what the demo carries (no worktree, no review); `run-acceptance.test.ts` carries the full chain. `RollbackManager` was made worktree-confined (WP-2.4) but is not wired into `run`; that is WP-3.4. Not landed, and still *planned* in the README: WP-2.11 (the toolchain floor, which needs registry access to regenerate the lockfile, so it lands from the maintainer's machine) and `allowPartial` set from a DAG spec or by the planner (carried from Phase 1, F9; no WP yet). The `wp/phase-2` → `main` PR, the lockfile and the Release are the maintainer's.
+
+### WP-2.1 In-process by default for writer roles — `in-review` [core] · D-01 · audit §scheduler 10, 11
 **Carried from WP-1.12, decided 2026-10-08 (D-32):** a writer-role node on the `cli` tier whose tree diff is empty after a non-empty, exit-0 answer fails with `NodeFailure('no_change')` when its role sets `expectsChange`; `coder` is the only built-in role that does. Add to this WP's acceptance: a `coder` node whose backend exits 0 with an answer and no diff fails `no_change`; the same for `tester` succeeds; a custom role with `expectsChange: true` behaves as `coder`; the diff is the one the security gate already takes (D-29), so the start commit is captured once (D-06). Update `docs/ROLES.md`'s field table and the README Status row planned for 0.3.0.
 
 **Also carried from WP-1.12 (cli-tier hardening, this WP or WP-2.4):** the spawned backend inherits the user's whole Claude Code configuration — MCP servers and hooks included, observed as a third-party MCP server's dashboard opening once per spawn during the proof. Spawn `claude` with its strict-MCP flag and an empty server list so the backend gets no MCP servers unless MAF hands them over (confirm the flag with `claude --help`; the codex and gemini adapters need the equivalent check), and say so in the README's "Before `maf run`" list.
 **Files:** `packages/roles/src/{RoleRegistry.ts,RoleDispatcher.ts}`, `.maf/roles.yaml`, `packages/cli/src/commands/run.ts` (`--allow-ungoverned` flag; writer-lock computed from the *effective* tier — integration, lands in WP-2.10).
 **Acceptance:** with no `execution` set, a role holding a write tool resolves to `in-process`; a writer role on an adapter without `inProcessLoop` refuses to start with a message naming `--allow-ungoverned`; with the flag, it runs `cli` and prints the ungoverned banner once; the writer lock counts a role by its effective tier, so a read-only in-process role that fell back to `cli` is treated as a writer; tool or adapter exceptions in the loop still fire `task_end` (audit §scheduler 11).
 
-### WP-2.2 Approval gate wired — `todo` [core] · D-02 · audit §scheduler 17, 18
+### WP-2.2 Approval gate wired — `in-review` [core] · D-02 · audit §scheduler 17, 18
 **Files:** `packages/approval-gate/src/ApprovalGate.ts`, new `packages/approval-gate/src/providers/{tty.ts,headless.ts}`, `packages/tool-loop/src/gatedExec.ts` (Escalate path), `packages/attestation/src/Attestor.ts` (`addApproval` called), first tests for the package.
 **Acceptance:** Escalate on a TTY prompts with tool id, declared paths and the request hash, and an approval lets the call execute once; a decision is bound to the request hash and a mismatched hash is refused; request ids are unique and cannot be reused; timeout denies and clears the slot; headless (stdin not a TTY) denies and writes `.maf/approvals/pending/<id>.json`; every decision appears in the attestation; the PR-merged-means-approved path is removed or behind an explicit, documented option that is off.
 
-### WP-2.3 Human review gate wired — `todo` [core] · audit §quickstart 7; §eval 34
+### WP-2.3 Human review gate wired — `in-review` [core] · audit §quickstart 7; §eval 34
 **Files:** `packages/git-ops/src/ReviewGate.ts` (28: fail-open on diff read error → fail closed), `packages/roles/src/RoleDispatcher.ts` (`reviewGate` read; runs alongside the security gate for writer roles), harness `reviewGate: { required: boolean }`.
 **Acceptance:** with `required: true`, a writer node blocks until the review decision; with `required: false` (default), the review request and outcome are recorded and the run continues; an error reading the diff fails the gate; the review runs for the same roles as the security gate.
 
-### WP-2.4 Worktree isolation — `todo` [core] · D-03 · audit §quickstart 9; §security 29–31
+### WP-2.4 Worktree isolation — `in-review` [core] · D-03 · audit §quickstart 9; §security 29–31
 **Files:** `packages/git-ops/src/{WorktreeManager.ts,BranchIsolator.ts,RollbackManager.ts}`, `packages/cli/src/commands/run.ts` (integration in WP-2.10), tests with real git.
 **Acceptance:** a run creates worktree `.maf/worktrees/<runId>` on branch `maf/<runId>` from the current HEAD and every adapter/tool runs with that cwd; on success MAF prints `git merge maf/<runId>` and does not merge; on gate failure the worktree remains and its path is printed; `--no-worktree` runs in place after a warning; `RollbackManager` refuses any path outside a run's worktree; the user's index and working tree are byte-identical before and after a run (test).
 
-### WP-2.5 Config and roles load like policy — `todo` [mech] · D-08 · audit §quickstart 4; §scheduler 6
+### WP-2.5 Config and roles load like policy — `in-review` [mech] · D-08 · audit §quickstart 4; §scheduler 6
 **Files:** `packages/cli/src/config/ConfigLoader.ts` (wired; shape matches `MafConfig`), `.maf/config.yaml` (shape fixed), `packages/roles/src/RoleRegistry.ts` (60–64: fall back to defaults only when the file is missing; parse/validation errors refuse), YAML via the loader from WP-1.5.
 **Acceptance:** precedence is CLI flag > `.maf/config.yaml` > defaults, tested per key; a config key the schema doesn't know is an error; a malformed `roles.yaml` refuses to run; the `lcm`, `circuit`, `dag` sections are either read or removed from the shipped file.
 
-### WP-2.6 Planner failure recall — `todo` [core] · D-16 · audit §eval 26
+### WP-2.6 Planner failure recall — `in-review` [core] · D-16 · audit §eval 26
 **Files:** `packages/dag-runner/src/DagRunner.ts` or `packages/roles/src/RoleDispatcher.ts` (write Task/Failure nodes on failure), `packages/memory-graph/src/MemoryGraph.ts`, `packages/planning-agent/src/{RetrievalAugmentedPlanner.ts,FailurePatternDetector.ts}` (one query, shared), `packages/memory-graph/src/__tests__/` (real Kùzu).
 **Acceptance:** after a failed node, the graph holds a `Task` node and a `Failure` node joined by `MemoryEdge {relation:'CAUSED_FAILURE'}`; the planner's recall query returns it against a real database; `FailurePatternDetector` uses the same query; `querySubgraph` filters before limiting (audit §eval 26, 120-node cap).
 
-### WP-2.7 Offline, isolated evaluation — `todo` [core] · D-14 · audit §eval 1, 6–13
+### WP-2.7 Offline, isolated evaluation — `in-review` [core] · D-14 · audit §eval 1, 6–13
 **Files:** `packages/eval-harness/src/*`, `packages/cli/src/commands/{goldens.ts,harness.ts}`, `packages/cli/src/wiring.ts` (adapter registry accepts `scripted`), `.gitignore` (track `.maf/harnesses/default-*.json` and `tests/goldens/baseline.json`), `tests/goldens/corpus.json`.
 **Acceptance:** `goldens run --adapter scripted` runs on a fresh clone with no keys and no prior `maf run`, and matches the committed baseline; results record corpus sha, attempts and adapter and `goldens compare` refuses to compare across corpus shas; each evaluation uses a fresh in-memory graph (no injection from past runs); coder tasks fail if `test.js` is modified (`mustNotModify`); the judge prompt and parser agree (JSON `{passed}`); the judge role is distinct from the agent role and the result records which model judged; `maf harness import <file>` validates, copies and indexes; short shas accepted where the store looks up by ref.
 
-### WP-2.8 In-toto attestation — `todo` [core] · D-13 (part 2) · audit §quickstart 14; §security 19, 22
+### WP-2.8 In-toto attestation — `in-review` [core] · D-13 (part 2) · audit §quickstart 14; §security 19, 22
 **Files:** `packages/attestation/src/*` (existing in-toto builder used), `packages/harness-config/src/canonicalize.ts` (shared), `packages/cli/src/commands/attest.ts` (new: `maf attest verify <bundle>`), `RoleDispatcher`/`gatedExec` call sites for `recordDiffHash`.
 **Acceptance:** the bundle is an in-toto Statement with the run's subjects (diff hashes recorded), signed over canonical JSON; `maf attest verify` succeeds on a bundle and fails on any single-byte change; a bundle re-serialized with different key order still verifies; `keySource` from WP-1.7 is inside the signed payload.
 
-### WP-2.9 Harness identity — `todo` [mech] · audit §quickstart 11–12; §eval 3–4
+### WP-2.9 Harness identity — `in-review` [mech] · audit §quickstart 11–12; §eval 3–4
 **Files:** `packages/harness-config/src/store.ts` (`adoptLegacy` 43–49), `packages/roles/src/RoleRegistry.ts` (prompt text hashed into the harness), `packages/cli/src/commands/run.ts` (default `--harness current` when `CURRENT` exists — integration in WP-2.10).
 **Acceptance:** editing `roles.yaml` or a `promptFile` changes the harness sha that `run` stamps; `harness set-current` changes what the next plain `run` uses; the attestation's `configSource.digest` equals the harness actually dispatched.
 
-### WP-2.10 Integration: `run.ts` and `wiring.ts` — `todo` [core, maintainer merges]
-Wires WP-2.1, 2.2, 2.3, 2.4, 2.5, 2.9 into the two entry points. One PR, after the lanes are merged. **Acceptance:** `inprocess-demo` and a `run` against a temp repository (scripted adapter) exercise worktree → in-process coder → security gate → review record → attestation with `keySource` and approvals; the user's tree is untouched.
+### WP-2.10 Integration: `run.ts` and `wiring.ts` — `in-review` [core, maintainer merges]
+Wires WP-2.1, 2.2, 2.3, 2.4, 2.5, 2.9 into the two entry points. One PR, after the lanes are merged. **Acceptance:** `run` exercises worktree → in-process coder → security gate → review record → attestation; `inprocess-demo` exercises in-process coder → security gate → an escalated call refused headless → signed attestation with `keySource`, approvals and a subject; the user's tree is untouched.
 
 ### WP-2.11 Toolchain floor — `todo` [mech, maintainer merges] · D-21 · audit §quickstart 3, 6, 17
+**Note 2026-10-09:** not done in the fleet: regenerating `pnpm-lock.yaml` as v9 under pnpm 10 needs registry access, which the fleet host does not have. It lands from the maintainer's machine; until then the README Status row stays *planned*.
 **Files:** root `package.json` (`engines`, `packageManager: pnpm@10.x`, `pnpm.onlyBuiltDependencies`), `pnpm-lock.yaml` (v9, mechanical), `.github/workflows/ci.yml` (pnpm 10), README prerequisites, `packages/cli/src/main.ts` shebang (`#!/usr/bin/env node`; heap flag moved to a documented `NODE_OPTIONS` or a wrapper script).
 **Acceptance:** fresh install on Node 22 with pnpm 10 builds native modules without prompts; `npm i -g` of the CLI package puts a working `maf` on PATH on Linux and macOS.
 
-### WP-2.12 CI end-to-end job — `todo` [mech] · D-24
+### WP-2.12 CI end-to-end job — `in-review` [mech] · D-24
 **Files:** `.github/workflows/ci.yml` (job `e2e`: build → `inprocess-demo` → `goldens run --adapter scripted` → compare to baseline, real Kùzu; `timeout-minutes` already present).
 **Acceptance:** the job fails if the demo's attestation is missing or the goldens result differs from the baseline; it is in the branch-protection required set.
 
-### WP-2.13 Documentation pass and release 0.3.0 — `todo` [mech, maintainer merges]
+### WP-2.13 Documentation pass and release 0.3.0 — `in-review` [mech, maintainer merges]
 Status table rows flipped to *shipped* only for behaviour landed in this phase, each row naming its regression check; POLICY.md, ROLES.md and SECURITY.md updated for approval, review, worktrees, config; CHANGELOG `[0.3.0]`; `docs/DECISIONS.md` statuses. Fresh-clone proof (WP-1.1 script plus `goldens run --adapter scripted`). Maintainer creates the Release.
+**Done on the branch (2026-10-09):** every `package.json` at 0.3.0; D-34 and D-37 reworded where the merged code is more exact than their text (no new decisions). The offline half of the fresh-clone proof — `inprocess-demo`, `maf attest verify` on its bundle, and `goldens run --adapter scripted` matching `tests/goldens/baseline.json` in a fresh `git clone` — ran in the fleet container; the WP-1.1 script with a live `run` is the maintainer's, as is the Release.
+
+### WP-2.14 The agent's git tools run hookless — `in-review` [core] · D-09, D-25 · WP-2.10 verifier F12
+**Files:** `packages/tools/src/plugins/git.ts`, `docs/SECURITY.md` (the key-exposure bullet), tests `packages/tools/src/__tests__/{git-isolation,git-args}.test.ts`.
+**Acceptance (as shipped):** every `git.*` tool runs git with `-c core.hooksPath=/dev/null -c core.fsmonitor= -c commit.gpgsign=false`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, the git configuration exported through the environment dropped, `GIT_TERMINAL_PROMPT=0` and literal pathspecs; an agent-written `.husky/pre-commit` under a relative `core.hooksPath` does not run and `git.commit` still commits; hooks in `.git/hooks` and in a repository-local `core.hooksPath` are ignored by every git tool, each of which still does its job; a `core.fsmonitor` script in the working tree does not run; the host's global and system configuration is ignored (no hook, no signing, no external diff, no host identity); `git.commit` commits with the repository's identity, unsigned, naming `maf` only for what the repository leaves unset. Each real-git case ends with a control in which plain git does run the hook. Not closed, and stated in SECURITY.md: repository configuration that names a program (`diff.external`, `textconv` and filter drivers, `gpg.program` with `log.showSignature`).
+
+### WP-2.15 Native crash: Kùzu query-result lifetime — `in-review` [core] · D-25 · found landing WP-2.12
+**Files:** `packages/memory-graph/src/{KuzuDriver.ts,types/kuzu.d.ts}`, `packages/cli/src/commands/goldens.ts` (comment only), `scripts/stress-native-lifecycle.mjs`, tests `packages/memory-graph/src/__tests__/native-lifetime.test.ts`, `packages/cli/src/__tests__/native-lifecycle.test.ts`.
+**Acceptance (as shipped):** the root cause is named — `KuzuDriver` never closed a `QueryResult`, whose finalizer could run after its `Database`'s and write into freed memory (also why `db.close()` "segfaulted"); each result is closed as soon as it is read; `close()` refuses later queries and closes the connection, then the database, once nothing is in flight, returning the database's address-space reservation; twenty graphs opened, used and closed in turn in one process all work; graphs dropped and garbage-collected leave the heap intact; a query in flight at `close()` finishes; five goldens stacks built, run and torn down in one process each reproduce the baseline. CI green on five consecutive attempts; no test skipped and no workflow changed. `maxDBSize` is left unset (a storage decision).
 
 ---
 

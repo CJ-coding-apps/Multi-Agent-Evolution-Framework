@@ -11,7 +11,7 @@ import {
   screenInstructionText, parsePlannerResponse,
   gateEvaluate, evolve,
 } from '../index.js';
-import type { EvolveOptions } from '../index.js';
+import type { EvolveOptions, HarnessEdit } from '../index.js';
 
 // ORACLE: the evolver's manifest screening and deterministic acceptance gate.
 
@@ -68,6 +68,39 @@ test('applyEdit is pure: prompt edit mints new harness, original untouched', () 
   assert.equal(cand.roleSet.roles[0]?.systemPrompt, 'be thorough');
   assert.notEqual(cand.sha, CURRENT.sha);
   assert.throws(() => applyEdit(CURRENT, { ...edit, role: 'ghost' }, 'c'), ManifestError);
+});
+
+/** One edit of every kind. None of them reaches the review requirement. */
+const EVERY_EDIT_KIND: HarnessEdit[] = [
+  { kind: 'edit_role_prompt',      role: 'coder', newPrompt: 'be thorough', rationale: 'r' },
+  { kind: 'adjust_tool_allowlist', role: 'coder', add: ['grep'], remove: [] },
+  { kind: 'retarget_model',        role: 'coder', model: 'm2' },
+  { kind: 'tune_role_budgets',     role: 'coder', maxToolIterations: 5 },
+  { kind: 'add_processor',         bundle: { name: 'transcript' } },
+  { kind: 'rebind_planner_recall', pastFailuresLimit: 3 },
+];
+
+test('applyEdit keeps the parent\'s review requirement: no edit kind drops it, none adds it', () => {
+  for (const required of [true, false]) {
+    const parent = mintHarnessConfig({
+      id: 'base', roleSet: CURRENT.roleSet, processorBundles: [], reviewGate: { required },
+    });
+    for (const edit of EVERY_EDIT_KIND) {
+      const child = applyEdit(parent, edit, 'c');
+      assert.deepEqual(child.reviewGate, { required }, `${edit.kind} on a parent with required: ${required}`);
+      // Hashed with the rest, so the child's sha says what its parent's did.
+      assert.notEqual(child.sha, applyEdit(CURRENT, edit, 'c').sha, edit.kind);
+    }
+  }
+  // A parent that says nothing has children that say nothing: their shas are what they were.
+  for (const edit of EVERY_EDIT_KIND) {
+    assert.equal('reviewGate' in applyEdit(CURRENT, edit, 'c'), false, edit.kind);
+  }
+  // Nor can a manifest carry it in: the field is outside the mutation surface.
+  assert.throws(() => assertChangeManifest({
+    edit: { kind: 'tune_role_budgets', role: 'coder', reviewGate: { required: false } },
+    expectedImprovement: 'y', targetTasks: [],
+  }), /not in the mutation surface/);
 });
 
 // ─── screening ─────────────────────────────────────────────────────────────

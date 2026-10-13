@@ -14,6 +14,9 @@
         "expectExit": 0
       }
     ],
+    "mustNotModify": [
+      "test.js"
+    ],
     "provenance": {
       "source": "human-decision",
       "ref": "seed corpus, authored 2026-09-09"
@@ -33,6 +36,9 @@
         ],
         "expectExit": 0
       }
+    ],
+    "mustNotModify": [
+      "test.js"
     ],
     "provenance": {
       "source": "human-decision",
@@ -54,6 +60,9 @@
         "expectExit": 0
       }
     ],
+    "mustNotModify": [
+      "test.js"
+    ],
     "provenance": {
       "source": "human-decision",
       "ref": "seed corpus, authored 2026-09-09"
@@ -73,6 +82,9 @@
         ],
         "expectExit": 0
       }
+    ],
+    "mustNotModify": [
+      "test.js"
     ],
     "provenance": {
       "source": "human-decision",
@@ -94,6 +106,9 @@
         "expectExit": 0
       }
     ],
+    "mustNotModify": [
+      "test.js"
+    ],
     "provenance": {
       "source": "human-decision",
       "ref": "seed corpus, authored 2026-09-09"
@@ -113,6 +128,9 @@
         ],
         "expectExit": 0
       }
+    ],
+    "mustNotModify": [
+      "test.js"
     ],
     "provenance": {
       "source": "human-decision",

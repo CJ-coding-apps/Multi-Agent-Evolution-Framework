@@ -1,5 +1,5 @@
 import { lstat, readFile } from 'node:fs/promises';
-import { parse as parseYaml } from 'yaml';
+import { LineCounter, isAlias, isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, visit } from 'yaml';
 import type { GraphQueryRunner, PolicyAction, PolicyPredicate, PolicyRule } from '@maf/types';
 import { makeToolId } from '@maf/types';
 import { PolicyEngine } from './PolicyEngine.js';
@@ -370,4 +370,105 @@ async function nameExists(p: string): Promise<boolean> {
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// ── Shared YAML reading for MAF's other configuration files (D-08) ─────────────────────────
+// `.maf/config.yaml` and `roles.yaml` load the way policy does. They read YAML through this
+// package rather than importing `yaml` themselves, so one parser, with one set of refusals,
+// stands behind every file under `.maf/` that shapes a run.
+
+/** A file that is not one valid YAML document, with where it stops being one. */
+export class YamlSyntaxError extends Error {
+  constructor(
+    readonly sourcePath: string,
+    readonly line:       number,
+    readonly column:     number,
+    readonly reason:     string,
+  ) {
+    super(`${JSON.stringify(sourcePath)} is not valid YAML at line ${line}, column ${column}: ${reason}`);
+    this.name = 'YamlSyntaxError';
+  }
+}
+
+/** A parsed YAML document: its plain value, and the source line of any part of it. */
+export interface YamlDocument {
+  /** The document as plain data; `null` when it is empty or holds only comments. */
+  readonly value: unknown;
+  /**
+   * The 1-based line of the entry at `at` (mapping keys and list indexes), or of the nearest
+   * enclosing entry that exists, so a missing field is placed at its parent.
+   */
+  lineOf(at: readonly (string | number)[]): number | undefined;
+}
+
+/**
+ * Parses `text` as exactly one YAML document, or throws a {@link YamlSyntaxError}. Like `parse`, it
+ * refuses a repeated key, a second document and an alias bomb; unlike it, it also refuses on a
+ * warning — an unresolved tag, which `parse` reports and then reads as a plain string — and on a
+ * `<<` key at any depth. YAML 1.2 has no merge keys, so `<<: *base` would load as an ordinary key
+ * named `<<` and the keys it was written to merge would be silently missing; a schema that checks
+ * only the keys it needs would never notice.
+ */
+export function parseYamlDocument(text: string, sourcePath: string): YamlDocument {
+  const counter = new LineCounter();
+  const doc = parseDocument(text, { lineCounter: counter, prettyErrors: false });
+  function fail(offset: number, reason: string): never {
+    const { line, col } = counter.linePos(offset);
+    throw new YamlSyntaxError(sourcePath, line, col, reason);
+  }
+  function lineAt(node: unknown): number | undefined {
+    return isNode(node) && node.range ? counter.linePos(node.range[0]).line : undefined;
+  }
+
+  const first = doc.errors[0] ?? doc.warnings[0];
+  if (first !== undefined) fail(first.pos[0], first.message);
+  visit(doc, {
+    Pair(_, pair) {
+      // An alias used as a key is checked as the key it stands for, and placed where it is used.
+      const key = isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
+      if (isScalar(key) && isMergeKey(key.value)) {
+        fail(
+          isNode(pair.key) ? (pair.key.range?.[0] ?? 0) : 0,
+          'the key "<<" asks for a YAML merge, which MAF does not perform; write the merged keys out in full.',
+        );
+      }
+    },
+  });
+  let value: unknown;
+  try {
+    value = doc.toJS({ maxAliasCount: 100 });
+  } catch (err) {
+    // Alias expansion is the one failure left after parsing; it has no position of its own.
+    fail(isNode(doc.contents) ? (doc.contents.range?.[0] ?? 0) : 0, messageOf(err));
+  }
+
+  return {
+    value,
+    lineOf(at) {
+      let node: unknown = doc.contents;
+      let line = lineAt(node);
+      for (const step of at) {
+        let next: unknown;
+        if (isMap(node)) {
+          const pair = node.items.find((p) => isScalar(p.key) && String(p.key.value) === String(step));
+          if (pair === undefined) break;
+          line = lineAt(pair.key) ?? line;
+          next = pair.value;
+        } else if (isSeq(node) && typeof step === 'number') {
+          next = node.items[step];
+          if (next === undefined) break;
+          line = lineAt(next) ?? line;
+        } else {
+          break;
+        }
+        node = next;
+      }
+      return line;
+    },
+  };
+}
+
+/** `<<` as written, or as a `%YAML 1.1` document resolves it: the merge-key symbol. */
+function isMergeKey(value: unknown): boolean {
+  return value === '<<' || (typeof value === 'symbol' && value.description === '<<');
 }

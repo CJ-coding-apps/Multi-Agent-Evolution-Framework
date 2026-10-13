@@ -114,3 +114,17 @@ test('stream runs through the injected spawnStreaming', async () => {
   assert.deepEqual(chunks, ['a', 'b']);
   assert.deepEqual(seen, ['codex', '--stream']);
 });
+
+// ORACLE (WP-2.1; cli-tier hardening). Codex's CLI has no verified way to ignore the MCP servers
+// in ~/.codex/config.toml (see the comment at the top of CodexAdapter.ts), so no isolation flag is
+// passed. Pinned so that adding one is a deliberate change, verified against a live binary first.
+
+test('invoke and sendTurn pass codex no MCP flag: there is no verified one to pass', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'done', stderr: '', exitCode: 0, duration: 1 });
+  const adapter = new CodexAdapter({ spawn });
+  await adapter.invoke({ ...CALL, model: 'o4' });
+  await adapter.sendTurn(HISTORY, { ...CALL, model: 'o4' });
+
+  assert.deepEqual(calls[0]?.args, ['--full-auto', '--model', 'o4']);
+  assert.deepEqual(calls[1]?.args, ['--model', 'o4']);
+});

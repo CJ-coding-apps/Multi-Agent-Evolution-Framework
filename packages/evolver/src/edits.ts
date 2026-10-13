@@ -154,5 +154,8 @@ export function applyEdit(current: HarnessConfig, edit: HarnessEdit, candidateId
     roleSet,
     processorBundles: bundles,
     ...(recall ? { plannerRecall: recall } : {}),
+    // No edit kind reaches the review requirement, so a child keeps its parent's: dropping it
+    // would let one evolve round turn a harness that required review into one that does not.
+    ...(current.reviewGate ? { reviewGate: current.reviewGate } : {}),
   });
 }

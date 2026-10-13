@@ -173,6 +173,10 @@ async function makeFixture(opts: {
     sessionId: 's1',
     runId: makeRunId('run-1'),
     harness,
+    // The writer cases here test the cli tier itself, which a writer reaches only with the
+    // run's consent (D-01); tier-default.test.ts covers the refusal and the banner.
+    allowUngoverned: true,
+    stderr: { write: () => true },
   });
   return {
     dispatcher, adapter: opts.adapter, transcript, policy, attestor, workDir,

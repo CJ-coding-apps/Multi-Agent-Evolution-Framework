@@ -1,8 +1,9 @@
 import type {
   Dag, DagNode, NodeId, RunId, AgentId, CliAdapter,
   AdapterInvokeOptions, BlackboardKey, BlackboardValue, RunOutcome, RunStatus,
+  FailureRecorder, NodeFailureRecord,
 } from '@maf/types';
-import { makeAgentId } from '@maf/types';
+import { makeAgentId, NodeFailure } from '@maf/types';
 import type { BlackboardStore } from '@maf/blackboard';
 import { NodeStateMachine } from './NodeStateMachine.js';
 import { withRetry } from './RetryOrchestrator.js';
@@ -26,7 +27,16 @@ export interface DagRunnerOptions {
   isWriter?:     (node: DagNode) => boolean;
   onNodeStart?:  (nodeId: NodeId) => void;
   onNodeEnd?:    (nodeId: NodeId, status: 'Succeeded' | 'Failed') => void;
+  /**
+   * Told about each node judged failed, once its retries are spent, so the planner can recall it
+   * (D-16). A seam rather than the graph, so the scheduler stays free of the graph backend.
+   */
+  failureRecorder?: FailureRecorder;
+  /** How long a failure is given to be recorded before the run moves on without it. Default 10 s. */
+  failureRecordTimeoutMs?: number;
 }
+
+const FAILURE_RECORD_TIMEOUT_MS = 10_000;
 
 export class DagRunner {
   private sm = new NodeStateMachine();
@@ -159,6 +169,9 @@ export class DagRunner {
       const error = err instanceof Error ? err.message : String(err);
       this.sm.transition(node.id, 'Failed', undefined, error);
       board.setDagState(node.id, 'Failed');
+      await recordFailure(
+        opts.failureRecorder, opts.failureRecordTimeoutMs ?? FAILURE_RECORD_TIMEOUT_MS, node, runId, err, error,
+      );
       opts.onNodeEnd?.(node.id, 'Failed');
     }
   }
@@ -166,4 +179,67 @@ export class DagRunner {
   getState(): ReturnType<NodeStateMachine['getAll']> {
     return this.sm.getAll();
   }
+}
+
+/**
+ * Hands a final failure to the recorder. Here, after `withRetry`, the verdict is settled, so an
+ * attempt that a retry recovers is never written down. The recorder is memory, not judgment: if
+ * it fails, or does not answer within `timeoutMs`, the node is still Failed for its own reason and
+ * the run goes on. The wait is bounded because the dispatch loop races this node's promise: a
+ * recorder that never settles would otherwise stall the whole run, not only this node.
+ */
+async function recordFailure(
+  recorder: FailureRecorder | undefined,
+  timeoutMs: number,
+  node: DagNode,
+  runId: RunId,
+  err: unknown,
+  message: string,
+): Promise<void> {
+  if (!recorder) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<'timed-out'>((resolve) => {
+    timer = setTimeout(() => resolve('timed-out'), timeoutMs);
+    timer.unref();
+  });
+  try {
+    const recorded = recorder.recordFailure(failureRecord(node, runId, err, message));
+    if (await Promise.race([recorded, timedOut]) === 'timed-out') {
+      console.error(`[dag] node ${node.id} failed, and recording that failure did not finish within ${timeoutMs} ms; the run goes on without it.`);
+    }
+  } catch (recordErr: unknown) {
+    console.error(`[dag] node ${node.id} failed, and recording that failure failed too:`, recordErr);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function failureRecord(node: DagNode, runId: RunId, err: unknown, message: string): NodeFailureRecord {
+  const description = node.metadata['taskDescription'];
+  const runTitle = node.metadata['runTitle'];
+  return {
+    runId,
+    nodeId:  node.id,
+    label:   node.label,
+    task:    typeof description === 'string' && description.trim() !== '' ? description : node.label,
+    ...(typeof runTitle === 'string' && runTitle.trim() !== '' ? { runTitle } : {}),
+    role:    node.agentRole,
+    reason:  failureReason(err),
+    message,
+    ...(err instanceof NodeFailure && err.exitCode !== undefined ? { exitCode: err.exitCode } : {}),
+  };
+}
+
+/**
+ * `NodeFailure.reason` when there is one; otherwise the error's class, which is what a planner can
+ * learn from. A plain `Error` (or an anonymous subclass) says nothing by its class, so its `name`,
+ * which code sets to tell such errors apart, is used instead.
+ */
+function failureReason(err: unknown): string {
+  if (err instanceof NodeFailure) return err.reason;
+  if (err instanceof Error) {
+    const cls = err.constructor.name;
+    return cls !== '' && cls !== 'Error' ? cls : (err.name || 'Error');
+  }
+  return 'non_error';
 }

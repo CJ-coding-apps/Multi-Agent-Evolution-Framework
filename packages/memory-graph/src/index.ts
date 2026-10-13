@@ -1,4 +1,5 @@
-export { MemoryGraph } from './MemoryGraph.js';
+export { MemoryGraph, recallFailures } from './MemoryGraph.js';
+export type { FailureRecallFilter, RecalledFailure } from './MemoryGraph.js';
 export { SCHEMA_DDL } from './schema.js';
 export { SubgraphQuery } from './SubgraphQuery.js';
 export { RunMerger } from './RunMerger.js';

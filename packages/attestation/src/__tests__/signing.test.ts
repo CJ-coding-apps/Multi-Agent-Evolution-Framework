@@ -8,7 +8,7 @@ import type { AttestationBundle, KeySource, SlsaBuilder, SlsaInvocation } from '
 import { makeRunId } from '@maf/types';
 import { Attestor, DEV_SIGNING_KEY } from '../Attestor.js';
 import { BundleSigner } from '../BundleSigner.js';
-import type { SigningOptions } from '../Attestor.js';
+import type { SignedRunStatement, SigningOptions } from '../Attestor.js';
 
 // ORACLE: D-13 (part 1) + audit P0 #8 — a bundle says which key signed it, inside the signature,
 // and a run on the public development key says so out loud, once.
@@ -42,8 +42,7 @@ async function withBundle(
 function resignedWithDevKey(bundle: AttestationBundle, keySource: KeySource): AttestationBundle {
   const { signature: _discarded, ...rest } = bundle;
   const claimed = { ...rest, keySource };
-  const signature = crypto.createHmac('sha256', DEV_SIGNING_KEY).update(JSON.stringify(claimed)).digest('hex');
-  return { ...claimed, signature };
+  return { ...claimed, signature: BundleSigner.signStatic(claimed, DEV_SIGNING_KEY) };
 }
 
 /** Runs `body` with process.stderr captured; returns its value and every chunk written to stderr. */
@@ -77,8 +76,8 @@ test('keySource: a bundle signed without a secret says "dev"; verify still passe
       'a dev-signed bundle does not pass a check against a real secret');
 
     // The persisted bundle, as a third party would read it, verifies the same way.
-    const onDisk = JSON.parse(await readFile(path.join(dir, 'r-key.bundle.json'), 'utf8')) as AttestationBundle;
-    assert.equal(onDisk.keySource, 'dev');
+    const onDisk = JSON.parse(await readFile(path.join(dir, 'r-key.bundle.json'), 'utf8')) as SignedRunStatement;
+    assert.equal(onDisk.predicate.keySource, 'dev');
     assert.deepEqual(Attestor.inspect(onDisk, {}), { valid: true, keySource: 'dev', legacy: false });
   });
 });

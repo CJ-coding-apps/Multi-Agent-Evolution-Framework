@@ -14,7 +14,8 @@
         "test.run"
       ],
       "policyTag": "coder",
-      "maxToolIterations": 12
+      "maxToolIterations": 12,
+      "expectsChange": true
     },
     {
       "role": "tester",

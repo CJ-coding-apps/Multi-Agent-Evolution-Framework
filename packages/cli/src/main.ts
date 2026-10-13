@@ -1,24 +1,27 @@
 #!/usr/bin/env node --max-old-space-size=8192
 import { Command } from 'commander';
+import { mafVersion } from '@maf/attestation';
 import { createAdapterRegistry } from './AdapterRegistry.js';
 import { registerRunCommand } from './commands/run.js';
 import { registerHarnessCommand } from './commands/harness.js';
 import { registerGoldensCommand } from './commands/goldens.js';
 import { registerEvolveCommand } from './commands/evolve.js';
 import { registerInProcessDemoCommand } from './commands/inprocessDemo.js';
+import { registerAttestCommand } from './commands/attest.js';
 
 const program = new Command();
 
 program
   .name('maf')
-  .description('Multi-Agent Framework — CLI-agnostic orchestration with LCM memory')
-  .version('0.2.1');
+  .description('Multi-Agent Framework — CLI-agnostic orchestration for code-modifying agents')
+  .version(mafVersion());
 
 registerRunCommand(program);
 registerHarnessCommand(program);
 registerGoldensCommand(program);
 registerEvolveCommand(program);
 registerInProcessDemoCommand(program);
+registerAttestCommand(program);
 
 // ── adapters list ─────────────────────────────────────────────────────────────
 program

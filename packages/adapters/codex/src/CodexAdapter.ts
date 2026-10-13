@@ -11,6 +11,13 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+// MCP isolation: none. Codex loads every server under `[mcp_servers.*]` in ~/.codex/config.toml,
+// and its CLI has no flag that ignores them. A `-c mcp_servers={}` override might, but whether a
+// table override replaces or merges into the configured one is not verified, and an argument the
+// binary rejects fails every call — so no flag is passed rather than one that may not work. The
+// README must say so (WP-2.13): "With --adapter codex, the Codex CLI connects to every MCP server
+// in your ~/.codex/config.toml; MAF cannot withhold them. Disable them there before a run."
+
 /**
  * The functions the adapter runs the `codex` binary through. Injectable so a test can stand in
  * for the binary and its failures; production uses the real spawner.
@@ -52,6 +59,10 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
    * `--system-prompt` flag, so the system block (role prompt + protocol + tool
    * catalog) is prepended to the serialized history on stdin. Intentionally does
    * NOT pass --full-auto: on this path MAF drives tool execution, not Codex.
+   *
+   * Native tools: still on. D-33 has a governed turn spawn its backend with every built-in
+   * tool off (Claude: `--tools ""`), but no Codex CLI flag is known to turn off its shell and
+   * file tools, so none is passed — one more reason `inProcessLoop` stays false above.
    */
   async sendTurn(history: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
     const systemBlock = buildTurnSystemPrompt(opts.systemPrompt, opts.tools);
@@ -82,6 +93,9 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       ? `${options.systemPrompt}\n\n${options.prompt}`
       : options.prompt;
 
+    // `--full-auto` is Codex's sandboxed automatic mode, on every cli-tier call: the planner's and the
+    // reviewer's too. It is documented (README.md, docs/SECURITY.md) and named in the UNGOVERNED banner.
+    // nativeTools: false — no Codex CLI flag is known to withhold its own tools, so none is passed.
     const args: string[] = ['--full-auto'];
     if (options.model) args.push('--model', options.model);
 

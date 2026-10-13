@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import type { VerifierRef } from './GoldenTask.js';
@@ -7,7 +7,8 @@ import type { VerifierRef } from './GoldenTask.js';
 const execFileAsync = promisify(execFile);
 
 export interface VerifierOutcome {
-  kind: VerifierRef['kind'];
+  /** A verifier's kind, or 'must-not-modify' for the task's protected-file check. */
+  kind: VerifierRef['kind'] | 'must-not-modify';
   passed: boolean;
   detail: string;
 }
@@ -77,4 +78,34 @@ export async function runVerifiers(vs: VerifierRef[], ctx: VerifierContext): Pro
   const outcomes: VerifierOutcome[] = [];
   for (const v of vs) outcomes.push(await runVerifier(v, ctx));
   return outcomes;
+}
+
+/** A file's bytes, or null when it is absent; a symlink counts as a change in its own right. */
+async function snapshot(file: string): Promise<Buffer | 'symlink' | null> {
+  try {
+    if ((await lstat(file)).isSymbolicLink()) return 'symlink';
+    return await readFile(file);
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
+ * The protected-file check (`mustNotModify`): each path must be byte-identical to the pristine
+ * fixture — not edited, deleted, created or swapped for a link. It runs before the verifiers,
+ * since a test script may itself write to the tree.
+ */
+export async function checkUnmodified(workDir: string, fixtureDir: string, paths: readonly string[]): Promise<VerifierOutcome> {
+  const changed: string[] = [];
+  for (const p of paths) {
+    const [before, after] = [await snapshot(path.join(fixtureDir, p)), await snapshot(path.join(workDir, p))];
+    const same = before === null || before === 'symlink'
+      ? before === after
+      : Buffer.isBuffer(after) && before.equals(after);
+    if (!same) changed.push(p);
+  }
+  return changed.length === 0
+    ? { kind: 'must-not-modify', passed: true, detail: `unchanged: ${paths.join(', ')}` }
+    : { kind: 'must-not-modify', passed: false, detail: `protected file(s) modified: ${changed.join(', ')}` };
 }

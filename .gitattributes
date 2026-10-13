@@ -1,0 +1,4 @@
+# Byte-exact on every checkout: the corpus sha and the committed default harness's sha hash
+# these files, so a line-ending conversion would change what a fresh clone measures.
+tests/goldens/** -text
+.maf/harnesses/*.json -text
