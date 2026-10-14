@@ -9,8 +9,10 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
-The Phase 3 readers work (WP-3.0b): a fifth built-in role, the built-in readers moved onto the governed
-in-process tier, and a `no_change` failure that names the policy rules which denied the node's own calls.
+The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b) land together here: the
+repository builds on pnpm 10 with a regenerated v9 lockfile, and a fifth built-in role joins a reader set
+moved onto the governed in-process tier, with a `no_change` failure that names the policy rules which denied
+the node's own calls.
 
 ### Added
 
@@ -35,6 +37,13 @@ in-process tier, and a `no_change` failure that names the policy rules which den
 
 ### Changed
 
+- **Toolchain floor** ([D-21](docs/DECISIONS.md), WP-2.11). The root `package.json` now declares `engines`
+  (Node ≥ 22, pnpm ≥ 10) and pins `packageManager: pnpm@10.34.7`, and names the two native modules whose
+  install scripts must run in `pnpm.onlyBuiltDependencies` (`kuzu`, `better-sqlite3`) — under pnpm 10 a
+  dependency's build scripts are skipped unless allow-listed, so without this the two native modules do not
+  build. `pnpm-lock.yaml` is regenerated to the v9 lockfile format; regenerating it re-resolved dependencies
+  that a caret range allowed to move. Developing maf now needs pnpm 10 and Node 22 or newer; CI installs and
+  caches pnpm 10 from the `packageManager` field.
 - **The built-in readers — `security`, `reviewer`, `analyst` — run in-process by default** ([D-44](docs/DECISIONS.md)).
   On the `cli` tier a read-only role is handed the backend's own file tools, and MAF's policy engine, secret
   redaction and attested tool calls exist only in-process, so an audit or a review that only reads is now

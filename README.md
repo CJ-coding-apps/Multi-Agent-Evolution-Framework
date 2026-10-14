@@ -46,7 +46,7 @@ What is true of the code as of 0.3.1. Prose elsewhere in this README describes o
 | `maf inprocess-demo` (offline by default) | shipped | 0.1.0 | `cli/demo-fixture.test.ts`, `cli/inprocess-demo.test.ts`; e2e |
 | The agent's `git.*` tools run with hooks, `core.fsmonitor` and commit signing off, ignore the host's git configuration, and act only on the run's own working tree; `fs.write`, `fs.delete` and `patch.apply` refuse any path into `.git` | shipped | 0.3.0 | `tools/git-isolation.test.ts`, `tools/git-args.test.ts`, `tools/worktree-confinement.test.ts` |
 | Backends: Claude Code, Gemini, Codex (CLI); Ollama, OpenRouter (HTTP) | shipped | 0.1.0 | `adapters/claude/ClaudeAdapter.test.ts`, `adapters/codex/CodexAdapter.test.ts`, `adapters/gemini/GeminiAdapter.test.ts`, `adapters/openrouter/OpenRouterAdapter.test.ts`, `adapters/openrouter/transport.test.ts`, `adapters/ollama/OllamaAdapter.test.ts`, `adapters/ollama/transport.test.ts`, `adapters/base/ProcessSpawner.test.ts`; the CLI adapters are tested with a stand-in spawner, not the real binaries |
-| Toolchain floor ([D-21](docs/DECISIONS.md)): `engines` declares Node ≥ 22, pnpm 10, a `maf` bin that runs from `PATH` on Linux and macOS | planned | not in this build (WP-2.11) | — the root `package.json` declares no `engines` and pins pnpm 8.15.1, and `packages/cli`'s shebang passes a flag through `env`, which Linux does not split |
+| Toolchain floor ([D-21](docs/DECISIONS.md)): `engines` declares Node ≥ 22, pnpm 10, a `maf` bin that runs from `PATH` on Linux and macOS | shipped | 0.4.0 | the root `package.json` pins `packageManager: pnpm@10.34.7` with `engines` and `pnpm.onlyBuiltDependencies`; `pnpm-lock.yaml` is v9; `cli/shebang.test.ts` runs the built bin through its shebang |
 | Docker image | planned | not scheduled | — |
 | npm packages (nothing is published) | planned | not scheduled | — |
 
@@ -70,7 +70,7 @@ What is true of the code as of 0.3.1. Prose elsewhere in this README describes o
 ### Prerequisites
 
 - **Node 22.** It is the version CI builds and tests on.
-- **pnpm 8.15.1**, through corepack: `corepack enable` provides the version named in `package.json`'s `packageManager` field.
+- **pnpm 10**, through corepack: `corepack enable` provides the version named in `package.json`'s `packageManager` field (currently `pnpm@10.34.7`).
 - **git.** The target directory of `maf run` must be in a git repository, with at least one commit unless you pass `--no-worktree`: a run's worktree starts from HEAD, and a writer role's change is reviewed as a diff against the commit its node started from.
 - **npm.** `test.run`, and so the demo, runs `npm test` in a project where it recognises no other test runner.
 - **Native modules.** `kuzu` (0.7.1) and `better-sqlite3` (11.x) need a prebuilt binary for your platform and Node version; where none exists, installing them means compiling from source, which needs a C++ toolchain.
