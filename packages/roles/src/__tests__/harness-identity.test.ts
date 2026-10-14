@@ -68,16 +68,15 @@ function git(root: string, ...args: string[]): Promise<void> {
 }
 
 /**
- * Writes a file in the fixture's `.maf` and commits it. Every node is diffed against the commit it
- * started from (F7), so the tree a run dispatches in has to be clean — as a real user's is when
- * they run maf. Without the commit, a test that edits a prompt file between runs would fail the
- * next reader node with `unexpected_change` for a change the test made.
+ * Writes a file in the fixture's `.maf` and leaves it uncommitted. A reader's turn is bracketed
+ * between two working-tree snapshots (F7), so a change already present when the turn begins sits
+ * in both snapshots and cancels — the tree stays clean from the reader's point of view whether or
+ * not the edit is committed. Leaving it uncommitted is deliberate: it is the regression test for a
+ * guard that diffed a reader against its start commit instead, which would fail here for a change
+ * the test itself made.
  */
-async function writeCommitted(mafDir: string, relPath: string, content: string): Promise<void> {
+async function writeUncommitted(mafDir: string, relPath: string, content: string): Promise<void> {
   await writeFile(path.join(mafDir, relPath), content, 'utf8');
-  const root = path.dirname(mafDir);
-  await git(root, 'add', '-A');
-  await git(root, 'commit', '-qm', 'config change');
 }
 
 async function withMafDir(fn: (mafDir: string) => Promise<void>): Promise<void> {
@@ -86,8 +85,9 @@ async function withMafDir(fn: (mafDir: string) => Promise<void>): Promise<void> 
   await mkdir(path.join(mafDir, 'prompts'), { recursive: true });
   await writeFile(path.join(mafDir, 'roles.yaml'), rolesYaml('reads code'), 'utf8');
   await writeFile(path.join(mafDir, 'prompts', 'analyst.md'), 'You are the analyst, v1.', 'utf8');
-  // The analyst is a reader, and a reader's turn is diffed (F7): the fixture is a repository with
-  // one commit, so a run that changes nothing diffs clean.
+  // The analyst is a reader, so its turn is bracketed between two tree snapshots (F7), and those
+  // need a repository: the fixture is one, with a single base commit. A turn that changes nothing
+  // then diffs clean, committed or not.
   await git(root, 'init', '-q');
   await git(root, 'add', '-A');
   await git(root, 'commit', '-qm', 'base');
@@ -210,7 +210,7 @@ test('a plain run: the attestation digest is the dispatched harness, and editing
       'the harness the attestation names hands out exactly the prompt that was dispatched');
 
     // Edit only the prompt file.
-    await writeCommitted(mafDir, 'prompts/analyst.md', 'You are the analyst, v2.');
+    await writeUncommitted(mafDir, 'prompts/analyst.md', 'You are the analyst, v2.');
     const second = await plainRun(mafDir, 'run-2');
     const digest2 = second.bundle.provenance.invocation.configSource.digest.sha256;
     assert.equal(digest2, second.harness.sha);
@@ -221,7 +221,7 @@ test('a plain run: the attestation digest is the dispatched harness, and editing
     assert.equal(await promptNamedBy(second.store, digest1, mafDir), 'You are the analyst, v1.');
 
     // Edit only roles.yaml.
-    await writeCommitted(mafDir, 'roles.yaml', rolesYaml('reads code carefully'));
+    await writeUncommitted(mafDir, 'roles.yaml', rolesYaml('reads code carefully'));
     const third = await plainRun(mafDir, 'run-3');
     const digest3 = third.bundle.provenance.invocation.configSource.digest.sha256;
     assert.equal(digest3, third.harness.sha);
@@ -239,7 +239,7 @@ test('a plain run: the attestation digest is the dispatched harness, and editing
 test('a pinned harness dispatches the prompt text it carries, whatever the prompt file says now', async () => {
   await withMafDir(async (mafDir) => {
     const first = await plainRun(mafDir, 'run-1');
-    await writeCommitted(mafDir, 'prompts/analyst.md', 'You are the analyst, v2.');
+    await writeUncommitted(mafDir, 'prompts/analyst.md', 'You are the analyst, v2.');
     const pinned = await plainRun(mafDir, 'run-2', first.harness.sha);
     assert.equal(pinned.harness.sha, first.harness.sha);
     assert.equal(pinned.dispatchedPrompt, 'You are the analyst, v1.');

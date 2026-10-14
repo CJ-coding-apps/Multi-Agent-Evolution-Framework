@@ -175,7 +175,7 @@ test('runtime state a .gitignore already ignores — the .maf/.gitignore maf wri
   }
 });
 
-// ── snapshotTree / diffTrees: the bracket that attributes a reader's own turn (F7, D-41) ──
+// ── snapshotTree / diffTrees: the bracket that attributes a reader's own turn (F7, D-42) ──
 
 test('a turn that changed nothing keeps its tree id, and a turn that did diffs only what it changed', async () => {
   const repo = await makeRepo('maf-snapshot-bracket-');
