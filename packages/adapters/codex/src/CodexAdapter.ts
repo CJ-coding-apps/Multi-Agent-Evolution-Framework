@@ -116,8 +116,9 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       ...(result.transportError !== undefined ? { transportError: result.transportError } : {}),
       // The cli-tier call's model-facing surface (WP-3.0c). The argv has no payload positional — the
       // binary takes the prompt on stdin — so it is carried verbatim; the prompt digest is of what
-      // was composed, and codex receives it joined with the system block on that stream.
-      modelSurface: cliModelSurface(options.systemPrompt, options.prompt, args, result.stdout),
+      // was composed and `stdinSha256` of the blob codex was actually written, which joins the
+      // system block and the prompt (F7): the two parts do not by themselves say what was sent.
+      modelSurface: cliModelSurface(options.systemPrompt, options.prompt, args, result.stdout, fullPrompt),
     };
   }
 

@@ -27,19 +27,24 @@ export function elided(name: string, value: string): string {
  * MAF sent, the digest of the output it received, and the backend argv — passed already elided by
  * the adapter, because only that adapter knows its own argv's payload positions. `toolCatalog` is
  * `''`: MAF sends a cli-tier backend no catalogue of its own; the backend's tools are what its argv
- * restricts, and the argv is carried verbatim so that restriction is readable.
+ * restricts, and the argv is carried verbatim so that restriction is readable. `stdin` is passed by
+ * an adapter that writes its prompt to the child's stdin — codex joins the system block and the
+ * prompt into one blob there (F7), so the two part-digests above do not by themselves say what was
+ * sent; an adapter with no stdin leaves it undefined and the field is absent.
  */
 export function cliModelSurface(
   systemPrompt: string | undefined,
   prompt: string,
   argv: readonly string[],
   output: string,
+  stdin?: string,
 ): ModelSurface {
   return {
     systemPromptSha256: sha256Hex(systemPrompt ?? ''),
     promptSha256:       sha256Hex(prompt),
     toolCatalog:        '',
     outputSha256:       sha256Hex(output),
+    ...(stdin !== undefined ? { stdinSha256: sha256Hex(stdin) } : {}),
     argv:               [...argv],
   };
 }

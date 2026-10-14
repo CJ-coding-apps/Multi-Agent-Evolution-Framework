@@ -617,14 +617,16 @@ test('cli tier: a role call records its model surface with tier "cli", and mirro
 
     assert.deepEqual(
       f.attestor.surfaces,
-      [{ role: 'analyst', taskId: makeTaskId('n1'), turn: 1, ...SURFACE, tier: 'cli' }],
-      'the same evidence shape as a governed turn, one record, marked cli',
+      [{ role: 'analyst', taskId: makeTaskId('n1'), turn: 1, ...SURFACE, tier: 'cli', nativeTools: 'read-only' }],
+      'the same evidence shape as a governed turn, one record, marked cli — and what the dispatcher ' +
+        'asked of the backend\'s own tools (F3), which for codex and gemini no argv can show',
     );
     const note = f.transcript.entries.find((e) => e.content.startsWith('[surface]'));
     assert.ok(note, 'the surface reaches the transcript too');
     assert.equal(note.metadata['tier'], 'cli');
     assert.equal(note.metadata['agentRole'], 'analyst');
     assert.equal(note.metadata['systemPromptSha256'], SURFACE.systemPromptSha256);
+    assert.equal(note.metadata['nativeTools'], 'read-only', 'the asked-for tool posture rides with the surface line');
     assert.deepEqual(note.metadata['argv'], SURFACE.argv);
   } finally {
     await f.cleanup();
@@ -646,11 +648,16 @@ test('cli tier: an adapter that reports no model surface records none — absent
   }
 });
 
-test('F7 window: a change during a reader\'s turn is attributed to the writer holding the lock, and the node does not fail (WP-3.0c)', async () => {
-  const adapter = new WritingCliAdapter();
+test('F2: an in-process reader is not failed for a writer still holding the lock across its turn (WP-3.0c)', async () => {
+  const adapter = new WritingTurnAdapter();
+  adapter.turnsToServe = [{ text: 'Reviewed. APPROVED.', toolCalls: [] }];
   const writer = makeNodeId('writer-elsewhere');
-  const ledger: WriterLockLedger = { enter() {}, exit() {}, writerOverlapping: () => writer };
-  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: (id) => id === writer, // the writer is still running: its own gates have not read the tree yet
+  };
+  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
   try {
     const out = await f.dispatcher.runNode(makeNode(ANALYST));
     const output = out['output'];
@@ -662,7 +669,14 @@ test('F7 window: a change during a reader\'s turn is attributed to the writer ho
     assert.equal(attributed?.nodeId, 'n1');
     assert.equal(attributed?.attributedTo, writer, 'named to the writer that held the lock across the turn');
     assert.match(attributed?.diffSha256 ?? '', /^[0-9a-f]{64}$/, 'a digest of the diff, not the diff text');
-    assert.equal(f.attestor.diffHashes.length, 0, 'and not charged to the reader as its own diff');
+    assert.ok(
+      f.attestor.diffHashes.some((h) => h.key === 'n1.attributed.diff'),
+      'the bracket diff is a subject of the run\'s statement, so the digest above points at bytes in the bundle (F2)',
+    );
+    assert.equal(
+      f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), false,
+      'and it is not charged to the reader as its own diff',
+    );
 
     const note = f.transcript.entries.find((e) => e.content.startsWith('[attributed]'));
     assert.ok(note, 'the attribution reaches the transcript');
@@ -673,41 +687,67 @@ test('F7 window: a change during a reader\'s turn is attributed to the writer ho
   }
 });
 
-test('F7 window: with no concurrent writer, a reader\'s changed tree still fails exactly as before (WP-3.0c)', async () => {
-  const adapter = new WritingCliAdapter();
-  const ledger: WriterLockLedger = { enter() {}, exit() {}, writerOverlapping: () => undefined };
-  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
+test('F2: a finished writer whose reviewed diff does not hold the path does not excuse the reader (WP-3.0c)', async () => {
+  // The heart of F2: overlapping in time is not evidence of authorship. The writer released the lock,
+  // but nothing it reviewed carries `sneaky.txt` (no entry in `reviewedPaths` at all here), so the
+  // change belongs to no gate and must fail the reader rather than be credited to it.
+  const adapter = new WritingTurnAdapter();
+  const writer = makeNodeId('writer-elsewhere');
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: () => false, // it finished — and its reviewed diff holds nothing this turn showed
+  };
+  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
   try {
     const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
-    assert.equal(failure.reason, 'unexpected_change', 'no writer to attribute to, so the node fails');
+    assert.equal(failure.reason, 'unexpected_change', 'a writer whose diff does not hold the path answers for nothing');
     assert.match(failure.message, /sneaky\.txt/);
     assert.equal(f.attestor.attributed.length, 0);
-    assert.equal(f.attestor.diffHashes.length, 1, 'and the change is recorded as the reader\'s own');
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'and the change is recorded as the reader\'s own');
   } finally {
     await f.cleanup();
   }
 });
 
-test('F7 window: the reader guard excludes its own node, so a cli-tier reader is not handed its own turn (WP-3.0c)', async () => {
-  // A cli-tier reader holds the lock itself, so a real ledger holds an interval that overlaps the
-  // reader's own bracket. The guard must exclude the reader's node id, or the reader would be
-  // attributed a change it made. The stub stands in for a ledger whose only interval is this node's:
-  // it answers with the reader's own id unless that id is excluded — the exact hazard `exclude` closes.
+test('F7 window: with no concurrent writer, a reader\'s changed tree still fails exactly as before (WP-3.0c)', async () => {
+  const adapter = new WritingTurnAdapter();
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {}, writersOverlapping: () => [], isHolding: () => false,
+  };
+  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change', 'no writer to attribute to, so the node fails');
+    assert.match(failure.message, /sneaky\.txt/);
+    assert.equal(f.attestor.attributed.length, 0);
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'and the change is recorded as the reader\'s own');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F4: a cli-tier reader is never handed a writer — the ledger is not consulted on that tier (WP-3.0c)', async () => {
+  // A cli-tier reader holds the writer lock itself (the scheduler serializes every cli-tier role,
+  // D-01/A3), so no other writer can have been running and any change the bracket shows is its own.
+  // The ledger would name a writer if asked; it must not be asked. This is the live-row hazard: an
+  // attribution here would let a cli-tier reader edit the tree and pass.
   const adapter = new WritingCliAdapter();
-  const seenExcludes: Array<string | undefined> = [];
+  const writer = makeNodeId('writer-elsewhere');
+  let consulted = false;
   const ledger: WriterLockLedger = {
     enter() {}, exit() {},
-    writerOverlapping: (_from, _to, exclude) => {
-      seenExcludes.push(exclude);
-      return exclude === makeNodeId('n1') ? undefined : makeNodeId('n1');
-    },
+    writersOverlapping: () => { consulted = true; return [writer]; },
+    isHolding: () => { consulted = true; return true; },
   };
   const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
   try {
     const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
-    assert.deepEqual(seenExcludes, ['n1'], 'the guard asked with its own node id excluded');
-    assert.equal(failure.reason, 'unexpected_change', 'its own change is not credited to a phantom writer');
-    assert.equal(f.attestor.attributed.length, 0);
+    assert.equal(failure.reason, 'unexpected_change', 'its own change, on the tier where no other writer can be running');
+    assert.match(failure.message, /sneaky\.txt/);
+    assert.equal(consulted, false, 'the ledger is not consulted on the cli tier at all (F4)');
+    assert.equal(f.attestor.attributed.length, 0, 'no attribution — this is exactly the F4 live row');
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is a subject of the run\'s statement');
   } finally {
     await f.cleanup();
   }

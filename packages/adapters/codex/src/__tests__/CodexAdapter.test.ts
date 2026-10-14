@@ -151,4 +151,12 @@ test('invoke records the cli-tier model surface; codex\'s prompt is on stdin, no
     surface.argv, ['--full-auto', '--model', 'o4'],
     'no payload positional: the prompt travels on stdin, so the argv is verbatim',
   );
+  // F7: codex writes one blob to stdin joining the system block and the prompt, and digests the two
+  // parts separately — so neither part digest alone says what codex was actually written. This is
+  // that blob's digest, and it is the only field that ties `argv` (which carries no prompt at all)
+  // to the text that reached the child.
+  assert.equal(surface.stdinSha256, sha256Hex('be brief\n\nsay hi'),
+    'the stdin digest is of the joined blob, not of either part');
+  assert.notEqual(surface.stdinSha256, surface.promptSha256,
+    'and it is distinct from the prompt digest, so it is not a second copy of it');
 });

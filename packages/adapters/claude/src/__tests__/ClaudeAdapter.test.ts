@@ -296,6 +296,8 @@ test('a prompt that starts with a dash follows --, on invoke, stream and sendTur
 const sha256Hex = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 const elided = (name: string, value: string): string =>
   `<${name}: ${Buffer.byteLength(value, 'utf8')} bytes, sha256 ${sha256Hex(value)}>`;
+/** The sha256 an elided marker carries, so a test can tie it to the digest the record holds (F7). */
+const markerSha = (marker: string): string => /sha256 ([0-9a-f]{64})/.exec(marker)?.[1] ?? '';
 
 /** A tool the loop would advertise: only id, permissionLevel, description and an input shape matter here. */
 const TOOLS: ToolPlugin[] = [
@@ -366,4 +368,9 @@ test('invoke records the cli-tier model surface, its own argv elided (WP-3.0c)',
   // The recorded digest is over the bytes that reached the binary, not a second derivation of them.
   assert.equal(surface.argv.at(-1), elided('prompt', String(calls[0]?.args.at(-1))));
   assert.equal(calls[0]?.args.at(-1), 'say hi', 'the binary itself still got the prompt');
+  // F7: the record's digest and the digest written into its own argv marker are computed in two
+  // places; tying them is what makes the argv a *check* on the record rather than a second copy of
+  // it — an elision that hashed different bytes than the record would show here.
+  assert.equal(surface.promptSha256, markerSha(surface.argv.at(-1) ?? ''), 'the prompt digest is the marker\'s');
+  assert.equal(surface.systemPromptSha256, markerSha(surface.argv[2] ?? ''), 'and so is the system-prompt digest');
 });
