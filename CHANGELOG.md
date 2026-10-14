@@ -73,20 +73,20 @@ a writer running concurrently with a reader is attributed to that writer rather 
   the one change that bracket cannot separate on its own is a writer editing the tree *during* the reader's
   turn. The scheduler already serializes writers (A3); it now stamps a `WriterLockLedger` of hold intervals
   where it takes and releases the writer lock, and `RoleDispatcher` asks it — for a reader whose bracket
-  shows a change — who held the lock across the reader's turn. When a writer did, the node no longer fails:
-  `{nodeId, attributedTo, diffSha256}` is recorded in the bundle's new `attributedChanges` field and in the
-  transcript, and the change is judged where every writer's change is judged, against that writer's own start
-  commit by the security gate that reviews it. A writer answers only on evidence, never on overlap alone: it
-  is named when it has finished and every path in the bracket diff is in the diff its own post-coder gate
-  reviewed, or when it still holds the lock at the reader's end snapshot; with more than one candidate, the
-  one whose diff actually holds the paths is named, and timing alone names nobody. With no such writer, the
-  guard is unchanged — `unexpected_change`, the diff recorded as the reader's own, and the bracket diff kept
-  as a subject under `<node>.attributed.diff` whenever a change is attributed. The ledger is not consulted at
-  all for a `cli`-tier reader: it holds the writer lock itself, so no other writer can have been running and
-  any change the bracket shows is its own. `run` is the only command that wires the shared ledger;
-  `wiring.ts` — behind the single-node dispatchers `goldens` and `evolve` — builds no ledger, so
-  `attributableWriter` returns nothing there and those readers fail closed, the pre-3.0c behaviour. This
-  supersedes the sentence above about a reader failing while attribution is pending.
+  shows a change — which writer to attribute that change to. A writer answers only on evidence, never on
+  overlap alone. Two conditions qualify one, tried in this order: the writer **still holds the lock** and its
+  post-coder gate has **not yet run** for this attempt, so the gate it is about to run will read the change;
+  or the writer has **finished**, its reviewed diff holds **every path** the bracket showed, and those paths
+  are **unchanged** between the tree its gate read and the reader's end tree. When a writer qualifies, the
+  node no longer fails: `{nodeId, attributedTo, diffSha256}` is recorded in the bundle's new
+  `attributedChanges` field and in the transcript, the bracket diff is kept as a subject under
+  `<node>.attributed.diff`, and the change is judged where every writer's change is judged, against that
+  writer's own start commit by the security gate that reviews it. A change no writer qualifies for is the
+  reader's own: `unexpected_change`, the diff recorded under the reader's node, failing as before. The ledger
+  is not consulted at all for a `cli`-tier reader: it holds the writer lock itself, so no other writer can
+  have been running and any change the bracket shows is its own. `run` is the only command that wires the
+  shared ledger; `wiring.ts` — behind the single-node dispatchers `goldens` and `evolve` — builds no ledger,
+  so `attributableWriter` returns nothing there and those readers fail closed, the pre-3.0c behaviour.
 - The committed default harness re-mints and the offline goldens baseline moves once more, because the role
   set changed — a fifth role (`analyst`), and `security` and `reviewer` now carry `execution: 'in-process'`
   (this repository's `.maf/roles.yaml` follows the built-in set, except that its `tester` also holds

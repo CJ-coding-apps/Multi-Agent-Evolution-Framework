@@ -146,7 +146,7 @@ function makeNode(role: RoleName, description = 'do the thing'): DagNode {
 
 interface Fixture {
   dispatcher: RoleDispatcher;
-  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter;
+  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter | MidTurnWriterAdapter;
   transcript: ReturnType<typeof makeTranscriptRecorder>;
   policy: ReturnType<typeof makePolicy>;
   attestor: ReturnType<typeof makeAttestor>;
@@ -158,19 +158,25 @@ const execFileAsync = promisify(execFile);
 
 async function makeFixture(opts: {
   roleExecution: 'cli' | 'in-process';
-  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter;
+  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter | MidTurnWriterAdapter;
   policyHandler: (toolId: string, input: ToolInput) => PolicyDecision;
   bundles?: HarnessConfig;
   /** The one role the set defines; read-only `analyst` unless a test needs a writer. */
   role?: RoleName;
   allowedTools?: string[];
+  /** Several roles, for a test that needs a writer and a reader in one registry (N2's rule (b)). */
+  roles?: Array<{ role: RoleName; allowedTools: string[]; execution: 'cli' | 'in-process' }>;
   /** The scheduler's writer-lock ledger (WP-3.0c); absent, the reader guard keeps its pre-3.0c behaviour. */
   writerLockLedger?: WriterLockLedger;
 }): Promise<Fixture> {
   const workDir = await mkdtemp(path.join(tmpdir(), 'maf-dispatch-'));
   await writeFile(path.join(workDir, 'hello.txt'), 'hello-world', 'utf8');
-  const roleName = opts.role ?? ANALYST;
-  const allowedTools = opts.allowedTools ?? ['fs.read'];
+  const roleSpecs = opts.roles ?? [{
+    role: opts.role ?? ANALYST,
+    allowedTools: opts.allowedTools ?? ['fs.read'],
+    execution: opts.roleExecution,
+  }];
+  const roleName = roleSpecs[0]!.role;
   // Every node captures a start commit before it runs (F7), so the fixture is a repository with
   // one commit whatever the role holds: a writer's baseline is what its post-coder gates diff
   // against, and a reader's is what the `unexpected_change` guard diffs against. A role holding
@@ -181,20 +187,24 @@ async function makeFixture(opts: {
   const roles = RoleRegistry.fromSet({
     version: 1,
     defaultRole: roleName,
-    roles: [{
-      role: roleName,
+    roles: roleSpecs.map((r) => ({
+      role: r.role,
       systemPrompt: 'analyze',
-      allowedTools: allowedTools.map(makeToolId),
-      execution: opts.roleExecution,
+      allowedTools: r.allowedTools.map(makeToolId),
+      execution: r.execution,
       maxToolIterations: 4,
-    }],
+    })),
   }, workDir);
   const transcript = makeTranscriptRecorder();
   const policy = makePolicy(opts.policyHandler);
   const attestor = makeAttestor();
   const harness = opts.bundles ?? mintHarnessConfig({
     id: 'test',
-    roleSet: { version: 1, defaultRole: roleName, roles: [{ role: roleName, allowedTools, execution: opts.roleExecution }] },
+    roleSet: {
+      version: 1,
+      defaultRole: roleName,
+      roles: roleSpecs.map((r) => ({ role: r.role, allowedTools: r.allowedTools, execution: r.execution })),
+    },
     processorBundles: [{ name: 'transcript' }, { name: 'policy-audit' }],
   });
   const dispatcher = new RoleDispatcher({
@@ -602,6 +612,9 @@ const SURFACE = {
   promptSha256:       'b'.repeat(64),
   toolCatalog:        '',
   outputSha256:       'c'.repeat(64),
+  // Only a codex call sets this — it writes the system block and the prompt to the child's stdin as
+  // one blob, so the two part-digests above cannot by themselves say what was sent (F7).
+  stdinSha256:        'd'.repeat(64),
   argv:               ['--print', '--tools', '', '-p', '--', '<prompt: 6 bytes, sha256 bbbbbb…>'],
 };
 
@@ -627,6 +640,11 @@ test('cli tier: a role call records its model surface with tier "cli", and mirro
     assert.equal(note.metadata['agentRole'], 'analyst');
     assert.equal(note.metadata['systemPromptSha256'], SURFACE.systemPromptSha256);
     assert.equal(note.metadata['nativeTools'], 'read-only', 'the asked-for tool posture rides with the surface line');
+    // F7: both text digests and the stdin digest ride with the line, so the transcript alone ties the
+    // argv's elided markers to what was sent and the output to what came back.
+    assert.equal(note.metadata['promptSha256'], SURFACE.promptSha256, 'the prompt digest rides');
+    assert.equal(note.metadata['outputSha256'], SURFACE.outputSha256, 'and so does the output digest');
+    assert.equal(note.metadata['stdinSha256'], SURFACE.stdinSha256, 'and the stdin digest a codex call carries');
     assert.deepEqual(note.metadata['argv'], SURFACE.argv);
   } finally {
     await f.cleanup();
@@ -748,6 +766,100 @@ test('F4: a cli-tier reader is never handed a writer — the ledger is not consu
     assert.equal(consulted, false, 'the ledger is not consulted on the cli tier at all (F4)');
     assert.equal(f.attestor.attributed.length, 0, 'no attribution — this is exactly the F4 live row');
     assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is a subject of the run\'s statement');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+/**
+ * A reader whose turn commits a second file and drives a writer node in the middle of that turn —
+ * so the writer's own gate runs while the reader's bracket is still open. That interleaving puts a
+ * path in the reader's bracket which the writer's gate tree still carries unchanged, yet which the
+ * writer never reviewed: the reader commits `other.ts` first, so the writer's *start commit* already
+ * holds the reader's new content and its own diff never mentions the path, while the reader's
+ * bracket (start tree → end tree) does. Without a second thread — `runNode` is re-entrant here, and
+ * the nested call is the writer's whole turn.
+ *
+ * `fixture` is assigned right after `makeFixture` returns (the fixture is built from this adapter).
+ */
+class MidTurnWriterAdapter implements TurnAdapter {
+  readonly name = 'mid-turn';
+  fixture!: Fixture;
+  private writerTurns = 0;
+  constructor(private readonly writerNode: DagNode) {}
+  capabilities(): AdapterCapabilities { return CAPS; }
+  async isAvailable(): Promise<boolean> { return true; }
+  async invoke(_o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    throw new Error('every role here runs the in-process loop');
+  }
+  async *stream(): AsyncGenerator<string> { yield 'x'; }
+  async sendTurn(_h: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
+    // Identify the writer by the tool registry the role holds, not by `opts.prompt`: the in-process
+    // loop passes the constant `'[turn]'` placeholder, so only the role's tools tell the two apart.
+    const isWriter = (opts.tools ?? []).some((t) => t.id === makeToolId('fs.write'));
+    if (isWriter) {
+      this.writerTurns += 1;
+      if (this.writerTurns === 1) {
+        return {
+          text: 'writing the feature',
+          toolCalls: [{ toolUseId: 'w1', toolName: 'fs.write', input: { path: 'feature.ts', content: 'export const feature = 2;\n' } }],
+        };
+      }
+      return { text: 'wrote feature.ts', toolCalls: [] };
+    }
+    // The reader: commit `other.ts` to a new content, so the nested writer's start commit already
+    // carries it, then run the writer node — whose gate reads this very tree.
+    await writeFile(path.join(opts.workingDir, 'other.ts'), 'reader-committed\n', 'utf8');
+    await execFileAsync('git', ['add', '-A'], { cwd: opts.workingDir });
+    await execFileAsync('git',
+      ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'reader'],
+      { cwd: opts.workingDir });
+    await this.fixture.dispatcher.runNode(this.writerNode);
+    return { text: 'investigated the code', toolCalls: [] };
+  }
+}
+
+test('N2: a writer that reviewed one of the two bracket paths does not excuse the reader (kills MB2)', async () => {
+  // The bracket shows two changed paths and the only overlapping writer reviewed one of them. Its own
+  // gate tree equals the reader's end tree — content-unchanged holds for both paths — so the
+  // reviewed-path check is the *only* thing that can refuse it. `paths.every` → `paths.some` would
+  // name the writer for a change it never reviewed, which is D-42's fail-open; this pins `every`.
+  const WRITER = defineRoleName('coder');
+  const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: () => false, // it finished: judged by its reviewed diff, not by the lock
+  };
+  const adapter = new MidTurnWriterAdapter(writerNode);
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
+  adapter.fixture = f;
+  const git = (args: string[]) => execFileAsync('git', args, { cwd: f.workDir });
+  try {
+    await writeFile(path.join(f.workDir, 'feature.ts'), 'export const feature = 1;\n', 'utf8');
+    await writeFile(path.join(f.workDir, 'other.ts'), 'committed\n', 'utf8');
+    await git(['add', '-A']);
+    await git(['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'two']);
+
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+
+    assert.equal(failure.reason, 'unexpected_change',
+      'a writer that did not review one of the two bracket paths answers for nothing');
+    assert.match(failure.message, /other\.ts/, 'the unreviewed path is named');
+    assert.equal(f.attestor.attributed.length, 0, 'no attribution — this is the case `every` → `some` would excuse');
+    assert.ok(
+      f.attestor.diffHashes.some((h) => h.key === 'writer-elsewhere.diff' && /feature\.ts/.test(h.diff)),
+      'the writer did gate on feature.ts — the reviewed path — so the rule turns on the unreviewed one',
+    );
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'and the change is recorded as the reader\'s own');
   } finally {
     await f.cleanup();
   }

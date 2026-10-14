@@ -374,3 +374,16 @@ test('invoke records the cli-tier model surface, its own argv elided (WP-3.0c)',
   assert.equal(surface.promptSha256, markerSha(surface.argv.at(-1) ?? ''), 'the prompt digest is the marker\'s');
   assert.equal(surface.systemPromptSha256, markerSha(surface.argv[2] ?? ''), 'and so is the system-prompt digest');
 });
+
+test('a recorded digest is over the exact bytes sent: leading and trailing whitespace survives (F7)', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'ok', stderr: '', exitCode: 0, duration: 1 });
+  const prompt = ' say hi\n';
+  const out = await new ClaudeAdapter({ spawn }).invoke({ ...CALL, prompt, systemPrompt: 'be brief' });
+
+  const surface = out.modelSurface;
+  assert.ok(surface, 'a cli-tier call carries a surface');
+  assert.equal(calls[0]?.args.at(-1), prompt, 'the binary got the prompt byte for byte');
+  assert.equal(surface.promptSha256, sha256Hex(prompt), 'the digest is over the untrimmed prompt');
+  assert.notEqual(surface.promptSha256, sha256Hex(prompt.trim()), 'a digest over trimmed bytes would show here');
+  assert.equal(surface.promptSha256, markerSha(surface.argv.at(-1) ?? ''), 'and the marker carries that same digest');
+});
