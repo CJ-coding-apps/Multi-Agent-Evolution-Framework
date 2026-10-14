@@ -24,12 +24,13 @@ in-process tier, and a `no_change` failure that names the policy rules which den
   says read-only. The planner guidance states the rule: *A task that asks a question, an investigation or a
   report — no change to the code — goes to a read-only role. A node whose role must change the tree fails if
   it does not.*
-- **A `no_change` failure now names the rules that denied the node's own tool calls** (F10). A writer that
+- **A `no_change` failure now names the rules that refused the node's own tool calls** (F10). A writer that
   finishes having changed nothing reads the same whether it lost its nerve or every write it attempted was
   refused by policy; naming the rule tells a backend to retry apart from a policy that is misconfigured. When
-  a writer fails `no_change` and its own attested tool calls include a `Deny`, the message appends
-  `; N tool call(s) were denied by policy: <ruleId> (<toolId>)…` — at most three rules named, the count
-  carrying the rest. Read per node, from the attestor's records for that task rather than the run-wide
+  a writer fails `no_change` and its own attested tool calls include a policy `Deny` — or an `Escalate` the
+  approval gate did not approve — the message appends
+  `; N tool call(s) were denied or refused by policy: <ruleId> (<toolId>)…` — at most three rules named, the
+  count carrying the rest. Read per node, from the attestor's records for that task rather than the run-wide
   counts; the tool message the model saw carries no rule id, so the attestor is the only source.
 
 ### Changed
@@ -41,12 +42,15 @@ in-process tier, and a `no_change` failure that names the policy rules which den
   fails `unexpected_change` if it changed the tree. A **custom** read-only role is unchanged: it still runs on
   the `cli` tier unless it sets `execution: 'in-process'` ([D-01](docs/DECISIONS.md)). Where the adapter cannot
   run the loop (`codex`, `gemini`, `ollama`, `openrouter`) the built-in readers fall back to `cli` with the
-  D-06 transcript note and a `fellBackFrom: 'in-process'` entry in the bundle's `executionTiers`.
+  D-06 transcript note and a `fellBackFrom: 'in-process'` entry in the bundle's `executionTiers`. Until
+  WP-3.0c's attribution lands, a built-in reader whose turn overlaps a writer can fail with
+  `unexpected_change`; `wp/phase-3` is not promoted before 3.0c.
 - The committed default harness re-mints and the offline goldens baseline moves once more, because the role
   set changed — a fifth role (`analyst`), and `security` and `reviewer` now carry `execution: 'in-process'`
-  (this repository's `.maf/roles.yaml` mirrors the built-in set). `60f0bb81…` → `d81facc5…`: the corpus sha, the
-  task list, every task's outcomes and the solved set (`4/10`) are unchanged, so the harness identity is the
-  only field that moved.
+  (this repository's `.maf/roles.yaml` follows the built-in set, except that its `tester` also holds
+  `fs.write`, which the built-in `tester` does not). `60f0bb81…` → `d81facc5…`: the corpus sha, the task list,
+  every task's outcomes and the solved set (`4/10`) are unchanged, so the harness identity is the only field
+  that moved.
 - **A built-in reader's tool-call cap is raised to the in-process loop default** (F2). A reader capped below
   the loop's own default could run out of turns mid-investigation: the chain a review or an audit actually
   runs — `git.diff → fs.read → grep → git.log → answer` — is five calls, and `reviewer` was capped at four,
@@ -54,6 +58,17 @@ in-process tier, and a `no_change` failure that names the policy rules which den
   `analyst` now carry no cap below the loop default (10), and a registry test pins every built-in reader to
   it. The cap is part of the minted role set, so the committed default harness re-mints again,
   `d81facc5…` → `7e0a5503…`; as before the corpus sha, the task list and every task's outcomes are unchanged.
+
+Breaking for code that calls the packages directly:
+
+- `@maf/roles`: `RoleCatalogEntry` gains two required fields, `writes` and `expectsChange` (D-43), so a
+  hand-built catalog stops compiling until they are set; `RoleRegistry.catalog()` fills both from the
+  role's own tools. `DEFAULT_MAX_TOOL_ITERATIONS` is exported as the in-process loop's default turn cap.
+- `@maf/planning-agent`: `PlannerConfig.roleCatalog` entries carry the same two required fields, which
+  the role block renders as `read-only` / `may change the tree` / `must change the tree`.
+- `@maf/types`: `AttestorHandle` gains an additive optional `toolCallsForTask?(taskId)`, so a hand-written
+  handle still compiles; `Attestor` implements it, and `@maf/roles` reads it to name the policy rules that
+  refused a node's own calls (F10).
 
 ## [0.3.1] - 2026-10-13
 

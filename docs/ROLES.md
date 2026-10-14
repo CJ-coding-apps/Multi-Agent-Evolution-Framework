@@ -180,10 +180,10 @@ The policy this repository ships (`.maf/policy.yaml`) includes:
 
 ```yaml
 - id: deny-readonly-roles
-  description: Reviewer and security roles are read-only
+  description: Reviewer, security and analyst roles are read-only
   priority: 85
   predicate:
-    agentRole: [reviewer, security]
+    agentRole: [reviewer, security, analyst]
     toolId: [fs.write, patch.apply, fs.delete, git.add, git.commit, git.reset]
   action:
     kind: Deny
