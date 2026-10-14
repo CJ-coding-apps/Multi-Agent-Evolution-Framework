@@ -999,7 +999,11 @@ export interface AttestationBundle {
    * earlier bundle still parses; a reader must treat its absence as "unrecorded", never as "none".
    */
   policyInForce?:    PolicyInForce;
-  /** What each governed turn showed the model (F4), in order. Absent when no turn reported one. */
+  /**
+   * What each role call showed the model (F4), in order. Absent when no call reported one. Both
+   * tiers since WP-3.0c (D-45) — a governed turn and a cli-tier `invoke` alike — so "absent" is
+   * "unrecorded", never "nothing ran on the cli tier".
+   */
   modelSurfaces?:    ModelSurfaceRecord[];
   /**
    * The tier each node ran on (F7), in dispatch order. Absent when no node reported one — a
@@ -1021,8 +1025,8 @@ export interface AttestationBundle {
 export interface AttestorHandle {
   record(call: Omit<ToolCallRecord, 'id'>): Promise<void>;
   /**
-   * Attach one governed turn's model-facing surface to the bundle (F4). Optional so a test double
-   * that records only tool calls still satisfies the handle.
+   * Attach one role call's model-facing surface to the bundle (F4; both tiers since WP-3.0c, D-45).
+   * Optional so a test double that records only tool calls still satisfies the handle.
    */
   recordModelSurface?(record: ModelSurfaceRecord): void;
   /** Attach the policy in force (F6); the last call wins, as it runs once per run. */
