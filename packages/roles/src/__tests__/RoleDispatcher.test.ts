@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, PolicyDecision, ToolContext, ToolInput, ToolResult,
-  RoleName, PartialNodeOutcome, ExecutionTierRecord,
+  RoleName, PartialNodeOutcome, ExecutionTierRecord, ModelSurfaceRecord, AttributedChange,
+  WriterLockLedger,
 } from '@maf/types';
 import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
@@ -114,14 +115,20 @@ function makeAttestor() {
   const records: Array<{ toolId: string; result: ToolResult }> = [];
   const diffHashes: Array<{ key: string; diff: string }> = [];
   const tiers: ExecutionTierRecord[] = [];
+  const surfaces: ModelSurfaceRecord[] = [];
+  const attributed: AttributedChange[] = [];
   return {
     records,
     diffHashes,
     tiers,
+    surfaces,
+    attributed,
     stub: {
       record: async (c: { toolId: string; result: ToolResult }) => { records.push(c); },
       recordDiffHash: (key: string, diff: string) => { diffHashes.push({ key, diff }); },
       recordExecutionTier: (record: ExecutionTierRecord) => { tiers.push(record); },
+      recordModelSurface: (record: ModelSurfaceRecord) => { surfaces.push(record); },
+      recordAttribution: (record: AttributedChange) => { attributed.push(record); },
     } as unknown as Attestor,
   };
 }
@@ -157,6 +164,8 @@ async function makeFixture(opts: {
   /** The one role the set defines; read-only `analyst` unless a test needs a writer. */
   role?: RoleName;
   allowedTools?: string[];
+  /** The scheduler's writer-lock ledger (WP-3.0c); absent, the reader guard keeps its pre-3.0c behaviour. */
+  writerLockLedger?: WriterLockLedger;
 }): Promise<Fixture> {
   const workDir = await mkdtemp(path.join(tmpdir(), 'maf-dispatch-'));
   await writeFile(path.join(workDir, 'hello.txt'), 'hello-world', 'utf8');
@@ -202,6 +211,7 @@ async function makeFixture(opts: {
     sessionId: 's1',
     runId: makeRunId('run-1'),
     harness,
+    ...(opts.writerLockLedger ? { writerLockLedger: opts.writerLockLedger } : {}),
     // The writer cases here test the cli tier itself, which a writer reaches only with the
     // run's consent (D-01); tier-default.test.ts covers the refusal and the banner.
     allowUngoverned: true,
@@ -574,6 +584,130 @@ test('F7: the reader\'s own change is still caught, and the diff names only its 
       f.attestor.diffHashes[0]?.diff ?? '', /sibling\.txt/,
       'and it is excluded from the recorded subject too',
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ORACLE (WP-3.0c, D-45; the F7 window). Two records a role call owes the bundle that neither tier
+// had. First, every cli-tier call is a model call MAF made, so its surface — digests, the argv it
+// spawned with — belongs in the record beside the governed turn's, marked `tier: 'cli'`. Second, the
+// one change the reader's two snapshots cannot separate from its own: a sibling writer running during
+// the reader's turn, inside the bracket. The writer lock says who held it then, and the change is
+// charged to that writer's own start commit rather than to the reader.
+
+/** A cli-tier surface of the shape an adapter reports — digests and the argv, no payload text. */
+const SURFACE = {
+  systemPromptSha256: 'a'.repeat(64),
+  promptSha256:       'b'.repeat(64),
+  toolCatalog:        '',
+  outputSha256:       'c'.repeat(64),
+  argv:               ['--print', '--tools', '', '-p', '--', '<prompt: 6 bytes, sha256 bbbbbb…>'],
+};
+
+test('cli tier: a role call records its model surface with tier "cli", and mirrors it to the transcript (WP-3.0c)', async () => {
+  const adapter = new CliOnlyAdapter();
+  adapter.reply = { success: true, output: 'CLI-PATH', toolCallLog: [], exitCode: 0, duration: 1, modelSurface: SURFACE };
+  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW });
+  try {
+    const out = await f.dispatcher.runNode(makeNode(ANALYST));
+    const output = out['output'];
+    if (!output || output.kind !== 'string') assert.fail('expected string output');
+    assert.equal(output.value, 'CLI-PATH', 'the surface is recorded without changing the answer');
+
+    assert.deepEqual(
+      f.attestor.surfaces,
+      [{ role: 'analyst', taskId: makeTaskId('n1'), turn: 1, ...SURFACE, tier: 'cli' }],
+      'the same evidence shape as a governed turn, one record, marked cli',
+    );
+    const note = f.transcript.entries.find((e) => e.content.startsWith('[surface]'));
+    assert.ok(note, 'the surface reaches the transcript too');
+    assert.equal(note.metadata['tier'], 'cli');
+    assert.equal(note.metadata['agentRole'], 'analyst');
+    assert.equal(note.metadata['systemPromptSha256'], SURFACE.systemPromptSha256);
+    assert.deepEqual(note.metadata['argv'], SURFACE.argv);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cli tier: an adapter that reports no model surface records none — absent, not empty (WP-3.0c)', async () => {
+  const adapter = new CliOnlyAdapter(); // `reply` defaults to one with no modelSurface
+  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW });
+  try {
+    await f.dispatcher.runNode(makeNode(ANALYST));
+    assert.equal(f.attestor.surfaces.length, 0, 'nothing is invented for a call that reported no surface');
+    assert.equal(
+      f.transcript.entries.some((e) => e.content.startsWith('[surface]')), false,
+      'and no transcript line either',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F7 window: a change during a reader\'s turn is attributed to the writer holding the lock, and the node does not fail (WP-3.0c)', async () => {
+  const adapter = new WritingCliAdapter();
+  const writer = makeNodeId('writer-elsewhere');
+  const ledger: WriterLockLedger = { enter() {}, exit() {}, writerOverlapping: () => writer };
+  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
+  try {
+    const out = await f.dispatcher.runNode(makeNode(ANALYST));
+    const output = out['output'];
+    if (!output || output.kind !== 'string') assert.fail('expected string output');
+    assert.equal(output.value, 'Reviewed. APPROVED.', 'the reader answers for its own turn, not the writer\'s change');
+
+    assert.equal(f.attestor.attributed.length, 1, 'the change is attributed, once');
+    const attributed = f.attestor.attributed[0];
+    assert.equal(attributed?.nodeId, 'n1');
+    assert.equal(attributed?.attributedTo, writer, 'named to the writer that held the lock across the turn');
+    assert.match(attributed?.diffSha256 ?? '', /^[0-9a-f]{64}$/, 'a digest of the diff, not the diff text');
+    assert.equal(f.attestor.diffHashes.length, 0, 'and not charged to the reader as its own diff');
+
+    const note = f.transcript.entries.find((e) => e.content.startsWith('[attributed]'));
+    assert.ok(note, 'the attribution reaches the transcript');
+    assert.equal(note.metadata['attributedTo'], writer);
+    assert.equal(note.metadata['diffSha256'], attributed?.diffSha256, 'the transcript and the bundle agree');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F7 window: with no concurrent writer, a reader\'s changed tree still fails exactly as before (WP-3.0c)', async () => {
+  const adapter = new WritingCliAdapter();
+  const ledger: WriterLockLedger = { enter() {}, exit() {}, writerOverlapping: () => undefined };
+  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change', 'no writer to attribute to, so the node fails');
+    assert.match(failure.message, /sneaky\.txt/);
+    assert.equal(f.attestor.attributed.length, 0);
+    assert.equal(f.attestor.diffHashes.length, 1, 'and the change is recorded as the reader\'s own');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F7 window: the reader guard excludes its own node, so a cli-tier reader is not handed its own turn (WP-3.0c)', async () => {
+  // A cli-tier reader holds the lock itself, so a real ledger holds an interval that overlaps the
+  // reader's own bracket. The guard must exclude the reader's node id, or the reader would be
+  // attributed a change it made. The stub stands in for a ledger whose only interval is this node's:
+  // it answers with the reader's own id unless that id is excluded — the exact hazard `exclude` closes.
+  const adapter = new WritingCliAdapter();
+  const seenExcludes: Array<string | undefined> = [];
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writerOverlapping: (_from, _to, exclude) => {
+      seenExcludes.push(exclude);
+      return exclude === makeNodeId('n1') ? undefined : makeNodeId('n1');
+    },
+  };
+  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.deepEqual(seenExcludes, ['n1'], 'the guard asked with its own node id excluded');
+    assert.equal(failure.reason, 'unexpected_change', 'its own change is not credited to a phantom writer');
+    assert.equal(f.attestor.attributed.length, 0);
   } finally {
     await f.cleanup();
   }

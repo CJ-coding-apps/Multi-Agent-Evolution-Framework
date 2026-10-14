@@ -169,3 +169,59 @@ test('toolCallsForTask returns only the calls carrying that taskId, in call orde
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ORACLE (WP-3.0c, D-45; the F7 window). Two additions to the record the 3.0c work introduces, and the
+// compatibility they must not break. A surface recorded with `tier: 'cli'` sits beside F4's governed
+// turn; a surface recorded the 0.3.1 way (no `tier`) must still sign and verify, so a bundle minted
+// before the field existed is readable. And an attributed change — a reader's turn charged to the
+// writer that held the lock across it — is in the signed payload with the rest.
+
+test('an attributed change flows into the signed bundle; unrecorded, the field is omitted (WP-3.0c)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
+  try {
+    const attestor = new Attestor(makeRunId('r-3c-attr'), stubGraph, dir, { secret: 'test-secret' });
+    attestor.recordAttribution({ nodeId: 'reader-1' as never, attributedTo: 'writer-2' as never, diffSha256: 'd'.repeat(64) });
+
+    const bundle = await attestor.bundle(BUILDER, INVOCATION, [], { status: 'Succeeded', unscheduled: [] });
+
+    assert.deepEqual(
+      bundle.attributedChanges,
+      [{ nodeId: 'reader-1', attributedTo: 'writer-2', diffSha256: 'd'.repeat(64) }],
+      'the attribution is in the bundle, naming the reader and the writer',
+    );
+    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true, 'inside the signed payload, not beside it');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+
+  const bare = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
+  try {
+    const attestor = new Attestor(makeRunId('r-3c-bare'), stubGraph, bare, { secret: 'test-secret' });
+    const bundle = await attestor.bundle(BUILDER, INVOCATION, [], { status: 'Succeeded', unscheduled: [] });
+    assert.equal('attributedChanges' in bundle, false, 'unrecorded, not recorded-as-empty');
+  } finally {
+    await rm(bare, { recursive: true, force: true });
+  }
+});
+
+test('a 0.3.1-shaped model surface — no `tier` — still signs and verifies (WP-3.0c)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
+  try {
+    const attestor = new Attestor(makeRunId('r-3c-old'), stubGraph, dir, { secret: 'test-secret' });
+    // As 0.3.1 recorded it: three digests and the argv, no tier.
+    attestor.recordModelSurface({
+      role: 'analyst', taskId: 't1' as never, turn: 1,
+      systemPromptSha256: 'f'.repeat(64), promptSha256: 'e'.repeat(64),
+      toolCatalog: '', outputSha256: 'd'.repeat(64), argv: ['--print', '-p', '--', '<prompt: 4 bytes, sha256 ' + 'a'.repeat(64) + '>'],
+    });
+
+    const bundle = await attestor.bundle(BUILDER, INVOCATION, [], { status: 'Succeeded', unscheduled: [] });
+
+    const surface = bundle.modelSurfaces?.[0];
+    assert.equal(surface?.role, 'analyst');
+    assert.equal('tier' in (surface ?? {}), false, 'absent, not present-and-undefined — the 0.3.1 shape');
+    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true, 'and it verifies as it did before the field existed');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

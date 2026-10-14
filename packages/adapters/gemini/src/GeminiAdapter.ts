@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord } from '@maf/types';
-import { BaseAdapter, spawnAndCollect, spawnStreaming } from '@maf/adapter-base';
+import { BaseAdapter, spawnAndCollect, spawnStreaming, elided, cliModelSurface } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
 
@@ -73,6 +73,8 @@ export class GeminiAdapter extends BaseAdapter {
       // Forwarded so the dispatcher can tell a timeout or a silent exit — retryable (D-06) —
       // from an answer that happens to be a failure.
       ...(result.transportError !== undefined ? { transportError: result.transportError } : {}),
+      // The cli-tier call's model-facing surface (WP-3.0c), built from this adapter's own argv.
+      modelSurface: cliModelSurface(options.systemPrompt, options.prompt, elideGeminiPayloads(args), result.stdout),
     };
   }
 
@@ -98,4 +100,18 @@ export class GeminiAdapter extends BaseAdapter {
     args.push(`--prompt=${options.prompt}`);
     return args;
   }
+}
+
+/**
+ * The gemini argv with its two payloads elided (WP-3.0c): the `--system-instruction` value, and the
+ * value half of the joined `--prompt=<value>` token. The flags stay readable — including `--prompt=`
+ * itself — so a reader sees that gemini was given a prompt on the option rather than as a
+ * positional, without the record carrying the prompt text.
+ */
+function elideGeminiPayloads(argv: readonly string[]): string[] {
+  return argv.map((arg, i) => {
+    if (argv[i - 1] === '--system-instruction') return elided('--system-instruction', arg);
+    if (arg.startsWith('--prompt=')) return `--prompt=${elided('prompt', arg.slice('--prompt='.length))}`;
+    return arg;
+  });
 }

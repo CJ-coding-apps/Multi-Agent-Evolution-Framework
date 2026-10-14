@@ -265,6 +265,40 @@ export interface RunOutcome {
   deferredWriters?: NodeId[];
 }
 
+/**
+ * A window during which a writer node held the scheduler's writer lock (WP-3.0c, the F7 window).
+ * The runner records one per writer turn; the dispatcher reads them to tell a reader's own change
+ * from a concurrent writer's — the one case the reader's two working-tree snapshots cannot separate
+ * on their own, because a sibling writer's uncommitted work in the shared tree lands inside the
+ * reader's turn.
+ */
+export interface WriterLockInterval {
+  nodeId: NodeId;
+  /** `Date.now()` when the writer acquired the lock. */
+  from:   number;
+  /** `Date.now()` when it released it. */
+  to:     number;
+}
+
+/**
+ * The scheduler's writer lock, as the two things that need it see it: the runner records the
+ * intervals, and the dispatcher asks whether a writer overlapped a reader's turn. An interface
+ * rather than the runner itself, so the dispatcher need not know the scheduler.
+ */
+export interface WriterLockLedger {
+  /** A writer acquired the lock. */
+  enter(nodeId: NodeId): void;
+  /** The writer released it. A no-op for a node that never entered. */
+  exit(nodeId: NodeId): void;
+  /**
+   * The node that held the lock across any part of `[from, to]`, or `undefined`. `exclude` drops one
+   * node from the answer: a cli-tier reader holds the lock itself, and must not be handed back its
+   * own turn as a concurrent writer. When several writers overlap, the earliest is returned, so the
+   * answer does not depend on iteration order.
+   */
+  writerOverlapping(from: number, to: number, exclude?: NodeId): NodeId | undefined;
+}
+
 export interface RetryPolicy {
   maxAttempts:   number;
   backoffMs:     number;
@@ -964,6 +998,12 @@ export interface AttestationBundle {
    * reader must treat that as "unrecorded", never as "every node ran governed".
    */
   executionTiers?:   ExecutionTierRecord[];
+  /**
+   * Changes a reader's turn attributed to a concurrent writer (WP-3.0c, the F7 window), in the
+   * order they were seen. Absent when none were — a reader must treat that as "none attributed",
+   * which is the same as "none happened".
+   */
+  attributedChanges?: AttributedChange[];
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;
@@ -981,6 +1021,11 @@ export interface AttestorHandle {
   recordPolicyInForce?(policy: PolicyInForce): void;
   /** Attach the tier a node ran on (F7); one per node, a retry replacing the node's own entry. */
   recordExecutionTier?(record: ExecutionTierRecord): void;
+  /**
+   * Attach one change a reader's turn attributed to a concurrent writer (WP-3.0c, the F7 window).
+   * Optional so a test double that records only tool calls still satisfies the handle.
+   */
+  recordAttribution?(record: AttributedChange): void;
   /**
    * The tool calls recorded for one task (F10). A node's `no_change` failure names the policy
    * rules that denied that node's *own* calls, so the reader is told which rule stopped the write
@@ -1051,6 +1096,12 @@ export interface AdapterInvokeResult {
    * retried.
    */
   transportError?: TransportError;
+  /**
+   * The model-facing surface of this cli-tier call (WP-3.0c): what MAF showed the backend and what
+   * it answered, so a role call is in the record wherever it ran. Absent when the adapter assembles
+   * none — an HTTP backend has no argv of its own to report.
+   */
+  modelSurface?: ModelSurface;
 }
 
 export interface CliAdapter {
@@ -1168,6 +1219,17 @@ export interface ModelSurface {
   /** The serialized tool catalogue exactly as the system block carried it ('' when the turn sent none). */
   toolCatalog:        string;
   /**
+   * sha256, hex, of the prompt this call sent (WP-3.0c). A cli-tier role call hands the backend one
+   * opaque prompt and there was no record of it; this is that digest. Absent on a governed turn,
+   * whose prompt is the serialized history the loop owns rather than a single string.
+   */
+  promptSha256?:      string;
+  /**
+   * sha256, hex, of the output the backend returned (WP-3.0c). Absent on a governed turn, whose
+   * answer is a parsed `AssistantTurn`, not one stdout string.
+   */
+  outputSha256?:      string;
+  /**
    * The backend argv. Payload positionals — the system-prompt value and the trailing prompt — are
    * replaced by `<name: N bytes, sha256 H>` markers, so the *flags* (including the empty string that
    * is `--tools ""`) are readable without the record carrying the whole prompt.
@@ -1185,6 +1247,27 @@ export interface ModelSurfaceRecord extends ModelSurface {
    * as a retry, not a duplicate.
    */
   turn:   number;
+  /**
+   * Which tier produced this surface (WP-3.0c, D-45): the governed loop's turn ('in-process') or a
+   * cli-tier `invoke` ('cli'). Optional so a 0.3.1 bundle — whose records carry no tier — still
+   * parses; a reader must treat its absence as "unrecorded", never as a tier.
+   */
+  tier?:  'cli' | 'in-process';
+}
+
+/**
+ * A change a reader's turn saw that was a concurrent writer's (WP-3.0c, the F7 window). The reader's
+ * two working-tree snapshots cancel out uncommitted work already in the tree when it began, but a
+ * sibling writer that ran *during* the reader's turn lands inside its bracket. When the lock ledger
+ * shows a writer overlapped the turn, the change is recorded here instead of failing the node; the
+ * writer's own start-commit diff — the one the security gate reviews — is where it is judged.
+ */
+export interface AttributedChange {
+  nodeId:       string;
+  /** The writer whose hold on the lock overlapped the reader's turn. */
+  attributedTo: string;
+  /** sha256, hex, of the bracket diff the reader's turn showed. */
+  diffSha256:   string;
 }
 
 /**

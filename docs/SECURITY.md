@@ -56,7 +56,9 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
 - **On the `cli` tier, no tool call is recorded at all.** Redaction describes the `in-process` path
   above. A `cli`-tier role's tools run inside the backend CLI, so there is nothing to record — see
   *The execution-tier boundary* below. What every `cli`-tier node does leave is the diff it produced, its
-  hash recorded as a subject of the statement, reader and writer alike (F7).
+  hash recorded as a subject of the statement, reader and writer alike (F7). What a `cli`-tier *role* call
+  also records, since WP-3.0c ([D-45](DECISIONS.md)), is its **model surface** — digests of the prompt and
+  the output and the argv the backend was spawned with, not the tool calls — under `tier: "cli"`.
 
 How a bundle is signed, and what a signature does **not** establish today, stated rather than implied:
 
@@ -231,17 +233,24 @@ governed there, so this clamp reaches them only when an adapter cannot run the l
 allowlist: on that tier it is not passed to the backend, so it decides only whether a gate runs, never what
 the agent may do.
 
-**One case the bracket cannot separate: a writer running concurrently with the reader.** If a *writer* node
-edits the tree during the reader's own turn — not before it — its partial write lands in the end snapshot
-with no start-snapshot counterpart, and the reader is failed for it. The scheduler serializes writers (their
-changes are ordered and recorded), so a plan's ordinary `coder` → `reviewer` sequence is exact. The window
-is open for the **built-in** readers until WP-3.0c's attribution lands: a built-in reader whose turn overlaps
-a writer can fail with `unexpected_change`, and `wp/phase-3` is not promoted before 3.0c. Those readers are
-now `in-process` and, holding only read-level tools, take no writer lock; a `cli`-tier reader still holds it
-(every `cli`-tier node does, since the backend's own file tools are unseen) and so cannot overlap a writer at
-all — a *custom* read-only role on the `cli` tier is unaffected. MAF does not claim to attribute changes
-across that window: the failure is loud and names the files, and the operator sees a real change in the tree,
-so the cost is a possibly-misattributed failure, never a change that passes unattested.
+**A writer running concurrently with the reader is attributed, not charged ([D-45](DECISIONS.md)).** The
+bracket cannot separate one case by itself: a *writer* node that edits the tree during the reader's own turn
+— not before it — leaves a partial write in the end snapshot with no start-snapshot counterpart,
+indistinguishable from the reader's own change by the two snapshots alone. The scheduler's writer lock closes
+it (A3): the scheduler serializes writers, and the runner stamps a ledger where it takes and releases the
+lock, one interval per writer turn, so the reader's guard can ask who held the lock across its own turn.
+When a writer did, and the bracket shows a change, the node does **not** fail: the change is recorded in the
+bundle's `attributedChanges` as `{nodeId, attributedTo, diffSha256}` — the reader's node, the writer that
+held the lock across the turn, and a digest of the diff — and it is judged where every writer's change is
+judged, against that **writer's** own start commit, by the security gate that reviews it. When no writer held
+the lock across the turn, the guard is exactly what it was: a change the bracket shows fails the node with
+`unexpected_change`, records the diff as the reader's own, and names the files. A `cli`-tier reader holds the
+writer lock itself (every `cli`-tier node does, since the backend's own file tools are unseen), so it cannot
+overlap a writer at all and needs no attribution; the guard excludes the reader's own node id, so that hold
+is never handed back as its own concurrent writer, and where more than one interval could answer the ledger
+returns the earliest, so the result does not depend on iteration order. The attribution names a **writer**,
+not a file, and it charges the change to that writer's reviewed diff rather than letting it pass: MAF does
+not claim the reader's turn is the source of the change, only that no writer is left unaccounted for.
 
 #### A missing repository is an error
 
@@ -335,8 +344,15 @@ such a diff, not only a writer: a role that holds a write tool has its diff revi
 and, if one is wired, the review gate, while a role without one has its turn's change checked and fails with
 `unexpected_change` if there was one (F7). Policy refusals, approved escalations, redaction and tool-call
 records exist on the `in-process` tier alone; the human review gate reviews a writer's diff on either tier.
-The planner's call and the security reviewer's call are `cli`-tier calls in this sense, whatever tier the
-roles run on, with one difference: they need only text, so `claude` is spawned for them with `--tools ""`,
+What the `cli` tier records is the call's **surface**, not its tool calls ([D-45](DECISIONS.md)): a `cli`-tier
+*role* call contributes a `modelSurfaces` entry too, marked `tier: "cli"` — the digest of the system prompt
+MAF composed, of the prompt and of the output, and the argv the backend was spawned with, its payload
+positionals each replaced by their byte length and sha256 exactly as an in-process turn's are. So the cli
+tier is no longer unrecorded for role calls: what MAF handed the backend and what came back is in the bundle,
+distinct from the individual tool calls the backend ran, which MAF still does not see. Two `cli`-tier calls
+are still without a surface — the planner's call and the security reviewer's call, which MAF spawns itself
+rather than through a role node. The planner's call and the security reviewer's call are `cli`-tier calls in
+this sense, whatever tier the roles run on, with one difference: they need only text, so `claude` is spawned for them with `--tools ""`,
 its own tools off, as for an in-process turn. `codex` and `gemini` have no known flag for that, and keep
 their tools on these calls; a reader's own `cli`-tier call gets `--tools Read,Glob,Grep` on `claude`.
 
@@ -407,7 +423,8 @@ What that separates, and what it does not:
   but nobody reviews the branch as a whole: a reader's change, which no gate reviews, would have to be
   caught by the `unexpected_change` guard to keep the run from handing the branch back at all (F7), and
   that guard sees only the change the reader's own turn made — a difference between the two snapshots that
-  bracket it — not, per the case above, a writer's edit made concurrently with that turn.
+  bracket it. A writer's edit made concurrently with that turn is attributed to the writer holding the lock
+  ([D-45](DECISIONS.md)), not charged to the reader, and is judged in that writer's own reviewed diff.
 - **Rollbacks are not on the run path.** `RollbackManager`, which refuses any reset outside a run's
   worktree, is not used by `maf run` in 0.3.0. The coder's own `git.reset` tool can reset `--hard`, and it
   acts on whatever the run works in: in a worktree, the run's branch — and only there, because every git

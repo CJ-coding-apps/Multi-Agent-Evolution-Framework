@@ -337,3 +337,33 @@ test('a turn with no tools records the empty catalogue rather than omitting it (
 
   assert.equal(bare.modelSurface?.toolCatalog, serializeTools(undefined), 'no tools is stated, not omitted');
 });
+
+// ORACLE (WP-3.0c, D-45). On the cli tier `invoke` is the whole model call, and until now it left no
+// trace of what the backend was shown: a bundle could say a reviewer role ran without saying with
+// which flags or from which prompt. invoke now reports the same surface sendTurn does for a governed
+// turn — the prompt digest, the backend's own argv with its payload positionals elided, and the
+// output digest — so "every role call is in the record" holds on both tiers.
+
+test('invoke records the cli-tier model surface, its own argv elided (WP-3.0c)', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'the answer', stderr: '', exitCode: 0, duration: 1 });
+  const out = await new ClaudeAdapter({ spawn }).invoke({
+    ...CALL, systemPrompt: 'be brief', nativeTools: 'read-only',
+  });
+
+  const surface = out.modelSurface;
+  assert.ok(surface, 'a cli-tier call carries a surface');
+  assert.equal(surface.systemPromptSha256, sha256Hex('be brief'));
+  assert.equal(surface.promptSha256, sha256Hex('say hi'));
+  assert.equal(surface.outputSha256, sha256Hex('the answer'));
+  assert.equal(surface.toolCatalog, '', 'a cli-tier backend is handed no catalogue of MAF tools');
+  assert.deepEqual(surface.argv, [
+    '--print', '--system-prompt', elided('--system-prompt', 'be brief'),
+    '--tools', 'Read,Glob,Grep', ...MCP_ISOLATION,
+    '-p', '--', elided('prompt', 'say hi'),
+  ], 'flags verbatim — including the reader tool set — and both payloads elided');
+  assert.equal(surface.argv.some((a) => a.includes('be brief')), false, 'no prompt text in the record');
+  assert.equal(surface.argv.some((a) => a.includes('say hi')), false);
+  // The recorded digest is over the bytes that reached the binary, not a second derivation of them.
+  assert.equal(surface.argv.at(-1), elided('prompt', String(calls[0]?.args.at(-1))));
+  assert.equal(calls[0]?.args.at(-1), 'say hi', 'the binary itself still got the prompt');
+});

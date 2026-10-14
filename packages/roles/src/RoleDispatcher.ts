@@ -1,7 +1,8 @@
+import crypto from 'node:crypto';
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
   AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle, TaskId,
-  PolicyDecision,
+  PolicyDecision, ModelSurfaceRecord, AttributedChange, WriterLockLedger,
 } from '@maf/types';
 import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
@@ -54,6 +55,14 @@ export interface RoleDispatcherConfig {
   stderr?:        { write(text: string): unknown };
   /** Asked when the policy escalates an in-process tool call (D-02); absent, Escalate is refused. */
   approvalGate?:  ApprovalGateHandle | undefined;
+  /**
+   * The scheduler's writer-lock ledger (WP-3.0c, the F7 window), handed to the dispatcher so a
+   * reader whose bracket shows a change can ask who held the lock across its turn and attribute the
+   * change to that writer instead of failing. Absent — a dispatcher with no scheduler behind it, as
+   * `wiring.ts` builds for goldens — there is no concurrent writer to attribute to, and the reader
+   * change guard keeps its pre-WP-3.0c behaviour of failing the node.
+   */
+  writerLockLedger?: WriterLockLedger;
 }
 
 export interface RoleNodeOutput {
@@ -285,6 +294,15 @@ function changedFiles(diff: string): string[] {
 }
 
 /**
+ * sha256, hex, of a diff's text (WP-3.0c). The attribution record carries the digest rather than the
+ * diff, matching the bundle's other evidence fields — a reader compares it against the writer's
+ * subject without the diff text crossing into a second copy.
+ */
+function sha256Hex(text: string): string {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/**
  * The security review of one attempt, run at most once whichever route reaches it first: the
  * security-gate processor at task_end, the end of a cli-tier call, or a backend that threw
  * (D-31). It keeps the diff it read, which is also D-32's evidence — one snapshot per attempt.
@@ -483,7 +501,13 @@ export class RoleDispatcher {
     // `--no-worktree` — sits in both snapshots and cancels out. Diffing the whole tree against HEAD
     // instead would fail the reader for a change it never made, the false positive this replaces;
     // `snapshotTree` in @maf/git-ops carries the reasoning in full.
-    const readerStartTree = isWriter ? undefined : await snapshotTree(this.config.cwd);
+    // The bracket's two halves: the tree id the reader's turn starts from, and the instant its turn
+    // opens. `at` is read before the snapshot awaits, so the window the ledger is asked about covers
+    // the snapshot's own duration too — a writer overlapping *that* shows up here (it may or may not
+    // be in the start tree) rather than being charged to the reader.
+    const readerBracket = isWriter
+      ? undefined
+      : { at: Date.now(), tree: await snapshotTree(this.config.cwd) };
     const review = isWriter
       ? new AttemptReview((onDiff) => this.runPostCoderGates(node, startCommit, onDiff))
       : undefined;
@@ -565,6 +589,9 @@ export class RoleDispatcher {
         if (loop.outcome === 'completed') answer = { tier: 'in-process', finalText: loop.finalText };
       } else {
         const cliResult = await adapter.invoke(invokeOpts);
+        // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
+        // the same evidence shape as F4's governed turn, `tier: 'cli'`.
+        await this.recordCliSurface(role, taskId, cliResult);
         outputForMemory = cliResult.output.slice(0, MAX_STORED_OUTPUT_CHARS);
         shortfall = cliShortfall(role, adapter.name, cliResult);
         answer = { tier: 'cli', result: cliResult };
@@ -582,8 +609,8 @@ export class RoleDispatcher {
       if (review && !alreadyJudged) await review.run();
       // A reader can change the tree before it fails too, and a diff left behind is recorded
       // whatever the outcome. The verdict outranks the transport failure, as it does for a writer.
-      if (readerStartTree !== undefined && !alreadyJudged) {
-        await this.readerChangeGuard(node, role, readerStartTree);
+      if (readerBracket !== undefined && !alreadyJudged) {
+        await this.readerChangeGuard(node, role, readerBracket);
       }
       throw err;
     }
@@ -597,7 +624,7 @@ export class RoleDispatcher {
     if (review) await review.run();
     // And every reader's diff is checked, for the mirror reason: a reader that changed the tree
     // fails here rather than returning the Succeeded that MAF used to report for it (F7).
-    if (readerStartTree !== undefined) await this.readerChangeGuard(node, role, readerStartTree);
+    if (readerBracket !== undefined) await this.readerChangeGuard(node, role, readerBracket);
 
     // D-32, judged after the gate so that a refusal still wins, and only where nothing else
     // already failed the node: an answer, on either tier, from a role that expects a change, whose
@@ -731,6 +758,31 @@ export class RoleDispatcher {
   }
 
   /**
+   * Records a cli-tier role call's model-facing surface (WP-3.0c, D-45), the cli-tier twin of F4's
+   * in-process record: the same shape, `tier: 'cli'`, so "every role call is in the record" is one
+   * array rather than two. The adapter assembles it, each from its own argv; an adapter that
+   * assembles none — an HTTP backend, which has no argv of its own to report — records nothing
+   * rather than an invented surface, exactly as a governed turn with no surface records nothing. A
+   * node's cli-tier call is one turn.
+   */
+  private async recordCliSurface(
+    role: RoleConfig,
+    taskId: TaskId,
+    result: AdapterInvokeResult,
+  ): Promise<void> {
+    const surface = result.modelSurface;
+    if (!surface) return;
+    const record: ModelSurfaceRecord = { role: role.role, taskId, turn: 1, ...surface, tier: 'cli' };
+    this.config.attestor.recordModelSurface?.(record);
+    await this.config.transcript.append(
+      'system',
+      `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; argv ${JSON.stringify(record.argv)}`,
+      { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
+        systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv },
+    );
+  }
+
+  /**
    * F7: fail a node whose role holds no write tool and whose turn changed the tree. Recorded as a
    * subject of the run's statement before it throws, so the change joins the signed evidence even
    * though the node fails, and `no_change`'s counterpart in the bundle's own terms: the run says
@@ -743,15 +795,38 @@ export class RoleDispatcher {
    * diff is the node's own change. A snapshot that cannot be read is an error, never an empty one:
    * "we could not look" and "nothing changed" must not be the same verdict (A4).
    *
-   * A writer running *concurrently* with this reader is the one case this cannot separate: its
-   * partial write lands in the end tree with no start-tree counterpart and is read as the reader's.
-   * The scheduler serializes writers (A3), so the sequential case a plan produces is exact; the
-   * concurrent window is documented in docs/SECURITY.md rather than papered over.
+   * A writer running *concurrently* with this reader is the one case the bracket cannot separate:
+   * its partial write lands in the end tree with no start-tree counterpart and reads as the
+   * reader's. Where a writer held the lock across `bracket.at` (WP-3.0c, the F7 window), the change
+   * is attributed to it and the node does not fail — the writer's own start-commit diff is where
+   * that change is judged, and failing the reader would be a false positive for a change it never
+   * made. `exclude` drops this node from the answer, because a cli-tier reader holds the lock
+   * itself and must not be handed back its own turn as a concurrent writer. With no writer
+   * concurrent the change is the reader's, and the node fails exactly as before.
    */
-  private async readerChangeGuard(node: DagNode, role: RoleConfig, startTree: string): Promise<void> {
+  private async readerChangeGuard(
+    node: DagNode,
+    role: RoleConfig,
+    bracket: { at: number; tree: string },
+  ): Promise<void> {
     const endTree = await snapshotTree(this.config.cwd);
-    if (endTree === startTree) return;
-    const diff = await diffTrees(this.config.cwd, startTree, endTree);
+    if (endTree === bracket.tree) return;
+    const diff = await diffTrees(this.config.cwd, bracket.tree, endTree);
+    const writer = this.config.writerLockLedger?.writerOverlapping(bracket.at, Date.now(), node.id);
+    if (writer !== undefined) {
+      const attributed: AttributedChange = {
+        nodeId: node.id, attributedTo: writer, diffSha256: sha256Hex(diff),
+      };
+      this.config.attestor.recordAttribution?.(attributed);
+      await this.config.transcript.append(
+        'system',
+        `[attributed] node "${node.id}" showed a change during its turn, but writer "${writer}" held ` +
+        `the lock across it (F7 window); the change is judged against that writer's own start commit, ` +
+        `not charged to this reader.`,
+        { agentRole: role.role, nodeId: node.id, attributedTo: writer, diffSha256: attributed.diffSha256 },
+      );
+      return;
+    }
     this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff);
     throw unexpectedChange(role, this.config.adapter.name, diff, this.config.cwd);
   }

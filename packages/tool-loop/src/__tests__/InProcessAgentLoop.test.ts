@@ -200,13 +200,13 @@ test('F4: each turn\'s model surface reaches the attestor and the transcript, nu
   await loop.run();
 
   assert.deepEqual(attestor.surfaces, [
-    { role: 'analyst', taskId: makeTaskId('t1'), turn: 1, ...SURFACE },
-    { role: 'analyst', taskId: makeTaskId('t1'), turn: 2, ...SURFACE },
-  ], 'every turn, in order, with the role, task and 1-based turn number');
+    { role: 'analyst', taskId: makeTaskId('t1'), turn: 1, ...SURFACE, tier: 'in-process' },
+    { role: 'analyst', taskId: makeTaskId('t1'), turn: 2, ...SURFACE, tier: 'in-process' },
+  ], 'every turn, in order, with the role, task and 1-based turn number, and its tier (WP-3.0c)');
   assert.equal(appended.length, 2, 'and each is mirrored into the transcript');
   assert.equal(appended[0]?.role, 'system');
   assert.deepEqual(appended[0]?.metadata, {
-    agentRole: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    agentRole: 'analyst', taskId: makeTaskId('t1'), turn: 1, tier: 'in-process',
     systemPromptSha256: SURFACE.systemPromptSha256, toolCatalog: SURFACE.toolCatalog, argv: SURFACE.argv,
   });
   assert.match(appended[0]?.content ?? '', /\[surface\] turn 1/, 'the transcript line says what it is');

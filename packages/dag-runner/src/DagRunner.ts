@@ -1,13 +1,14 @@
 import type {
   Dag, DagNode, NodeId, RunId, AgentId, CliAdapter,
   AdapterInvokeOptions, BlackboardKey, BlackboardValue, RunOutcome, RunStatus,
-  FailureRecorder, NodeFailureRecord,
+  FailureRecorder, NodeFailureRecord, WriterLockLedger,
 } from '@maf/types';
 import { makeAgentId, NodeFailure } from '@maf/types';
 import type { BlackboardStore } from '@maf/blackboard';
 import { NodeStateMachine } from './NodeStateMachine.js';
 import { withRetry } from './RetryOrchestrator.js';
 import { validateDag } from './validateDag.js';
+import { createWriterLockLedger } from './WriterLockLedger.js';
 
 export type NodeExecutor = (
   node: DagNode,
@@ -25,6 +26,12 @@ export interface DagRunnerOptions {
    * own file tools whatever its allowlist says.
    */
   isWriter?:     (node: DagNode) => boolean;
+  /**
+   * The writer-lock ledger to stamp (WP-3.0c, the F7 window). When given, every writer turn's hold
+   * on the lock is recorded in it so a reader whose bracket shows a change can attribute it to a
+   * concurrent writer. Absent, the runner keeps a private ledger nothing reads.
+   */
+  writerLockLedger?: WriterLockLedger;
   onNodeStart?:  (nodeId: NodeId) => void;
   onNodeEnd?:    (nodeId: NodeId, status: 'Succeeded' | 'Failed') => void;
   /**
@@ -65,6 +72,9 @@ export class DagRunner {
     const isWriter = opts.isWriter ?? (() => true);
     const runningWriters = new Set<NodeId>();
     const deferredWriters = new Set<NodeId>();
+    // The lock's hold intervals (WP-3.0c). Stamped in the same places the writer set is, so the
+    // ledger and the serialization can never disagree about who held the lock when.
+    const writerLock = opts.writerLockLedger ?? createWriterLockLedger();
 
     const dispatch = async (): Promise<void> => {
       while (true) {
@@ -97,7 +107,10 @@ export class DagRunner {
           this.sm.transition(node.id, 'Running', makeAgentId(`runner-${node.id}`));
           board.setDagState(node.id, 'Running');
           opts.onNodeStart?.(node.id);
-          if (isWriter(node)) runningWriters.add(node.id);
+          if (isWriter(node)) {
+            runningWriters.add(node.id);
+            writerLock.enter(node.id);
+          }
 
           const promise = this.executeNode(node, dag.runId, board, executor, opts);
           running.set(node.id, promise);
@@ -106,6 +119,7 @@ export class DagRunner {
           const release = (): void => {
             running.delete(node.id);
             runningWriters.delete(node.id);
+            writerLock.exit(node.id); // a no-op for a node that never entered
           };
           void promise.then(release, release);
         }

@@ -6,7 +6,7 @@ import type {
 } from '@maf/types';
 import {
   BaseAdapter, spawnAndCollect, spawnStreaming, turnStdout,
-  buildTurnSystemPrompt, serializeHistory, parseTurn,
+  buildTurnSystemPrompt, serializeHistory, parseTurn, cliModelSurface,
 } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
@@ -114,6 +114,10 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       // Forwarded so the dispatcher can tell a timeout or a silent exit — retryable (D-06) —
       // from an answer that happens to be a failure.
       ...(result.transportError !== undefined ? { transportError: result.transportError } : {}),
+      // The cli-tier call's model-facing surface (WP-3.0c). The argv has no payload positional — the
+      // binary takes the prompt on stdin — so it is carried verbatim; the prompt digest is of what
+      // was composed, and codex receives it joined with the system block on that stream.
+      modelSurface: cliModelSurface(options.systemPrompt, options.prompt, args, result.stdout),
     };
   }
 

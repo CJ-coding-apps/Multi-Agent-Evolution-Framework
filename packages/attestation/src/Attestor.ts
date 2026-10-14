@@ -6,6 +6,7 @@ import type {
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
   RunOutcome, KeySource, ModelSurfaceRecord, PolicyInForce, ExecutionTierRecord, TaskId,
+  AttributedChange,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { jcs } from './jcs.js';
@@ -254,6 +255,7 @@ export class Attestor implements AttestorHandle {
   private securityFindings: SecurityFindingsRecord[] = [];
   private modelSurfaces: ModelSurfaceRecord[] = [];
   private executionTiers: ExecutionTierRecord[] = [];
+  private attributedChanges: AttributedChange[] = [];
   private policyInForce: PolicyInForce | undefined;
   private readonly signingSecret: string;
   private readonly keySource: KeySource;
@@ -357,6 +359,15 @@ export class Attestor implements AttestorHandle {
   }
 
   /**
+   * One change a reader's turn attributed to a concurrent writer (WP-3.0c, the F7 window). Append-only
+   * in the order seen: a node's turn is bracketed once, so a repeat reads as a retry, not a second
+   * change — the same convention as `recordModelSurface`.
+   */
+  recordAttribution(record: AttributedChange): void {
+    this.attributedChanges.push(record);
+  }
+
+  /**
    * Signs the run and writes it to `<attestationsDir>/<runId>.bundle.json`: an in-toto Statement
    * (subjects: the recorded diffs; predicate: the run) with its signature beside it.
    */
@@ -393,6 +404,7 @@ export class Attestor implements AttestorHandle {
       ...(this.policyInForce ? { policyInForce: this.policyInForce } : {}),
       ...(this.modelSurfaces.length > 0 ? { modelSurfaces: this.modelSurfaces } : {}),
       ...(this.executionTiers.length > 0 ? { executionTiers: this.executionTiers } : {}),
+      ...(this.attributedChanges.length > 0 ? { attributedChanges: this.attributedChanges } : {}),
       ...(goldens ? { goldens } : {}),
       bundledAt:        new Date(),
     };
