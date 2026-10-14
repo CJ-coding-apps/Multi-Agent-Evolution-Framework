@@ -1,6 +1,6 @@
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
-  AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle,
+  AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle, TaskId,
 } from '@maf/types';
 import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
@@ -125,6 +125,32 @@ type Answer =
   | { readonly tier: 'cli'; readonly result: AdapterInvokeResult }
   | { readonly tier: 'in-process'; readonly finalText: string };
 
+/** One policy-denied call the attestor recorded for a task (F10): the tool and the rule that stopped it. */
+interface DeniedCall {
+  readonly toolId: string;
+  readonly ruleId?: string | undefined;
+}
+
+/**
+ * F10: the sentence a `no_change` message carries when the node's own attested calls were refused
+ * by policy. A writer that fails having changed nothing reads the same whether it lost its nerve or
+ * every write it tried was denied; naming the rule tells the two apart, which is the difference
+ * between a backend to retry and a policy that is misconfigured. Empty when no call was denied, so
+ * the ordinary message is unchanged.
+ *
+ * At most three are named: a node that made twenty denied calls is saying one thing, and the count
+ * carries it. The tail keeps this a summary of the refusal, not a transcript of it.
+ */
+function denyNote(denied: readonly DeniedCall[]): string {
+  if (denied.length === 0) return '';
+  const shown = denied
+    .slice(0, 3)
+    .map((call) => `${call.ruleId ?? 'a rule that recorded no id'} (${call.toolId})`)
+    .join(', ');
+  const verb = denied.length === 1 ? 'tool call was' : 'tool calls were';
+  return `; ${denied.length} ${verb} denied by policy: ${shown}${denied.length > 3 ? ', …' : ''}`;
+}
+
 /**
  * D-32: a role that expects to change the tree finished with an answer and left no diff against the
  * node's start commit. On the cli tier that is what a backend looks like when its own permission
@@ -137,15 +163,17 @@ function noChangeShortfall(
   adapterName: string,
   answer: Answer,
   startCommit: string,
+  denied: readonly DeniedCall[],
 ): NodeFailure {
   const expected = `role "${role.role}" expects to change the tree, so`;
   const base = `leave a diff against the node's start commit ${startCommit.slice(0, 12)}`;
+  const note = denyNote(denied);
   if (answer.tier === 'cli') {
     return new NodeFailure(
       'no_change',
       `${expected} adapter "${adapterName}" was expected to ${base}, but it answered ` +
       `(exit code ${answer.result.exitCode}) and changed nothing — a backend running under its own ` +
-      `permission settings may have refused the edit. Output tail: ${outputTail(answer.result.output)}`,
+      `permission settings may have refused the edit. Output tail: ${outputTail(answer.result.output)}${note}`,
       answer.result.exitCode,
     );
   }
@@ -153,7 +181,7 @@ function noChangeShortfall(
     'no_change',
     `${expected} its in-process loop on adapter "${adapterName}" was expected to ${base}, but the ` +
     `loop completed and changed nothing — every tool call it made, each failed one included, is in the ` +
-    `run's attestation. Output tail: ${outputTail(answer.finalText)}`,
+    `run's attestation. Output tail: ${outputTail(answer.finalText)}${note}`,
   );
 }
 
@@ -304,6 +332,25 @@ export class RoleDispatcher {
     const commit = await this.startCommit();
     this.baselines.set(key, commit);
     return commit;
+  }
+
+  /**
+   * F10: this node's own policy-denied tool calls, read from the run's attestation by the taskId
+   * every record carries. Per-node, never the run-wide set — a sibling's denial is not this node's
+   * failure. A test double without the getter answers with no denials, which leaves the message
+   * exactly as it was before this existed.
+   */
+  private deniedCallsFor(taskId: TaskId): DeniedCall[] {
+    const denied: DeniedCall[] = [];
+    for (const call of this.config.attestor.toolCallsForTask?.(taskId) ?? []) {
+      if (call.policyDecision.verdict === 'Deny') {
+        denied.push({
+          toolId: String(call.toolId),
+          ...(call.policyDecision.ruleId !== undefined ? { ruleId: call.policyDecision.ruleId } : {}),
+        });
+      }
+    }
+    return denied;
   }
 
   /** The ungoverned banner goes out once per dispatcher; `maf run` builds one per run. */
@@ -508,7 +555,7 @@ export class RoleDispatcher {
     // requires a write tool, so the diff below is always one the gate read.
     if (shortfall === undefined && answer !== undefined && role.expectsChange === true &&
         review?.diff?.trim() === '') {
-      shortfall = noChangeShortfall(role, adapter.name, answer, startCommit);
+      shortfall = noChangeShortfall(role, adapter.name, answer, startCommit, this.deniedCallsFor(taskId));
     }
 
     if (shortfall) {

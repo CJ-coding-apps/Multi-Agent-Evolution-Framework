@@ -1,6 +1,7 @@
 import { makeToolId, type RoleName, type ToolId } from '@maf/types';
 import type { RoleConfig, RoleSet, RoleCatalogEntry } from './RoleConfig.js';
 import { defineRoleName } from './RoleConfig.js';
+import { isWriterRole } from './isWriterRole.js';
 
 const t = (id: string): ToolId => makeToolId(id);
 
@@ -85,6 +86,21 @@ const REVIEWER_TOOLS: ToolId[] = [
   t('fs.read'), t('grep'), t('git.diff'), t('git.log'),
 ];
 
+const ANALYST_PROMPT = `You are the Analyst agent. Read-only. You answer a question about the code, investigate, and report. You make no change.
+
+What you do:
+1. Establish exactly what the task is asking — a question, an investigation, or a report over the code as it stands.
+2. Read what answers it: the files the question names, their neighbours, and the history that explains them (fs.read, fs.list, fs.stat, grep, git.log, git.diff, git.status).
+3. Answer plainly, and separate what you read from what you infer. Name the files and lines you relied on.
+
+Output: the answer to the question, and the evidence you read to reach it. If the task actually requires a change to the tree, say so — a role that writes must make that change, and this one does not.
+
+Tools available: fs.read, fs.list, fs.stat, grep, git.status, git.diff, git.log. No writes — you hold no write tool, and a change you make to the tree fails this node, its diff recorded in the run's attestation.`;
+
+const ANALYST_TOOLS: ToolId[] = [
+  t('fs.read'), t('fs.list'), t('fs.stat'), t('grep'), t('git.status'), t('git.diff'), t('git.log'),
+];
+
 export const DEFAULT_ROLE_SET: RoleSet = {
   version: 1,
   defaultRole: defineRoleName('coder'),
@@ -115,6 +131,11 @@ export const DEFAULT_ROLE_SET: RoleSet = {
       allowedTools:      SECURITY_TOOLS,
       policyTag:         'security',
       maxToolIterations: 6,
+      // D-44: a built-in reader runs in-process, where policy verdicts, secret redaction and
+      // attested tool calls exist. On the cli tier a reader is handed the backend's own file
+      // tools; an audit or a review that reads the tree ungoverned is the case F7 built the
+      // `unexpected_change` guard for, and running it governed is what removes the need.
+      execution:         'in-process',
     },
     {
       role:              defineRoleName('reviewer'),
@@ -123,13 +144,30 @@ export const DEFAULT_ROLE_SET: RoleSet = {
       allowedTools:      REVIEWER_TOOLS,
       policyTag:         'reviewer',
       maxToolIterations: 4,
+      execution:         'in-process',   // D-44, as for `security`
+    },
+    {
+      role:              defineRoleName('analyst'),
+      // Written for the planner: it is the planner's role block that routes a question here
+      // (WP-3.0b), so the description says what the role is *for*, not only what it cannot do.
+      description:       'Read-only. Answers a question about the code, investigates, reports. Makes no change.',
+      systemPrompt:      ANALYST_PROMPT,
+      allowedTools:      ANALYST_TOOLS,
+      policyTag:         'analyst',
+      maxToolIterations: 8,
+      // D-43/D-44: a reader, so in-process like the other two readers, and no `expectsChange` —
+      // answering a question changes nothing, and a role that owes no change must not fail for
+      // making none.
+      execution:         'in-process',
     },
   ],
 };
 
 export const DEFAULT_ROLE_CATALOG: RoleCatalogEntry[] = DEFAULT_ROLE_SET.roles.map((r) => ({
-  role:        r.role,
-  description: r.description ?? '',
+  role:          r.role,
+  description:   r.description ?? '',
+  writes:        isWriterRole(r),
+  expectsChange: r.expectsChange === true,
 }));
 
 export function getDefaultRoleConfig(role: RoleName): RoleConfig | undefined {

@@ -168,7 +168,14 @@ export class RoleRegistry implements RoleResolver {
   }
 
   catalog(): RoleCatalogEntry[] {
-    return this.list().map((r) => ({ role: r.role, description: r.description ?? '' }));
+    return this.list().map((r) => ({
+      role:          r.role,
+      description:   r.description ?? '',
+      // Both read from the role the registry holds, never from its name (D-07): `writes` from the
+      // tools it carries, `expectsChange` from its own declaration.
+      writes:        isWriterRole(r),
+      expectsChange: r.expectsChange === true,
+    }));
   }
 
   async loadPrompt(role: RoleConfig): Promise<string> {

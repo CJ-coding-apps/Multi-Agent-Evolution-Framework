@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeResult, AssistantTurn, DagNode,
+  ToolCallRecord, TaskId, PolicyDecision,
 } from '@maf/types';
 import { makeNodeId, makeRunId, makeToolId, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
@@ -71,6 +72,30 @@ function calling(toolName: string, input: Record<string, unknown>, n: number): A
 }
 
 /**
+ * An attestor that keeps every call it was handed (F10). `executeToolGated` records a refused call
+ * through the same `record` it records a run one, so a node's own denied calls are read back here by
+ * taskId — the `policyDecision` still carries the `Deny` and its `ruleId`.
+ */
+class RecordingAttestor {
+  readonly calls: ToolCallRecord[] = [];
+  async record(call: Omit<ToolCallRecord, 'id'>): Promise<void> {
+    this.calls.push({ id: `rec-${this.calls.length}`, ...call });
+  }
+  toolCallsForTask(taskId: TaskId): ToolCallRecord[] {
+    return this.calls.filter((call) => call.taskId === taskId);
+  }
+  recordSecurityFindings(): void {}
+}
+
+/** A policy engine that refuses one tool by a named rule and allows every other call. */
+function denyingPolicy(toolId: string, ruleId: string): PolicyEngine {
+  return {
+    evaluate: async (id: unknown): Promise<PolicyDecision> =>
+      String(id) === toolId ? { verdict: 'Deny', reason: 'forbidden by test policy', ruleId } : { verdict: 'Allow' },
+  } as unknown as PolicyEngine;
+}
+
+/**
  * Three calls that each fail without changing the tree, as WP-2.18 answers them: a read of a file
  * that is not there, a write into a directory that is not there, a write with a field misnamed.
  */
@@ -106,7 +131,11 @@ interface Fixture {
   cleanup:    () => Promise<void>;
 }
 
-async function makeFixture(role: RoleConfig, adapter: CliAdapter): Promise<Fixture> {
+async function makeFixture(
+  role: RoleConfig,
+  adapter: CliAdapter,
+  deps: { policy?: PolicyEngine; attestor?: Attestor } = {},
+): Promise<Fixture> {
   const workDir = await mkdtemp(path.join(tmpdir(), 'maf-no-change-'));
   await writeFile(path.join(workDir, 'hello.txt'), 'hello', 'utf8');
   await execFileAsync('git', ['init', '-q'], { cwd: workDir });
@@ -117,8 +146,8 @@ async function makeFixture(role: RoleConfig, adapter: CliAdapter): Promise<Fixtu
     baseTools: createDefaultRegistry(),
     roles: RoleRegistry.fromSet({ version: 1, defaultRole: role.role, roles: [role] }, workDir),
     injector: { assemble: async () => ({ systemPromptPrefix: '' }) } as unknown as GraphAwareInjector,
-    policy: { evaluate: async () => ({ verdict: 'Allow' }) } as unknown as PolicyEngine,
-    attestor: { record: async () => {}, recordSecurityFindings: () => {} } as unknown as Attestor,
+    policy: deps.policy ?? { evaluate: async () => ({ verdict: 'Allow' }) } as unknown as PolicyEngine,
+    attestor: deps.attestor ?? { record: async () => {}, recordSecurityFindings: () => {} } as unknown as Attestor,
     graph: { addNode: async () => 'n' } as unknown as MemoryGraph,
     transcript: { append: async () => {} } as unknown as TranscriptLogger,
     lcmBridge: { flush: async () => {} } as unknown as BlackboardToLcmAdapter,
@@ -322,6 +351,66 @@ test('an in-process loop that stops any other way keeps its own failure, not no_
   const fx = await makeFixture(coder, new ScriptedTurns(failingCalls()));
   try {
     assert.equal((await failureOf(fx.dispatcher.runNode(nodeFor('coder')))).reason, 'budget_exhausted');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+// ─── F10: a no_change message names the rules that denied the node's own calls ───────────────
+// A writer that changed nothing reads the same whether it lost its nerve or its one write was
+// refused by policy. A denied call is answered to the in-process loop as a failed result (WP-2.18),
+// so the node can still complete and reach no_change — and the attestor is the only place the rule
+// id lives, because the tool message the model saw carries none.
+
+test('F10: an in-process coder whose write the policy denied fails with no_change, naming the rule', async () => {
+  const attestor = new RecordingAttestor();
+  const turns = [calling('fs.write', { path: 'hello.txt', content: 'hi' }, 1)];
+  const fx = await makeFixture(CODER, new ScriptedTurns(turns, 'I was not permitted to write.'), {
+    attestor: attestor as unknown as Attestor,
+    policy: denyingPolicy('fs.write', 'protect-secrets'),
+  });
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
+    assert.equal(failure.reason, 'no_change');
+    assert.match(failure.message, /; 1 tool call was denied by policy: protect-secrets \(fs\.write\)$/);
+    // The rule id is not in the tool message the model saw, so the message is the attestor's alone.
+    assert.equal(attestor.calls.length, 1, 'the refused call was attested');
+    assert.equal(attestor.calls[0]?.policyDecision.verdict, 'Deny');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('F10: at most three rules are named; the count carries the rest', async () => {
+  const attestor = new RecordingAttestor();
+  const turns = Array.from({ length: 4 }, (_, i) => calling('fs.write', { path: `f${i}.txt`, content: 'x' }, i + 1));
+  const fx = await makeFixture(CODER, new ScriptedTurns(turns, 'no write was permitted.'), {
+    attestor: attestor as unknown as Attestor,
+    policy: denyingPolicy('fs.write', 'deny-all-writes'),
+  });
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
+    assert.equal(failure.reason, 'no_change');
+    assert.match(
+      failure.message,
+      /; 4 tool calls were denied by policy: deny-all-writes \(fs\.write\), deny-all-writes \(fs\.write\), deny-all-writes \(fs\.write\), …$/,
+    );
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('F10: a coder that made no denied call leaves the no_change message as it was', async () => {
+  const attestor = new RecordingAttestor();
+  // An allow policy: the one write fails for a reason of its own (no such directory), not a Deny.
+  const fx = await makeFixture(CODER, new ScriptedTurns(failingCalls(), 'I could not write.'), {
+    attestor: attestor as unknown as Attestor,
+  });
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
+    assert.equal(failure.reason, 'no_change');
+    assert.ok(!failure.message.includes('denied by policy'), failure.message);
+    assert.ok(failure.message.endsWith(`Output tail: ${JSON.stringify('I could not write.')}`), failure.message);
   } finally {
     await fx.cleanup();
   }

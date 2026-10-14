@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDefaultRegistry } from '@maf/tools';
+import { makeToolId } from '@maf/types';
 import { RoleRegistry, RoleConfigError } from '../RoleRegistry.js';
 import { defineRoleName } from '../RoleConfig.js';
 import { DEFAULT_ROLE_SET } from '../defaults.js';
@@ -128,6 +129,27 @@ test('catalog returns role + description pairs', () => {
     assert.equal(typeof entry.role, 'string');
     assert.equal(typeof entry.description, 'string');
   }
+});
+
+// D-43: the catalog entry carries what the planner needs to route a task — whether the role holds
+// a write tool and whether it owes a change — read from the role's tools, never its name.
+test('the catalog entry carries writes and expectsChange, from the role not its name', () => {
+  const reg = RoleRegistry.fromSet(DEFAULT_ROLE_SET, '/tmp');
+  const flags = reg.catalog().map((e) => [String(e.role), e.writes, e.expectsChange]);
+  assert.deepEqual(flags, [
+    ['coder',    true,  true],
+    ['tester',   true,  false],
+    ['security', false, false],
+    ['reviewer', false, false],
+    ['analyst',  false, false],
+  ]);
+  // `writes` follows the tools, not the name: a role named `tester` that holds `fs.write` is a writer.
+  const custom = RoleRegistry.fromSet({
+    version: 1, defaultRole: defineRoleName('tester'),
+    roles: [{ role: defineRoleName('tester'), systemPrompt: 'x', allowedTools: [makeToolId('fs.write')] }],
+  }, '/tmp');
+  assert.equal(custom.catalog()[0]?.writes, true);
+  assert.equal(custom.catalog()[0]?.expectsChange, false);
 });
 
 test('loadPrompt returns inline systemPrompt without filesystem read', async () => {

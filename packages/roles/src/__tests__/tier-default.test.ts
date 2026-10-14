@@ -26,6 +26,7 @@ import { RoleDispatcher } from '../RoleDispatcher.js';
 import { RoleRegistry, RoleConfigError } from '../RoleRegistry.js';
 import { defineRoleName } from '../RoleConfig.js';
 import type { RoleConfig } from '../RoleConfig.js';
+import { getDefaultRoleConfig } from '../defaults.js';
 import { effectiveTier, isWriterForLock } from '../isWriterRole.js';
 
 // ORACLE: D-01 — governed in-process execution is the default for writer roles. A role holding a
@@ -630,6 +631,41 @@ test('a loop that fails on malformed tool calls under a bundle without the secur
     });
     assert.equal(fx.reviewed.length, 1);
     assert.match(fx.reviewed[0] ?? '', /written in-process/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+// ─── D-44: the built-in readers run in-process, where the gate and the record are ──────────────
+// The tier is decided by the role set, not the dispatcher's caller: a shipped reader that said
+// no `execution` ran ungoverned on the cli tier, and a reader on the cli tier is handed the
+// backend's own file tools. In-process is where policy verdicts, redaction and attested tool
+// calls exist, so it is the tier a built-in audit or review now asks for.
+
+test('a built-in reader (analyst) runs in-process on an adapter that can drive the loop', async () => {
+  const adapter = new TurnStub();
+  adapter.turns = [{ text: 'the flag is read at config.ts:41', toolCalls: [] }];
+  const fx = await makeFixture({ adapter, role: getDefaultRoleConfig(defineRoleName('analyst'))! });
+  try {
+    await fx.dispatcher.runNode(nodeFor('analyst'));
+    assert.equal(adapter.invoked, 0, 'not the single opaque cli call');
+    assert.equal(adapter.turnsTaken, 1, 'the loop drove the backend turn by turn');
+    assert.deepEqual(fx.tiers, [{ nodeId: 'n1', role: 'analyst', tier: 'in-process', adapter: 'turn-stub' }]);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a built-in reader falls back to the cli tier on an adapter without the loop, and the record names it', async () => {
+  const adapter = new CliOnly();
+  const fx = await makeFixture({ adapter, role: getDefaultRoleConfig(defineRoleName('security'))! });
+  try {
+    await fx.dispatcher.runNode(nodeFor('security'));
+    assert.equal(adapter.invoked, 1, 'the cli tier, not the loop');
+    assert.ok(fx.transcript.some((e) => e.content.includes('falling back to CLI dispatch')));
+    assert.deepEqual(fx.tiers, [
+      { nodeId: 'n1', role: 'security', tier: 'cli', adapter: 'cli-only', fellBackFrom: 'in-process' },
+    ]);
   } finally {
     await fx.cleanup();
   }

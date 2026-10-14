@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_ROLE_SET, DEFAULT_ROLE_CATALOG } from '../defaults.js';
 
-test('DEFAULT_ROLE_SET covers coder/tester/security/reviewer', () => {
+test('DEFAULT_ROLE_SET covers coder/tester/security/reviewer/analyst', () => {
   const roles = new Set<string>(DEFAULT_ROLE_SET.roles.map((r) => r.role));
-  for (const expected of ['coder', 'tester', 'security', 'reviewer']) {
+  for (const expected of ['coder', 'tester', 'security', 'reviewer', 'analyst']) {
     assert.ok(roles.has(expected), `missing role ${expected}`);
   }
   assert.equal(DEFAULT_ROLE_SET.defaultRole, 'coder');
@@ -21,7 +21,7 @@ test('catalog mirrors role set length', () => {
 });
 
 test('read-only roles cannot write through their allowedTools', () => {
-  for (const roleName of ['security', 'reviewer']) {
+  for (const roleName of ['security', 'reviewer', 'analyst']) {
     const role = DEFAULT_ROLE_SET.roles.find((r) => r.role === roleName)!;
     const writeIds = ['fs.write', 'fs.delete', 'patch.apply', 'git.add', 'git.commit'];
     for (const id of writeIds) {
