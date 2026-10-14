@@ -19,6 +19,7 @@ import type { ProcessorDeps } from '@maf/processors';
 import { InProcessAgentLoop } from '@maf/tool-loop';
 import type { InProcessLoopResult } from '@maf/tool-loop';
 import type { RoleConfig } from './RoleConfig.js';
+import { DEFAULT_MAX_TOOL_ITERATIONS } from './RoleConfig.js';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
 import { isWriterRole, effectiveTier, requestedTier } from './isWriterRole.js';
@@ -624,7 +625,7 @@ export class RoleDispatcher {
         systemPrompt: invokeOpts.systemPrompt ?? '',
         userPrompt:   invokeOpts.prompt,
         tools:        toolList,
-        maxTurns:     role.maxToolIterations ?? 10,
+        maxTurns:     role.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS,
         timeoutMs:    invokeOpts.timeoutMs,
         workingDir:   invokeOpts.workingDir,
         projectRoot:  this.config.cwd,

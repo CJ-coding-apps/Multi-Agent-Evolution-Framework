@@ -1,6 +1,6 @@
 import { makeToolId, type RoleName, type ToolId } from '@maf/types';
 import type { RoleConfig, RoleSet, RoleCatalogEntry } from './RoleConfig.js';
-import { defineRoleName } from './RoleConfig.js';
+import { defineRoleName, DEFAULT_MAX_TOOL_ITERATIONS } from './RoleConfig.js';
 import { isWriterRole } from './isWriterRole.js';
 
 const t = (id: string): ToolId => makeToolId(id);
@@ -130,7 +130,10 @@ export const DEFAULT_ROLE_SET: RoleSet = {
       systemPrompt:      SECURITY_PROMPT,
       allowedTools:      SECURITY_TOOLS,
       policyTag:         'security',
-      maxToolIterations: 6,
+      // At least the loop default (F2): a reader's cap must cover the read chain it needs
+      // (`git.diff → fs.read → grep → git.log → answer`), or it fails `budget_exhausted` on a
+      // task it would otherwise finish. The registry test pins every built-in reader to this.
+      maxToolIterations: DEFAULT_MAX_TOOL_ITERATIONS,
       // D-44: a built-in reader runs in-process, where policy verdicts, secret redaction and
       // attested tool calls exist. On the cli tier a reader is handed the backend's own file
       // tools; an audit or a review that reads the tree ungoverned is the case F7 built the
@@ -143,7 +146,7 @@ export const DEFAULT_ROLE_SET: RoleSet = {
       systemPrompt:      REVIEWER_PROMPT,
       allowedTools:      REVIEWER_TOOLS,
       policyTag:         'reviewer',
-      maxToolIterations: 4,
+      maxToolIterations: DEFAULT_MAX_TOOL_ITERATIONS,   // F2, as for `security`
       execution:         'in-process',   // D-44, as for `security`
     },
     {
@@ -154,7 +157,7 @@ export const DEFAULT_ROLE_SET: RoleSet = {
       systemPrompt:      ANALYST_PROMPT,
       allowedTools:      ANALYST_TOOLS,
       policyTag:         'analyst',
-      maxToolIterations: 8,
+      maxToolIterations: DEFAULT_MAX_TOOL_ITERATIONS,   // F2, as for `security` and `reviewer`
       // D-43/D-44: a reader, so in-process like the other two readers, and no `expectsChange` —
       // answering a question changes nothing, and a role that owes no change must not fail for
       // making none.

@@ -16,6 +16,15 @@ import type { RoleName, ToolId } from '@maf/types';
  */
 export function defineRoleName(name: string): RoleName { return name as RoleName; }
 
+/**
+ * The number of tool-calling turns the in-process loop allows when a role names no
+ * `maxToolIterations` of its own: what `RoleDispatcher` passes as `maxTurns`. Named here rather than
+ * written as a literal at the one call site, so a built-in reader's cap can be checked against it —
+ * a reader whose cap sits *below* this cannot take the `git.diff → fs.read → grep → git.log → answer`
+ * chain a review or an audit actually needs, and would fail `budget_exhausted` on a legitimate task.
+ */
+export const DEFAULT_MAX_TOOL_ITERATIONS = 10;
+
 export interface RoleConfig {
   role:               RoleName;
   description?:       string;

@@ -1,5 +1,5 @@
 export type { RoleConfig, RoleSet, RoleCatalogEntry } from './RoleConfig.js';
-export { defineRoleName } from './RoleConfig.js';
+export { defineRoleName, DEFAULT_MAX_TOOL_ITERATIONS } from './RoleConfig.js';
 export { RoleRegistry, RoleConfigError } from './RoleRegistry.js';
 export type { ResolvedRole } from './RoleRegistry.js';
 export { RoleToolRegistry } from './RoleToolRegistry.js';

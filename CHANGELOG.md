@@ -47,6 +47,13 @@ in-process tier, and a `no_change` failure that names the policy rules which den
   (this repository's `.maf/roles.yaml` mirrors the built-in set). `60f0bb81…` → `d81facc5…`: the corpus sha, the
   task list, every task's outcomes and the solved set (`4/10`) are unchanged, so the harness identity is the
   only field that moved.
+- **A built-in reader's tool-call cap is raised to the in-process loop default** (F2). A reader capped below
+  the loop's own default could run out of turns mid-investigation: the chain a review or an audit actually
+  runs — `git.diff → fs.read → grep → git.log → answer` — is five calls, and `reviewer` was capped at four,
+  so it could fail `budget_exhausted` on a task it would otherwise have finished. `security`, `reviewer` and
+  `analyst` now carry no cap below the loop default (10), and a registry test pins every built-in reader to
+  it. The cap is part of the minted role set, so the committed default harness re-mints again,
+  `d81facc5…` → `7e0a5503…`; as before the corpus sha, the task list and every task's outcomes are unchanged.
 
 ## [0.3.1] - 2026-10-13
 
