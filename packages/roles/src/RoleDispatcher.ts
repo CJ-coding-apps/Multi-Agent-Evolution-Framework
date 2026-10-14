@@ -1,6 +1,7 @@
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
-  AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle,
+  AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle, TaskId,
+  PolicyDecision,
 } from '@maf/types';
 import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
@@ -19,6 +20,7 @@ import type { ProcessorDeps } from '@maf/processors';
 import { InProcessAgentLoop } from '@maf/tool-loop';
 import type { InProcessLoopResult } from '@maf/tool-loop';
 import type { RoleConfig } from './RoleConfig.js';
+import { DEFAULT_MAX_TOOL_ITERATIONS } from './RoleConfig.js';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
 import { isWriterRole, effectiveTier, requestedTier } from './isWriterRole.js';
@@ -125,6 +127,69 @@ type Answer =
   | { readonly tier: 'cli'; readonly result: AdapterInvokeResult }
   | { readonly tier: 'in-process'; readonly finalText: string };
 
+/** One policy-denied call the attestor recorded for a task (F10): the tool and the rule that stopped it. */
+interface DeniedCall {
+  readonly toolId: string;
+  readonly ruleId?: string | undefined;
+}
+
+/**
+ * The rule a refused call names, read from its decision (F8). A `Deny` and an `Indeterminate` carry
+ * the id on the decision itself; an `Escalate` carries it on the request the gate was shown. Mirrors
+ * the rule id `executeToolGated` records on the refusal, so the message and the bundle agree.
+ * `undefined` where the decision names no rule at all — the note renders that as "a rule that
+ * recorded no id" rather than dropping the call from the count.
+ */
+function refusingRuleId(decision: PolicyDecision): string | undefined {
+  switch (decision.verdict) {
+    case 'Deny':
+    case 'Indeterminate': return decision.ruleId;
+    case 'Escalate':      return decision.approvalRequest?.policyRuleId;
+    default:              return undefined;
+  }
+}
+
+/**
+ * Whether a decision is a policy refusal the `no_change` clause names (F8/R2). A `Deny` and an
+ * unapproved `Escalate` are refusals outright; so is an `Indeterminate` the engine reached because
+ * it could not evaluate one of its own rules — a write it could not decide on is still a write
+ * policy refused, and carries the rule's own id. The one exception is a `builtin:*` id:
+ * `builtin:input-schema` is the tool's schema refusing a malformed call before policy was ever
+ * asked, so naming it "denied or refused by policy" would be untrue.
+ */
+function isPolicyRefusal(decision: PolicyDecision): boolean {
+  switch (decision.verdict) {
+    case 'Deny':
+    case 'Escalate':      return true;
+    case 'Indeterminate': return !(decision.ruleId?.startsWith('builtin:') ?? false);
+    default:              return false;
+  }
+}
+
+/**
+ * F10: the sentence a `no_change` message carries when the node's own attested calls were refused.
+ * A writer that fails having changed nothing reads the same whether it lost its nerve or every write
+ * it tried was refused; naming the rule tells the two apart, which is the difference between a
+ * backend to retry and a policy that is misconfigured. Empty when no call was refused, so the
+ * ordinary message is unchanged.
+ *
+ * At most three are named: a node that made twenty refused calls is saying one thing, and the count
+ * carries it. The tail keeps this a summary of the refusal, not a transcript of it.
+ *
+ * F8(b): the count spans every attempt the node made. A `ToolCallRecord` carries no attempt id
+ * (types `ToolCallRecord`), so a retried node's refusals are counted together rather than per
+ * attempt — the message describes the node, and the attempts are already told apart in the bundle.
+ */
+function denyNote(denied: readonly DeniedCall[]): string {
+  if (denied.length === 0) return '';
+  const shown = denied
+    .slice(0, 3)
+    .map((call) => `${call.ruleId ?? 'a rule that recorded no id'} (${call.toolId})`)
+    .join(', ');
+  const verb = denied.length === 1 ? 'tool call was' : 'tool calls were';
+  return `; ${denied.length} ${verb} denied or refused by policy: ${shown}${denied.length > 3 ? ', …' : ''}`;
+}
+
 /**
  * D-32: a role that expects to change the tree finished with an answer and left no diff against the
  * node's start commit. On the cli tier that is what a backend looks like when its own permission
@@ -137,15 +202,17 @@ function noChangeShortfall(
   adapterName: string,
   answer: Answer,
   startCommit: string,
+  denied: readonly DeniedCall[],
 ): NodeFailure {
   const expected = `role "${role.role}" expects to change the tree, so`;
   const base = `leave a diff against the node's start commit ${startCommit.slice(0, 12)}`;
+  const note = denyNote(denied);
   if (answer.tier === 'cli') {
     return new NodeFailure(
       'no_change',
       `${expected} adapter "${adapterName}" was expected to ${base}, but it answered ` +
       `(exit code ${answer.result.exitCode}) and changed nothing — a backend running under its own ` +
-      `permission settings may have refused the edit. Output tail: ${outputTail(answer.result.output)}`,
+      `permission settings may have refused the edit. Output tail: ${outputTail(answer.result.output)}${note}`,
       answer.result.exitCode,
     );
   }
@@ -153,7 +220,7 @@ function noChangeShortfall(
     'no_change',
     `${expected} its in-process loop on adapter "${adapterName}" was expected to ${base}, but the ` +
     `loop completed and changed nothing — every tool call it made, each failed one included, is in the ` +
-    `run's attestation. Output tail: ${outputTail(answer.finalText)}`,
+    `run's attestation. Output tail: ${outputTail(answer.finalText)}${note}`,
   );
 }
 
@@ -304,6 +371,39 @@ export class RoleDispatcher {
     const commit = await this.startCommit();
     this.baselines.set(key, commit);
     return commit;
+  }
+
+  /**
+   * F10: this node's own policy-refused tool calls, read from the run's attestation by the taskId
+   * every record carries. Per-node, never the run-wide set — a sibling's refusal is not this node's
+   * failure. A test double without the getter answers with no refusals, which leaves the message
+   * exactly as it was before this existed.
+   *
+   * F8(a): a refusal is a `Deny`, an `Escalate` the gate did not approve, or an `Indeterminate` the
+   * engine reached because it could not evaluate one of its own rules — every verdict that means
+   * "policy refused this call", which the clause's "denied or refused by policy" names. The old
+   * `Deny`-only test missed the other two. An `Escalate` the gate *approved* did run and is recorded
+   * under its `Escalate` verdict like any other call, so `metadata.refused` — which `executeToolGated`
+   * sets on the calls that did not run — is what tells the two apart.
+   *
+   * R2: the one `Indeterminate` left out is a `builtin:*` one. `builtin:input-schema` is the tool's
+   * schema refusing a malformed call before policy was ever asked, so it is not a policy refusal; an
+   * engine `Indeterminate` (a `memoryPattern` rule whose graph query threw, or a template naming a
+   * parameter that cannot be bound) is policy refusing because it could not decide, and is counted.
+   */
+  private deniedCallsFor(taskId: TaskId): DeniedCall[] {
+    const denied: DeniedCall[] = [];
+    for (const call of this.config.attestor.toolCallsForTask?.(taskId) ?? []) {
+      const decision = call.policyDecision;
+      if (!isPolicyRefusal(decision)) continue;
+      if (call.result.metadata.refused !== true) continue;
+      const ruleId = refusingRuleId(decision);
+      denied.push({
+        toolId: String(call.toolId),
+        ...(ruleId !== undefined ? { ruleId } : {}),
+      });
+    }
+    return denied;
   }
 
   /** The ungoverned banner goes out once per dispatcher; `maf run` builds one per run. */
@@ -508,7 +608,7 @@ export class RoleDispatcher {
     // requires a write tool, so the diff below is always one the gate read.
     if (shortfall === undefined && answer !== undefined && role.expectsChange === true &&
         review?.diff?.trim() === '') {
-      shortfall = noChangeShortfall(role, adapter.name, answer, startCommit);
+      shortfall = noChangeShortfall(role, adapter.name, answer, startCommit, this.deniedCallsFor(taskId));
     }
 
     if (shortfall) {
@@ -577,7 +677,7 @@ export class RoleDispatcher {
         systemPrompt: invokeOpts.systemPrompt ?? '',
         userPrompt:   invokeOpts.prompt,
         tools:        toolList,
-        maxTurns:     role.maxToolIterations ?? 10,
+        maxTurns:     role.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS,
         timeoutMs:    invokeOpts.timeoutMs,
         workingDir:   invokeOpts.workingDir,
         projectRoot:  this.config.cwd,

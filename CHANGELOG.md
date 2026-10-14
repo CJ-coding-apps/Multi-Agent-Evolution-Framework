@@ -9,6 +9,34 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b) land together here: the
+repository builds on pnpm 10 with a regenerated v9 lockfile, and a fifth built-in role joins a reader set
+moved onto the governed in-process tier, with a `no_change` failure that names the policy rules which refused
+the node's own calls.
+
+### Added
+
+- **A fifth built-in role, `analyst`** ([D-43](docs/DECISIONS.md)). A read-only role whose job is to answer a
+  question about the code, investigate and report — it holds the seven read tools and no write tool. A plan
+  that asks a question ("list every TODO in `src/` and say which look stale") now has somewhere to route it;
+  before this it had to choose between the writer `coder` and a reader (`security`, `reviewer`) whose prompt
+  audits or reviews a diff rather than answering a question. The planner's role block now tags every role by
+  what it does to the tree, from the role's own tools and never its name — `- analyst (read-only): …`,
+  `- coder (default, must change the tree): …` — so a question routes to a read-only role because the block
+  says read-only. The planner guidance states the rule: *A task that asks a question, an investigation or a
+  report — no change to the code — goes to a read-only role. A node whose role must change the tree fails if
+  it does not.*
+- **A `no_change` failure now names the rules that refused the node's own tool calls** (F10). A writer that
+  finishes having changed nothing reads the same whether it lost its nerve or every write it attempted was
+  refused by policy; naming the rule tells a backend to retry apart from a policy that is misconfigured. When
+  a writer fails `no_change` and its own attested tool calls include a policy `Deny`, an `Escalate` the
+  approval gate did not approve, or an `Indeterminate` the engine reached because it could not evaluate one of
+  its own rules — but not a `builtin:*` one, which is the tool's schema refusing a malformed call rather than
+  policy — the message appends
+  `; N tool call(s) were denied or refused by policy: <ruleId> (<toolId>)…` — at most three rules named, the
+  count carrying the rest. Read per node, from the attestor's records for that task rather than the run-wide
+  counts; the tool message the model saw carries no rule id, so the attestor is the only source.
+
 ### Changed
 
 - **Toolchain floor** ([D-21](docs/DECISIONS.md), WP-2.11). The root `package.json` now declares `engines`
@@ -18,6 +46,41 @@ is entitled to know which of their own code stops compiling.
   build. `pnpm-lock.yaml` is regenerated to the v9 lockfile format; regenerating it re-resolved dependencies
   that a caret range allowed to move. Developing maf now needs pnpm 10 and Node 22 or newer; CI installs and
   caches pnpm 10 from the `packageManager` field.
+- **The built-in readers — `security`, `reviewer`, `analyst` — run in-process by default** ([D-44](docs/DECISIONS.md)).
+  On the `cli` tier a read-only role is handed the backend's own file tools, and MAF's policy engine, secret
+  redaction and attested tool calls exist only in-process, so an audit or a review that only reads is now
+  governed rather than merely observed. A reader's turn is still diffed (F7) and still
+  fails `unexpected_change` if it changed the tree. A **custom** read-only role is unchanged: it still runs on
+  the `cli` tier unless it sets `execution: 'in-process'` ([D-01](docs/DECISIONS.md)). Where the adapter cannot
+  run the loop (`codex`, `gemini`, `ollama`, `openrouter`) the built-in readers fall back to `cli` with the
+  D-06 transcript note and a `fellBackFrom: 'in-process'` entry in the bundle's `executionTiers`. Until
+  WP-3.0c's attribution lands, a built-in reader whose turn overlaps a writer can fail with
+  `unexpected_change`; `wp/phase-3` is not promoted before 3.0c.
+- The committed default harness re-mints and the offline goldens baseline moves once more, because the role
+  set changed — a fifth role (`analyst`), and `security` and `reviewer` now carry `execution: 'in-process'`
+  (this repository's `.maf/roles.yaml` follows the built-in set, except that its `tester` also holds
+  `fs.write`, which the built-in `tester` does not). `60f0bb81…` → `d81facc5…`: the corpus sha, the task list,
+  every task's outcomes and the solved set (`4/10`) are unchanged, so the harness identity is the only field
+  that moved.
+- **A built-in reader's tool-call cap is raised to the in-process loop default** (F2). A reader capped below
+  the loop's own default could run out of turns mid-investigation: the chain a review or an audit actually
+  runs — `git.diff → fs.read → grep → git.log → answer` — is five calls, and `reviewer` was capped at four,
+  so it could fail `budget_exhausted` on a task it would otherwise have finished. `security`, `reviewer` and
+  `analyst` now carry no cap below the loop default (10), and `defaults.test.ts` pins every built-in reader to
+  it — and this repository's own `.maf/roles.yaml` to the same floor. The cap is part of the minted role set, so
+  the committed default harness re-mints again,
+  `d81facc5…` → `7e0a5503…`; as before the corpus sha, the task list and every task's outcomes are unchanged.
+
+Breaking for code that calls the packages directly:
+
+- `@maf/roles`: `RoleCatalogEntry` gains two required fields, `writes` and `expectsChange` (D-43), so a
+  hand-built catalog stops compiling until they are set; `RoleRegistry.catalog()` fills both from the
+  role's own tools. `DEFAULT_MAX_TOOL_ITERATIONS` is exported as the in-process loop's default turn cap.
+- `@maf/planning-agent`: `PlannerConfig.roleCatalog` entries carry the same two required fields, which
+  the role block renders as `read-only` / `may change the tree` / `must change the tree`.
+- `@maf/types`: `AttestorHandle` gains an additive optional `toolCallsForTask?(taskId)`, so a hand-written
+  handle still compiles; `Attestor` implements it, and `@maf/roles` reads it to name the policy rules that
+  refused a node's own calls (F10).
 
 ## [0.3.1] - 2026-10-13
 

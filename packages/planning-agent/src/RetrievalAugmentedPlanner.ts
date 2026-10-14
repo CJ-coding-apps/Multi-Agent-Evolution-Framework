@@ -12,6 +12,29 @@ import type { GraphAwareInjector } from '@maf/prompt-injector';
 export interface RoleCatalogEntry {
   role:        string;
   description: string;
+  /**
+   * Whether the role holds a write tool and whether it is expected to change the tree (D-43).
+   * Rendered into the role block so the planner can route a question to a read-only role and a
+   * change to one that owes it. Supplied by the caller (`RoleRegistry.catalog`), computed from the
+   * role's tools, never its name — the planner must not infer either from `role`.
+   */
+  writes:        boolean;
+  expectsChange: boolean;
+}
+
+/**
+ * The tag the role block puts after a role's name (D-43): what the role does to the tree, from
+ * `writes`/`expectsChange` and nothing else. Three states, so a task can be routed by the fact
+ * that decides it — a reader answers, a role that merely *may* write is the tester's shape, and a
+ * role that *must* write is the coder's. `default` marks where an unclassified task lands.
+ */
+function roleTag(r: RoleCatalogEntry, isDefault: boolean): string {
+  const what = !r.writes
+    ? 'read-only'
+    : r.expectsChange
+      ? 'must change the tree'
+      : 'may change the tree';
+  return isDefault ? `(default, ${what})` : `(${what})`;
 }
 
 export interface PlannerConfig {
@@ -70,8 +93,24 @@ export class RetrievalAugmentedPlanner {
     const defaultRole = this.config.roles.defaultRole;
     const catalog = this.config.roleCatalog ?? [];
     if (catalog.length === 0) return PLANNING_INSTRUCTIONS_BASE(defaultRole);
-    const rolesBlock = catalog.map((r) => `- ${r.role}${r.role === defaultRole ? ' (default)' : ''}: ${r.description}`).join('\n');
-    return PLANNING_INSTRUCTIONS_BASE(defaultRole) + `\n\nAvailable agent roles (use these in node.agentRole):\n${rolesBlock}\n\nGuidance:\n- After any coder node that introduces new behavior, emit a tester node that depends on it.\n- When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every writer role's diff.)`;
+    // Each role carries the two facts that decide where a task goes — `writes` and
+    // `expectsChange`, both read from the caller's config and never from the role's name. The
+    // default role is marked so the model knows where an unclassified task lands.
+    const rolesBlock = catalog
+      .map((r) => `- ${r.role} ${roleTag(r, r.role === defaultRole)}: ${r.description}`)
+      .join('\n');
+    // The read-only line only makes sense when there is a read-only role to route a question to (F9).
+    // A writers-only set told "send a question to a read-only role" would send it nowhere, and the
+    // guidance would then contradict the block right above it.
+    const guidance = [
+      '- After any coder node that introduces new behavior, emit a tester node that depends on it.',
+      '- When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every writer role\'s diff.)',
+      ...(catalog.some((r) => !r.writes)
+        ? ['- A task that asks a question, an investigation or a report — no change to the code — goes to a read-only role. A node whose role must change the tree fails if it does not.']
+        : []),
+    ].join('\n');
+    return PLANNING_INSTRUCTIONS_BASE(defaultRole) +
+      `\n\nAvailable agent roles (use these in node.agentRole):\n${rolesBlock}\n\nGuidance:\n${guidance}`;
   }
 
   private async getFailureContext(title: string): Promise<string> {

@@ -198,7 +198,7 @@ The policy shipped in this repository:
 | 95  | `protect-lock-files` | Escalate (ask a person) writes/patches to `**/*.lock`. |
 | 90  | `protect-migrations` | Escalate (ask a person) writes/patches to `**/migrations/**`. |
 | 90  | `coder-no-secrets-dir` | Deny `coder` writes to `**/secrets/**`. |
-| 85  | `deny-readonly-roles`  | Deny mutating tools for `reviewer`/`security`. |
+| 85  | `deny-readonly-roles`  | Deny mutating tools for `reviewer`/`security`/`analyst`. |
 | 81  | `tester-no-ci-config` | Deny `tester` writes/patches/deletes under `{.github,.github/**}`: once globs matched dotfiles, `**/*test*` reached `.github/workflows/test.yml`, which is CI configuration, not a test ([D-30](DECISIONS.md)). |
 | 80  | `tester-write-only-tests` | Deny `tester` writes outside test path patterns. |
 

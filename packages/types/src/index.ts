@@ -981,6 +981,14 @@ export interface AttestorHandle {
   recordPolicyInForce?(policy: PolicyInForce): void;
   /** Attach the tier a node ran on (F7); one per node, a retry replacing the node's own entry. */
   recordExecutionTier?(record: ExecutionTierRecord): void;
+  /**
+   * The tool calls recorded for one task (F10). A node's `no_change` failure names the policy
+   * rules that denied that node's *own* calls, so the reader is told which rule stopped the write
+   * rather than only that nothing changed — the run-wide counts answer a different question.
+   * Optional so a test double that records only tool calls still satisfies the handle; absent,
+   * the message carries no deny note.
+   */
+  toolCallsForTask?(taskId: TaskId): ToolCallRecord[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -102,8 +102,8 @@ test('roleCatalog flows into planning instructions', async () => {
     injector: noopInjector,
     roles: rolesOf(['coder', 'tester']),
     roleCatalog: [
-      { role: 'coder', description: 'writes code' },
-      { role: 'tester', description: 'writes tests' },
+      { role: 'coder', description: 'writes code', writes: true, expectsChange: true },
+      { role: 'tester', description: 'writes tests', writes: true, expectsChange: false },
     ],
     generatePlan: async (sys) => {
       capturedSystemPrompt = sys;
@@ -116,4 +116,64 @@ test('roleCatalog flows into planning instructions', async () => {
   });
   assert.match(capturedSystemPrompt, /Available agent roles/);
   assert.match(capturedSystemPrompt, /writes tests/);
+});
+
+// D-43: the role block states what each role does to the tree, taken from the two booleans the
+// caller supplies and never from the role's name. A plan routes a question to a read-only role
+// because the block says "read-only", not because the name happens to be `analyst`.
+test('the role block tags each role by what it does to the tree, from writes/expectsChange', async () => {
+  let capturedSystemPrompt = '';
+  const planner = new RetrievalAugmentedPlanner({
+    graph: noopGraph,
+    lcm: noopLcm,
+    injector: noopInjector,
+    roles: rolesOf(['coder', 'analyst', 'reviewer']),
+    roleCatalog: [
+      { role: 'coder',    description: 'changes the tree', writes: true,  expectsChange: true  },
+      { role: 'analyst',  description: 'answers questions', writes: false, expectsChange: false },
+      { role: 'reviewer', description: 'reviews diffs',     writes: false, expectsChange: false },
+    ],
+    generatePlan: async (sys) => { capturedSystemPrompt = sys; return PLAN_JSON('coder'); },
+  });
+  await planner.plan({ title: 't', description: 'd', runId: makeRunId('r1'), sessionId: 's1' });
+  assert.match(capturedSystemPrompt, /^- coder \(default, must change the tree\): changes the tree$/m);
+  assert.match(capturedSystemPrompt, /^- analyst \(read-only\): answers questions$/m);
+  assert.match(capturedSystemPrompt, /^- reviewer \(read-only\): reviews diffs$/m);
+  // The tag comes from the fields, not the name: a `tester`-named role that holds a write tool but
+  // owes no change renders "may change the tree", proving the name is not consulted.
+  let second = '';
+  const planner2 = new RetrievalAugmentedPlanner({
+    graph: noopGraph, lcm: noopLcm, injector: noopInjector,
+    roles: rolesOf(['coder', 'tester']),
+    roleCatalog: [{ role: 'tester', description: 'writes tests', writes: true, expectsChange: false }],
+    generatePlan: async (sys) => { second = sys; return PLAN_JSON('coder'); },
+  });
+  await planner2.plan({ title: 't', description: 'd', runId: makeRunId('r2'), sessionId: 's1' });
+  assert.match(second, /^- tester \(may change the tree\): writes tests$/m);
+});
+
+test('the guidance tells the planner where a question goes and that a writer must change the tree', async () => {
+  let capturedSystemPrompt = '';
+  // F9: the read-only line is emitted only when the set actually has a read-only role to route a
+  // question to, so this catalog carries one (`reviewer`). With a writers-only set the line is
+  // absent — an assertion of the absence lives where the default set is in scope (packages/cli,
+  // planner-role-block). A writers-only set told to route a question to a reader would send it
+  // nowhere, and the guidance would contradict the block above it.
+  const planner = new RetrievalAugmentedPlanner({
+    graph: noopGraph, lcm: noopLcm, injector: noopInjector,
+    roles: rolesOf(['coder', 'reviewer']),
+    roleCatalog: [
+      { role: 'coder',    description: 'changes the tree', writes: true,  expectsChange: true  },
+      { role: 'reviewer', description: 'reviews diffs',    writes: false, expectsChange: false },
+    ],
+    generatePlan: async (sys) => { capturedSystemPrompt = sys; return PLAN_JSON('coder'); },
+  });
+  await planner.plan({ title: 't', description: 'd', runId: makeRunId('r3'), sessionId: 's1' });
+  assert.ok(
+    capturedSystemPrompt.includes(
+      '- A task that asks a question, an investigation or a report — no change to the code — goes ' +
+      'to a read-only role. A node whose role must change the tree fails if it does not.',
+    ),
+    'the guidance line is present verbatim',
+  );
 });

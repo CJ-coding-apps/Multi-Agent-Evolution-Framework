@@ -33,12 +33,13 @@ for (const row of TABLE) {
   });
 }
 
-test('isWriterRole: the default role set — coder and tester write, security and reviewer do not', () => {
+test('isWriterRole: the default role set — coder and tester write, the three readers do not', () => {
   const verdicts = Object.fromEntries(
     DEFAULT_ROLE_SET.roles.map((r): [string, boolean] => [r.role, isWriterRole(r)]),
   );
   // The tester holds patch.apply; keying on the name 'coder' is what left it unreviewed.
-  assert.deepEqual(verdicts, { coder: true, tester: true, security: false, reviewer: false });
+  // D-43's analyst joins security and reviewer as a reader: no write tool, so no review.
+  assert.deepEqual(verdicts, { coder: true, tester: true, security: false, reviewer: false, analyst: false });
 });
 
 test('isWriterRole: every tool the default registry rates above read makes its holder a writer', () => {

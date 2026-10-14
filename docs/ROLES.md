@@ -3,7 +3,7 @@
 Every DAG node in MAF runs as a *role*. A role bundles:
 
 1. A **system prompt** (inline or loaded from a file).
-2. An **allowed tool set** — the only tools the role is allowed to call on the `in-process` tier, where a [writer](#writer-roles) runs by default. On the `cli` tier — the default for a read-only role, and a writer's only with `--allow-ungoverned` — the allowlist is not passed to the backend CLI, which uses its own tools.
+2. An **allowed tool set** — the only tools the role is allowed to call on the `in-process` tier, where a [writer](#writer-roles) runs by default. On the `cli` tier — the default for a *custom* read-only role, and a writer's only with `--allow-ungoverned` — the allowlist is not passed to the backend CLI, which uses its own tools.
 3. Optional **execution** tier, **expectsChange**, and **model**, **timeout**, **token budget** and **policyTag** overrides.
 
 A run does not dispatch from the roles file directly. It resolves a *harness* first — by default `legacy-default`, minted from the roles file as it is when the run starts, each prompt file's text included — and dispatches from the role set that harness carries, so the sha its attestation names is the content that ran. See the README's "Which harness runs".
@@ -12,14 +12,17 @@ The planner emits `agentRole` on each node it produces. That name is checked aga
 
 ## Default roles
 
-The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four roles. They apply only when there is no roles file — the target has no `.maf/roles.yaml`, or nothing exists at the `--roles` path. A roles file that exists but cannot be read (a directory, no permission, a symlink whose target has gone), is not valid YAML, does not match the role-set shape, or names a tool that does not exist stops the run with a `RoleConfigError` naming the file — and, for a YAML error, the line. It is never replaced by the built-in set, whose default role is a writer ([D-08](DECISIONS.md)).
+The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships five roles. They apply only when there is no roles file — the target has no `.maf/roles.yaml`, or nothing exists at the `--roles` path. A roles file that exists but cannot be read (a directory, no permission, a symlink whose target has gone), is not valid YAML, does not match the role-set shape, or names a tool that does not exist stops the run with a `RoleConfigError` naming the file — and, for a YAML error, the line. It is never replaced by the built-in set, whose default role is a writer ([D-08](DECISIONS.md)).
 
-| Role       | Writer? | Allowed tools                                                                                                                  | Use for                              |
-|------------|---------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
-| `coder`    | yes     | `fs.read`, `fs.write`, `fs.delete`, `fs.stat`, `fs.list`, `grep`, `git.{status,diff,add,commit,log,reset}`, `patch.apply`, `test.run` | Writing & modifying production code  |
-| `tester`   | yes\*   | `fs.read`, `fs.list`, `fs.stat`, `grep`, `test.run`, `patch.apply`                                                            | Writing tests only                   |
-| `security` | no      | `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.diff`, `git.log`                                                                 | CWE/OWASP audit, JSON-only output    |
-| `reviewer` | no      | `fs.read`, `grep`, `git.diff`, `git.log`                                                                                       | Code review, approve/reject diffs    |
+| Role       | Writer? | Execution    | Allowed tools                                                                                                                  | Use for                              |
+|------------|---------|--------------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
+| `coder`    | yes     | `in-process` | `fs.read`, `fs.write`, `fs.delete`, `fs.stat`, `fs.list`, `grep`, `git.{status,diff,add,commit,log,reset}`, `patch.apply`, `test.run` | Writing & modifying production code  |
+| `tester`   | yes\*   | `in-process` | `fs.read`, `fs.list`, `fs.stat`, `grep`, `test.run`, `patch.apply`                                                            | Writing tests only                   |
+| `security` | no      | `in-process` | `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.diff`, `git.log`                                                                 | CWE/OWASP audit, JSON-only output    |
+| `reviewer` | no      | `in-process` | `fs.read`, `grep`, `git.diff`, `git.log`                                                                                       | Code review, approve/reject diffs    |
+| `analyst`  | no      | `in-process` | `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.status`, `git.diff`, `git.log`                                                  | Answering a question, investigation, a report — no change to the tree |
+
+The three readers carry `execution: 'in-process'` ([D-44](DECISIONS.md)). On the `cli` tier a read-only role is handed the backend's own file tools, so a review or an audit that only reads the tree is still a change MAF did not gate at the moment it happened; keeping the readers in-process puts their calls through policy, redaction and the attestor instead. `analyst` is the fifth built-in ([D-43](DECISIONS.md)): a read-only role for work that changes nothing, so a plan that asks for an investigation has somewhere to route it that is neither a writer nor a diff-reviewer.
 
 \* **The two tester definitions in this repository differ.** The built-in tester above (`TESTER_TOOLS` in `defaults.ts`) holds `patch.apply` and no `fs.write`: it can apply a diff but cannot create or overwrite a file. The `.maf/roles.yaml` this repository ships grants the tester `fs.write` as well. `maf run` reads `.maf/roles.yaml` from the *target* directory, so which tester a run gets depends on that directory: one with no roles file gets the built-in tester, one with a copy of this repository's file gets `fs.write`. Either way the tester is a writer (see [Writer roles](#writer-roles)), so its changes are security-reviewed. On the in-process tier the shipped policy also limits *where* it may write — `tester-write-only-tests` and `tester-no-ci-config` in `.maf/policy.yaml` — because the tool allowlist and the policy work together, and neither alone is sufficient. On the `cli` tier neither the allowlist nor the policy reaches the backend's own tools.
 
@@ -164,6 +167,10 @@ The scheduler's writer lock — which stops two nodes editing the tree at once �
 > After any coder node that introduces new behavior, emit a tester node that depends on it.
 >
 > When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every writer role's diff.)
+>
+> A task that asks a question, an investigation or a report — no change to the code — goes to a read-only role. A node whose role must change the tree fails if it does not.
+
+The catalogue the planner is handed renders each role's writer flag and whether it must change the tree — `- analyst (read-only): …`, `- coder (default, must change the tree): …` — from the role's own tools, never from its name ([D-43](DECISIONS.md)). That is the same predicate the dispatcher uses ([D-07](DECISIONS.md)): a role called `coder` that holds only read tools renders as read-only, and the planner routes on that, not on the label.
 
 If the LLM emits a node with `agentRole: "ghost"` and the role set does not define `ghost`, the plan is **rejected**: `plan()` throws `planner: node "n1" asks for unknown agentRole "ghost". Known roles: coder, tester, ...`. Substituting the default was the escalation — the default is `coder`, a writer — so a plan the model got wrong must not be quietly re-planned as a privileged one.
 
@@ -173,10 +180,10 @@ The policy this repository ships (`.maf/policy.yaml`) includes:
 
 ```yaml
 - id: deny-readonly-roles
-  description: Reviewer and security roles are read-only
+  description: Reviewer, security and analyst roles are read-only
   priority: 85
   predicate:
-    agentRole: [reviewer, security]
+    agentRole: [reviewer, security, analyst]
     toolId: [fs.write, patch.apply, fs.delete, git.add, git.commit, git.reset]
   action:
     kind: Deny
@@ -185,7 +192,7 @@ The policy this repository ships (`.maf/policy.yaml`) includes:
 
 That is belt-and-suspenders with the tool allowlist: even if a future role config grants `fs.write` to `reviewer`, the policy will deny the call on the `in-process` tier.
 
-**On the `cli` tier this rule is in force and unreachable.** A reader runs there by default ([D-01](DECISIONS.md)), the policy engine only ever sees an in-process tool call, and on the `cli` tier the backend keeps its own tools — so this Deny never fires for the very roles it names, and a live audit found a `reviewer` edit a tracked file under it and be recorded as `Succeeded`. What catches that is not the policy but the diff guard above: the node fails with `unexpected_change` and the change becomes a subject of the attestation (F7). The rule is still worth keeping for a reader that sets `execution: in-process`; the bundle's `executionTiers` show which tier each node actually ran on, which is how a reader can tell the two cases apart.
+**On the `cli` tier this rule is in force and unreachable.** Before [D-44](DECISIONS.md), a reader ran there by default ([D-01](DECISIONS.md)): the policy engine only ever sees an in-process tool call, and on the `cli` tier the backend keeps its own tools — so this Deny never fired for the very roles it names, and a live audit found a `reviewer` edit a tracked file under it and be recorded as `Succeeded`. That is why the three built-in readers now ask for `in-process` ([D-44](DECISIONS.md)), where this rule and the tool allowlist are both in force. A **custom** read-only role still runs on the `cli` tier unless it sets `execution: 'in-process'` ([D-01](DECISIONS.md)), and for it this rule remains unreachable; what catches it is not the policy but the diff guard above — the node fails with `unexpected_change` and the change becomes a subject of the attestation (F7). The bundle's `executionTiers` show which tier each node actually ran on, which is how the two cases are told apart.
 
 ## Authoring a new role
 

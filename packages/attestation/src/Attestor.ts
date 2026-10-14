@@ -5,7 +5,7 @@ import type {
   AttestorHandle, ToolCallRecord, AttestationBundle, SlsaProvenance,
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
-  RunOutcome, KeySource, ModelSurfaceRecord, PolicyInForce, ExecutionTierRecord,
+  RunOutcome, KeySource, ModelSurfaceRecord, PolicyInForce, ExecutionTierRecord, TaskId,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { jcs } from './jcs.js';
@@ -317,6 +317,15 @@ export class Attestor implements AttestorHandle {
 
   addApproval(attestation: ReviewAttestation): void {
     this.approvals.push(attestation);
+  }
+
+  /**
+   * The tool calls recorded for one task (F10), in call order. A `no_change` failure reads this to
+   * name the rules that denied the node's *own* calls; the run-wide list answers a different
+   * question, so the filter belongs here, where the taskId each call already carries is known.
+   */
+  toolCallsForTask(taskId: TaskId): ToolCallRecord[] {
+    return this.calls.filter((call) => call.taskId === taskId);
   }
 
   recordSecurityFindings(nodeId: string, result: SecurityReviewResult): void {

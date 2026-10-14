@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { SlsaBuilder, SlsaInvocation } from '@maf/types';
-import { makeRunId } from '@maf/types';
+import { makeRunId, makeAgentId, makeToolId, makeTaskId } from '@maf/types';
 import { Attestor } from '../Attestor.js';
 
 // Attestor.bundle only touches MemoryGraph via record(), which we don't exercise here.
@@ -132,6 +132,39 @@ test('recordExecutionTier flows into the signed bundle, last-wins per node, so a
     assert.equal(bundle.executionTiers?.find((e) => e.nodeId === 'n2')?.fellBackFrom, 'in-process');
     // Inside the signed payload, not beside it: re-wrapping the predicate verifies (D-36).
     assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// F10/F4: the run's attestation holds every call, and a `no_change` failure reads back the node's
+// own. `toolCallsForTask` is that filter, and it is by `taskId` — a task with no calls gets none, not
+// the run-wide list, so a sibling's denial cannot appear on a node that made none. Asserted here
+// (the filter) as well as through the dispatcher (the message it produces).
+test('toolCallsForTask returns only the calls carrying that taskId, in call order (F4)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
+  try {
+    const runId = makeRunId('r-tasks');
+    const attestor = new Attestor(runId, stubGraph, dir, { secret: 'test-secret' });
+    const call = (taskId: string, toolId: string) => ({
+      toolId:         makeToolId(toolId),
+      agentId:        makeAgentId('a1'),
+      runId,
+      taskId:         makeTaskId(taskId),
+      input:          { path: 'x' },
+      result:         { stdout: '', stderr: '', exitCode: 0, duration: 1, metadata: {} },
+      invokedAt:      new Date(0),
+      durationMs:     1,
+      policyDecision: { verdict: 'Allow' as const },
+    });
+    await attestor.record(call('n1', 'fs.write'));
+    await attestor.record(call('n2', 'grep'));
+    await attestor.record(call('n1', 'fs.read'));
+
+    // Three calls are on the record; each task sees only its own, in call order.
+    assert.deepEqual(attestor.toolCallsForTask(makeTaskId('n1')).map((c) => String(c.toolId)), ['fs.write', 'fs.read']);
+    assert.deepEqual(attestor.toolCallsForTask(makeTaskId('n2')).map((c) => String(c.toolId)), ['grep']);
+    assert.deepEqual(attestor.toolCallsForTask(makeTaskId('n3')), [], 'a task with no calls gets none, not the run-wide list');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

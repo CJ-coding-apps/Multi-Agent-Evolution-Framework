@@ -222,20 +222,24 @@ snapshot and cancel out, so neither is the reader's to answer for. This guard se
 and no more: a path the repository's `.gitignore` already ignores, and this run's own runtime state under
 `.maf/` (the list above), lie outside both, so neither is *this* guard's to catch. Nothing is reverted, because in the
 default run and under `--no-worktree` the working tree is the user's own checkout; the node names the files
-and prints the `git diff` / `git checkout --` lines. The built-in `security` and `reviewer` roles are such
-roles, and on `claude` their `cli`-tier calls are also spawned with only the reading tools
-(`--tools Read,Glob,Grep`), so they cannot write at all; `codex` and `gemini` have no such flag, and for them
-the diff guard is the only defence. The one thing that does *not* limit a `cli`-tier role is its own
+and prints the `git diff` / `git checkout --` lines. A `cli`-tier read-only role is such a role, and on
+`claude` its calls are also spawned with only the reading tools (`--tools Read,Glob,Grep`), so it cannot write
+at all; `codex` and `gemini` have no such flag, and for them the diff guard is the only defence. The built-in
+readers (`security`, `reviewer`, `analyst`) are no longer `cli`-tier: they run `in-process` by default and are
+governed there, so this clamp reaches them only when an adapter cannot run the loop and they fall back to
+`cli`. The one thing that does *not* limit a `cli`-tier role is its own
 allowlist: on that tier it is not passed to the backend, so it decides only whether a gate runs, never what
 the agent may do.
 
 **One case the bracket cannot separate: a writer running concurrently with the reader.** If a *writer* node
 edits the tree during the reader's own turn — not before it — its partial write lands in the end snapshot
 with no start-snapshot counterpart, and the reader is failed for it. The scheduler serializes writers (their
-changes are ordered and recorded), so a plan's ordinary `coder` → `reviewer` sequence is exact, and the
-window is narrow: a `cli`-tier reader holds the writer lock too (every `cli`-tier node does, since the
-backend's own file tools are unseen), so it cannot overlap a writer at all — the only reader that can is an
-`in-process` one whose tools are all read-level and so holds no lock. MAF does not claim to attribute changes
+changes are ordered and recorded), so a plan's ordinary `coder` → `reviewer` sequence is exact. The window
+is open for the **built-in** readers until WP-3.0c's attribution lands: a built-in reader whose turn overlaps
+a writer can fail with `unexpected_change`, and `wp/phase-3` is not promoted before 3.0c. Those readers are
+now `in-process` and, holding only read-level tools, take no writer lock; a `cli`-tier reader still holds it
+(every `cli`-tier node does, since the backend's own file tools are unseen) and so cannot overlap a writer at
+all — a *custom* read-only role on the `cli` tier is unaffected. MAF does not claim to attribute changes
 across that window: the failure is loud and names the files, and the operator sees a real change in the tree,
 so the cost is a possibly-misattributed failure, never a change that passes unattested.
 
@@ -337,11 +341,13 @@ its own tools off, as for an in-process turn. `codex` and `gemini` have no known
 their tools on these calls; a reader's own `cli`-tier call gets `--tools Read,Glob,Grep` on `claude`.
 
 A role's `execution` field defaults by the tools it holds ([D-01](DECISIONS.md)): `in-process` for a role
-that holds a write tool, `cli` for any other. A writer lands on the `cli` tier only by its own
+that holds a write tool, `cli` for any other — except the built-in readers (`security`, `reviewer`,
+`analyst`), which set `in-process` explicitly ([D-44](DECISIONS.md)). A writer lands on the `cli` tier only by its own
 `execution: cli` or because the adapter cannot run the in-process loop (`codex`, `gemini`, `ollama`,
 `openrouter`), and then only under `--allow-ungoverned`, which prints an `UNGOVERNED` banner; without it
-`maf run` refuses before planning. So **maf's default posture is governed for writers; a read-only role
-still runs on the `cli` tier unless it sets `execution: in-process`** — ungoverned, though not unobserved:
+`maf run` refuses before planning. So **maf's default posture is governed for writers and for the built-in
+readers; a *custom* read-only role still runs on the `cli` tier unless it sets `execution: in-process`** —
+ungoverned, though not unobserved:
 its turn is diffed and a change it makes fails the node (F7).
 
 The tier **is** recorded in the bundle (F7): each node contributes `{nodeId, role, tier, adapter,
