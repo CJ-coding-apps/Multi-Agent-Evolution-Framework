@@ -51,12 +51,20 @@ are optional, so a bundle written by 0.3.0 still parses and verifies.
 
 ### Changed
 
-- **The offline-goldens baseline did not move, contrary to the plan's expectation.** The 0.3.1 plan expected
-  additive bundle fields to require one deliberate baseline bump. Measured: they do not. `tests/goldens/
-  baseline.json` is a `GoldenSuiteResult` — harness sha and id, corpus sha, attempts, adapter, judge, task
-  list, solved ids, timestamp — and a bundle is not part of it; the `scripted` adapter the baseline is built
-  with does not produce a `modelSurface`, and neither `goldens` nor `evolve` reads a bundle back. So there is
-  no bump here, and a future field that *is* in the result will move it visibly and deliberately.
+- **The additive bundle fields did not move the offline-goldens baseline; the re-minted harness did.** The
+  0.3.1 plan expected the new bundle fields to require one deliberate baseline bump. Measured: they do not.
+  `tests/goldens/baseline.json` is a `GoldenSuiteResult` — harness sha and id, corpus sha, attempts, adapter,
+  judge, task list, solved ids, timestamp — and a bundle is not part of it; the `scripted` adapter the
+  baseline is built with does not produce a `modelSurface`, and neither `goldens` nor `evolve` reads a bundle
+  back. `harnessSha` *is* in the result, so re-minting the committed default (below) moves the baseline by
+  exactly that field and nothing else — which is the rule this entry states.
+- **The committed default harness is re-minted, so it stops contradicting the tree it ships in.** The
+  snapshot `.maf/harnesses/default-425ac38e….json` was minted before 0.3.1 and carried the pre-F7 reviewer
+  and security prompt tails — the "No writes" text this release replaced — while `.maf/prompts/reviewer.md`
+  and `.maf/prompts/security.md` in the same tree carried the new text, so a fresh clone's `goldens` run
+  evaluated a harness that did not match the prompts beside it. Re-minted from the current `roles.yaml` and
+  prompt files: `425ac38e…` → `60f0bb81…`. The golden baseline is re-recorded against the new sha; the
+  corpus sha, task list and solved ids are byte-identical, so the only change is the harness identity.
 
 ### Fixed
 
@@ -73,9 +81,8 @@ are optional, so a bundle written by 0.3.0 still parses and verifies.
   handed only the reading tools (`--tools Read,Glob,Grep`); `codex` and `gemini` have no known flag for that,
   so for them this diff guard is the only defence, and the README says so. The role prompts
   (`REVIEWER_PROMPT`, `SECURITY_PROMPT`, `.maf/prompts/reviewer.md`) now say what is enforced — "a change you
-  make fails this node" — rather than "No writes", which nothing enforced. (The committed
-  `legacy-default` snapshot still carries the old text; changing it moves its content hash and the golden
-  baseline, so it is left as is for a separate decision.)
+  make fails this node" — rather than "No writes", which nothing enforced. (The committed default snapshot
+  carried the old text; it is re-minted in this release, and the golden baseline with it — see Changed.)
 - **The reader guard is attributed to the reader's own turn, not to the tree it found** (F7 follow-up). The
   guard first diffed the whole working tree against the node's start commit, so a reader run after a writer
   that had left uncommitted work in the shared worktree — no node commits between DAG nodes — failed on the
