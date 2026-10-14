@@ -31,7 +31,7 @@ Status legend for work packages: `todo` · `in-progress` · `in-review` · `merg
 | **0.4.0** | LCM built properly, patch-test strategy, run persistence with pause/resume, provider failover, DAG-from-spec, evolver as claimed, Kùzu 0.11.3, hardening, consolidation. | Exit criteria 1–3 of §1, and a whole-branch audit (§3.7). |
 | **0.5.0** | Port from maf-v1: `mcp-tools` bridge (with its known fixes), `resolveHarnessForRun`, encryption at rest (E1), prompt-injector test script. Scoped after 0.4.0 from the v1 checklist. | — |
 
-Semantics: pre-1.0 SemVer. Behaviour changes bump the minor; 0.2.1 is the only patch release because it changes no documented behaviour.
+Semantics: pre-1.0 SemVer. Behaviour changes bump the minor. A patch adds no behaviour the docs do not already describe: 0.2.1 changed none; 0.3.1 restored guarantees the docs already made — a read-only role cannot change the tree unnoticed, and the bundle's subjects are the run's diffs. **A fix that makes an existing guarantee true ships in the patch, with its README row.**
 
 ---
 
@@ -55,7 +55,7 @@ Semantics: pre-1.0 SemVer. Behaviour changes bump the minor; 0.2.1 is the only p
 
 ### 3.3 Stop-and-ask conditions (D-27)
 
-An agent stops and reports — it does not proceed, retry another route, or "fix it while in there" — when it would: change behaviour the README describes beyond its WP; add or upgrade a dependency not named in its WP; edit a workflow file outside WP-1.11/2.10/3.10; refactor outside the files its WP names; hit its budget cap (§3.5); or reach a phase boundary.
+An agent stops and reports — it does not proceed, retry another route, or "fix it while in there" — when it would: change behaviour the README describes beyond its WP; add or upgrade a dependency not named in its WP; edit a workflow file outside WP-1.11/2.10/3.10; refactor outside the files its WP names; hit its budget cap (§3.5); or reach a phase boundary; **or merge a pull request into `main`** — the maintainer merges with their own hands, even when the instruction to merge arrives in the maintainer's own message or a runbook they hand over.
 
 ### 3.4 Model allocation
 
@@ -250,6 +250,8 @@ Status table rows flipped to *shipped* only for behaviour landed in this phase, 
 ---
 
 ## 7. Phase 3 — release 0.4.0
+
+> **Deviation recorded 2026-10-14:** PR #31 was merged to `main` by the coder, under the maintainer's `gh` credential, rather than by the maintainer (D-26). The runbook the architect wrote put the merge commands beside the coder's conflict-resolution steps without re-labelling them as the maintainer's, and the maintainer handed the runbook over whole. The merge was reviewed, verifier-passed and CI-green and is not reverted; the rule below is the consequence.
 
 ### WP-3.0 Carried into Phase 3 — not a lane
 
