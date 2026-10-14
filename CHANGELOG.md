@@ -9,6 +9,16 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+### Changed
+
+- **Toolchain floor** ([D-21](docs/DECISIONS.md), WP-2.11). The root `package.json` now declares `engines`
+  (Node ≥ 22, pnpm ≥ 10) and pins `packageManager: pnpm@10.34.7`, and names the two native modules whose
+  install scripts must run in `pnpm.onlyBuiltDependencies` (`kuzu`, `better-sqlite3`) — under pnpm 10 a
+  dependency's build scripts are skipped unless allow-listed, so without this the two native modules do not
+  build. `pnpm-lock.yaml` is regenerated to the v9 lockfile format; regenerating it re-resolved dependencies
+  that a caret range allowed to move. Developing maf now needs pnpm 10 and Node 22 or newer; CI installs and
+  caches pnpm 10 from the `packageManager` field.
+
 ## [0.3.2] - 2026-10-14
 
 A patch closing one hole in the shipped policy. `deny-env-files` named `fs.write` alone, but a rename
