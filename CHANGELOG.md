@@ -100,6 +100,13 @@ are optional, so a bundle written by 0.3.0 still parses and verifies.
   Rather than widen the number past the point it still tests the timeout, the gate takes an injectable clock;
   the test holds it still and fires the timeout itself. Production passes the real clock and is unchanged,
   and there is no user-visible behaviour change.
+- **The published entry point's interpreter line is one `env` can split on every platform.** The shebang
+  read `#!/usr/bin/env node --max-old-space-size=8192`; on a kernel that hands the rest of the shebang line to
+  `env` as a single argument — Linux — `env` looks for a program literally named
+  `node --max-old-space-size=8192` and `maf` fails to start, while macOS splits that argument and hides it.
+  It now reads `#!/usr/bin/env -S node --max-old-space-size=8192`, which GNU and BSD `env` both accept, and a
+  test executes the built bin the way the OS does — directly, through its shebang — rather than through
+  `node <file>` as `version.test.ts` does, which cannot see this.
 
 ## [0.3.0] - 2026-10-09
 

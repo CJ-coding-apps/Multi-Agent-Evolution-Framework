@@ -1,4 +1,4 @@
-#!/usr/bin/env node --max-old-space-size=8192
+#!/usr/bin/env -S node --max-old-space-size=8192
 import { Command } from 'commander';
 import { mafVersion } from '@maf/attestation';
 import { createAdapterRegistry } from './AdapterRegistry.js';
