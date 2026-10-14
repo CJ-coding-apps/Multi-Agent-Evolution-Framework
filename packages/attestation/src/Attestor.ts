@@ -335,8 +335,8 @@ export class Attestor implements AttestorHandle {
   }
 
   /**
-   * One governed turn's model-facing surface (F4). Append-only, in call order: every turn is kept,
-   * because the transcript it mirrors has no way back from a lost turn.
+   * One role call's model-facing surface (F4; both tiers since WP-3.0c, D-45). Append-only, in call
+   * order: every call is kept, because the transcript it mirrors has no way back from a lost turn.
    */
   recordModelSurface(record: ModelSurfaceRecord): void {
     this.modelSurfaces.push(record);

@@ -170,11 +170,12 @@ test('toolCallsForTask returns only the calls carrying that taskId, in call orde
   }
 });
 
-// ORACLE (WP-3.0c, D-45; the F7 window). Two additions to the record the 3.0c work introduces, and the
-// compatibility they must not break. A surface recorded with `tier: 'cli'` sits beside F4's governed
-// turn; a surface recorded the 0.3.1 way (no `tier`) must still sign and verify, so a bundle minted
-// before the field existed is readable. And an attributed change — a reader's turn charged to the
-// writer that held the lock across it — is in the signed payload with the rest.
+// ORACLE (WP-3.0c, D-45; the F7 window). Two additions to the record the 3.0c work introduces: an
+// attributed change — a reader's turn charged to the writer that held the lock across it — which must
+// be in the signed payload with the rest; and the `tier` field, which is optional. What the recorder
+// does with a surface handed to it without a `tier` is only the writer's half of compatibility. The
+// claim itself — that a bundle a real 0.3.1 build wrote still verifies under this reader — rests on
+// the committed fixture in intoto.test.ts, not on a bundle this code mints.
 
 test('an attributed change flows into the signed bundle; unrecorded, the field is omitted (WP-3.0c)', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
@@ -204,11 +205,11 @@ test('an attributed change flows into the signed bundle; unrecorded, the field i
   }
 });
 
-test('a 0.3.1-shaped model surface — no `tier` — still signs and verifies (WP-3.0c)', async () => {
+test('a surface recorded without a `tier` is written that way and the bundle signs (WP-3.0c)', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
   try {
     const attestor = new Attestor(makeRunId('r-3c-old'), stubGraph, dir, { secret: 'test-secret' });
-    // As 0.3.1 recorded it: three digests and the argv, no tier.
+    // Three digests and the argv, no tier — the shape a 0.3.1 build recorded.
     attestor.recordModelSurface({
       role: 'analyst', taskId: 't1' as never, turn: 1,
       systemPromptSha256: 'f'.repeat(64), promptSha256: 'e'.repeat(64),
@@ -219,8 +220,8 @@ test('a 0.3.1-shaped model surface — no `tier` — still signs and verifies (W
 
     const surface = bundle.modelSurfaces?.[0];
     assert.equal(surface?.role, 'analyst');
-    assert.equal('tier' in (surface ?? {}), false, 'absent, not present-and-undefined — the 0.3.1 shape');
-    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true, 'and it verifies as it did before the field existed');
+    assert.equal('tier' in (surface ?? {}), false, 'absent, not present-and-undefined — the recorder does not fill one in');
+    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true, 'and it verifies: an untiered surface is signable');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

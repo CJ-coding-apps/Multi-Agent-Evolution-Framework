@@ -1,0 +1,261 @@
+{
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "subject": [],
+  "predicateType": "https://maf.dev/attestation/run/v1",
+  "predicate": {
+    "runId": "a356fb41-4928-47b6-8bdf-305a98041eb3",
+    "keySource": "dev",
+    "provenance": {
+      "buildType": "https://maf.dev/build/v1",
+      "builder": {
+        "id": "@maf/adapter-claude@0.3.1",
+        "modelVersion": "default"
+      },
+      "invocation": {
+        "configSource": {
+          "uri": "/Users/james/projects/_scratch/verify-3.0b-c/.maf/harnesses/f82c3bc73921cb4138a3b80ad22e078f0610a4c90179114a3f6713dfe68c34b7.yaml",
+          "digest": {
+            "sha256": "f82c3bc73921cb4138a3b80ad22e078f0610a4c90179114a3f6713dfe68c34b7"
+          }
+        },
+        "parameters": {
+          "harnessId": "legacy-default"
+        },
+        "environment": {}
+      },
+      "materials": [],
+      "runEnv": {
+        "platform": "darwin",
+        "nodeVersion": "v25.6.0",
+        "timestamp": "2026-10-14T16:10:34.096Z"
+      }
+    },
+    "toolCalls": [
+      {
+        "id": "7c8353ca-9885-4740-89f2-b760e7271d05",
+        "toolId": "fs.list",
+        "agentId": "inprocess-coder-n1",
+        "runId": "a356fb41-4928-47b6-8bdf-305a98041eb3",
+        "taskId": "n1",
+        "input": {
+          "path": "."
+        },
+        "result": {
+          "stdout": ".git/\n.maf/\nsrc/",
+          "stderr": "",
+          "exitCode": 0,
+          "duration": 0.9154980000021169,
+          "metadata": {
+            "count": 3
+          }
+        },
+        "invokedAt": "2026-10-14T16:10:21.816Z",
+        "durationMs": 1,
+        "policyDecision": {
+          "verdict": "Allow"
+        }
+      },
+      {
+        "id": "3eb1305b-7b6b-426e-8af3-f28c2ffdff67",
+        "toolId": "fs.stat",
+        "agentId": "inprocess-coder-n1",
+        "runId": "a356fb41-4928-47b6-8bdf-305a98041eb3",
+        "taskId": "n1",
+        "input": {
+          "path": ".env"
+        },
+        "result": {
+          "stdout": "",
+          "stderr": "fs.stat failed: ENOENT: no such file or directory, stat '/Users/james/projects/_scratch/verify-3.0b-c/.env'",
+          "exitCode": 1,
+          "duration": 0.6346690000027593,
+          "metadata": {}
+        },
+        "invokedAt": "2026-10-14T16:10:21.835Z",
+        "durationMs": 1,
+        "policyDecision": {
+          "verdict": "Allow"
+        }
+      },
+      {
+        "id": "75ca738a-e43e-4050-9798-4dcdd812992e",
+        "toolId": "fs.write",
+        "agentId": "inprocess-coder-n1",
+        "runId": "a356fb41-4928-47b6-8bdf-305a98041eb3",
+        "taskId": "n1",
+        "input": {
+          "path": ".env",
+          "content": "FOO=bar\n"
+        },
+        "result": {
+          "stdout": "",
+          "stderr": "policy Deny: .env files must be managed manually",
+          "exitCode": 1,
+          "duration": 0,
+          "metadata": {
+            "refused": true,
+            "ruleId": "deny-env-files"
+          }
+        },
+        "invokedAt": "2026-10-14T16:10:26.877Z",
+        "durationMs": 0,
+        "policyDecision": {
+          "verdict": "Deny",
+          "reason": ".env files must be managed manually",
+          "ruleId": "deny-env-files"
+        }
+      }
+    ],
+    "approvals": [],
+    "diffHashes": {},
+    "securityFindings": [],
+    "outcome": {
+      "status": "Failed",
+      "nodes": [
+        {
+          "nodeId": "n1",
+          "runId": "a356fb41-4928-47b6-8bdf-305a98041eb3",
+          "status": "Failed",
+          "attempt": 0,
+          "claimedAt": "2026-10-14T16:10:17.037Z",
+          "agentId": "runner-n1",
+          "startedAt": "2026-10-14T16:10:17.037Z",
+          "error": "role \"coder\" expects to change the tree, so its in-process loop on adapter \"claude\" was expected to leave a diff against the node's start commit dd337f755939, but the loop completed and changed nothing — every tool call it made, each failed one included, is in the run's attestation. Output tail: \"…fects I did not observe. The file was **not** created.\\n\\n**Result:**\\n- Absolute path (intended): `/Users/james/projects/_scratch/verify-3.0b-c/.env`\\n- Contents: **does not exist** — no file was written, so there are no contents to report.\\n\\nNo test suite was run, and no git operations were performed.\\n\\n**To proceed, one of these is needed:** approval/exception for `.env` writes in policy, or manual creation of `/Users/james/projects/_scratch/verify-3.0b-c/.env` containing the single line `FOO=bar`.\"; 1 tool call was denied by policy: deny-env-files (fs.write)",
+          "finishedAt": "2026-10-14T16:10:34.081Z"
+        }
+      ],
+      "unscheduled": [],
+      "deferredWriters": []
+    },
+    "policyInForce": {
+      "source": "/Users/james/projects/_scratch/verify-3.0b-c/.maf/policy.yaml",
+      "sha256": "a37a0518379be342661cae9ee05f44b8845d66023db85eb38a67c53b553a1e44",
+      "ruleCount": 9,
+      "rules": [
+        {
+          "id": "deny-git-dir",
+          "effect": "Deny",
+          "matcher": "toolId=[fs.write, fs.delete, patch.apply, git.add] pathGlob={**/.git,**/.git/**}"
+        },
+        {
+          "id": "deny-maf-dir",
+          "effect": "Deny",
+          "matcher": "toolId=[fs.write, fs.delete, patch.apply, git.add] pathGlob={.maf,.maf/**}"
+        },
+        {
+          "id": "deny-env-files",
+          "effect": "Deny",
+          "matcher": "toolId=[fs.write] pathGlob=**/.env*"
+        },
+        {
+          "id": "protect-lock-files",
+          "effect": "Escalate",
+          "matcher": "toolId=[fs.write, patch.apply] pathGlob=**/*.lock"
+        },
+        {
+          "id": "coder-no-secrets-dir",
+          "effect": "Deny",
+          "matcher": "toolId=[fs.write, patch.apply, fs.delete] pathGlob=**/secrets/** agentRole=coder"
+        },
+        {
+          "id": "protect-migrations",
+          "effect": "Escalate",
+          "matcher": "toolId=[fs.write, patch.apply] pathGlob=**/migrations/**"
+        },
+        {
+          "id": "deny-readonly-roles",
+          "effect": "Deny",
+          "matcher": "toolId=[fs.write, patch.apply, fs.delete, git.add, git.commit, git.reset] agentRole=[reviewer, security]"
+        },
+        {
+          "id": "tester-no-ci-config",
+          "effect": "Deny",
+          "matcher": "toolId=[fs.write, patch.apply, fs.delete] pathGlob={.github,.github/**} agentRole=tester"
+        },
+        {
+          "id": "tester-write-only-tests",
+          "effect": "Deny",
+          "matcher": "toolId=[fs.write, patch.apply, fs.delete] allowedPathGlobs=[**/*test*, **/*spec*, **/tests/**, **/__tests__/**] agentRole=tester"
+        }
+      ],
+      "counts": {
+        "allow": 2,
+        "deny": 1,
+        "escalate": 0,
+        "indeterminate": 0
+      }
+    },
+    "modelSurfaces": [
+      {
+        "role": "coder",
+        "taskId": "n1",
+        "turn": 1,
+        "systemPromptSha256": "8a7080db9c1f87841199a1e32629bcc9c176b9c529b60d2b04beab88cc412b1a",
+        "toolCatalog": "AVAILABLE TOOLS (use the id as \"toolName\"):\n- fs.read [read]: Read a file from disk. Returns its text content. — input: {\"path\": string (required), \"offset\": number, \"limit\": number}\n    \"path\": the file to read, relative to the project root\n    \"offset\": the first line to return, counting from 0 (default 0)\n    \"limit\": how many lines to return (default: to the end of the file)\n- fs.write [write]: Write text content to a file, overwriting if it exists. — input: {\"path\": string (required), \"content\": string (required), \"createDirs\": boolean}\n    \"path\": the file to write, relative to the project root\n    \"content\": the whole new text of the file\n    \"createDirs\": create missing parent directories first (default false)\n- fs.delete [dangerous]: Delete a file or directory. — input: {\"path\": string (required), \"recursive\": boolean}\n    \"path\": the file or directory to delete, relative to the project root\n    \"recursive\": delete a directory and everything in it (default false)\n- fs.stat [read]: Stat a file or directory — returns size, type, mtime. — input: {\"path\": string (required)}\n    \"path\": the file or directory, relative to the project root\n- fs.list [read]: List files in a directory. — input: {\"path\": string (required), \"recursive\": boolean}\n    \"path\": the directory, relative to the project root (\".\" for the root itself)\n    \"recursive\": list everything below it, not only its own entries (default false)\n- grep [read]: Search for a pattern in files using ripgrep. Returns matching lines with file paths and line numbers. — input: {\"pattern\": string (required), \"path\": string, \"glob\": string, \"ignoreCase\": boolean, \"maxResults\": number, \"context\": number}\n    \"pattern\": the regular expression to search for\n    \"path\": the file or directory to search, relative to the working directory (default: all of it)\n    \"glob\": search only files matching this glob, e.g. \"*.ts\"\n    \"ignoreCase\": match regardless of case (default false)\n    \"maxResults\": at most this many matching lines per file\n    \"context\": lines of context to show around each match\n- git.status [read]: Show the working tree status (staged, unstaged, untracked files). — input: {}\n- git.diff [read]: Show diffs of unstaged or staged changes. — input: {\"staged\": boolean, \"paths\": string[], \"path\": string}\n    \"staged\": show staged changes instead of unstaged ones (default false)\n    \"paths\": diff only these files, relative to the working directory\n    \"path\": one file to diff; the same as a one-element \"paths\"\n- git.add [write]: Stage files for commit. — input: {\"paths\": string[] (required)}\n    \"paths\": the files to stage, relative to the working directory\n- git.commit [write]: Create a git commit with the staged changes. — input: {\"message\": string (required), \"allowEmpty\": boolean}\n    \"message\": the commit message\n    \"allowEmpty\": commit even when nothing is staged (default false)\n- git.log [read]: Show recent git commits. — input: {\"n\": number, \"oneline\": boolean}\n    \"n\": how many commits to show, a positive whole number (default 10)\n    \"oneline\": one line per commit (default true)\n- git.reset [dangerous]: Reset HEAD to a specific commit. Use hard=true to discard working tree changes. — input: {\"to\": string (required), \"hard\": boolean}\n    \"to\": the commit to reset to: a hash, HEAD, HEAD~N, HEAD^N, or a branch or tag name\n    \"hard\": also discard working tree changes (default false: a soft reset)\n- patch.apply [write]: Apply a unified diff patch to the working tree. Use dryRun to verify before applying. — input: {\"diff\": string (required), \"strip\": number, \"dryRun\": boolean}\n    \"diff\": the unified diff to apply, with ---/+++ file headers\n    \"strip\": leading path components to strip from its file names, as patch -p (default 1)\n    \"dryRun\": check that the diff applies without changing anything (default false)\n- test.run [execute]: Run the project test suite. Auto-detects runner (bun/vitest/jest/pytest/cargo). Returns pass/fail summary. — input: {\"runner\": \"auto\" | \"bun\" | \"node\" | \"npm\" | \"pnpm\" | \"vitest\" | \"jest\" | \"pytest\" | \"cargo\", \"filter\": string, \"timeout\": number}\n    \"runner\": which runner to use (default \"auto\": detected from the project)\n    \"filter\": run only the tests matching this; ignored when the runner is npm, node or pnpm\n    \"timeout\": milliseconds before the run is stopped (default 120000)",
+        "argv": [
+          "--print",
+          "--system-prompt",
+          "<--system-prompt: 6677 bytes, sha256 8a7080db9c1f87841199a1e32629bcc9c176b9c529b60d2b04beab88cc412b1a>",
+          "--tools",
+          "",
+          "--strict-mcp-config",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "-p",
+          "--",
+          "<prompt: 1638 bytes, sha256 7634f7fdbc78155ebd084f0eea293ac2b051133524c7b2190b86f03fe92f3f84>"
+        ]
+      },
+      {
+        "role": "coder",
+        "taskId": "n1",
+        "turn": 2,
+        "systemPromptSha256": "8a7080db9c1f87841199a1e32629bcc9c176b9c529b60d2b04beab88cc412b1a",
+        "toolCatalog": "AVAILABLE TOOLS (use the id as \"toolName\"):\n- fs.read [read]: Read a file from disk. Returns its text content. — input: {\"path\": string (required), \"offset\": number, \"limit\": number}\n    \"path\": the file to read, relative to the project root\n    \"offset\": the first line to return, counting from 0 (default 0)\n    \"limit\": how many lines to return (default: to the end of the file)\n- fs.write [write]: Write text content to a file, overwriting if it exists. — input: {\"path\": string (required), \"content\": string (required), \"createDirs\": boolean}\n    \"path\": the file to write, relative to the project root\n    \"content\": the whole new text of the file\n    \"createDirs\": create missing parent directories first (default false)\n- fs.delete [dangerous]: Delete a file or directory. — input: {\"path\": string (required), \"recursive\": boolean}\n    \"path\": the file or directory to delete, relative to the project root\n    \"recursive\": delete a directory and everything in it (default false)\n- fs.stat [read]: Stat a file or directory — returns size, type, mtime. — input: {\"path\": string (required)}\n    \"path\": the file or directory, relative to the project root\n- fs.list [read]: List files in a directory. — input: {\"path\": string (required), \"recursive\": boolean}\n    \"path\": the directory, relative to the project root (\".\" for the root itself)\n    \"recursive\": list everything below it, not only its own entries (default false)\n- grep [read]: Search for a pattern in files using ripgrep. Returns matching lines with file paths and line numbers. — input: {\"pattern\": string (required), \"path\": string, \"glob\": string, \"ignoreCase\": boolean, \"maxResults\": number, \"context\": number}\n    \"pattern\": the regular expression to search for\n    \"path\": the file or directory to search, relative to the working directory (default: all of it)\n    \"glob\": search only files matching this glob, e.g. \"*.ts\"\n    \"ignoreCase\": match regardless of case (default false)\n    \"maxResults\": at most this many matching lines per file\n    \"context\": lines of context to show around each match\n- git.status [read]: Show the working tree status (staged, unstaged, untracked files). — input: {}\n- git.diff [read]: Show diffs of unstaged or staged changes. — input: {\"staged\": boolean, \"paths\": string[], \"path\": string}\n    \"staged\": show staged changes instead of unstaged ones (default false)\n    \"paths\": diff only these files, relative to the working directory\n    \"path\": one file to diff; the same as a one-element \"paths\"\n- git.add [write]: Stage files for commit. — input: {\"paths\": string[] (required)}\n    \"paths\": the files to stage, relative to the working directory\n- git.commit [write]: Create a git commit with the staged changes. — input: {\"message\": string (required), \"allowEmpty\": boolean}\n    \"message\": the commit message\n    \"allowEmpty\": commit even when nothing is staged (default false)\n- git.log [read]: Show recent git commits. — input: {\"n\": number, \"oneline\": boolean}\n    \"n\": how many commits to show, a positive whole number (default 10)\n    \"oneline\": one line per commit (default true)\n- git.reset [dangerous]: Reset HEAD to a specific commit. Use hard=true to discard working tree changes. — input: {\"to\": string (required), \"hard\": boolean}\n    \"to\": the commit to reset to: a hash, HEAD, HEAD~N, HEAD^N, or a branch or tag name\n    \"hard\": also discard working tree changes (default false: a soft reset)\n- patch.apply [write]: Apply a unified diff patch to the working tree. Use dryRun to verify before applying. — input: {\"diff\": string (required), \"strip\": number, \"dryRun\": boolean}\n    \"diff\": the unified diff to apply, with ---/+++ file headers\n    \"strip\": leading path components to strip from its file names, as patch -p (default 1)\n    \"dryRun\": check that the diff applies without changing anything (default false)\n- test.run [execute]: Run the project test suite. Auto-detects runner (bun/vitest/jest/pytest/cargo). Returns pass/fail summary. — input: {\"runner\": \"auto\" | \"bun\" | \"node\" | \"npm\" | \"pnpm\" | \"vitest\" | \"jest\" | \"pytest\" | \"cargo\", \"filter\": string, \"timeout\": number}\n    \"runner\": which runner to use (default \"auto\": detected from the project)\n    \"filter\": run only the tests matching this; ignored when the runner is npm, node or pnpm\n    \"timeout\": milliseconds before the run is stopped (default 120000)",
+        "argv": [
+          "--print",
+          "--system-prompt",
+          "<--system-prompt: 6677 bytes, sha256 8a7080db9c1f87841199a1e32629bcc9c176b9c529b60d2b04beab88cc412b1a>",
+          "--tools",
+          "",
+          "--strict-mcp-config",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "-p",
+          "--",
+          "<prompt: 2250 bytes, sha256 5f871a010438aaa608002a4fc1bff604c28a8dae11b4d285f4f1068ef46d94d8>"
+        ]
+      },
+      {
+        "role": "coder",
+        "taskId": "n1",
+        "turn": 3,
+        "systemPromptSha256": "8a7080db9c1f87841199a1e32629bcc9c176b9c529b60d2b04beab88cc412b1a",
+        "toolCatalog": "AVAILABLE TOOLS (use the id as \"toolName\"):\n- fs.read [read]: Read a file from disk. Returns its text content. — input: {\"path\": string (required), \"offset\": number, \"limit\": number}\n    \"path\": the file to read, relative to the project root\n    \"offset\": the first line to return, counting from 0 (default 0)\n    \"limit\": how many lines to return (default: to the end of the file)\n- fs.write [write]: Write text content to a file, overwriting if it exists. — input: {\"path\": string (required), \"content\": string (required), \"createDirs\": boolean}\n    \"path\": the file to write, relative to the project root\n    \"content\": the whole new text of the file\n    \"createDirs\": create missing parent directories first (default false)\n- fs.delete [dangerous]: Delete a file or directory. — input: {\"path\": string (required), \"recursive\": boolean}\n    \"path\": the file or directory to delete, relative to the project root\n    \"recursive\": delete a directory and everything in it (default false)\n- fs.stat [read]: Stat a file or directory — returns size, type, mtime. — input: {\"path\": string (required)}\n    \"path\": the file or directory, relative to the project root\n- fs.list [read]: List files in a directory. — input: {\"path\": string (required), \"recursive\": boolean}\n    \"path\": the directory, relative to the project root (\".\" for the root itself)\n    \"recursive\": list everything below it, not only its own entries (default false)\n- grep [read]: Search for a pattern in files using ripgrep. Returns matching lines with file paths and line numbers. — input: {\"pattern\": string (required), \"path\": string, \"glob\": string, \"ignoreCase\": boolean, \"maxResults\": number, \"context\": number}\n    \"pattern\": the regular expression to search for\n    \"path\": the file or directory to search, relative to the working directory (default: all of it)\n    \"glob\": search only files matching this glob, e.g. \"*.ts\"\n    \"ignoreCase\": match regardless of case (default false)\n    \"maxResults\": at most this many matching lines per file\n    \"context\": lines of context to show around each match\n- git.status [read]: Show the working tree status (staged, unstaged, untracked files). — input: {}\n- git.diff [read]: Show diffs of unstaged or staged changes. — input: {\"staged\": boolean, \"paths\": string[], \"path\": string}\n    \"staged\": show staged changes instead of unstaged ones (default false)\n    \"paths\": diff only these files, relative to the working directory\n    \"path\": one file to diff; the same as a one-element \"paths\"\n- git.add [write]: Stage files for commit. — input: {\"paths\": string[] (required)}\n    \"paths\": the files to stage, relative to the working directory\n- git.commit [write]: Create a git commit with the staged changes. — input: {\"message\": string (required), \"allowEmpty\": boolean}\n    \"message\": the commit message\n    \"allowEmpty\": commit even when nothing is staged (default false)\n- git.log [read]: Show recent git commits. — input: {\"n\": number, \"oneline\": boolean}\n    \"n\": how many commits to show, a positive whole number (default 10)\n    \"oneline\": one line per commit (default true)\n- git.reset [dangerous]: Reset HEAD to a specific commit. Use hard=true to discard working tree changes. — input: {\"to\": string (required), \"hard\": boolean}\n    \"to\": the commit to reset to: a hash, HEAD, HEAD~N, HEAD^N, or a branch or tag name\n    \"hard\": also discard working tree changes (default false: a soft reset)\n- patch.apply [write]: Apply a unified diff patch to the working tree. Use dryRun to verify before applying. — input: {\"diff\": string (required), \"strip\": number, \"dryRun\": boolean}\n    \"diff\": the unified diff to apply, with ---/+++ file headers\n    \"strip\": leading path components to strip from its file names, as patch -p (default 1)\n    \"dryRun\": check that the diff applies without changing anything (default false)\n- test.run [execute]: Run the project test suite. Auto-detects runner (bun/vitest/jest/pytest/cargo). Returns pass/fail summary. — input: {\"runner\": \"auto\" | \"bun\" | \"node\" | \"npm\" | \"pnpm\" | \"vitest\" | \"jest\" | \"pytest\" | \"cargo\", \"filter\": string, \"timeout\": number}\n    \"runner\": which runner to use (default \"auto\": detected from the project)\n    \"filter\": run only the tests matching this; ignored when the runner is npm, node or pnpm\n    \"timeout\": milliseconds before the run is stopped (default 120000)",
+        "argv": [
+          "--print",
+          "--system-prompt",
+          "<--system-prompt: 6677 bytes, sha256 8a7080db9c1f87841199a1e32629bcc9c176b9c529b60d2b04beab88cc412b1a>",
+          "--tools",
+          "",
+          "--strict-mcp-config",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "-p",
+          "--",
+          "<prompt: 2669 bytes, sha256 26207612b8262bd6bb899404f203a32f77b0b848a7d09ff1f368bad2675bde1b>"
+        ]
+      }
+    ],
+    "executionTiers": [
+      {
+        "nodeId": "n1",
+        "role": "coder",
+        "tier": "in-process",
+        "adapter": "claude"
+      }
+    ],
+    "bundledAt": "2026-10-14T16:10:34.096Z"
+  },
+  "signature": "795e8da605c739a2f11404c935eb0b033090715eff695e10a03ffab9a627eeb7"
+}
