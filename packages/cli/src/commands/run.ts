@@ -344,6 +344,10 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       },
     });
 
+    // F6 — the policy in force, read now rather than where the engine was built: the counts are
+    // only final after the last call it decided, and the bundle is written after the run.
+    attestor.recordPolicyInForce(policy.inForce());
+
     // Bundle attestation — the harness IS the build's config source (signed): the stored file and
     // its sha, re-verified now, so the digest names what was dispatched.
     const bundle = await attestor.bundle(

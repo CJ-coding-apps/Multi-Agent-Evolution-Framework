@@ -9,6 +9,55 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+The 0.3.1 content: evidence honesty for the in-process tier. A signed bundle now says what the model was
+shown each turn and which policy was in force — the two things a reader of a bundle could not get before,
+and the things the 2026-10-13 sweep found missing when it read a run's transcripts against its bundle. The
+version heading is the maintainer's to promote; nothing here needs a migration, and both new bundle fields
+are optional, so a bundle written by 0.3.0 still parses and verifies.
+
+### Added
+
+- **A bundle records the model-facing surface of each governed turn** (F4). A reader of an in-process run
+  could see the tool calls it made and nothing about the turn that produced them: not the system prompt,
+  not the tool catalogue the model was shown, not the argv that reached the backend. Each turn in the loop
+  now records, into the signed bundle and the transcript, the sha256 of the exact system-prompt bytes, the
+  serialized tool catalogue as sent, and the backend argv. The two payload positionals — the
+  `--system-prompt` value and the trailing prompt — are replaced in the recorded argv by a note naming their
+  byte length and their own sha256, so a turn-sized prompt does not enter every bundle while the flags that
+  reached the binary stay verbatim; a flag is what this evidence is for, and the digest already answers
+  "what text". Recorded for the `cli` tier not at all: that turn sends the backend no MAF tool catalogue, so
+  recording one would be false.
+- **A bundle records the policy in force** (F6). A run with no policy file and a run whose policy file held
+  rules that never matched looked identical from `toolCalls` and `securityFindings` alone. The bundle now
+  carries the policy's source path, the sha256 of its bytes (absent exactly when no file was read — the one
+  case that stays silent), the rule count, every rule as `(id, effect, matcher)`, and the Allow/Deny/
+  Escalate/Indeterminate counts the engine reached. Every command that writes a bundle records it: `run`,
+  `goldens` and `inprocess-demo`.
+- **`test.run` answers an absent test runner** (F1 — lands with `#29`, a separate PR, not in this change-set).
+  Asking for a runner the host does not have —
+  `bun`, `python`, `cargo` — failed the *spawn*, and an unhandled `error` on a `ChildProcess` kills the whole
+  process: one live run died with `spawn bun ENOENT` and wrote no attestation at all. The tool now answers
+  that the way it answers a tool that fails while running: with a failed result, which the node reports with
+  the reason (D-41). The same pass gave `node` and `pnpm` their own commands — both were already in the
+  schema's enum, but neither had a `case`, so a model that asked for either silently ran `npm test`.
+
+### Changed
+
+- **The offline-goldens baseline did not move, contrary to the plan's expectation.** The 0.3.1 plan expected
+  additive bundle fields to require one deliberate baseline bump. Measured: they do not. `tests/goldens/
+  baseline.json` is a `GoldenSuiteResult` — harness sha and id, corpus sha, attempts, adapter, judge, task
+  list, solved ids, timestamp — and a bundle is not part of it; the `scripted` adapter the baseline is built
+  with does not produce a `modelSurface`, and neither `goldens` nor `evolve` reads a bundle back. So there is
+  no bump here, and a future field that *is* in the result will move it visibly and deliberately.
+
+### Fixed
+
+- **The approval gate's timeout is testable without racing a wall clock** (0.3.0 audit follow-up). The test
+  that pins "a request is pending while it waits" used a 25 ms budget and lost to the timer under load.
+  Rather than widen the number past the point it still tests the timeout, the gate takes an injectable clock;
+  the test holds it still and fires the timeout itself. Production passes the real clock and is unchanged,
+  and there is no user-visible behaviour change.
+
 ## [0.3.0] - 2026-10-09
 
 The governed-by-default execution model, and the wiring the 0.2.1 README listed as planned: writer roles

@@ -484,6 +484,9 @@ export class RoleDispatcher {
         policy:    this.config.policy,
         attestor:  this.config.attestor,
         approvalGate: this.config.approvalGate,
+        // Each turn's model surface goes here as well as to the bundle (F4): a reader of the
+        // transcript should not have to open the signed artifact to see what the model was shown.
+        transcript: this.config.transcript,
         runId:     this.config.runId,
         taskId,
         pipeline,

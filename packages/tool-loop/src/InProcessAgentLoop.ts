@@ -2,6 +2,7 @@ import { makeAgentId, estimateTokens } from '@maf/types';
 import type {
   RunId, TaskId, TurnAdapter, TurnMessage, ToolPlugin, ToolContext,
   PolicyEngineHandle, AttestorHandle, AssistantTurn, ToolCallRequest, ToolResult, ApprovalGateHandle,
+  ModelSurfaceRecord,
 } from '@maf/types';
 import { ProcessorInterrupt, ContractViolation } from '@maf/processors';
 import type { ProcessorPipeline, HarnessEvent, HookPoint } from '@maf/processors';
@@ -26,6 +27,18 @@ export interface InProcessLoopOptions {
   maxToolCallRepairs?: number;
 }
 
+/**
+ * The transcript, as the loop needs it: one method. A `TranscriptLogger` satisfies it structurally,
+ * so the loop does not depend on `@maf/transcript` for a type.
+ */
+export interface TranscriptSink {
+  append(
+    role: 'user' | 'assistant' | 'system' | 'tool',
+    content: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<void>;
+}
+
 export interface InProcessLoopDeps {
   adapter:    TurnAdapter;
   policy:     PolicyEngineHandle;
@@ -33,6 +46,8 @@ export interface InProcessLoopDeps {
   runId:      RunId;
   taskId:     TaskId;
   pipeline?:  ProcessorPipeline;
+  /** Where each turn's model surface is written (F4); omitted when there is no transcript to write. */
+  transcript?: TranscriptSink;
   /** Asked when the policy escalates a call (D-02); reaches executeToolGated with these deps. */
   approvalGate?: ApprovalGateHandle | undefined;
 }
@@ -241,11 +256,36 @@ export class InProcessAgentLoop {
     systemPrompt: string,
   ): Promise<{ turn: AssistantTurn; intercepted: boolean }> {
     const turn = await this.callModel(promptHistory, systemPrompt);
+    await this.recordSurface(base, stepIndex, turn);
     if (!this.deps.pipeline) return { turn, intercepted: false };
     const ev = await this.deps.pipeline.run({ ...base, hook: 'after_model', stepIndex, turn });
     const first = this.firstEvent<{ turn: AssistantTurn }>(ev, 'after_model');
     if (!first) return { turn, intercepted: true };
     return { turn: first.turn, intercepted: false };
+  }
+
+  /**
+   * Records what this turn showed the model (F4), to the bundle and the transcript. It runs before
+   * the `after_model` hook, because the evidence is about what the model *was shown*, which no
+   * processor that edits the turn can change after the fact.
+   */
+  private async recordSurface(
+    base: { runId: RunId; taskId: TaskId; role: string },
+    stepIndex: number,
+    turn: AssistantTurn,
+  ): Promise<void> {
+    const surface = turn.modelSurface;
+    if (!surface) return;
+    const record: ModelSurfaceRecord = {
+      role: base.role, taskId: base.taskId, turn: stepIndex + 1, ...surface,
+    };
+    this.deps.attestor.recordModelSurface?.(record);
+    await this.deps.transcript?.append(
+      'system',
+      `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; argv ${JSON.stringify(record.argv)}`,
+      { agentRole: record.role, taskId: record.taskId, turn: record.turn,
+        systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv },
+    );
   }
 
   private async callModel(history: TurnMessage[], systemPrompt: string): Promise<AssistantTurn> {

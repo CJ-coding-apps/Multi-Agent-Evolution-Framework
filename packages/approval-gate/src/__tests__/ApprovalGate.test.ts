@@ -7,7 +7,7 @@ import type { ApprovalAsk, ReviewAttestation } from '@maf/types';
 import { makeAgentId, makeRunId, makeTaskId, makeToolId } from '@maf/types';
 import { Attestor } from '@maf/attestation';
 import { ApprovalGate, DEFAULT_APPROVAL_TIMEOUT_MS } from '../ApprovalGate.js';
-import type { ApprovalProvider, PendingApproval, ProviderAnswer } from '../ApprovalGate.js';
+import type { ApprovalClock, ApprovalProvider, PendingApproval, ProviderAnswer } from '../ApprovalGate.js';
 import type { ApprovalSink } from '../AttestationRecorder.js';
 import { approvalRequestHash } from '../requestHash.js';
 
@@ -17,6 +17,19 @@ import { approvalRequestHash } from '../requestHash.js';
 class SpySink implements ApprovalSink {
   approvals: ReviewAttestation[] = [];
   addApproval(attestation: ReviewAttestation): void { this.approvals.push(attestation); }
+}
+
+/**
+ * The gate's clock, held still: the test fires the timeout when it says, never on a wall clock.
+ * A real 25 ms timer races the assertion below and a loaded machine loses — so the test owns the
+ * clock instead of widening the budget past the point the number still means anything.
+ */
+function manualClock(): { clock: ApprovalClock; fire: () => void } {
+  let arm: (() => void) | undefined;
+  return {
+    clock: (handler) => { arm = handler; return () => { arm = undefined; }; },
+    fire:  () => { arm?.(); },
+  };
 }
 
 /** A provider answering by `script`, keeping every request it was shown and the signal it got. */
@@ -201,16 +214,21 @@ test('a request that cannot be hashed is refused and attested, not thrown', asyn
 test('timeout: no answer in time is TimedOut, attested, the slot cleared and the provider told to stop', async () => {
   const sink = new SpySink();
   const { provider, signals } = scripted(() => new Promise<ProviderAnswer>(() => undefined));
-  const gate = new ApprovalGate({ provider, recorder: sink, timeoutMs: 25 });
+  const { clock, fire } = manualClock();
+  // The budget is deliberately far longer than the test could run: with the injected clock the
+  // timeout fires only when `fire()` says so, and if the gate were on the real clock the test would
+  // still be waiting here — which is the property this pins, not merely a shorter wait.
+  const gate = new ApprovalGate({ provider, recorder: sink, timeoutMs: 3_600_000, clock });
 
   const decided = gate.decide(ask('req-1'));
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(gate.pendingIds(), ['req-1'], 'pending while it waits');
+  fire(); // the timeout, exactly when the test says — not on a wall clock
   const outcome = await decided;
 
   assert.equal(outcome.approved, false);
   assert.equal(outcome.status, 'TimedOut');
-  assert.match(outcome.reason, /no decision within 25 ms/);
+  assert.match(outcome.reason, /no decision within 3600000 ms/);
   assert.deepEqual(gate.pendingIds(), [], 'the slot is cleared');
   assert.equal(signals[0]?.aborted, true, 'the provider was told to stop listening');
   assert.equal(sink.approvals[0]?.decision.status, 'TimedOut');

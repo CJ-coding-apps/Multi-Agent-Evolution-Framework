@@ -188,12 +188,16 @@ export function registerInProcessDemoCommand(program: Command): void {
         dispatchError = err;
       }
       // A signed attestation bundle for the run, whatever happened (records are redacted at record-time).
-      await attestAndClose(stack, () => stack.attestor.bundle(
-        { id: componentId('@maf/inprocess-demo'), modelVersion: adapter.name },
-        { configSource: { uri: 'inprocess-demo', digest: { sha256: harness.sha } }, parameters: { harnessId: harness.id }, environment: {} },
-        [],
-        { status: dispatchError === undefined ? 'Succeeded' : 'Failed', unscheduled: [] },
-      ), dispatchError);
+      // F6 — the policy the demo ran under, recorded before the bundle so its counts are final.
+      await attestAndClose(stack, () => {
+        stack.recordPolicyInForce();
+        return stack.attestor.bundle(
+          { id: componentId('@maf/inprocess-demo'), modelVersion: adapter.name },
+          { configSource: { uri: 'inprocess-demo', digest: { sha256: harness.sha } }, parameters: { harnessId: harness.id }, environment: {} },
+          [],
+          { status: dispatchError === undefined ? 'Succeeded' : 'Failed', unscheduled: [] },
+        );
+      }, dispatchError);
 
       // ── observe real effects ──
       const sumAfter = await readFile(path.join(fixture, 'sum.js'), 'utf8');

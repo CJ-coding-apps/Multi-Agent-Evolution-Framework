@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TransportError } from '@maf/types';
-import type { AdapterInvokeOptions, TurnMessage } from '@maf/types';
+import { createHash } from 'node:crypto';
+import { TransportError, makeToolId } from '@maf/types';
+import type { AdapterInvokeOptions, TurnMessage, ToolPlugin } from '@maf/types';
 import type { SpawnResult, spawnAndCollect } from '@maf/adapter-base';
+import { serializeTools } from '@maf/adapter-base';
 import { ClaudeAdapter } from '../index.js';
 
 // ORACLE (F4, F8; D-04, D-06).
@@ -259,4 +261,55 @@ test('a prompt that starts with a dash follows --, on invoke, stream and sendTur
   }
   assert.equal(calls[0]?.args.at(-1), hostile);
   assert.equal(streamed[0]?.at(-1), hostile);
+});
+
+// ORACLE (F4 of the 0.3.1 sweep). A governed turn's evidence must name what the model was shown:
+// the sha256 of the system-prompt bytes, the serialized tool catalogue as sent, and the argv — with
+// the two payload positionals elided, because the digests answer "what text" and the flags answer
+// "what reached the binary". Eliding the payloads is a deliberate deviation from "argv verbatim";
+// it keeps a turn-sized prompt out of every bundle.
+
+const sha256Hex = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
+const elided = (name: string, value: string): string =>
+  `<${name}: ${Buffer.byteLength(value, 'utf8')} bytes, sha256 ${sha256Hex(value)}>`;
+
+/** A tool the loop would advertise: only id, permissionLevel, description and an input shape matter here. */
+const TOOLS: ToolPlugin[] = [
+  {
+    id: makeToolId('fs.read'), name: 'read', description: 'Read a file.', permissionLevel: 'read',
+    async execute() { return { stdout: '', stderr: '', exitCode: 0, duration: 0, metadata: {} }; },
+    declaredPaths: () => [],
+    inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'file to read' } }, required: ['path'] },
+  },
+];
+
+test('sendTurn records the model-facing surface: prompt digest, tool catalogue, argv with payloads elided (F4)', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'done', stderr: '', exitCode: 0, duration: 1 });
+  const turn = await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, systemPrompt: 'be brief', model: 'opus', tools: TOOLS });
+
+  const args = calls[0]?.args ?? [];
+  const surface = turn.modelSurface;
+  assert.ok(surface, 'a governed turn carries its surface');
+  const asSent = args[args.indexOf('--system-prompt') + 1] ?? '';
+  const sentHistory = args.at(-1) ?? '';
+
+  // The digest is taken over the bytes that reached the binary, not over the pre-spawn value: the
+  // two are the same string only while `buildArgs` does not rewrite it, which is the thing to pin.
+  assert.equal(surface.systemPromptSha256, sha256Hex(asSent), 'the digest is of the prompt as sent');
+  assert.equal(surface.toolCatalog, serializeTools(TOOLS), 'the catalogue is what the model was shown');
+  assert.deepEqual(surface.argv, [
+    '--print', '--system-prompt', elided('--system-prompt', asSent),
+    '--model', 'opus', '--tools', '',
+    ...MCP_ISOLATION,
+    '-p', '--', elided('prompt', sentHistory),
+  ], 'flags verbatim — including the empty --tools value — and both payloads elided');
+  assert.equal(surface.argv.some((a) => a.includes('be brief')), false, 'no prompt text in the record');
+  assert.equal(surface.argv.some((a) => a.includes('[user]')), false, 'no history text in the record');
+});
+
+test('a turn with no tools records the empty catalogue rather than omitting it (F4)', async () => {
+  const { spawn } = stubSpawn({ stdout: 'done', stderr: '', exitCode: 0, duration: 1 });
+  const bare = await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, systemPrompt: 'be brief' });
+
+  assert.equal(bare.modelSurface?.toolCatalog, serializeTools(undefined), 'no tools is stated, not omitted');
 });

@@ -691,6 +691,48 @@ export interface PolicyEngineHandle {
     ctx: ToolContext,
     declaredPaths: readonly string[],
   ): Promise<PolicyDecision>;
+
+  /**
+   * The rules that governed this engine and how its calls fell, for the run's bundle (F6). Optional
+   * because a handle that is a test double need not answer it; a production engine always does.
+   *
+   * Without it a reader cannot tell "no policy was loaded" from "a Deny rule was loaded and never
+   * consulted": for a run whose `toolCalls` and `securityFindings` are both empty those two runs
+   * produce byte-identical policy evidence. The counts are read after the run, so they cover every
+   * call until then — including a refusal, which is attested but reaches no tool.
+   */
+  inForce?(): PolicyInForce;
+}
+
+/** A rule as the bundle records it: what it was called, what it would do, and what it matches. */
+export interface PolicyRuleSummary {
+  id:      string;
+  effect:  PolicyAction['kind'];
+  /** The predicate in one line, so a reader sees a rule's reach without the whole file. */
+  matcher: string;
+}
+
+/** How the run's calls were decided. `indeterminate` is a refusal the policy could not make. */
+export interface PolicyVerdictCounts {
+  allow:         number;
+  deny:          number;
+  escalate:      number;
+  indeterminate: number;
+}
+
+/**
+ * The policy in force for a run (F6): the file it came from and its digest, the rules, and the
+ * counts. `sha256` is absent exactly when no file was read — which is how `source` names a file that
+ * was asked for but not found, distinct from a file that was read and held zero rules.
+ */
+export interface PolicyInForce {
+  /** The path the rules were loaded from; the run's resolved `--policy`, whether or not it exists. */
+  source?:  string;
+  /** sha256 of the policy file's bytes. Absent when there was no file to read. */
+  sha256?:  string;
+  ruleCount: number;
+  rules:    PolicyRuleSummary[];
+  counts:   PolicyVerdictCounts;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -881,6 +923,13 @@ export interface AttestationBundle {
    * whether its run succeeded is precisely the defect this field exists to stop.
    */
   outcome:           RunOutcome;
+  /**
+   * The policy rules that governed the run and how its calls fell (F6). Optional so a 0.3.0 and
+   * earlier bundle still parses; a reader must treat its absence as "unrecorded", never as "none".
+   */
+  policyInForce?:    PolicyInForce;
+  /** What each governed turn showed the model (F4), in order. Absent when no turn reported one. */
+  modelSurfaces?:    ModelSurfaceRecord[];
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;
@@ -889,6 +938,13 @@ export interface AttestationBundle {
 
 export interface AttestorHandle {
   record(call: Omit<ToolCallRecord, 'id'>): Promise<void>;
+  /**
+   * Attach one governed turn's model-facing surface to the bundle (F4). Optional so a test double
+   * that records only tool calls still satisfies the handle.
+   */
+  recordModelSurface?(record: ModelSurfaceRecord): void;
+  /** Attach the policy in force (F6); the last call wins, as it runs once per run. */
+  recordPolicyInForce?(policy: PolicyInForce): void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1037,6 +1093,45 @@ export interface AssistantTurn {
    * silently dropping the model's botched tool call). Omitted when there are none.
    */
   parseErrors?: string[];
+  /**
+   * What MAF showed the model this turn (F4). The adapter that assembles the system block reports
+   * it, because that is where the exact bytes and the backend argv exist; the loop records it. An
+   * adapter that assembles no surface of its own omits it.
+   */
+  modelSurface?: ModelSurface;
+}
+
+/**
+ * What a governed (in-process) turn showed the model: the system block's digest, the tool catalogue
+ * as sent, and the backend argv. It exists because a model's claim about its own tools — `fix-test`'s
+ * "only one tool is actually registered: `LSP`" — cannot be adjudicated from a transcript that holds
+ * neither the prompt nor the argv, and the two mechanisms that could produce the claim (the model
+ * reasoning from an empty *native* tool list; something per-run exposing a plugin tool) are
+ * indistinguishable without this.
+ */
+export interface ModelSurface {
+  /** sha256, hex, of the exact system-prompt bytes handed to the backend this turn. */
+  systemPromptSha256: string;
+  /** The serialized tool catalogue exactly as the system block carried it ('' when the turn sent none). */
+  toolCatalog:        string;
+  /**
+   * The backend argv. Payload positionals — the system-prompt value and the trailing prompt — are
+   * replaced by `<name: N bytes, sha256 H>` markers, so the *flags* (including the empty string that
+   * is `--tools ""`) are readable without the record carrying the whole prompt.
+   */
+  argv:               string[];
+}
+
+/** One turn's surface, as the bundle records it: which node and turn it was, and what was sent. */
+export interface ModelSurfaceRecord extends ModelSurface {
+  role:   string;
+  taskId: TaskId;
+  /**
+   * 1-based loop step within the node. A step whose model call was malformed and retried records one
+   * entry per attempt, all sharing this number; the array is in call order, so a repeated `turn` reads
+   * as a retry, not a duplicate.
+   */
+  turn:   number;
 }
 
 /**
