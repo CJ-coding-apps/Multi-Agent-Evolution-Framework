@@ -95,7 +95,7 @@ rules:
     description: Prevent writing to lock files without approval
     priority: 95
     predicate:
-      toolId: [fs.write, patch.apply]
+      toolId: [fs.write, patch.apply, fs.delete]
       pathGlob: "**/*.lock"
     action:
       kind: Escalate
@@ -105,17 +105,20 @@ rules:
     description: Prevent editing migration files without approval
     priority: 90
     predicate:
-      toolId: [fs.write, patch.apply]
+      toolId: [fs.write, patch.apply, fs.delete]
       pathGlob: "**/migrations/**"
     action:
       kind: Escalate
       requiresApproval: true
 
+  # `.env` is off-limits to every path-declaring write tool, not `fs.write` alone: a rename lands as
+  # a `patch.apply` or an `fs.delete`, and staging one (`git.add`) then committing leaks it the same
+  # way. The structural test below refuses any path-scoped rule that names fewer than the write tools.
   - id: deny-env-files
     description: Never write .env files
     priority: 100
     predicate:
-      toolId: [fs.write]
+      toolId: [fs.write, patch.apply, fs.delete, git.add]
       pathGlob: "**/.env*"
     action:
       kind: Deny

@@ -13,7 +13,7 @@ reproduction is worth more than a description.
 
 ## Supported versions
 
-MAF is pre-1.0 (currently 0.3.1). Only the most recent release is supported; fixes land there and are not
+MAF is pre-1.0 (currently 0.3.2). Only the most recent release is supported; fixes land there and are not
 backported. Please reproduce against the latest version, on Node 22 — the version CI builds and tests
 on — before reporting.
 
