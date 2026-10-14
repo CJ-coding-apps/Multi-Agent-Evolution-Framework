@@ -9,7 +9,7 @@ import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeResult, AssistantTurn, DagNode,
   ToolCallRecord, TaskId, PolicyDecision,
 } from '@maf/types';
-import { makeNodeId, makeRunId, makeToolId, NodeFailure, TransportError } from '@maf/types';
+import { makeNodeId, makeRunId, makeToolId, makeTaskId, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { HarnessConfigError } from '@maf/harness-config';
 import type { HarnessConfig, HarnessRoleConfig } from '@maf/harness-config';
@@ -411,6 +411,37 @@ test('F10: a coder that made no denied call leaves the no_change message as it w
     assert.equal(failure.reason, 'no_change');
     assert.ok(!failure.message.includes('denied by policy'), failure.message);
     assert.ok(failure.message.endsWith(`Output tail: ${JSON.stringify('I could not write.')}`), failure.message);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('F10/F4: the deny clause is per node — a sibling\'s denied call is not this node\'s failure', async () => {
+  // One attestor, two nodes of the same coder role, the adapter's one scripted call belonging to the
+  // first. n1's write is denied (`deny-env-files`); n2, whose turns are already spent, makes no call.
+  // The attestor holds n1's denial for the whole run, so a run-wide count would put the clause on
+  // n2's message too — and two nodes would read identically although only one was refused. The
+  // clause is read back by this node's own taskId.
+  const attestor = new RecordingAttestor();
+  const turns = [calling('fs.write', { path: '.env', content: 'SECRET=1' }, 1)];
+  const fx = await makeFixture(CODER, new ScriptedTurns(turns, 'I made no write.'), {
+    attestor: attestor as unknown as Attestor,
+    policy: denyingPolicy('fs.write', 'deny-env-files'),
+  });
+  try {
+    const n1 = await failureOf(fx.dispatcher.runNode(nodeFor('coder', 'n1')));
+    assert.equal(n1.reason, 'no_change');
+    assert.match(n1.message, /; 1 tool call was denied by policy: deny-env-files \(fs\.write\)$/);
+
+    // n2 makes no call, so its own record set for its taskId is empty, and the message is unchanged.
+    const n2 = await failureOf(fx.dispatcher.runNode(nodeFor('coder', 'n2')));
+    assert.equal(n2.reason, 'no_change');
+    assert.ok(!n2.message.includes('denied by policy'), `n2 made no denied call of its own:\n${n2.message}`);
+
+    // The attestor held a denial the whole time — so the absence above is the per-task filter, not
+    // an empty attestor.
+    assert.equal(attestor.calls.length, 1, 'n1\'s denial is on the record while n2 runs');
+    assert.equal(attestor.toolCallsForTask(makeTaskId('n2')).length, 0, 'and it is not n2\'s');
   } finally {
     await fx.cleanup();
   }
