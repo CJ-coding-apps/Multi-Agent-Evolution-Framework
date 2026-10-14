@@ -99,7 +99,18 @@ export class RetrievalAugmentedPlanner {
     const rolesBlock = catalog
       .map((r) => `- ${r.role} ${roleTag(r, r.role === defaultRole)}: ${r.description}`)
       .join('\n');
-    return PLANNING_INSTRUCTIONS_BASE(defaultRole) + `\n\nAvailable agent roles (use these in node.agentRole):\n${rolesBlock}\n\nGuidance:\n- After any coder node that introduces new behavior, emit a tester node that depends on it.\n- When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every writer role's diff.)\n- A task that asks a question, an investigation or a report — no change to the code — goes to a read-only role. A node whose role must change the tree fails if it does not.`;
+    // The read-only line only makes sense when there is a read-only role to route a question to (F9).
+    // A writers-only set told "send a question to a read-only role" would send it nowhere, and the
+    // guidance would then contradict the block right above it.
+    const guidance = [
+      '- After any coder node that introduces new behavior, emit a tester node that depends on it.',
+      '- When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every writer role\'s diff.)',
+      ...(catalog.some((r) => !r.writes)
+        ? ['- A task that asks a question, an investigation or a report — no change to the code — goes to a read-only role. A node whose role must change the tree fails if it does not.']
+        : []),
+    ].join('\n');
+    return PLANNING_INSTRUCTIONS_BASE(defaultRole) +
+      `\n\nAvailable agent roles (use these in node.agentRole):\n${rolesBlock}\n\nGuidance:\n${guidance}`;
   }
 
   private async getFailureContext(title: string): Promise<string> {

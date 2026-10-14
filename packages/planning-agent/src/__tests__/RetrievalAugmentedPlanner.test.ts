@@ -154,10 +154,18 @@ test('the role block tags each role by what it does to the tree, from writes/exp
 
 test('the guidance tells the planner where a question goes and that a writer must change the tree', async () => {
   let capturedSystemPrompt = '';
+  // F9: the read-only line is emitted only when the set actually has a read-only role to route a
+  // question to, so this catalog carries one (`reviewer`). With a writers-only set the line is
+  // absent — an assertion of the absence lives where the default set is in scope (packages/cli,
+  // planner-role-block). A writers-only set told to route a question to a reader would send it
+  // nowhere, and the guidance would contradict the block above it.
   const planner = new RetrievalAugmentedPlanner({
     graph: noopGraph, lcm: noopLcm, injector: noopInjector,
-    roles: rolesOf(['coder']),
-    roleCatalog: [{ role: 'coder', description: 'changes the tree', writes: true, expectsChange: true }],
+    roles: rolesOf(['coder', 'reviewer']),
+    roleCatalog: [
+      { role: 'coder',    description: 'changes the tree', writes: true,  expectsChange: true  },
+      { role: 'reviewer', description: 'reviews diffs',    writes: false, expectsChange: false },
+    ],
     generatePlan: async (sys) => { capturedSystemPrompt = sys; return PLAN_JSON('coder'); },
   });
   await planner.plan({ title: 't', description: 'd', runId: makeRunId('r3'), sessionId: 's1' });
