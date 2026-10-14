@@ -144,3 +144,43 @@ test('a tester may write tests but not CI configuration, now that globs reach do
   // Other roles are not affected by the tester's rule.
   assert.equal((await evaluate(FS_WRITE, '.github/workflows/ci.yml', 'coder')).verdict, 'Allow');
 });
+
+test('a .env edit is refused for every path-declaring write tool, not `fs.write` alone (F11)', async () => {
+  // `deny-env-files` was `[fs.write]`, and a rename reaches the file through `patch.apply` (D-05's
+  // declared paths), so a coder editing `.env` as a patch was allowed while `docs/POLICY.md` and the
+  // coder prompt both said it was denied (F11). The rule's own reason is asserted, so this is that
+  // rule firing and not another that happens to deny the same call.
+  for (const toolId of [FS_WRITE, PATCH_APPLY, FS_DELETE, GIT_ADD]) {
+    for (const file of ['.env', '.env.example', 'config/.env.local']) {
+      const decision = await evaluate(toolId, file);
+      assert.equal(decision.verdict, 'Deny', `${toolId} ${file}`);
+      assert.match(reasonOf(decision), /\.env files must be managed manually/, `${toolId} ${file}`);
+    }
+  }
+});
+
+// Every tool that can carry a declared path and mutate the file it names. A path-scoped Deny or
+// Escalate that names fewer of these matches a narrower set of calls than the path it guards, which
+// is how `deny-env-files` let a `patch.apply` through (F11). The list is hand-maintained, so the
+// check is structural: the next rule that guards a path and forgets a tool fails here rather than in
+// the field.
+const PATH_WRITE_TOOLS = ['fs.write', 'patch.apply', 'fs.delete'];
+
+test('every path-scoped Deny or Escalate names every write tool (F11)', async () => {
+  const offenders: string[] = [];
+  for (const rule of await PolicyLoader.load(SHIPPED_POLICY)) {
+    const action = rule.action;
+    if (action.kind !== 'Deny' && action.kind !== 'Escalate') continue;
+    const p = rule.predicate;
+    if (p.pathGlob === undefined && (p.allowedPathGlobs?.length ?? 0) === 0) continue;
+    const named = p.toolId === undefined ? [] : (Array.isArray(p.toolId) ? p.toolId : [p.toolId]).map(String);
+    const missing = PATH_WRITE_TOOLS.filter((t) => !named.includes(t));
+    if (missing.length > 0) offenders.push(`${rule.id} (${action.kind}): missing ${missing.join(', ')}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'a path-scoped rule that names fewer than the write tools matches a narrower set of calls than ' +
+      `the path it guards:\n  - ${offenders.join('\n  - ')}`,
+  );
+});

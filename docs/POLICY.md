@@ -194,15 +194,17 @@ The policy shipped in this repository:
 |----------|----|--------|
 | 1000 | `deny-git-dir` | Deny `fs.write`, `fs.delete`, `patch.apply` and `git.add` on `{**/.git,**/.git/**}` — a `.git` directory or file at any depth — for every role. |
 | 1000 | `deny-maf-dir` | Deny `fs.write`, `fs.delete`, `patch.apply` and `git.add` on `{.maf,.maf/**}` — the project's own MAF state — for every role. |
-| 100 | `deny-env-files` | Deny `fs.write` to `**/.env*`. |
-| 95  | `protect-lock-files` | Escalate (ask a person) writes/patches to `**/*.lock`. |
-| 90  | `protect-migrations` | Escalate (ask a person) writes/patches to `**/migrations/**`. |
+| 100 | `deny-env-files` | Deny `fs.write`, `patch.apply`, `fs.delete` and `git.add` to `**/.env*`. |
+| 95  | `protect-lock-files` | Escalate (ask a person) writes, patches and deletes to `**/*.lock`. |
+| 90  | `protect-migrations` | Escalate (ask a person) writes, patches and deletes to `**/migrations/**`. |
 | 90  | `coder-no-secrets-dir` | Deny `coder` writes to `**/secrets/**`. |
 | 85  | `deny-readonly-roles`  | Deny mutating tools for `reviewer`/`security`/`analyst`. |
 | 81  | `tester-no-ci-config` | Deny `tester` writes/patches/deletes under `{.github,.github/**}`: once globs matched dotfiles, `**/*test*` reached `.github/workflows/test.yml`, which is CI configuration, not a test ([D-30](DECISIONS.md)). |
 | 80  | `tester-write-only-tests` | Deny `tester` writes outside test path patterns. |
 
 The two priority-1000 rules exist because anything written into `.git/` — a hook, or `core.hooksPath` in `.git/config` — runs outside every gate, and `.maf/` holds the policy, roles and run records an agent could otherwise rewrite. A coder commits through the gated `git.commit` tool instead; `.gitignore`, `.gitattributes` and a `.githooks/` directory stay writable, and reads are unaffected.
+
+A path-scoped Deny or Escalate names **every** write tool a call could carry a path on — `fs.write`, `patch.apply` and `fs.delete` — because a rule that names fewer matches a narrower set of calls than the path it guards. `deny-env-files` named `fs.write` alone until 0.3.2, so a coder editing `.env` as a patch was allowed while this page and the coder prompt both said it was denied (F11); `shipped-policy.test.ts` now refuses a path-scoped rule that omits one of the three.
 
 Priorities are conventional, not enforced: keep them widely spaced so rules can be inserted between them later without renumbering. Two rules may share a priority; their relative order is then not something to rely on.
 
