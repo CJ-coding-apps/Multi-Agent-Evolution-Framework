@@ -273,7 +273,10 @@ test('a change the security gate refused is never sent for review', async () => 
 
 test('the review runs for the roles the security gate runs for: a reader and an unchanged tree are not asked', async () => {
   await withRepo(async (workDir) => {
-    const reader = makeFixture({ workDir, required: true, role: READER, adapter: changingAgent(workDir) });
+    // Both gates are the writer's: a reader is dispatched with no AttemptReview at all, so a
+    // reader's turn is never sent for either verdict. (A reader that changed the tree *is* failed
+    // for it — F7 — but that is a guard of its own, not a gate; RoleDispatcher.test.ts pins it.)
+    const reader = makeFixture({ workDir, required: true, role: READER });
     await reader.dispatcher.runNode(nodeFor('analyst'));
     assert.deepEqual(reader.events, [], 'a role without a write tool is reviewed by neither gate');
   });

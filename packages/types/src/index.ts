@@ -347,10 +347,14 @@ export interface DagNodeExecution {
  *  - `adapter_failed`   — CLI tier: the adapter reported `success: false` (a timeout's exit 124,
  *                         an expired login, an HTTP error body).
  *  - `empty_output`     — CLI tier: a role holding a write tool returned no output.
- *  - `no_change`        — CLI tier: a role that expects to change the tree (`expectsChange`)
- *                         answered and exited 0, but its diff against the node's start commit is
- *                         empty — what a backend that refused the edit under its own permission
- *                         settings looks like (D-32).
+ *  - `no_change`        — a role that expects to change the tree (`expectsChange`) answered on
+ *                         either tier, but its diff against the node's start commit is empty —
+ *                         what a backend that refused the edit under its own permission settings
+ *                         looks like (D-32).
+ *  - `unexpected_change`— a role that holds **no** write tool changed the tree anyway (F7). On
+ *                         the cli tier that is what a backend with file tools of its own does
+ *                         whatever the role's allowlist says; MAF never sees those calls. The
+ *                         exact mirror of `no_change`, and the reason a reader's turn is diffed.
  *  - `budget_exhausted` — in-process: the role's own `maxToolIterations` or `tokenBudget` ran
  *                         out, or a processor stopped the loop before a step.
  *  - `loop_failed`      — in-process: the loop itself reported failure.
@@ -359,6 +363,7 @@ export type NodeFailureReason =
   | 'adapter_failed'
   | 'empty_output'
   | 'no_change'
+  | 'unexpected_change'
   | 'budget_exhausted'
   | 'loop_failed';
 
@@ -861,6 +866,30 @@ export interface SecurityFindingsRecord {
 }
 
 /**
+ * The tier a node actually ran on (F7). MAF's policy engine, processors and attestor see an
+ * individual tool call only on the in-process tier; on the cli tier the backend runs its own
+ * tools and MAF sees one opaque result. So a policy rule scoped to a role that ran cli-tier was
+ * unreachable — it is in force, it never fired, and `policyInForce` alone cannot show that.
+ * Beside it the bundle names the tier whose rule it was, and the reader settles it.
+ *
+ * One entry per node, last write winning: a retry resolves the same tier (it is a function of the
+ * role and the adapter), so a retried node reads as one node with one tier.
+ */
+export interface ExecutionTierRecord {
+  nodeId:  string;
+  role:    string;
+  tier:    'cli' | 'in-process';
+  /** The adapter that ran the node — `fellBackFrom` is only meaningful beside it. */
+  adapter: string;
+  /**
+   * Set when the role asked for `in-process` but the adapter could not run the loop, so it ran
+   * cli-tier instead. Present, the reader can see that a governed turn was intended and not
+   * performed; absent, the node ran on the tier its role asked for.
+   */
+  fellBackFrom?: 'in-process';
+}
+
+/**
  * The security gate refused a writer node's change: blocking findings, an unreadable review,
  * or a diff over the gate's size cap (then `findings` is empty, because nothing was reviewed).
  *
@@ -930,6 +959,11 @@ export interface AttestationBundle {
   policyInForce?:    PolicyInForce;
   /** What each governed turn showed the model (F4), in order. Absent when no turn reported one. */
   modelSurfaces?:    ModelSurfaceRecord[];
+  /**
+   * The tier each node ran on (F7), in dispatch order. Absent when no node reported one — a
+   * reader must treat that as "unrecorded", never as "every node ran governed".
+   */
+  executionTiers?:   ExecutionTierRecord[];
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;
@@ -945,6 +979,8 @@ export interface AttestorHandle {
   recordModelSurface?(record: ModelSurfaceRecord): void;
   /** Attach the policy in force (F6); the last call wins, as it runs once per run. */
   recordPolicyInForce?(policy: PolicyInForce): void;
+  /** Attach the tier a node ran on (F7); one per node, a retry replacing the node's own entry. */
+  recordExecutionTier?(record: ExecutionTierRecord): void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -976,12 +1012,21 @@ export interface AdapterInvokeOptions {
    *  Adapters that cannot control temperature MUST ignore it, never error. */
   temperature?:     number;
   /**
-   * Whether the backend may use tools of its own — a CLI's file, shell and edit tools. Default `true`.
-   * `false` means the backend must not be given its own tools: the call needs only text (a plan, a
-   * review verdict), and whatever a tool did would happen outside MAF's gates — after the security
-   * review, for the reviewer. An adapter that knows no flag for it says so where it builds its argv.
+   * Whether the backend may use tools of its own — a CLI's file, shell and edit tools.
+   *
+   *  - `true` (default) — a cli-tier turn where the backend is meant to act with its own tools.
+   *  - `false`          — the call needs only text (a plan, a review verdict), and whatever a tool
+   *                       did would happen outside MAF's gates — after the security review, for the
+   *                       reviewer.
+   *  - `'read-only'`    — a role that holds no write tool. The backend keeps the tools it needs to
+   *                       read (F7) and loses the ones that could change the tree, so a change MAF
+   *                       would otherwise have to catch after the fact cannot be made at all.
+   *
+   * An adapter that knows no flag for `false` or `'read-only'` says so where it builds its argv, and
+   * ignores the value: the run's unexpected-change guard is then the only thing standing between a
+   * "read-only" role and an edited tree.
    */
-  nativeTools?:     boolean;
+  nativeTools?:     boolean | 'read-only';
 }
 
 export interface AdapterInvokeResult {

@@ -5,7 +5,7 @@ import type {
   AttestorHandle, ToolCallRecord, AttestationBundle, SlsaProvenance,
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
-  RunOutcome, KeySource, ModelSurfaceRecord, PolicyInForce,
+  RunOutcome, KeySource, ModelSurfaceRecord, PolicyInForce, ExecutionTierRecord,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { jcs } from './jcs.js';
@@ -253,6 +253,7 @@ export class Attestor implements AttestorHandle {
   private diffHashes: Record<string, string> = {};
   private securityFindings: SecurityFindingsRecord[] = [];
   private modelSurfaces: ModelSurfaceRecord[] = [];
+  private executionTiers: ExecutionTierRecord[] = [];
   private policyInForce: PolicyInForce | undefined;
   private readonly signingSecret: string;
   private readonly keySource: KeySource;
@@ -336,6 +337,17 @@ export class Attestor implements AttestorHandle {
   }
 
   /**
+   * The tier a node ran on (F7), one entry per node: a retried node re-enters `runNode` and
+   * resolves the same tier, so the second call replaces the first rather than reading as a second
+   * node. Kept in first-dispatch order, so the record reads as the run's DAG.
+   */
+  recordExecutionTier(record: ExecutionTierRecord): void {
+    const at = this.executionTiers.findIndex((entry) => entry.nodeId === record.nodeId);
+    if (at === -1) this.executionTiers.push(record);
+    else this.executionTiers[at] = record;
+  }
+
+  /**
    * Signs the run and writes it to `<attestationsDir>/<runId>.bundle.json`: an in-toto Statement
    * (subjects: the recorded diffs; predicate: the run) with its signature beside it.
    */
@@ -367,10 +379,11 @@ export class Attestor implements AttestorHandle {
       diffHashes:       this.diffHashes,
       securityFindings: this.securityFindings,
       outcome,
-      // Both optional and both omitted when unrecorded, so a bundle without them parses and, more to
-      // the point, a reader can tell "not recorded" from "recorded as empty" (F4, F6).
+      // Optional and omitted when unrecorded, so a bundle without them parses and, more to the
+      // point, a reader can tell "not recorded" from "recorded as empty" (F4, F6, F7).
       ...(this.policyInForce ? { policyInForce: this.policyInForce } : {}),
       ...(this.modelSurfaces.length > 0 ? { modelSurfaces: this.modelSurfaces } : {}),
+      ...(this.executionTiers.length > 0 ? { executionTiers: this.executionTiers } : {}),
       ...(goldens ? { goldens } : {}),
       bundledAt:        new Date(),
     };

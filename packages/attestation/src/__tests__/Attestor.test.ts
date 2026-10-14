@@ -103,7 +103,35 @@ test('a bundle with neither recorded omits both fields entirely, rather than wri
 
     assert.equal('policyInForce' in bundle, false, 'unrecorded, not recorded-as-empty');
     assert.equal('modelSurfaces' in bundle, false);
+    assert.equal('executionTiers' in bundle, false, 'the F7 tier record is optional the same way');
     assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true, 'and the bundle still signs and verifies');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('recordExecutionTier flows into the signed bundle, last-wins per node, so a retry reads as one node', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
+  try {
+    const attestor = new Attestor(makeRunId('r-f7'), stubGraph, dir, { secret: 'test-secret' });
+    // The F7 finding: a Deny rule scoped to a cli-tier role is in force and unreachable, and only the
+    // recorded tier shows which node the rule failed to reach. A reader and a writer, both cli-tier.
+    attestor.recordExecutionTier({ nodeId: 'n1', role: 'reviewer', tier: 'cli', adapter: 'gemini' });
+    attestor.recordExecutionTier({ nodeId: 'n2', role: 'coder', tier: 'cli', adapter: 'codex', fellBackFrom: 'in-process' });
+    // A retried node records once per attempt; the last attempt is the one that stands.
+    attestor.recordExecutionTier({ nodeId: 'n1', role: 'reviewer', tier: 'in-process', adapter: 'claude' });
+
+    const bundle = await attestor.bundle(BUILDER, INVOCATION, [], { status: 'Succeeded', unscheduled: [] });
+
+    assert.equal(bundle.executionTiers?.length, 2, 'one entry per node, not one per attempt');
+    assert.deepEqual(
+      bundle.executionTiers?.find((e) => e.nodeId === 'n1'),
+      { nodeId: 'n1', role: 'reviewer', tier: 'in-process', adapter: 'claude' },
+      'the retry replaced the earlier tier for the same node',
+    );
+    assert.equal(bundle.executionTiers?.find((e) => e.nodeId === 'n2')?.fellBackFrom, 'in-process');
+    // Inside the signed payload, not beside it: re-wrapping the predicate verifies (D-36).
+    assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

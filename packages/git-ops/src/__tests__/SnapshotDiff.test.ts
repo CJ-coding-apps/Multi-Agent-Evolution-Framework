@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { snapshotDiff, runIsolatedGit, GIT_EMPTY_TREE } from '../index.js';
+import { snapshotDiff, snapshotTree, diffTrees, runIsolatedGit, GIT_EMPTY_TREE } from '../index.js';
 import { commitFile, git, makeRepo } from './gitTestUtils.js';
 
 // ORACLE: A4 — the working-tree diff is computed by
@@ -170,6 +170,76 @@ test('runtime state a .gitignore already ignores — the .maf/.gitignore maf wri
     assert.match(diff, /change\.txt/);
     assert.match(diff, /\.maf\/policy\.yaml/, 'configuration is reviewed');
     assert.doesNotMatch(diff, /lcm\.db|transcripts|memory\.kuzu/, 'runtime state is not, ignored or not');
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+// ── snapshotTree / diffTrees: the bracket that attributes a reader's own turn (F7, D-42) ──
+
+test('a turn that changed nothing keeps its tree id, and a turn that did diffs only what it changed', async () => {
+  const repo = await makeRepo('maf-snapshot-bracket-');
+  try {
+    // Work already in the tree when the turn begins — a sibling writer's uncommitted file, or the
+    // user's own dirty checkout. It must sit in both snapshots and cancel out, not be blamed on the reader.
+    await writeFile(path.join(repo, 'already-there.txt'), 'a writer got here first\n', 'utf8');
+
+    const before = await snapshotTree(repo);
+    assert.equal(await snapshotTree(repo), before, 'a turn that changed nothing: the same tree id');
+
+    await writeFile(path.join(repo, 'its-own.txt'), 'the reader did this\n', 'utf8');
+    const after = await snapshotTree(repo);
+    assert.notEqual(after, before, 'a change moves the tree id');
+
+    const diff = await diffTrees(repo, before, after);
+    assert.match(diff, /its-own\.txt/, "the diff is the change the turn made");
+    assert.doesNotMatch(diff, /already-there\.txt/, 'and not what the tree already carried when it began');
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("snapshotTree leaves the user's staged index untouched and keeps maf's runtime state out of the tree", async () => {
+  const repo = await makeRepo('maf-snapshot-tree-');
+  try {
+    // Deliberately not empty: the user has work staged. If snapshotTree staged into the real index,
+    // this is what would be silently absorbed — the same claim as the snapshotDiff index test.
+    await writeFile(path.join(repo, 'staged.txt'), 'work the user staged\n', 'utf8');
+    await git(['add', 'staged.txt'], repo);
+
+    const before = await realIndex(repo);
+    const clean = await snapshotTree(repo);
+    assert.equal(await snapshotTree(repo), clean, 'the same tree, taken twice');
+    assert.deepEqual(await realIndex(repo), before, "snapshotting must not alter the user's staged index");
+
+    // maf's runtime state is excluded from the tree the snapshot hashes, exactly as it is from the review diff.
+    await mkdir(path.join(repo, '.maf', 'transcripts'), { recursive: true });
+    await writeFile(path.join(repo, '.maf', 'transcripts', 'run.jsonl'), 'state\n', 'utf8');
+    assert.equal(await snapshotTree(repo), clean, "runtime state is not part of the tree the snapshot hashes");
+
+    // But configuration under .maf/ is content — an agent could rewrite it to shape the next run.
+    await writeFile(path.join(repo, '.maf', 'policy.yaml'), 'rules: []\n', 'utf8');
+    await writeFile(path.join(repo, 'own.txt'), 'the turn\n', 'utf8');
+    const diff = await diffTrees(repo, clean, await snapshotTree(repo));
+    assert.match(diff, /own\.txt/, 'the change the turn made');
+    assert.match(diff, /\.maf\/policy\.yaml/, 'configuration is reviewed');
+    assert.doesNotMatch(diff, /run\.jsonl/, "runtime state is not");
+    assert.deepEqual(await realIndex(repo), before, "and through all of it the user's index is untouched");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test('a repository with no commits at all can still be snapshotted and diffed', async () => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'maf-snapshot-tree-unborn-'));
+  try {
+    await git(['init', '-q'], repo);
+    await writeFile(path.join(repo, 'first.txt'), 'the very first change\n', 'utf8');
+
+    // No HEAD exists yet — `snapshotTree` must not need one; the first change shows against the empty tree.
+    const tree = await snapshotTree(repo);
+    assert.notEqual(tree, GIT_EMPTY_TREE, 'the working tree has content');
+    assert.match(await diffTrees(repo, GIT_EMPTY_TREE, tree), /first\.txt/, 'the first change is still reviewable');
   } finally {
     await rm(repo, { recursive: true, force: true });
   }

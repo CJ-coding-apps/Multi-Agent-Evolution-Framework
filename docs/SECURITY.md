@@ -55,7 +55,8 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
   hash, the declared paths, a timestamp and the reason. The tool's input is not written there.
 - **On the `cli` tier, no tool call is recorded at all.** Redaction describes the `in-process` path
   above. A `cli`-tier role's tools run inside the backend CLI, so there is nothing to record — see
-  *The execution-tier boundary* below.
+  *The execution-tier boundary* below. What every `cli`-tier node does leave is the diff it produced, its
+  hash recorded as a subject of the statement, reader and writer alike (F7).
 
 How a bundle is signed, and what a signature does **not** establish today, stated rather than implied:
 
@@ -207,11 +208,36 @@ output, cannot start, or whose HTTP request fails, aborts or gets a 5xx has judg
 a failure (a non-zero exit with output, an HTTP 4xx) usually leaves no readable findings, so the review
 fails closed as a refusal.
 
-**A `cli`-tier role that holds no write tool is not reviewed**, although its backend CLI has file tools of
-its own. On the `cli` tier the allowlist is not passed to the backend, so it does not limit what the agent
-can do — it only decides whether the gate runs. The built-in `security` and `reviewer` roles are such
-roles; what they write in the run's tree is reviewed by no gate, and on success it is committed to the
-run's branch with everything else (see *Worktree isolation*).
+**A `cli`-tier role that holds no write tool is not reviewed — but it is diffed.** The security gate, the
+review gate and the policy engine are the writers'; a role with no write tool reaches none of them, so what
+its backend does with its own tools is not *reviewed*. It is caught instead (F7). A node that holds no write
+tool — on either tier — brackets its turn with two working-tree snapshots, the tree taken the same way at the
+node's start and again when it ends, and diffs those; a reader whose turn changed the tree fails with
+`unexpected_change` — the mirror of the writer's `no_change` — and that change is recorded as a subject of
+the run's signed statement. A writer is diffed against the commit it started from, as the gate has always
+done. The bracket is what attributes the change to the reader: a writer that ran
+before it and committed nothing (no node commits between DAG nodes) leaves its work in the shared worktree,
+and under `--no-worktree` the tree may already be the user's dirty checkout — both sit in the *start*
+snapshot and cancel out, so neither is the reader's to answer for. This guard sees what the review diff sees
+and no more: a path the repository's `.gitignore` already ignores, and this run's own runtime state under
+`.maf/` (the list above), lie outside both, so neither is *this* guard's to catch. Nothing is reverted, because in the
+default run and under `--no-worktree` the working tree is the user's own checkout; the node names the files
+and prints the `git diff` / `git checkout --` lines. The built-in `security` and `reviewer` roles are such
+roles, and on `claude` their `cli`-tier calls are also spawned with only the reading tools
+(`--tools Read,Glob,Grep`), so they cannot write at all; `codex` and `gemini` have no such flag, and for them
+the diff guard is the only defence. The one thing that does *not* limit a `cli`-tier role is its own
+allowlist: on that tier it is not passed to the backend, so it decides only whether a gate runs, never what
+the agent may do.
+
+**One case the bracket cannot separate: a writer running concurrently with the reader.** If a *writer* node
+edits the tree during the reader's own turn — not before it — its partial write lands in the end snapshot
+with no start-snapshot counterpart, and the reader is failed for it. The scheduler serializes writers (their
+changes are ordered and recorded), so a plan's ordinary `coder` → `reviewer` sequence is exact, and the
+window is narrow: a `cli`-tier reader holds the writer lock too (every `cli`-tier node does, since the
+backend's own file tools are unseen), so it cannot overlap a writer at all — the only reader that can is an
+`in-process` one whose tools are all read-level and so holds no lock. MAF does not claim to attribute changes
+across that window: the failure is loud and names the files, and the operator sees a real change in the tree,
+so the cost is a possibly-misattributed failure, never a change that passes unattested.
 
 #### A missing repository is an error
 
@@ -297,25 +323,34 @@ A role runs in one of two tiers:
   backend acts under its own permission settings. `claude` is still given the empty, strict MCP
   configuration; `gemini` an MCP allowlist that names no configured server; `codex` no MCP flag.
 
-The writer-role diff above is the one thing maf still observes on the `cli` tier, and it observes it only
-*after* the node finishes — and only for a role that holds a write tool. Policy refusals, approved
-escalations, redaction and tool-call records exist on the `in-process` tier alone; the human review gate
-reviews a writer's diff on either tier. The planner's call and the security
-reviewer's call are `cli`-tier calls in this sense, whatever tier the roles run on, with one difference:
-they need only text, so `claude` is spawned for them with `--tools ""`, its own tools off, as for an
-in-process turn. `codex` and `gemini` have no known flag for that, and keep their tools on these calls.
+The diff is the one thing maf observes on the `cli` tier, and it observes it only *after* the node finishes.
+A writer's diff runs from the node's start commit to whatever the tree holds when it ends; a reader's diff is
+the change *its own turn* made, taken between two working-tree snapshots that bracket the turn, so work the
+tree already carried — a sibling writer's, or the user's own — is not attributed to it. Every node leaves
+such a diff, not only a writer: a role that holds a write tool has its diff reviewed by the security gate
+and, if one is wired, the review gate, while a role without one has its turn's change checked and fails with
+`unexpected_change` if there was one (F7). Policy refusals, approved escalations, redaction and tool-call
+records exist on the `in-process` tier alone; the human review gate reviews a writer's diff on either tier.
+The planner's call and the security reviewer's call are `cli`-tier calls in this sense, whatever tier the
+roles run on, with one difference: they need only text, so `claude` is spawned for them with `--tools ""`,
+its own tools off, as for an in-process turn. `codex` and `gemini` have no known flag for that, and keep
+their tools on these calls; a reader's own `cli`-tier call gets `--tools Read,Glob,Grep` on `claude`.
 
 A role's `execution` field defaults by the tools it holds ([D-01](DECISIONS.md)): `in-process` for a role
 that holds a write tool, `cli` for any other. A writer lands on the `cli` tier only by its own
 `execution: cli` or because the adapter cannot run the in-process loop (`codex`, `gemini`, `ollama`,
 `openrouter`), and then only under `--allow-ungoverned`, which prints an `UNGOVERNED` banner; without it
 `maf run` refuses before planning. So **maf's default posture is governed for writers; a read-only role
-still runs on the ungoverned `cli` tier unless it sets `execution: in-process`.**
+still runs on the `cli` tier unless it sets `execution: in-process`** — ungoverned, though not unobserved:
+its turn is diffed and a change it makes fails the node (F7).
 
-The tier is *not* yet recorded in the attestation bundle, and neither is `--allow-ungoverned`: a bundle
-says what a run produced but not how each node was executed. The harness it names carries each role's
-`execution` setting, if any, and the builder id names the adapter; together they say which tier each role
-was meant to get.
+The tier **is** recorded in the bundle (F7): each node contributes `{nodeId, role, tier, adapter,
+fellBackFrom?}` to `executionTiers`, with `fellBackFrom: "in-process"` exactly when the role asked for the
+governed loop and the adapter could not run it. A bundle therefore says both what a run produced and how
+each node was executed, and this is what shows the `cli`-tier half of the governance gap: a policy rule
+scoped to a `cli`-tier role is in force and unreachable, and only the tier identifies which node that was.
+The harness the bundle names carries each role's `execution` setting, and the builder id names the adapter.
+`--allow-ungoverned` is still not itself recorded.
 
 ### Recalled history is untrusted text
 
@@ -363,8 +398,10 @@ What that separates, and what it does not:
   for example because the agent committed it, is refused: no merge command, the paths named, and the run
   exits non-zero ([D-35](DECISIONS.md)). A failed run keeps its worktree as it was and prints its path.
 - **Review the branch before you merge it.** Each writer node's change was reviewed when the node ended,
-  but nobody reviews the branch as a whole: work done after a node's review — by a read-only `cli`-tier
-  role, which is never reviewed — reaches the branch too.
+  but nobody reviews the branch as a whole: a reader's change, which no gate reviews, would have to be
+  caught by the `unexpected_change` guard to keep the run from handing the branch back at all (F7), and
+  that guard sees only the change the reader's own turn made — a difference between the two snapshots that
+  bracket it — not, per the case above, a writer's edit made concurrently with that turn.
 - **Rollbacks are not on the run path.** `RollbackManager`, which refuses any reset outside a run's
   worktree, is not used by `maf run` in 0.3.0. The coder's own `git.reset` tool can reset `--hard`, and it
   acts on whatever the run works in: in a worktree, the run's branch — and only there, because every git

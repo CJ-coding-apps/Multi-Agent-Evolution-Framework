@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, PolicyDecision, ToolContext, ToolInput, ToolResult,
-  RoleName, PartialNodeOutcome,
+  RoleName, PartialNodeOutcome, ExecutionTierRecord,
 } from '@maf/types';
 import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
@@ -56,13 +56,35 @@ class StubTurnAdapter implements TurnAdapter {
 class CliOnlyAdapter implements CliAdapter {
   readonly name = 'cli-only';
   invoked = 0;
+  /** The `nativeTools` the dispatcher set on the last call: `'read-only'` for a reader, else `undefined`. */
+  lastNativeTools: AdapterInvokeOptions['nativeTools'] = undefined;
   /** What the CLI call comes back with; a test that needs a failed call replaces it. */
   reply: AdapterInvokeResult = { success: true, output: 'CLI-PATH', toolCallLog: [], exitCode: 0, duration: 1 };
   capabilities(): AdapterCapabilities { return { ...CAPS, inProcessLoop: false }; }
   async isAvailable(): Promise<boolean> { return true; }
-  async invoke(): Promise<AdapterInvokeResult> {
+  async invoke(o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     this.invoked++;
+    this.lastNativeTools = o.nativeTools;
     return this.reply;
+  }
+  async *stream(): AsyncGenerator<string> { yield 'x'; }
+}
+
+/**
+ * A cli-tier backend that edits a tracked file itself and answers as if it had only read — the F7
+ * live row, as a fixture. MAF hands a cli-tier role one opaque prompt and never sends its
+ * allowlist, so a role holding only reading tools still has whatever file tools its backend ships
+ * with; the role reads as read-only and is not.
+ */
+class WritingCliAdapter implements CliAdapter {
+  readonly name = 'writing-cli';
+  invoked = 0;
+  capabilities(): AdapterCapabilities { return { ...CAPS, inProcessLoop: false }; }
+  async isAvailable(): Promise<boolean> { return true; }
+  async invoke(o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    this.invoked++;
+    await writeFile(path.join(o.workingDir, 'sneaky.txt'), 'edited by a reader\n', 'utf8');
+    return { success: true, output: 'Reviewed. APPROVED.', toolCallLog: [], exitCode: 0, duration: 1 };
   }
   async *stream(): AsyncGenerator<string> { yield 'x'; }
 }
@@ -90,9 +112,17 @@ function makePolicy(handler: (toolId: string, input: ToolInput) => PolicyDecisio
 
 function makeAttestor() {
   const records: Array<{ toolId: string; result: ToolResult }> = [];
+  const diffHashes: Array<{ key: string; diff: string }> = [];
+  const tiers: ExecutionTierRecord[] = [];
   return {
     records,
-    stub: { record: async (c: { toolId: string; result: ToolResult }) => { records.push(c); } } as unknown as Attestor,
+    diffHashes,
+    tiers,
+    stub: {
+      record: async (c: { toolId: string; result: ToolResult }) => { records.push(c); },
+      recordDiffHash: (key: string, diff: string) => { diffHashes.push({ key, diff }); },
+      recordExecutionTier: (record: ExecutionTierRecord) => { tiers.push(record); },
+    } as unknown as Attestor,
   };
 }
 
@@ -109,7 +139,7 @@ function makeNode(role: RoleName, description = 'do the thing'): DagNode {
 
 interface Fixture {
   dispatcher: RoleDispatcher;
-  adapter: StubTurnAdapter | CliOnlyAdapter;
+  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter;
   transcript: ReturnType<typeof makeTranscriptRecorder>;
   policy: ReturnType<typeof makePolicy>;
   attestor: ReturnType<typeof makeAttestor>;
@@ -121,7 +151,7 @@ const execFileAsync = promisify(execFile);
 
 async function makeFixture(opts: {
   roleExecution: 'cli' | 'in-process';
-  adapter: StubTurnAdapter | CliOnlyAdapter;
+  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter;
   policyHandler: (toolId: string, input: ToolInput) => PolicyDecision;
   bundles?: HarnessConfig;
   /** The one role the set defines; read-only `analyst` unless a test needs a writer. */
@@ -132,14 +162,13 @@ async function makeFixture(opts: {
   await writeFile(path.join(workDir, 'hello.txt'), 'hello-world', 'utf8');
   const roleName = opts.role ?? ANALYST;
   const allowedTools = opts.allowedTools ?? ['fs.read'];
-  // A role holding a write tool is a writer (D-07), and the dispatcher captures its baseline
-  // commit before it runs, so a writer fixture has to be a repository with one commit —
-  // what the CLI-tier `run` hands it. A read-only fixture is a bare directory, as before.
-  if (allowedTools.some((t) => ['fs.write', 'fs.delete', 'patch.apply', 'git.commit', 'git.reset', 'git.add'].includes(t))) {
-    await execFileAsync('git', ['init', '-q'], { cwd: workDir });
-    await execFileAsync('git', ['add', '-A'], { cwd: workDir });
-    await execFileAsync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'base'], { cwd: workDir });
-  }
+  // Every node captures a start commit before it runs (F7), so the fixture is a repository with
+  // one commit whatever the role holds: a writer's baseline is what its post-coder gates diff
+  // against, and a reader's is what the `unexpected_change` guard diffs against. A role holding
+  // no write tool used to run in a bare directory, because nothing diffed it.
+  await execFileAsync('git', ['init', '-q'], { cwd: workDir });
+  await execFileAsync('git', ['add', '-A'], { cwd: workDir });
+  await execFileAsync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'base'], { cwd: workDir });
   const roles = RoleRegistry.fromSet({
     version: 1,
     defaultRole: roleName,
@@ -439,6 +468,112 @@ test('cli tier: allowPartial does not rescue a failed adapter call', async () =>
     const failure = await failureOf(f.dispatcher.runNode({ ...makeNode(ANALYST), allowPartial: true }));
     assert.equal(failure.reason, 'adapter_failed', 'only budget_exhausted is partial work');
     assert.match(failure.message, /Invalid API key/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ─── F7: a reader whose turn changes the tree ────────────────────────────────
+
+/** An in-process backend that edits the tree during a turn of its own. */
+class WritingTurnAdapter extends StubTurnAdapter {
+  override async sendTurn(history: TurnMessage[], o: AdapterInvokeOptions): Promise<AssistantTurn> {
+    await writeFile(path.join(o.workingDir, 'sneaky.txt'), 'edited in-process\n', 'utf8');
+    return super.sendTurn(history, o);
+  }
+}
+
+test('cli tier: a read-only role whose backend changes the tree fails with unexpected_change (F7)', async () => {
+  const adapter = new WritingCliAdapter();
+  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW });
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change', 'the documented Succeeded becomes a failure');
+    assert.match(failure.message, /sneaky\.txt/, 'the file it changed is named');
+    assert.match(failure.message, /git -C .* diff/, 'the user is told how to see it');
+    assert.match(failure.message, /git -C .* checkout --/, 'and how to undo it — MAF reverts nothing');
+    assert.equal(adapter.invoked, 1);
+    // The change is a subject of the run's attestation — the half the live row found empty (F7).
+    assert.equal(f.attestor.diffHashes.length, 1);
+    assert.equal(f.attestor.diffHashes[0]?.key, 'n1.diff');
+    assert.match(f.attestor.diffHashes[0]?.diff ?? '', /sneaky\.txt/);
+    assert.deepEqual(f.attestor.tiers, [{ nodeId: 'n1', role: 'analyst', tier: 'cli', adapter: 'writing-cli' }]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('in-process tier: a reader whose backend edits the tree is caught the same way (F7)', async () => {
+  const adapter = new WritingTurnAdapter();
+  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change', 'the guard is the tier-independent mirror of no_change');
+    assert.match(failure.message, /sneaky\.txt/);
+    assert.equal(f.attestor.diffHashes.length, 1);
+    assert.deepEqual(f.attestor.tiers, [{ nodeId: 'n1', role: 'analyst', tier: 'in-process', adapter: 'stub' }]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cli tier: the read-only toolset is handed to a reader, and not to a writer (F7)', async () => {
+  // The `--tools Read,Glob,Grep` set confines a *reader*. A cli-tier writer — reachable only under
+  // --allow-ungoverned — must keep the backend's own tools, or a coder could not write at all.
+  const reader = new CliOnlyAdapter();
+  const rf = await makeFixture({ roleExecution: 'cli', adapter: reader, policyHandler: ALLOW });
+  try {
+    await rf.dispatcher.runNode(makeNode(ANALYST));
+    assert.equal(reader.lastNativeTools, 'read-only', 'a cli-tier reader is confined to the reading tools');
+  } finally {
+    await rf.cleanup();
+  }
+
+  const writer = new CliOnlyAdapter();
+  const wf = await makeFixture({
+    roleExecution: 'cli', adapter: writer, policyHandler: ALLOW, allowedTools: ['fs.read', 'fs.write'],
+  });
+  try {
+    await wf.dispatcher.runNode(makeNode(ANALYST));
+    assert.equal(writer.lastNativeTools, undefined, "a writer keeps the backend's own tools, not the reader set");
+  } finally {
+    await wf.cleanup();
+  }
+});
+
+test('F7: a sibling writer\'s uncommitted change does not fail a reader', async () => {
+  const adapter = new CliOnlyAdapter();
+  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW });
+  try {
+    // No node commits between DAG nodes, so a writer that ran before this reader leaves its work in
+    // the shared worktree. The reader must answer for the change it made, not for what it found —
+    // diffing the whole tree against HEAD would fail it here, the false positive this closes.
+    await writeFile(path.join(f.workDir, 'sibling.txt'), 'a writer got here first\n', 'utf8');
+    const out = await f.dispatcher.runNode(makeNode(ANALYST));
+    const output = out['output'];
+    if (!output || output.kind !== 'string') assert.fail('expected string output');
+    assert.equal(output.value, 'CLI-PATH', 'the reader changed nothing of its own, so it succeeds');
+    assert.equal(f.attestor.diffHashes.length, 0, 'and nothing is recorded as a diff it made');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F7: the reader\'s own change is still caught, and the diff names only its own files', async () => {
+  const adapter = new WritingCliAdapter();
+  const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW });
+  try {
+    // The sibling's work is present when the reader's turn begins, so it sits in the start snapshot
+    // and cancels out; only what the reader adds is diffed, recorded and named.
+    await writeFile(path.join(f.workDir, 'sibling.txt'), 'a writer got here first\n', 'utf8');
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change');
+    assert.match(failure.message, /sneaky\.txt/, "the reader's own file is named");
+    assert.doesNotMatch(failure.message, /sibling\.txt/, "a sibling writer's work is not blamed on the reader");
+    assert.doesNotMatch(
+      f.attestor.diffHashes[0]?.diff ?? '', /sibling\.txt/,
+      'and it is excluded from the recorded subject too',
+    );
   } finally {
     await f.cleanup();
   }

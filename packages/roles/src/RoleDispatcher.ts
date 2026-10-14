@@ -11,7 +11,7 @@ import type { MemoryGraph } from '@maf/memory-graph';
 import type { TranscriptLogger } from '@maf/transcript';
 import type { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import type { ReviewGate, SecurityReviewGate } from '@maf/git-ops';
-import { snapshotDiff, runIsolatedGit, GIT_EMPTY_TREE } from '@maf/git-ops';
+import { snapshotDiff, snapshotTree, diffTrees, runIsolatedGit, GIT_EMPTY_TREE } from '@maf/git-ops';
 import type { HarnessConfig } from '@maf/harness-config';
 import {
   ProcessorPipeline, createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS, redactCredentials } from '@maf/processors';
@@ -158,6 +158,66 @@ function noChangeShortfall(
 }
 
 /**
+ * F7: a role that holds no write tool changed the tree. `no_change`'s exact mirror — there a role
+ * that owed a change made none; here a role that owed none made one.
+ *
+ * On the cli tier this is the backend acting with file tools of its own. The role's allowlist
+ * governs MAF's in-process registry, and on the cli tier MAF hands the backend one prompt and
+ * reads back one opaque result: those tools are whatever the backend has, so a "read-only"
+ * reviewer can edit a tracked file and the run would otherwise report Succeeded having attested
+ * nothing. Detected after the fact, and recorded: the diff becomes a subject of the run's signed
+ * statement, so the change is in the evidence even though the node fails.
+ *
+ * Nothing is reverted here. Under `--no-worktree` (and in the default run, which reads the diff
+ * from the same working tree) the tree is the user's own checkout, and MAF does not undo a change
+ * it did not make behind the user's back. The message names the files and prints the two commands.
+ */
+function unexpectedChange(
+  role: RoleConfig,
+  adapterName: string,
+  diff: string,
+  cwd: string,
+): NodeFailure {
+  const files = changedFiles(diff);
+  const named = files.length > 0
+    ? `${files.length} file${files.length === 1 ? '' : 's'}: ${files.join(', ')}`
+    : 'at least one file (the diff names none)';
+  return new NodeFailure(
+    'unexpected_change',
+    `role "${role.role}" holds no write tool, so adapter "${adapterName}" was not expected to ` +
+    `change the tree, but it left a diff — ${named}. The change is recorded as a subject of this ` +
+    `run's attestation. MAF has not reverted it: inspect it with "git -C ${cwd} diff" and undo it ` +
+    `with "git -C ${cwd} checkout -- <path>".`,
+  );
+}
+
+/**
+ * The paths a unified diff touches, read from its file headers — both sides of each, so a creation
+ * (`--- /dev/null`) and a deletion (`+++ /dev/null`) are each named by the side that has a path, and
+ * git's quotes come off a path with special characters in it.
+ *
+ * Only outside a hunk: a *content* line of the file is prefixed with its own `+`/`-`/space, so a
+ * line the agent wrote that reads `-- x` or `++ y` reaches us as `--- x` / `+++ y` and would
+ * otherwise be reported as a file that was never touched. Headers come before the first `@@` of a
+ * file section and `diff --git` starts the next one.
+ */
+function changedFiles(diff: string): string[] {
+  const paths = new Set<string>();
+  let inHunk = false;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('diff --git ')) { inHunk = false; continue; }
+    if (line.startsWith('@@')) { inHunk = true; continue; }
+    if (inHunk) continue;
+    if (!line.startsWith('--- ') && !line.startsWith('+++ ')) continue;
+    let p = line.slice(4).trim();
+    if (p.startsWith('"') && p.endsWith('"') && p.length > 1) p = p.slice(1, -1);
+    if (p === '' || p === '/dev/null') continue;
+    paths.add(p.startsWith('a/') || p.startsWith('b/') ? p.slice(2) : p);
+  }
+  return [...paths];
+}
+
+/**
  * The security review of one attempt, run at most once whichever route reaches it first: the
  * security-gate processor at task_end, the end of a cli-tier call, or a backend that threw
  * (D-31). It keeps the diff it read, which is also D-32's evidence — one snapshot per attempt.
@@ -196,15 +256,19 @@ function gitSaid(err: unknown): string {
 }
 
 /**
- * The gate cannot read a diff without a repository, and skipping it would attest an
- * unreviewed coder diff as reviewed. The message has to say what to do about it, because
- * the fix is one command the user can run.
+ * MAF diffs every node's turn (F7): the security gate reads a coder's diff against its start
+ * commit, and the `unexpected_change` guard reads a reader's between two working-tree snapshots.
+ * Neither can be taken without a repository, and skipping it would attest an unreviewed coder diff
+ * as reviewed and let a reader's edit pass as a clean turn. The message has to say what to do about
+ * it, because the fix is one command the user can run.
  */
 function notARepository(cwd: string, err: unknown): Error {
   return new Error(
-    `cannot review the coder diff — no usable git repository at ${cwd} (git said: ${gitSaid(err)}). ` +
-    `The security gate reads the working-tree diff, so it needs a repository to see what the ` +
-    `coder changed; run "git init" in ${cwd} (or run maf inside an existing repository).`,
+    `cannot diff the node's turn — no usable git repository at ${cwd} (git said: ${gitSaid(err)}). ` +
+    `Every node is diffed — a writer against its start commit, a reader between two working-tree ` +
+    `snapshots, both taken through git — so maf needs a ` +
+    `repository to see what the node changed; run "git init" in ${cwd} (or run maf inside an ` +
+    `existing repository).`,
   );
 }
 
@@ -246,11 +310,14 @@ export class RoleDispatcher {
   private bannerShown = false;
 
   /**
-   * The tier this node runs on (D-01), decided before it captures anything or spends a model
-   * call. A writer lands on the cli tier only by its own `execution: 'cli'` or because the
-   * adapter cannot run the loop, and then only with `allowUngoverned`: otherwise it is refused
-   * here, not run where no gate sees its tool calls. A reader on the cli tier can change the
-   * tree through MAF no more than in-process, so its fallback stays the transcript note it was.
+   * The tier this node runs on (D-01), decided before it captures anything, spends a model call,
+   * or records the tier in the bundle (F7). A writer lands on the cli tier only by its own
+   * `execution: 'cli'` or because the adapter cannot run the loop, and then only with
+   * `allowUngoverned`: otherwise it is refused here, not run where no gate sees its tool calls.
+   * A reader's fallback is not refused — it is the ordinary cli tier for a reader — but it is not
+   * harmless either: the backend's own file tools come with it, so a reader that changes the tree
+   * is caught after the fact by the node's diff and fails with `unexpected_change` (F7), and the
+   * note below is what tells a bundle reader the node landed on the tier its role did not ask for.
    */
   private resolveTier(role: RoleConfig): { tier: 'cli' | 'in-process'; note?: string; ungoverned?: string } {
     const adapter = this.config.adapter;
@@ -303,10 +370,35 @@ export class RoleDispatcher {
     // security gate would be handed an empty diff and call the change reviewed. Which
     // roles are writers is decided by the tools they hold, not their name (D-07), and
     // the baseline is captured once per node so a retry reviews against the same commit (D-06).
-    const startCommit = isWriterRole(role) ? await this.baselineFor(node.id) : undefined;
-    const review = startCommit === undefined
-      ? undefined
-      : new AttemptReview((onDiff) => this.runPostCoderGates(node, startCommit, onDiff));
+    //
+    // Every node captures one, not only the writers (F7): a reader's turn is diffed too, so a
+    // role that holds no write tool and changes the tree anyway is caught rather than attested
+    // as having done nothing. It costs one `git rev-parse` per node, and a reader one more
+    // (`snapshotTree` below).
+    const startCommit = await this.baselineFor(node.id);
+    const isWriter = isWriterRole(role);
+    // F7: a reader is judged on the change *it* made, not on the tree it found. This brackets the
+    // reader's turn with two working-tree snapshots and diffs those, so a sibling writer's
+    // uncommitted work in the shared worktree — or the user's own dirty checkout under
+    // `--no-worktree` — sits in both snapshots and cancels out. Diffing the whole tree against HEAD
+    // instead would fail the reader for a change it never made, the false positive this replaces;
+    // `snapshotTree` in @maf/git-ops carries the reasoning in full.
+    const readerStartTree = isWriter ? undefined : await snapshotTree(this.config.cwd);
+    const review = isWriter
+      ? new AttemptReview((onDiff) => this.runPostCoderGates(node, startCommit, onDiff))
+      : undefined;
+
+    // Which tier this node ran on, for the bundle (F7): on the cli tier MAF's policy engine sees
+    // no individual tool call, so a rule scoped to a cli-tier role is in force and unreachable,
+    // and only the tier the node ran on lets a reader see that. `fellBackFrom` separates "asked
+    // for cli" from "asked for in-process and did not get it" (D-06).
+    this.config.attestor.recordExecutionTier?.({
+      nodeId:  node.id,
+      role:    role.role,
+      tier:    resolved.tier,
+      adapter: this.config.adapter.name,
+      ...(resolved.note !== undefined ? { fellBackFrom: 'in-process' as const } : {}),
+    });
 
     await this.config.transcript.append(
       'user',
@@ -348,6 +440,11 @@ export class RoleDispatcher {
     if (modelChoice) invokeOpts.model = modelChoice;
     if (role.tokenBudget) invokeOpts.tokenBudget = role.tokenBudget;
     if (this.config.temperature !== undefined) invokeOpts.temperature = this.config.temperature;
+    // A reader on the cli tier does not get the backend's write tools (F7). The in-process tier
+    // needs nothing here — MAF runs every tool through the registry, and a reader's registry holds
+    // no write tool — and this field is read only where an adapter builds its cli-tier argv, so
+    // setting it on an in-process turn is inert.
+    if (resolved.tier === 'cli' && !isWriter) invokeOpts.nativeTools = 'read-only';
 
     const adapter = this.config.adapter;
     let outputForMemory: string;
@@ -383,6 +480,11 @@ export class RoleDispatcher {
       // finished its task, task_end review included, and reported failure (NodeFailure).
       const alreadyJudged = err instanceof GateRefused || err instanceof NodeFailure;
       if (review && !alreadyJudged) await review.run();
+      // A reader can change the tree before it fails too, and a diff left behind is recorded
+      // whatever the outcome. The verdict outranks the transport failure, as it does for a writer.
+      if (readerStartTree !== undefined && !alreadyJudged) {
+        await this.readerChangeGuard(node, role, readerStartTree);
+      }
       throw err;
     }
 
@@ -393,14 +495,19 @@ export class RoleDispatcher {
     // task_end, through the security-gate processor; the cli tier, and an in-process bundle
     // without that processor, get it here. `review` exists exactly when the role is a writer.
     if (review) await review.run();
+    // And every reader's diff is checked, for the mirror reason: a reader that changed the tree
+    // fails here rather than returning the Succeeded that MAF used to report for it (F7).
+    if (readerStartTree !== undefined) await this.readerChangeGuard(node, role, readerStartTree);
 
     // D-32, judged after the gate so that a refusal still wins, and only where nothing else
     // already failed the node: an answer, on either tier, from a role that expects a change, whose
     // diff against the start commit — the one the gate just read — is empty. In-process it was
     // left to the record until WP-2.18 made a run of failed tool calls survivable: a coder whose
     // every write failed, and that then said so, would otherwise succeed with nothing done.
+    // Every node has a start commit (F7) and only a writer holds `review`; `expectsChange` itself
+    // requires a write tool, so the diff below is always one the gate read.
     if (shortfall === undefined && answer !== undefined && role.expectsChange === true &&
-        startCommit !== undefined && review?.diff?.trim() === '') {
+        review?.diff?.trim() === '') {
       shortfall = noChangeShortfall(role, adapter.name, answer, startCommit);
     }
 
@@ -521,6 +628,32 @@ export class RoleDispatcher {
     // budget_exhausted is returned, not thrown: whether it fails the node depends on the node's
     // allowPartial, which the caller decides after the transcript has the output.
     return result;
+  }
+
+  /**
+   * F7: fail a node whose role holds no write tool and whose turn changed the tree. Recorded as a
+   * subject of the run's statement before it throws, so the change joins the signed evidence even
+   * though the node fails, and `no_change`'s counterpart in the bundle's own terms: the run says
+   * what changed, not merely that something did.
+   *
+   * The test is the tree's own id, taken the same way at the node's start and here, so the two
+   * always describe the same content: equal ids mean the turn changed nothing and anything the
+   * tree already carried when the turn began — a sibling writer's uncommitted work, the user's own
+   * dirty checkout — is not the reader's to answer for. Only a non-equal id is diffed, and that
+   * diff is the node's own change. A snapshot that cannot be read is an error, never an empty one:
+   * "we could not look" and "nothing changed" must not be the same verdict (A4).
+   *
+   * A writer running *concurrently* with this reader is the one case this cannot separate: its
+   * partial write lands in the end tree with no start-tree counterpart and is read as the reader's.
+   * The scheduler serializes writers (A3), so the sequential case a plan produces is exact; the
+   * concurrent window is documented in docs/SECURITY.md rather than papered over.
+   */
+  private async readerChangeGuard(node: DagNode, role: RoleConfig, startTree: string): Promise<void> {
+    const endTree = await snapshotTree(this.config.cwd);
+    if (endTree === startTree) return;
+    const diff = await diffTrees(this.config.cwd, startTree, endTree);
+    this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff);
+    throw unexpectedChange(role, this.config.adapter.name, diff, this.config.cwd);
   }
 
   /**

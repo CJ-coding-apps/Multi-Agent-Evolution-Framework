@@ -54,7 +54,7 @@ Output STRICT JSON only, wrapped in a \`\`\`json fenced block:
 
 "passed" is false if any critical or high finding exists.
 
-Tools available: fs.read, fs.list, fs.stat, grep, git.diff, git.log. No writes.`;
+Tools available: fs.read, fs.list, fs.stat, grep, git.diff, git.log. No writes — you hold no write tool, and a change you make to the tree fails this node, its diff recorded in the run's attestation.`;
 
 const REVIEWER_PROMPT = `You are the Reviewer agent. Read-only. You review diffs for correctness, maintainability, and clarity.
 
@@ -63,7 +63,7 @@ Respond with:
 2. A brief reasoning paragraph.
 3. A bulleted list of specific suggestions (if any).
 
-Tools available: fs.read, grep, git.diff, git.log. No writes.`;
+Tools available: fs.read, grep, git.diff, git.log. No writes — you hold no write tool, and a change you make to the tree fails this node, its diff recorded in the run's attestation.`;
 
 const CODER_TOOLS: ToolId[] = [
   t('fs.read'), t('fs.write'), t('fs.delete'), t('fs.stat'), t('fs.list'),

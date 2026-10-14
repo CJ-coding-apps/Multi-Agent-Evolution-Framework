@@ -39,10 +39,36 @@ const CLAUDE_MCP_ISOLATION_ARGS: readonly string[] = [
  * The empty string is one argv element (`spawn` runs without a shell). `invoke` and `stream`
  * are the cli tier, where the backend is meant to act with its own tools, so they keep them —
  * unless the caller says `nativeTools: false` (the planner, the security reviewer), whose call
- * needs only text and gets this set too.
+ * needs only text and gets this set too, or `nativeTools: 'read-only'` (a role holding no write
+ * tool, F7), which gets `CLAUDE_READ_ONLY_ISOLATION_ARGS` instead: the reading tools, and none
+ * of the writing ones.
  */
 const CLAUDE_TURN_ISOLATION_ARGS: readonly string[] = [
   '--tools', '',
+  ...CLAUDE_MCP_ISOLATION_ARGS,
+];
+
+/**
+ * The built-in tools a cli-tier reader keeps (F7): the ones that read the tree and nothing else.
+ * `--tools` takes a comma-separated list — the same syntax as the `""` above, both taken from
+ * `claude --help`: *"Specify the list of available tools from the built-in set. Use \"\" to
+ * disable all tools, \"default\" to use all tools, or specify tool names (e.g. \"Bash,Edit,Read\")."*
+ *
+ * Without this a role that holds no write tool keeps claude's whole toolset — `Edit`, `Write` and
+ * `Bash` among it — because on the cli tier MAF hands over one prompt and never sends the role's
+ * allowlist. The role reads as read-only and is not: a live run had a read-only `reviewer` edit a
+ * tracked file and maf report `Succeeded` having attested nothing. MAF still diffs the turn
+ * (`unexpected_change`), but a change that cannot be made needs no catching.
+ *
+ * Deliberately short. `Read`, `Glob` and `Grep` are what reviewing a tree needs; anything that can
+ * write, run a command, or reach the network is out of reach of a role that was not given the
+ * authority to use it, and a reader that wants more is a role whose allowlist should say so.
+ */
+const CLAUDE_READ_ONLY_TOOLS: readonly string[] = ['Read', 'Glob', 'Grep'];
+
+/** A cli-tier reader's turn: the read-only built-in set, MCP still isolated to empty. */
+const CLAUDE_READ_ONLY_ISOLATION_ARGS: readonly string[] = [
+  '--tools', CLAUDE_READ_ONLY_TOOLS.join(','),
   ...CLAUDE_MCP_ISOLATION_ARGS,
 ];
 
@@ -156,9 +182,15 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
   }
 }
 
-/** A cli-tier call keeps claude's own tools unless its caller needs only text (`nativeTools: false`). */
+/**
+ * What a cli-tier call is allowed of claude's own tools: the whole set by default, the read-only
+ * set for a role that holds no write tool (`nativeTools: 'read-only'`, F7), and none at all when
+ * the caller needs only text (`nativeTools: false`).
+ */
 function cliTierIsolation(options: AdapterInvokeOptions): readonly string[] {
-  return options.nativeTools === false ? CLAUDE_TURN_ISOLATION_ARGS : CLAUDE_MCP_ISOLATION_ARGS;
+  if (options.nativeTools === false) return CLAUDE_TURN_ISOLATION_ARGS;
+  if (options.nativeTools === 'read-only') return CLAUDE_READ_ONLY_ISOLATION_ARGS;
+  return CLAUDE_MCP_ISOLATION_ARGS;
 }
 
 /** The governed turn's model-facing surface: the system block's digest, the catalogue, the argv. */
