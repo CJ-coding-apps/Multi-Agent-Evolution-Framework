@@ -1,6 +1,7 @@
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
   AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle, TaskId,
+  PolicyDecision,
 } from '@maf/types';
 import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
@@ -133,14 +134,34 @@ interface DeniedCall {
 }
 
 /**
- * F10: the sentence a `no_change` message carries when the node's own attested calls were refused
- * by policy. A writer that fails having changed nothing reads the same whether it lost its nerve or
- * every write it tried was denied; naming the rule tells the two apart, which is the difference
- * between a backend to retry and a policy that is misconfigured. Empty when no call was denied, so
- * the ordinary message is unchanged.
+ * The rule a refused call names, read from its decision (F8). A `Deny` and an `Indeterminate` carry
+ * the id on the decision itself; an `Escalate` carries it on the request the gate was shown. Mirrors
+ * the rule id `executeToolGated` records on the refusal, so the message and the bundle agree.
+ * `undefined` where the decision names no rule at all — the note renders that as "a rule that
+ * recorded no id" rather than dropping the call from the count.
+ */
+function refusingRuleId(decision: PolicyDecision): string | undefined {
+  switch (decision.verdict) {
+    case 'Deny':
+    case 'Indeterminate': return decision.ruleId;
+    case 'Escalate':      return decision.approvalRequest?.policyRuleId;
+    default:              return undefined;
+  }
+}
+
+/**
+ * F10: the sentence a `no_change` message carries when the node's own attested calls were refused.
+ * A writer that fails having changed nothing reads the same whether it lost its nerve or every write
+ * it tried was refused; naming the rule tells the two apart, which is the difference between a
+ * backend to retry and a policy that is misconfigured. Empty when no call was refused, so the
+ * ordinary message is unchanged.
  *
- * At most three are named: a node that made twenty denied calls is saying one thing, and the count
+ * At most three are named: a node that made twenty refused calls is saying one thing, and the count
  * carries it. The tail keeps this a summary of the refusal, not a transcript of it.
+ *
+ * F8(b): the count spans every attempt the node made. A `ToolCallRecord` carries no attempt id
+ * (types `ToolCallRecord`), so a retried node's refusals are counted together rather than per
+ * attempt — the message describes the node, and the attempts are already told apart in the bundle.
  */
 function denyNote(denied: readonly DeniedCall[]): string {
   if (denied.length === 0) return '';
@@ -149,7 +170,7 @@ function denyNote(denied: readonly DeniedCall[]): string {
     .map((call) => `${call.ruleId ?? 'a rule that recorded no id'} (${call.toolId})`)
     .join(', ');
   const verb = denied.length === 1 ? 'tool call was' : 'tool calls were';
-  return `; ${denied.length} ${verb} denied by policy: ${shown}${denied.length > 3 ? ', …' : ''}`;
+  return `; ${denied.length} ${verb} denied or refused by policy: ${shown}${denied.length > 3 ? ', …' : ''}`;
 }
 
 /**
@@ -336,20 +357,30 @@ export class RoleDispatcher {
   }
 
   /**
-   * F10: this node's own policy-denied tool calls, read from the run's attestation by the taskId
-   * every record carries. Per-node, never the run-wide set — a sibling's denial is not this node's
-   * failure. A test double without the getter answers with no denials, which leaves the message
+   * F10: this node's own policy-refused tool calls, read from the run's attestation by the taskId
+   * every record carries. Per-node, never the run-wide set — a sibling's refusal is not this node's
+   * failure. A test double without the getter answers with no refusals, which leaves the message
    * exactly as it was before this existed.
+   *
+   * F8(a): a refusal is a `Deny`, or an `Escalate` the gate did not approve — the two verdicts that
+   * mean "policy refused this call", the two the clause's "denied or refused by policy" names. The
+   * old `Deny`-only test missed the unapproved `Escalate`. An `Escalate` the gate *approved* did run
+   * and is recorded under its `Escalate` verdict like any other call, so `metadata.refused` — which
+   * `executeToolGated` sets on the calls that did not run — is what tells the two apart.
+   * `Indeterminate` is left out on purpose: the policy was never asked for it (a malformed input, or
+   * a rule that could not be evaluated), so calling it "denied or refused by policy" would be untrue.
    */
   private deniedCallsFor(taskId: TaskId): DeniedCall[] {
     const denied: DeniedCall[] = [];
     for (const call of this.config.attestor.toolCallsForTask?.(taskId) ?? []) {
-      if (call.policyDecision.verdict === 'Deny') {
-        denied.push({
-          toolId: String(call.toolId),
-          ...(call.policyDecision.ruleId !== undefined ? { ruleId: call.policyDecision.ruleId } : {}),
-        });
-      }
+      const verdict = call.policyDecision.verdict;
+      if (verdict !== 'Deny' && verdict !== 'Escalate') continue;
+      if (call.result.metadata.refused !== true) continue;
+      const ruleId = refusingRuleId(call.policyDecision);
+      denied.push({
+        toolId: String(call.toolId),
+        ...(ruleId !== undefined ? { ruleId } : {}),
+      });
     }
     return denied;
   }

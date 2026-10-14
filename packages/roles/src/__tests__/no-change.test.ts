@@ -9,7 +9,7 @@ import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeResult, AssistantTurn, DagNode,
   ToolCallRecord, TaskId, PolicyDecision,
 } from '@maf/types';
-import { makeNodeId, makeRunId, makeToolId, makeTaskId, NodeFailure, TransportError } from '@maf/types';
+import { makeNodeId, makeRunId, makeToolId, makeTaskId, makeAgentId, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { HarnessConfigError } from '@maf/harness-config';
 import type { HarnessConfig, HarnessRoleConfig } from '@maf/harness-config';
@@ -372,7 +372,7 @@ test('F10: an in-process coder whose write the policy denied fails with no_chang
   try {
     const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
     assert.equal(failure.reason, 'no_change');
-    assert.match(failure.message, /; 1 tool call was denied by policy: protect-secrets \(fs\.write\)$/);
+    assert.match(failure.message, /; 1 tool call was denied or refused by policy: protect-secrets \(fs\.write\)$/);
     // The rule id is not in the tool message the model saw, so the message is the attestor's alone.
     assert.equal(attestor.calls.length, 1, 'the refused call was attested');
     assert.equal(attestor.calls[0]?.policyDecision.verdict, 'Deny');
@@ -393,7 +393,7 @@ test('F10: at most three rules are named; the count carries the rest', async () 
     assert.equal(failure.reason, 'no_change');
     assert.match(
       failure.message,
-      /; 4 tool calls were denied by policy: deny-all-writes \(fs\.write\), deny-all-writes \(fs\.write\), deny-all-writes \(fs\.write\), …$/,
+      /; 4 tool calls were denied or refused by policy: deny-all-writes \(fs\.write\), deny-all-writes \(fs\.write\), deny-all-writes \(fs\.write\), …$/,
     );
   } finally {
     await fx.cleanup();
@@ -409,7 +409,7 @@ test('F10: a coder that made no denied call leaves the no_change message as it w
   try {
     const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
     assert.equal(failure.reason, 'no_change');
-    assert.ok(!failure.message.includes('denied by policy'), failure.message);
+    assert.ok(!failure.message.includes('by policy'), failure.message);
     assert.ok(failure.message.endsWith(`Output tail: ${JSON.stringify('I could not write.')}`), failure.message);
   } finally {
     await fx.cleanup();
@@ -431,17 +431,81 @@ test('F10/F4: the deny clause is per node — a sibling\'s denied call is not th
   try {
     const n1 = await failureOf(fx.dispatcher.runNode(nodeFor('coder', 'n1')));
     assert.equal(n1.reason, 'no_change');
-    assert.match(n1.message, /; 1 tool call was denied by policy: deny-env-files \(fs\.write\)$/);
+    assert.match(n1.message, /; 1 tool call was denied or refused by policy: deny-env-files \(fs\.write\)$/);
 
     // n2 makes no call, so its own record set for its taskId is empty, and the message is unchanged.
     const n2 = await failureOf(fx.dispatcher.runNode(nodeFor('coder', 'n2')));
     assert.equal(n2.reason, 'no_change');
-    assert.ok(!n2.message.includes('denied by policy'), `n2 made no denied call of its own:\n${n2.message}`);
+    assert.ok(!n2.message.includes('by policy'), `n2 made no denied call of its own:\n${n2.message}`);
 
     // The attestor held a denial the whole time — so the absence above is the per-task filter, not
     // an empty attestor.
     assert.equal(attestor.calls.length, 1, 'n1\'s denial is on the record while n2 runs');
     assert.equal(attestor.toolCallsForTask(makeTaskId('n2')).length, 0, 'and it is not n2\'s');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+// ─── F8: the count is of every refusal, not just a policy Deny ────────────────────────────────
+// The clause's count came from a `Deny`-verdict filter, so the refusals that are not a `Deny` were
+// invisible: an `Escalate` the gate did not approve, and an `Indeterminate`. Each leaves the tree
+// unchanged exactly as a `Deny` does, so each belongs in the count. The clause now reads "denied or
+// refused by policy", the count comes from the `metadata.refused` marker `executeToolGated` sets on
+// every call that did not run, and the rule is read from whichever field the decision carries it on.
+
+test('F8: an Escalate the gate did not approve is refused, and is named by its policy rule', async () => {
+  const attestor = new RecordingAttestor();
+  const turns = [calling('fs.write', { path: 'hello.txt', content: 'hi' }, 1)];
+  // No `approvalGate` on the dispatcher, so the request is refused outright. The rule id lives on the
+  // request the gate would have been shown, not on the decision's own top level — the `Deny`-only
+  // filter both missed the call and would have had no id to name it by.
+  const escalating = {
+    evaluate: async (id: unknown): Promise<PolicyDecision> =>
+      String(id) === 'fs.write'
+        ? {
+            verdict: 'Escalate',
+            reason: 'writes are escalated',
+            approvalRequest: {
+              id: 'req-1', runId: makeRunId('run-no-change'), taskId: makeTaskId('coder-1'),
+              requestedBy: makeAgentId('a1'), toolId: makeToolId('fs.write'),
+              policyRuleId: 'escalate-writes', description: 'review the write', createdAt: new Date(0),
+            },
+          }
+        : { verdict: 'Allow' },
+  } as unknown as PolicyEngine;
+  const fx = await makeFixture(CODER, new ScriptedTurns(turns, 'I asked first.'), {
+    attestor: attestor as unknown as Attestor,
+    policy: escalating,
+  });
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
+    assert.equal(failure.reason, 'no_change');
+    assert.match(failure.message, /; 1 tool call was denied or refused by policy: escalate-writes \(fs\.write\)$/);
+    assert.equal(attestor.calls[0]?.policyDecision.verdict, 'Escalate', 'a refusal the Deny-only filter missed');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('F8: a refusal whose decision records no rule id is still counted, and named as such', async () => {
+  const attestor = new RecordingAttestor();
+  const turns = [calling('fs.write', { path: 'hello.txt', content: 'hi' }, 1)];
+  const nameless = {
+    evaluate: async (id: unknown): Promise<PolicyDecision> =>
+      String(id) === 'fs.write' ? { verdict: 'Deny', reason: 'forbidden' } : { verdict: 'Allow' },
+  } as unknown as PolicyEngine;
+  const fx = await makeFixture(CODER, new ScriptedTurns(turns, 'no write.'), {
+    attestor: attestor as unknown as Attestor,
+    policy: nameless,
+  });
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
+    assert.equal(failure.reason, 'no_change');
+    assert.match(
+      failure.message,
+      /; 1 tool call was denied or refused by policy: a rule that recorded no id \(fs\.write\)$/,
+    );
   } finally {
     await fx.cleanup();
   }
