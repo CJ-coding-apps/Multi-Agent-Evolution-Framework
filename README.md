@@ -6,7 +6,7 @@ The backends sit behind one adapter interface: the Claude Code, Gemini and Codex
 
 ## Status
 
-What is true of the code as of 0.3.1. Prose elsewhere in this README describes only the *shipped* rows. **Proof** names the tests that check a shipped row; each lives under `packages/<package>/src/__tests__/` and runs in the CI job `build · typecheck · test`. **e2e** marks a row the CI job `e2e · demo · attestation · offline goldens` also exercises, by running the built CLI. **Since/Planned** is the release a shipped row first appeared in, or the release planned to ship (or, for an experimental row, to finish) it.
+What is true of the code as of 0.3.2. Prose elsewhere in this README describes only the *shipped* rows. **Proof** names the tests that check a shipped row; each lives under `packages/<package>/src/__tests__/` and runs in the CI job `build · typecheck · test`. **e2e** marks a row the CI job `e2e · demo · attestation · offline goldens` also exercises, by running the built CLI. **Since/Planned** is the release a shipped row first appeared in, or the release planned to ship (or, for an experimental row, to finish) it.
 
 | Feature | Status | Since/Planned | Proof |
 |---|---|---|---|

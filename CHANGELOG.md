@@ -9,6 +9,24 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-14
+
+A patch closing one hole in the shipped policy. `deny-env-files` named `fs.write` alone, but a rename
+reaches the file through `patch.apply` (D-05's declared paths), so a coder editing `.env` as a patch
+was allowed while `docs/POLICY.md` and the coder prompt both promised the write would be denied. No
+API changes, and a policy file that ships its own `deny-env-files` keeps working unchanged — only the
+rule in this repository's `.maf/policy.yaml` is corrected.
+
+### Fixed
+
+- **`deny-env-files` refuses every write tool, not `fs.write` alone** (F11). The rule now names
+  `fs.write`, `patch.apply`, `fs.delete` and `git.add`, so a `.env` rename, deletion or staging is
+  refused the way a direct write already was; `protect-lock-files` and `protect-migrations` gained
+  `fs.delete` for the same reason. `shipped-policy.test.ts` gains a structural check — every
+  path-scoped Deny or Escalate must name `fs.write`, `patch.apply` and `fs.delete` — so the next rule
+  that guards a path and forgets a tool fails a test rather than a run. Found by a live row against a
+  real model, which reached for `patch.apply` where the scripted layers reached for `fs.write`.
+
 ## [0.3.1] - 2026-10-13
 
 The 0.3.1 content: evidence honesty for the in-process tier. A signed bundle now says what the model was
