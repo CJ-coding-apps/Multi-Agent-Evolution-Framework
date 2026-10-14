@@ -447,12 +447,16 @@ test('F10/F4: the deny clause is per node — a sibling\'s denied call is not th
   }
 });
 
-// ─── F8: the count is of every refusal, not just a policy Deny ────────────────────────────────
+// ─── F8/R2: the count is of every policy refusal, not just a `Deny` ─────────────────────────────
 // The clause's count came from a `Deny`-verdict filter, so the refusals that are not a `Deny` were
-// invisible: an `Escalate` the gate did not approve, and an `Indeterminate`. Each leaves the tree
-// unchanged exactly as a `Deny` does, so each belongs in the count. The clause now reads "denied or
-// refused by policy", the count comes from the `metadata.refused` marker `executeToolGated` sets on
-// every call that did not run, and the rule is read from whichever field the decision carries it on.
+// invisible: an `Escalate` the gate did not approve, and an `Indeterminate` the engine reached
+// because it could not evaluate one of its own rules. Each leaves the tree unchanged exactly as a
+// `Deny` does, so each belongs in the count. The one thing the count leaves out (R2) is an
+// `Indeterminate` under a `builtin:*` id: `builtin:input-schema` is the tool's schema refusing a
+// malformed call before policy was ever asked, so naming it "refused by policy" would be untrue.
+// The clause reads "denied or refused by policy", the count comes from the `metadata.refused`
+// marker `executeToolGated` sets on every call that did not run, and the rule is read from
+// whichever field the decision carries it on.
 
 test('F8: an Escalate the gate did not approve is refused, and is named by its policy rule', async () => {
   const attestor = new RecordingAttestor();
@@ -506,6 +510,72 @@ test('F8: a refusal whose decision records no rule id is still counted, and name
       failure.message,
       /; 1 tool call was denied or refused by policy: a rule that recorded no id \(fs\.write\)$/,
     );
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('R1: an Escalate the approval gate approved is not counted — policy did not refuse it', async () => {
+  const attestor = new RecordingAttestor();
+  // Seeded as `executeToolGated` records an approved Escalate: the call ran, so its record carries
+  // the `Escalate` verdict and NO `metadata.refused` marker — that marker is set only on the calls
+  // that did not run. A count that keyed on the verdict alone would name a rule that permitted the
+  // call. The seeded record is this node's own taskId, which is what makes the absence meaningful.
+  await attestor.record({
+    toolId: makeToolId('fs.write'), agentId: makeAgentId('a1'), runId: makeRunId('run-no-change'),
+    taskId: makeTaskId('coder-1'), input: { path: 'hello.txt', content: 'hi' },
+    result: { stdout: 'wrote hello.txt', stderr: '', exitCode: 0, duration: 1, metadata: {} },
+    invokedAt: new Date(0), durationMs: 1,
+    policyDecision: {
+      verdict: 'Escalate', reason: 'writes are escalated',
+      approvalRequest: {
+        id: 'req-1', runId: makeRunId('run-no-change'), taskId: makeTaskId('coder-1'),
+        requestedBy: makeAgentId('a1'), toolId: makeToolId('fs.write'),
+        policyRuleId: 'escalate-writes', description: 'review the write', createdAt: new Date(0),
+      },
+    },
+  });
+  const fx = await makeFixture(CODER, new ScriptedTurns([], 'I asked first, and was allowed.'), {
+    attestor: attestor as unknown as Attestor,
+  });
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
+    assert.equal(failure.reason, 'no_change');
+    assert.ok(!failure.message.includes('by policy'), failure.message);
+    // The attestor held an Escalate for this task the whole time — so the absence is the
+    // approved-call filter (no `metadata.refused`), not an empty record set.
+    assert.equal(attestor.toolCallsForTask(makeTaskId('coder-1')).length, 1, 'the approved call is on the record');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('R2: an Indeterminate the engine reached is counted; a builtin:* one is not', async () => {
+  const attestor = new RecordingAttestor();
+  const at = new Date(0);
+  const ind = (ruleId: string, reason: string): PolicyDecision => ({ verdict: 'Indeterminate', reason, ruleId });
+  const seed = (ruleId: string, reason: string, input: Record<string, unknown>): Promise<void> =>
+    attestor.record({
+      toolId: makeToolId('fs.write'), agentId: makeAgentId('a1'), runId: makeRunId('run-no-change'),
+      taskId: makeTaskId('coder-1'), input,
+      result: { stdout: '', stderr: reason, exitCode: 1, duration: 0, metadata: { refused: true, ruleId } },
+      invokedAt: at, durationMs: 0, policyDecision: ind(ruleId, reason),
+    });
+  // The engine's own Indeterminate — a `memoryPattern` rule whose graph query threw, or a template
+  // naming a parameter that cannot be bound — is policy refusing because it could not decide, and it
+  // carries the rule's own id. A write refused here is a refusal to name.
+  await seed('memory-pattern-broke', 'the rule could not be evaluated', { path: 'hello.txt', content: 'hi' });
+  // `builtin:input-schema` is the tool's schema refusing a malformed call before policy was asked;
+  // not a policy refusal, and not counted.
+  await seed('builtin:input-schema', 'the call did not match the tool schema', { path: 'hello.txt', text: 'hi' });
+  const fx = await makeFixture(CODER, new ScriptedTurns([], 'I could not write.'), {
+    attestor: attestor as unknown as Attestor,
+  });
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
+    assert.equal(failure.reason, 'no_change');
+    assert.match(failure.message, /; 1 tool call was denied or refused by policy: memory-pattern-broke \(fs\.write\)$/);
+    assert.ok(!failure.message.includes('input-schema'), `the builtin refusal is not named:\n${failure.message}`);
   } finally {
     await fx.cleanup();
   }

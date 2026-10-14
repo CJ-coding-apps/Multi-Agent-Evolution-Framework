@@ -150,6 +150,23 @@ function refusingRuleId(decision: PolicyDecision): string | undefined {
 }
 
 /**
+ * Whether a decision is a policy refusal the `no_change` clause names (F8/R2). A `Deny` and an
+ * unapproved `Escalate` are refusals outright; so is an `Indeterminate` the engine reached because
+ * it could not evaluate one of its own rules — a write it could not decide on is still a write
+ * policy refused, and carries the rule's own id. The one exception is a `builtin:*` id:
+ * `builtin:input-schema` is the tool's schema refusing a malformed call before policy was ever
+ * asked, so naming it "denied or refused by policy" would be untrue.
+ */
+function isPolicyRefusal(decision: PolicyDecision): boolean {
+  switch (decision.verdict) {
+    case 'Deny':
+    case 'Escalate':      return true;
+    case 'Indeterminate': return !(decision.ruleId?.startsWith('builtin:') ?? false);
+    default:              return false;
+  }
+}
+
+/**
  * F10: the sentence a `no_change` message carries when the node's own attested calls were refused.
  * A writer that fails having changed nothing reads the same whether it lost its nerve or every write
  * it tried was refused; naming the rule tells the two apart, which is the difference between a
@@ -362,21 +379,25 @@ export class RoleDispatcher {
    * failure. A test double without the getter answers with no refusals, which leaves the message
    * exactly as it was before this existed.
    *
-   * F8(a): a refusal is a `Deny`, or an `Escalate` the gate did not approve — the two verdicts that
-   * mean "policy refused this call", the two the clause's "denied or refused by policy" names. The
-   * old `Deny`-only test missed the unapproved `Escalate`. An `Escalate` the gate *approved* did run
-   * and is recorded under its `Escalate` verdict like any other call, so `metadata.refused` — which
-   * `executeToolGated` sets on the calls that did not run — is what tells the two apart.
-   * `Indeterminate` is left out on purpose: the policy was never asked for it (a malformed input, or
-   * a rule that could not be evaluated), so calling it "denied or refused by policy" would be untrue.
+   * F8(a): a refusal is a `Deny`, an `Escalate` the gate did not approve, or an `Indeterminate` the
+   * engine reached because it could not evaluate one of its own rules — every verdict that means
+   * "policy refused this call", which the clause's "denied or refused by policy" names. The old
+   * `Deny`-only test missed the other two. An `Escalate` the gate *approved* did run and is recorded
+   * under its `Escalate` verdict like any other call, so `metadata.refused` — which `executeToolGated`
+   * sets on the calls that did not run — is what tells the two apart.
+   *
+   * R2: the one `Indeterminate` left out is a `builtin:*` one. `builtin:input-schema` is the tool's
+   * schema refusing a malformed call before policy was ever asked, so it is not a policy refusal; an
+   * engine `Indeterminate` (a `memoryPattern` rule whose graph query threw, or a template naming a
+   * parameter that cannot be bound) is policy refusing because it could not decide, and is counted.
    */
   private deniedCallsFor(taskId: TaskId): DeniedCall[] {
     const denied: DeniedCall[] = [];
     for (const call of this.config.attestor.toolCallsForTask?.(taskId) ?? []) {
-      const verdict = call.policyDecision.verdict;
-      if (verdict !== 'Deny' && verdict !== 'Escalate') continue;
+      const decision = call.policyDecision;
+      if (!isPolicyRefusal(decision)) continue;
       if (call.result.metadata.refused !== true) continue;
-      const ruleId = refusingRuleId(call.policyDecision);
+      const ruleId = refusingRuleId(decision);
       denied.push({
         toolId: String(call.toolId),
         ...(ruleId !== undefined ? { ruleId } : {}),

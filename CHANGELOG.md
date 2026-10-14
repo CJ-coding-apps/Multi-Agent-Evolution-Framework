@@ -11,7 +11,7 @@ is entitled to know which of their own code stops compiling.
 
 The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b) land together here: the
 repository builds on pnpm 10 with a regenerated v9 lockfile, and a fifth built-in role joins a reader set
-moved onto the governed in-process tier, with a `no_change` failure that names the policy rules which denied
+moved onto the governed in-process tier, with a `no_change` failure that names the policy rules which refused
 the node's own calls.
 
 ### Added
@@ -29,8 +29,10 @@ the node's own calls.
 - **A `no_change` failure now names the rules that refused the node's own tool calls** (F10). A writer that
   finishes having changed nothing reads the same whether it lost its nerve or every write it attempted was
   refused by policy; naming the rule tells a backend to retry apart from a policy that is misconfigured. When
-  a writer fails `no_change` and its own attested tool calls include a policy `Deny` — or an `Escalate` the
-  approval gate did not approve — the message appends
+  a writer fails `no_change` and its own attested tool calls include a policy `Deny`, an `Escalate` the
+  approval gate did not approve, or an `Indeterminate` the engine reached because it could not evaluate one of
+  its own rules — but not a `builtin:*` one, which is the tool's schema refusing a malformed call rather than
+  policy — the message appends
   `; N tool call(s) were denied or refused by policy: <ruleId> (<toolId>)…` — at most three rules named, the
   count carrying the rest. Read per node, from the attestor's records for that task rather than the run-wide
   counts; the tool message the model saw carries no rule id, so the attestor is the only source.
@@ -64,8 +66,9 @@ the node's own calls.
   the loop's own default could run out of turns mid-investigation: the chain a review or an audit actually
   runs — `git.diff → fs.read → grep → git.log → answer` — is five calls, and `reviewer` was capped at four,
   so it could fail `budget_exhausted` on a task it would otherwise have finished. `security`, `reviewer` and
-  `analyst` now carry no cap below the loop default (10), and a registry test pins every built-in reader to
-  it. The cap is part of the minted role set, so the committed default harness re-mints again,
+  `analyst` now carry no cap below the loop default (10), and `defaults.test.ts` pins every built-in reader to
+  it — and this repository's own `.maf/roles.yaml` to the same floor. The cap is part of the minted role set, so
+  the committed default harness re-mints again,
   `d81facc5…` → `7e0a5503…`; as before the corpus sha, the task list and every task's outcomes are unchanged.
 
 Breaking for code that calls the packages directly:

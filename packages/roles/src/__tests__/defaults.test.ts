@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { createDefaultRegistry } from '@maf/tools';
 import { DEFAULT_ROLE_SET, DEFAULT_ROLE_CATALOG } from '../defaults.js';
 import { DEFAULT_MAX_TOOL_ITERATIONS } from '../RoleConfig.js';
 import { isWriterRole } from '../isWriterRole.js';
+import { RoleRegistry } from '../RoleRegistry.js';
 
 test('DEFAULT_ROLE_SET covers coder/tester/security/reviewer/analyst', () => {
   const roles = new Set<string>(DEFAULT_ROLE_SET.roles.map((r) => r.role));
@@ -41,6 +44,22 @@ test('no built-in reader is capped below the in-process loop default (F2)', () =
   // The cap that matters is the in-process loop's, since D-44 moves the built-in readers onto it.
   const readers = DEFAULT_ROLE_SET.roles.filter((r) => !isWriterRole(r));
   assert.ok(readers.length >= 3, 'the built-in readers are here to check');
+  for (const role of readers) {
+    assert.ok(
+      (role.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS) >= DEFAULT_MAX_TOOL_ITERATIONS,
+      `reader "${role.role}" caps at ${role.maxToolIterations}, below the loop default ${DEFAULT_MAX_TOOL_ITERATIONS}`,
+    );
+  }
+});
+
+test('the shipped .maf/roles.yaml caps no reader below the loop default either (F2)', async () => {
+  // The built-in set above is one source of readers; this repository's own roles file is the one
+  // `maf run` actually loads. Its `tester` holds `fs.write` and so is a writer here, which leaves the
+  // same three readers the built-ins carry.
+  const mafDir = path.resolve(__dirname, '../../../../.maf');
+  const roles = await RoleRegistry.fromYamlOrDefault(path.join(mafDir, 'roles.yaml'), mafDir, createDefaultRegistry());
+  const readers = roles.list().filter((r) => !isWriterRole(r));
+  assert.ok(readers.length >= 3, 'the shipped readers are here to check');
   for (const role of readers) {
     assert.ok(
       (role.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS) >= DEFAULT_MAX_TOOL_ITERATIONS,
