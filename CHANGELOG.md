@@ -13,9 +13,9 @@ is entitled to know which of their own code stops compiling.
 
 The 0.3.1 content: evidence honesty for the in-process tier. A signed bundle now says what the model was
 shown each turn and which policy was in force — the two things a reader of a bundle could not get before,
-and the things the 2026-10-13 sweep found missing when it read a run's transcripts against its bundle. The
-version heading is the maintainer's to promote; nothing here needs a migration, and both new bundle fields
-are optional, so a bundle written by 0.3.0 still parses and verifies.
+and the things the 2026-10-13 sweep found missing when it read a run's transcripts against its bundle.
+Nothing here needs a migration, and both new bundle fields are optional, so a bundle written by 0.3.0 still
+parses and verifies.
 
 ### Added
 
@@ -43,7 +43,7 @@ are optional, so a bundle written by 0.3.0 still parses and verifies.
   that a reader cannot get from the policy's rule list alone. `fellBackFrom: 'in-process'` separates a role
   that asked for the governed loop and did not get it from one that asked for `cli` — the D-06 fallback the
   transcript had only warned about once.
-- **`test.run` answers an absent test runner** (F1 — lands with `#29`, a separate PR, not in this change-set).
+- **`test.run` answers an absent test runner** (F1 — `#29`).
   Asking for a runner the host does not have —
   `bun`, `python`, `cargo` — failed the *spawn*, and an unhandled `error` on a `ChildProcess` kills the whole
   process: one live run died with `spawn bun ENOENT` and wrote no attestation at all. The tool now answers
