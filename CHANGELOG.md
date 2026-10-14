@@ -9,6 +9,8 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-13
+
 The 0.3.1 content: evidence honesty for the in-process tier. A signed bundle now says what the model was
 shown each turn and which policy was in force — the two things a reader of a bundle could not get before,
 and the things the 2026-10-13 sweep found missing when it read a run's transcripts against its bundle. The
