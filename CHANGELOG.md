@@ -52,10 +52,11 @@ own tools are off, and a failed node's failure is a value in the run outcome.
   to `ollama` or `openrouter` spawns no process and fills no surface, so it stays unrecorded; only `claude`,
   `codex` and `gemini` do. The planner's call and the security reviewer's call stay outside the record — MAF
   spawns them itself, not through a role node.
-- **A non-writer that answers without calling a tool fails `no_work`** ([D-46](docs/DECISIONS.md), WP-3.1).
-  A read-only role on the in-process tier can finish with an answer the model produced without running
-  anything — "the feature is there" after reading nothing — and the node counted as a success. A non-writer
-  node that finishes with an answer after **zero executed tool calls** now fails `no_work`. "Executed" is a
+- **A role that does not expect a change, and answers without calling a tool, fails `no_work`**
+  ([D-46](docs/DECISIONS.md), WP-3.1). A read-only role on the in-process tier can finish with an answer the
+  model produced without running anything — "the feature is there" after reading nothing — and the node
+  counted as a success. A node of a role that does not expect a change (`expectsChange !== true`), on the
+  in-process tier, that finishes with an answer after **zero executed tool calls** now fails `no_work`. "Executed" is a
   call that **ran**: one the policy engine allowed, or an `Escalate` the approval gate then approved. A `Deny`,
   an `Escalate` that was not approved, and an `Indeterminate` — an engine rule it could not evaluate, or the
   `builtin:input-schema` refusal of a malformed call — never ran and are not work. The message names the role,
@@ -64,10 +65,12 @@ own tools are off, and a failed node's failure is a value in the run outcome.
   when the node's own calls were refused. The check runs only where a per-call record exists — the in-process
   tier — because the `cli` tier attests no per-call record for a role call, and it counts the **current
   attempt's** calls, so a retried node that read only on an earlier attempt does not excuse this one. A role
-  whose job is not to call a tool sets `expectsToolCalls: false` (default `true` for a non-writer that lists a
-  tool, `false` for one that lists none); no built-in sets it, so the three built-in readers keep `true`. The
-  set is refused at load if `expectsToolCalls: true` is declared on a role with no tool (it could never be
-  satisfied) or on a writer (which is judged by `no_change`, never by its call count). `RoleCatalogEntry` does
+  whose job is not to call a tool sets `expectsToolCalls: false` (default `true` for a role that does not
+  expect a change and lists a tool, `false` for one that lists none); no built-in sets it, so the three
+  built-in readers keep `true`, and the built-in `tester` — a writer by its tools, since it holds `test.run`,
+  but expected by no rule to change the tree — is judged by this rule too. The set is refused at load if
+  `expectsToolCalls: true` is declared on a role with no tool (it could never be satisfied) or on a role that
+  expects a change (which is judged by `no_change`, never by its call count). `RoleCatalogEntry` does
   not change.
 - **A failed node's failure is a value in the run outcome** ([D-46](docs/DECISIONS.md), WP-3.1; live-row
   finding L3). `RunOutcome.nodes[].failure` is now `{ kind, ruleId?, toolId? }` — the kind the dispatcher
