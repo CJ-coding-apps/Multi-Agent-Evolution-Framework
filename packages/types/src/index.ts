@@ -1473,3 +1473,15 @@ export { canonicalJson } from './canonicalJson.js';
  */
 export { describeToolInput, toolInputProblem, toolFailureMessage } from './toolInput.js';
 export type { ToolInputCheckOptions } from './toolInput.js';
+
+// The secret scrubber lives here, in the package every other @maf package already depends on,
+// rather than in `@maf/processors` where it grew up. Two of its callers — the security gate
+// (`@maf/git-ops`, which the workspace-deps guard keeps a leaf on `@maf/types` alone) and the
+// tool protocol (`@maf/adapter-base`) — must mask model text before it reaches a record, and
+// neither may take a new edge to do it. One home, reached without a new dependency; the
+// processors package re-exports these names so no existing importer moves.
+export {
+  CREDENTIAL_PATTERNS, ASSIGNMENT_PATTERNS, DEFAULT_PATTERNS,
+  redactCredentials, redactSecrets, redactText,
+  redactCredentialsRecord, redactRecord,
+} from './redaction.js';

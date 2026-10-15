@@ -164,3 +164,27 @@ test('the protocol tells the model its host tools are off, and says it before th
     'the sentence must precede the catalogue it names',
   );
 });
+
+// ── A5 (0.4.0 audit): the quoted body of a malformed block is model text that becomes node state ──
+// `snippet` quotes a malformed tool_call block into the parse error. The loop keeps that error, and
+// once the repair budget is spent it becomes the node's failure, recorded. A key the model printed
+// inside the block must not survive into it, and because masking runs before the 80-character cut, a
+// key the cut would split is still recognised — masking after the cut would preserve its head.
+
+test('a malformed tool_call block is masked before it is quoted into the parse error (A5)', () => {
+  const key = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  // Unterminated object: not valid JSON, so it takes the parse-error path, and the key sits inside
+  // the quoted snippet.
+  const turn = parseTurn(`\`\`\`tool_call\n{"toolName":"fs.read","input":{"path":"${key}"}\n\`\`\``);
+  const err = turn.parseErrors?.[0] ?? '';
+  assert.equal(turn.toolCalls.length, 0);
+  assert.match(err, /not valid JSON/, 'the block is still reported as malformed');
+  assert.doesNotMatch(err, /sk-ant/, 'no part of the key survives the quote');
+  assert.match(err, /\[REDACTED:anthropic-key\]/, 'and the position it occupied is marked');
+});
+
+test('a malformed block with no credential is quoted verbatim (A5: masking is not a mangler)', () => {
+  const turn = parseTurn('```tool_call\n{"toolName":"fs.read","input":{"path":"a.txt"}\n```');
+  assert.match(turn.parseErrors?.[0] ?? '', /"fs\.read"/);
+  assert.match(turn.parseErrors?.[0] ?? '', /a\.txt/);
+});

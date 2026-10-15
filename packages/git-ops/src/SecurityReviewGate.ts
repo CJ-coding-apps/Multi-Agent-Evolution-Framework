@@ -2,7 +2,7 @@ import type {
   CliAdapter, AdapterInvokeOptions,
   SecurityFinding, SecurityReviewResult, SecuritySeverity,
 } from '@maf/types';
-import { GateRefused } from '@maf/types';
+import { GateRefused, redactCredentials } from '@maf/types';
 
 export interface SecurityReviewGateConfig {
   adapter:        CliAdapter;
@@ -97,11 +97,15 @@ export class SecurityReviewGate {
  * severity — fails closed.
  */
 export function parseSecurityOutput(raw: string): SecurityReviewResult {
+  // The raw output is the reviewer's own text; on any failure below a slice of it is quoted into
+  // `summary`, which becomes node state and the record. Mask credential-shaped substrings BEFORE
+  // the 600-char slice, so the head of a key the slice would cut is not preserved as evidence.
+  const safeRaw = redactCredentials(raw);
   const json = extractJsonBlock(raw);
   if (!json) {
     return {
       findings: [],
-      summary:  `Could not parse security review output. Raw: ${raw.slice(0, 600)}`,
+      summary:  `Could not parse security review output. Raw: ${safeRaw.slice(0, 600)}`,
       passed:   false,
     };
   }
@@ -111,7 +115,7 @@ export function parseSecurityOutput(raw: string): SecurityReviewResult {
   } catch {
     return {
       findings: [],
-      summary:  `Security review JSON parse failed. Raw: ${raw.slice(0, 600)}`,
+      summary:  `Security review JSON parse failed. Raw: ${safeRaw.slice(0, 600)}`,
       passed:   false,
     };
   }
@@ -122,7 +126,7 @@ export function parseSecurityOutput(raw: string): SecurityReviewResult {
     return {
       findings: [],
       summary:  `Security review output has no findings array, so there are no severities to ` +
-                `derive a verdict from. Raw: ${raw.slice(0, 600)}`,
+                `derive a verdict from. Raw: ${safeRaw.slice(0, 600)}`,
       passed:   false,
     };
   }
