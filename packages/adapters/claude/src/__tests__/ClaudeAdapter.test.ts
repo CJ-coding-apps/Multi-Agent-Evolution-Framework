@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { TransportError, makeToolId } from '@maf/types';
 import type { AdapterInvokeOptions, TurnMessage, ToolPlugin } from '@maf/types';
 import type { SpawnResult, spawnAndCollect } from '@maf/adapter-base';
-import { serializeTools } from '@maf/adapter-base';
+import { serializeTools, TOOL_PROTOCOL } from '@maf/adapter-base';
 import { ClaudeAdapter } from '../index.js';
 
 // ORACLE (F4, F8; D-04, D-06).
@@ -338,6 +338,24 @@ test('a turn with no tools records the empty catalogue rather than omitting it (
   const bare = await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, systemPrompt: 'be brief' });
 
   assert.equal(bare.modelSurface?.toolCatalog, serializeTools(undefined), 'no tools is stated, not omitted');
+});
+
+// F9/M20: the composed block was never checked for order, so a change that put the tool catalogue
+// before the D-46 paragraph — announcing tools to a model that had just been told its host tools were
+// gone — would pass every existing test. The governed turn's system block must read: role, then what
+// the turn does *not* have, then what it does.
+
+test('sendTurn puts the D-46 protocol paragraph before the tool catalogue in args[2] (F9)', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'done', stderr: '', exitCode: 0, duration: 1 });
+  await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, systemPrompt: 'be brief', tools: TOOLS });
+
+  const block = calls[0]?.args[2] ?? '';
+  const protocolAt = block.indexOf(TOOL_PROTOCOL);
+  const catalogueAt = block.indexOf('AVAILABLE TOOLS');
+  assert.ok(protocolAt >= 0, 'the D-46 paragraph is in the turn system block');
+  assert.ok(catalogueAt >= 0, 'and the catalogue is too');
+  assert.ok(protocolAt < catalogueAt, 'the paragraph that says the host tools are gone comes before the list');
+  assert.match(block, /are not available in this turn/, 'the paragraph still says the host tools are gone');
 });
 
 // ORACLE (WP-3.0c, D-45). On the cli tier `invoke` is the whole model call, and until now it left no

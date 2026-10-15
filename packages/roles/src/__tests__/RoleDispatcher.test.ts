@@ -739,6 +739,8 @@ class HeldWriterAdapter implements TurnAdapter {
   readonly name = 'held-writer';
   fixture!: Fixture;
   park = true;
+  /** When false the reader makes no tool call at all — the live row 2b shape (F11). */
+  readerMakesACall = true;
   writerDone: Promise<unknown> | undefined;
   private readerStarted = false;
   private readonly writerStarted = deferred();
@@ -771,6 +773,10 @@ class HeldWriterAdapter implements TurnAdapter {
       this.readerStarted = true;
       this.writerDone = this.fixture.dispatcher.runNode(this.writerNode);
       await this.writerStarted.promise;
+      // F11: a reader that makes no call at all answers on its first turn, so its node has zero
+      // executed calls and fails `no_work` — while the writer's change, attributed below, is the
+      // writer's, not a change the reader has to answer for.
+      if (!this.readerMakesACall) return { text: 'investigated the code', toolCalls: [] };
       return { text: 'investigating', toolCalls: [{ toolUseId: 'q1', toolName: 'fs.read', input: { path: 'hello.txt' } }] };
     }
     return { text: 'investigated the code', toolCalls: [] };
@@ -836,6 +842,59 @@ test('F2: an in-process reader is excused for a writer still holding the lock ac
     assert.equal(note.metadata['fromTree'], attributed?.fromTree, 'and the transcript carries the tree ids (N6)');
     assert.equal(note.metadata['toTree'], attributed?.toTree);
     assert.equal('writerGateTree' in note.metadata, false, 'absent under (a) in the transcript too');
+  } finally {
+    adapter.release();
+    if (adapter.writerDone) await adapter.writerDone.catch(() => undefined);
+    await f.cleanup();
+  }
+});
+
+// F11: live row 2b's exact shape, which no committed test covered once every reader fixture was
+// changed to make a call. The WP-3.0c pass ran two independent parts at maxConcurrent: 2; an analyst
+// made no executed call while a writer held the writer-lock across its turn. The scheduler's own
+// arrangement (two concurrent nodes) is what made it live, but the observable behaviour is rule (a)'s
+// and this fixture reproduces it deterministically: the reader's bracket holds the writer's change,
+// the change is charged to the writer, so the `unexpected_change` guard does not fire — and the
+// reader, having called nothing, fails `no_work`. Both facts at once: attribution recorded, node still
+// fails.
+
+test('F11: a zero-call reader whose bracket is the writer\'s change is attributed, then fails no_work (live row 2b)', async () => {
+  const WRITER = defineRoleName('coder');
+  const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: (id) => id === writer, // the writer is mid-turn: it holds the lock and its gate is ahead of it
+  };
+  const adapter = new HeldWriterAdapter(writerNode);
+  adapter.readerMakesACall = false;
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
+  adapter.fixture = f;
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'no_work', 'the reader called nothing, so it did no work');
+    assert.equal(failure.message.split(';')[0], 'role "analyst" made no executed tool call across 1 turn',
+      'and the message is the D-46/F10 template, one turn, zero executed calls');
+
+    assert.equal(f.attestor.attributed.length, 1, 'the writer\'s change is still attributed, once');
+    assert.equal(f.attestor.attributed[0]?.nodeId, 'n1');
+    assert.equal(f.attestor.attributed[0]?.attributedTo, writer, 'named to the writer that held the lock across the turn');
+    assert.ok(
+      f.attestor.diffHashes.some((h) => h.key === 'n1.attributed.diff'),
+      'the bracket diff is a subject of the run\'s statement — attribution is recorded even though the node fails',
+    );
+    assert.equal(
+      f.attestor.records.filter((r) => r.taskId === makeTaskId('n1')).length, 0,
+      'the reader made no executed call — the attribution is not itself work, so no_work stands',
+    );
   } finally {
     adapter.release();
     if (adapter.writerDone) await adapter.writerDone.catch(() => undefined);
