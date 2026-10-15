@@ -100,9 +100,13 @@ RoleDispatcher.runNode(node):
      writer on the cli tier, allowUngoverned:        UNGOVERNED banner on stderr (once per run) and an
                                                      // [ungoverned] transcript note for the node
      reader that asked for in-process, fell back:    [warn] transcript note
-  2. if isWriterRole(role):
-       startCommit = git rev-parse HEAD              // captured before the node runs, once per node;
-                                                     // a retry reuses it (empty tree if no commits yet)
+  2. startCommit = git rev-parse HEAD                // captured before the node runs, once per node, for
+                                                     // *every* node and not only writers (F7), so a retry
+                                                     // reuses it (empty tree if no commits yet)
+     role holds no write tool:                       bracket = { at: performance.now(),
+                                                              tree: snapshotTree(cwd) }
+                                                     // taken before the turn, so the reader is diffed against
+                                                     // the tree it found and not against HEAD (F7)
   3. roleTools = new RoleToolRegistry(baseTools, role.allowedTools)
   4. rolePrompt = await roles.loadPrompt(role)       // the harness's text for the role
   5. systemPrompt = injector.assemble(node.label, sessionId, role.role) + '\n' + rolePrompt
@@ -127,16 +131,30 @@ RoleDispatcher.runNode(node):
        if the run has a review gate, or the harness requires review:
          decision = await reviewGate.review(…)       // the node waits; recorded in approvals
          if required and not approved: throw ReviewRefused
+ 7b. reader role (no write tool), once per attempt, after the turn (F7) — the change its *own* turn made,
+     from the bracket opened in step 2:
+       endTree = snapshotTree(cwd); if endTree == bracket.tree: the turn changed nothing, stop here
+       diff = diffTrees(cwd, bracket.tree, endTree)
+       in-process: a concurrent writer whose own gate read every path here and has not seen them change
+                    since is named; if one is, record the attribution and the bracket diff as a subject
+                    — the node does not fail, the writer's gate has judged the change (D-45)
+       otherwise:  throw NodeFailure('unexpected_change')   // the diff recorded as a subject
   8. fail the node: a cli result that carried a transport failure → TransportError (may be retried);
      one that reported failure, or a writer's empty output → NodeFailure;
      a loop that ended budget_exhausted without node.allowPartial → NodeFailure
   9. otherwise, either tier — a cli answer, or a loop that completed —, role.expectsChange and the
      step-7 diff is empty:
        throw NodeFailure('no_change')                // the output tail in the message (D-32)
- 10. otherwise, an in-process non-writer whose role expects tool calls and whose executed-call
-     count is zero (D-46):
+ 10. otherwise, an in-process role that does **not** expect a change (`expectsChange` is not true)
+     whose role expects tool calls and whose executed-call count is zero (D-46):
        throw NodeFailure('no_work')                  // role, turn count, answer excerpt in the message
 ```
+
+The judged verdicts are reached in this order, each only if nothing above it has already failed the node:
+**`unexpected_change`** (step 7b, with attribution weighed inside it) → **`no_change`** (step 9) →
+**`no_work`** (step 10). A reader that failed step 7b never reaches steps 9 or 10; `no_change` and `no_work`
+are disjoint by `expectsChange` — the first requires `true`, the second is taken only when it is not — so
+the two can never both apply to one node.
 
 A node that fails, after its last attempt, is handed to the failure recorder: the memory graph gets a `Task` (the node's instruction, with the run's title in its properties) joined to a `Failure` by a `CAUSED_FAILURE` edge, which the planner recalls the next time a title with the same first three words is planned ([D-37](DECISIONS.md)).
 
@@ -160,7 +178,7 @@ A role is a writer when it holds any of `fs.write`, `fs.delete`, `patch.apply`, 
 - puts a diff the security gate passed to the human review gate, when the run has one or the harness requires review ([D-34](DECISIONS.md); see [SECURITY.md](SECURITY.md#the-human-review-gate));
 - fails the node on the `cli` tier if the backend returns empty output, and on either tier — for a role with `expectsChange` — if it answers and leaves the tree unchanged against the start commit (`no_change`, [D-32](DECISIONS.md)): in-process, when its loop completed.
 
-A role that holds **no** write tool gets two of those steps all the same, and this is deliberate (F7): MAF diffs a reader's turn too, by bracketing it with two working-tree snapshots and diffing those, so the change it answers for is the one its own turn made. A writer is diffed against its start commit, as the gate has always done. A reader whose turn changed the tree fails with `unexpected_change` — the mirror of `no_change` — and that change is recorded as a subject of the run's attestation. The bracket matters: a writer that ran before it and committed nothing (no node commits between DAG nodes), or the user's own dirty checkout under `--no-worktree`, sits in both snapshots and is not blamed on the reader. This guard sees what the review diff sees and no more — a path the repository's `.gitignore` already ignores, and this run's `.maf/` runtime state, are outside both. Nothing is reverted; the node names the files and prints the `git diff` / `git checkout --` lines. On the `claude` backend a `cli`-tier reader is also spawned with only the reading tools (`--tools Read,Glob,Grep`), so the built-in `reviewer` and `security` roles cannot write at all; `codex` and `gemini` have no such flag, and for them this diff guard is the only defence. The role's allowlist does not do this work on the `cli` tier — it is not passed to the backend — which is why the guard is a diff and not an allowlist.
+A role that holds **no** write tool gets two of those steps all the same, and this is deliberate (F7): MAF diffs a reader's turn too, by bracketing it with two working-tree snapshots and diffing those, so the change it answers for is the one its own turn made. A writer is diffed against its start commit, as the gate has always done. A reader whose turn changed the tree fails with `unexpected_change` — the mirror of `no_change` — and that change is recorded as a subject of the run's attestation. **One change is not the reader's and does not fail it** ([D-45](DECISIONS.md)): on the `in-process` tier the dispatcher asks a ledger of the run's writer locks, and a change whose every path a *concurrent* writer's own reviewed diff already held, and which is unchanged since that gate read it, is attributed to that writer instead — recorded with the three working-tree ids and the diff's digest, so the change is still judged by a gate (that writer's) rather than excused from every gate at once. A path the rule cannot settle fails the reader, and with no writer to name the change is the reader's and the node fails exactly as before. The ledger is consulted on the `in-process` tier only: a `cli`-tier reader holds the writer lock itself, so no other writer can have been running and any change it shows is its own. The bracket matters: a writer that ran before it and committed nothing (no node commits between DAG nodes), or the user's own dirty checkout under `--no-worktree`, sits in both snapshots and is not blamed on the reader. This guard sees what the review diff sees and no more — a path the repository's `.gitignore` already ignores, and this run's `.maf/` runtime state, are outside both. Nothing is reverted; the node names the files and prints the `git diff` / `git checkout --` lines. On the `claude` backend a `cli`-tier reader is spawned with only the reading tools (`--tools Read,Glob,Grep`), so it cannot write at all. That covers a *custom* read-only role, and a built-in reader that asked for `in-process` and fell back to `cli` on an adapter without the loop; the built-in `security`, `reviewer` and `analyst` run `in-process` by default ([D-44](DECISIONS.md)), where the role's allowlist governs them instead. `codex` and `gemini` have no such flag, and for them this diff guard is the only defence. The role's allowlist does not do this work on the `cli` tier — it is not passed to the backend — which is why the guard is a diff and not an allowlist.
 
 The scheduler's writer lock — which stops two nodes editing the tree at once — uses a broader test, `isWriterForLock(role, adapter, baseTools)`: every role that runs on the `cli` tier counts as a writer there, because its backend CLI has file tools of its own whatever the allowlist says — including a read-only role that asked for `in-process` on an adapter that cannot run it — and an `in-process` role counts as one if it holds any tool that is not read-only.
 
