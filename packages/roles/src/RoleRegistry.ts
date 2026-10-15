@@ -43,6 +43,24 @@ export class RoleRegistry implements RoleResolver {
           '(fs.write, fs.delete, patch.apply, git.add, git.commit, git.reset or test.run), but it holds none.',
         );
       }
+      // F8: the reader's `expectsToolCalls` declaration must be able to mean something, and it is
+      // checked here, where the set is validated, rather than left to be silently ignored. `true` on a
+      // role with no tools can never be satisfied — the node has nothing to call, so every run ends
+      // `no_work` — and on a writer it is inert, because a writer is judged by whether it changed the
+      // tree (`no_change`, D-32), never by its call count. Both are configuration errors: a rule that
+      // cannot take effect should fail loudly, not be read and discarded.
+      if (role.expectsToolCalls === true && role.allowedTools.length === 0) {
+        throw new RoleConfigError(
+          `Role "${role.role}" sets expectsToolCalls: true but holds no tool; a reader with nothing to ` +
+          'call can never satisfy it, so every node of this role would fail no_work.',
+        );
+      }
+      if (role.expectsToolCalls === true && isWriterRole(role)) {
+        throw new RoleConfigError(
+          `Role "${role.role}" sets expectsToolCalls: true but holds a write tool, so it is judged as a ` +
+          'writer by no_change (D-32) and this setting is never read.',
+        );
+      }
       this.byName.set(role.role, role);
     }
     if (!this.byName.has(set.defaultRole)) {
@@ -268,6 +286,7 @@ function isRoleSet(x: unknown): x is RawRoleSet {
     if (rr['systemPrompt'] !== undefined && typeof rr['systemPrompt'] !== 'string') return false;
     if (rr['promptFile']   !== undefined && typeof rr['promptFile']   !== 'string') return false;
     if (rr['expectsChange'] !== undefined && typeof rr['expectsChange'] !== 'boolean') return false;
+    if (rr['expectsToolCalls'] !== undefined && typeof rr['expectsToolCalls'] !== 'boolean') return false;
     // Thrown, not `false`, so the message can name the value: a misspelt tier would otherwise
     // reach the dispatcher and be refused as an adapter that "cannot run the in-process loop".
     const execution = rr['execution'];
