@@ -220,13 +220,18 @@ function refusalDetail(denied: readonly DeniedCall[]): { ruleId?: string; toolId
 }
 
 /**
- * The reader's answer, quoted for `no_work` (D-46): its whitespace collapsed to single spaces so the
- * message stays one line, trimmed, and cut to the first 200 characters so it stays a summary rather
- * than a transcript. `JSON.stringify` gives the quotes and escapes any quote inside, so a machine
- * parsing the field gets the same text a reader sees.
+ * The reader's answer, quoted for `no_work` (D-46): credentials masked first — the same
+ * `redactCredentials` the `no_change` tail gets, because this string reaches the signed bundle, the
+ * memory graph and the planner's failure recall, none of which the transcript scrubber sees — then
+ * its whitespace collapsed to single spaces so the message stays one line, trimmed, and cut to the
+ * first 200 characters so it stays a summary rather than a transcript. The mask is *before* the cut,
+ * and that order is load-bearing: a credential straddling character 200 would survive a
+ * slice-then-mask as a fragment no format pattern recognises. `JSON.stringify` gives the quotes and
+ * escapes any quote inside, so a machine parsing the field gets the same text a reader sees.
  */
 function answerExcerpt(text: string): string {
-  return JSON.stringify(text.replace(/\s+/g, ' ').trim().slice(0, 200));
+  const masked = redactCredentials(text);
+  return JSON.stringify(masked.replace(/\s+/g, ' ').trim().slice(0, 200));
 }
 
 /**
@@ -271,12 +276,15 @@ function noChangeShortfall(
  * D-46(ii): the governed turn says what it has, and a reader that did no work has not succeeded.
  *
  * A **reader** — a role that holds no write tool, so `no_change` cannot be its reason — finished with
- * a final answer having made **no executed tool call**: the attested calls it made were all refused,
- * or it made none at all. Live row 2b of the 3.0c pass is the case: an in-process `analyst` with the
- * host's native tools disabled tried `Read`/`Glob`/`Grep` anyway, was refused ("No such tool
- * available"), and gave up — and the run read `Succeeded` off the prose. The record said what
- * happened: zero calls, one turn, a refusal. Judged from the record, not the narrative: `Allow` is a
- * call that ran, so a denied call is no work — it left the tree exactly as it found it.
+ * a final answer having made **no executed tool call**: every attested call it made was refused, or it
+ * made none at all. Live row 2b of the 3.0c pass is the case: an in-process `analyst` with the host's
+ * native tools disabled tried `Read`/`Glob`/`Grep` anyway, was refused ("No such tool available"), and
+ * gave up — and the run read `Succeeded` off the prose. The record said what happened: zero executed
+ * calls, one turn, a refusal. Judged from the record, not the narrative: a call that ran is work, and a
+ * refused call is not — it left the tree exactly as it found it. "Ran" is `metadata.refused !== true`,
+ * the mark `executeToolGated` sets on every call it did not execute (F4/A2): a `Deny`, an `Escalate`
+ * the gate did not approve, an `Indeterminate`, a malformed call. An approved `Escalate` ran, keeps its
+ * `Escalate` verdict, and carries no such mark, so it is work.
  *
  * Only a reader is judged this way. A writer that made no call owes a *change* and fails `no_change`
  * (D-32); a reader that holds no tool, or opted out with `expectsToolCalls: false`, expects nothing
@@ -293,7 +301,7 @@ function noWorkShortfall(
   const turns = answer.tier === 'in-process' ? answer.turns : 1;
   return new NodeFailure(
     'no_work',
-    `role "${role.role}" made no tool call across ${turns} turn${turns === 1 ? '' : 's'}; ` +
+    `role "${role.role}" made no executed tool call across ${turns} turn${turns === 1 ? '' : 's'}; ` +
     `its answer: ${answerExcerpt(finalText)}${denyNote(denied)}`,
     undefined,
     refusalDetail(denied),
@@ -543,18 +551,26 @@ export class RoleDispatcher {
   private bannerShown = false;
 
   /**
-   * How many of this node's attested calls actually ran (D-46): the records whose `policyDecision`
-   * is `Allow`, which `executeToolGated` writes only for a call the policy let through. A denied,
-   * an unapproved-escalated or an indeterminate call left the tree exactly as it found it — a
-   * refusal is no work, and the spec's rule says so. In-process by construction: the cli tier
-   * records a `modelSurface` per role call but no per-tool `ToolCallRecord`, so on that tier this is
-   * always zero — which is why the only check that reads it (`no_work`) is gated to the tier where
-   * the record is real.
+   * How many of this node's attested calls actually ran (D-46): the records whose result was not
+   * `refused` — the mark `executeToolGated` sets on every call it did not execute. A `Deny`, an
+   * `Escalate` the gate did not approve, an `Indeterminate` and a malformed call are all marked, so
+   * none is work; an approved `Escalate` ran and carries no mark, so it is (F4/A2). "Not refused" and
+   * not "`Allow`" is the right test: a refusal left the tree exactly as it found it, which is the whole
+   * of what the count is for.
+   *
+   * The count is over the whole node, because a `ToolCallRecord` carries no attempt id (types
+   * `ToolCallRecord`). A caller reading it across a retried node must therefore snapshot it when the
+   * attempt starts and use the delta (F3/A4), or an earlier attempt's reads would excuse a later
+   * attempt that read nothing.
+   *
+   * In-process by construction: the cli tier records a `modelSurface` per role call but no per-tool
+   * `ToolCallRecord`, so on that tier this is always zero — which is why the only check that reads it
+   * (`no_work`) is gated to the tier where the record is real.
    */
   private executedCallCount(taskId: TaskId): number {
     let executed = 0;
     for (const call of this.config.attestor.toolCallsForTask?.(taskId) ?? []) {
-      if (call.policyDecision.verdict === 'Allow') executed += 1;
+      if (call.result.metadata.refused !== true) executed += 1;
     }
     return executed;
   }
@@ -613,6 +629,12 @@ export class RoleDispatcher {
   async runNode(node: DagNode): Promise<Record<string, BlackboardValue>> {
     const role = this.config.roles.getRole(node.agentRole);
     const taskId = makeTaskId(node.id);
+    // F3/A4: the D-46 guard reads a *count of executed calls*, and a `ToolCallRecord` carries no
+    // attempt id, so the number it must read is the delta since this attempt began. Snapshotting here
+    // — before the node does anything, and on every attempt — keeps a retry from being a way to
+    // succeed having done nothing: a reader that read on attempt 1, hit a transport failure, and then
+    // answered without reading on attempt 2 has done no work *this* attempt.
+    const executedAtAttemptStart = this.executedCallCount(taskId);
     const resolved = this.resolveTier(role);
 
     // N2, rule (a): a fresh attempt clears this node's own gate evidence. The gate records what it
@@ -795,8 +817,11 @@ export class RoleDispatcher {
     // cli tier attests none, so an empty call set there means "unwatched", not "did no work", and a
     // cli-tier reader (live row 1) is left exactly as it was. `expectsToolCalls` is the role's own
     // declaration, else its tools: a reader with none to call, or one that opted out, expects nothing.
+    // The count is this attempt's delta (F3/A4), so a retried node that read only on an earlier
+    // attempt does not excuse this one.
+    const executedThisAttempt = this.executedCallCount(taskId) - executedAtAttemptStart;
     if (shortfall === undefined && answer?.tier === 'in-process' && !isWriterRole(role) &&
-        expectsToolCalls(role) && this.executedCallCount(taskId) === 0) {
+        expectsToolCalls(role) && executedThisAttempt === 0) {
       shortfall = noWorkShortfall(role, answer, denied);
     }
 
