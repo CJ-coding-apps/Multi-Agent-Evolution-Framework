@@ -922,23 +922,25 @@ export class RoleDispatcher {
     // omit a path the diff actually changed, and the omission is what excuses the change. `undefined`
     // means the rule cannot name what changed (git failed, or the section count disagrees) and the
     // reader fails closed below rather than being handed an empty set that matches nothing.
-    const paths = await this.bracketPaths(bracket.tree, endTree, diff);
+    const { paths, listed } = await this.bracketPaths(bracket.tree, endTree, diff);
     const writer = paths !== undefined && tier === 'in-process'
       ? await this.attributableWriter(node, paths, bracket.at, endedAt, endTree)
       : undefined;
     if (writer !== undefined) {
       // The three tree ids the rule used (N6): the digest below is reproducible from the first two
-      // with `git diff --no-renames <fromTree> <toTree>`, and the third names the content the named
-      // writer's gate read — absent under rule (a), where the writer had not gated yet.
+      // with `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff --text --no-ext-diff
+      // --no-textconv --no-renames <fromTree> <toTree>` (the flags the digest was taken with, R1),
+      // and the third names the content the named writer's gate read — absent under rule (a),
+      // where the writer had not gated yet.
       const attributed: AttributedChange = {
         nodeId: node.id, attributedTo: writer, diffSha256: sha256Hex(diff),
         fromTree: bracket.tree, toTree: endTree,
         ...(this.gateTrees.get(writer) !== undefined ? { writerGateTree: this.gateTrees.get(writer)! } : {}),
       };
       this.config.attestor.recordAttribution?.(attributed);
-      // The bracket diff as a subject of the run's statement, under its own name: the digest above
-      // then points at bytes in the bundle, the same way a writer's `<node>.diff` does, instead of at
-      // a diff that was never written down (F2).
+      // The bracket diff as a subject of the run's statement, under its own name: `diffSha256` above
+      // then names a diff the statement carries a digest for — in `diffHashes`, like every subject —
+      // rather than naming a change written down nowhere (F2).
       this.config.attestor.recordDiffHash?.(`${node.id}.attributed.diff`, diff);
       await this.config.transcript.append(
         'system',
@@ -954,7 +956,10 @@ export class RoleDispatcher {
       return;
     }
     this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff);
-    throw unexpectedChange(role, this.config.adapter.name, paths ?? [], this.config.cwd);
+    // R5: `paths` is undefined both when git failed (no names to give) and when the section count
+    // disagreed — and on a disagreement git named files the rule simply could not reconcile. Pass
+    // the raw listing in that case so the message names them instead of saying "git named none".
+    throw unexpectedChange(role, this.config.adapter.name, paths ?? listed, this.config.cwd);
   }
 
   /**
@@ -968,13 +973,20 @@ export class RoleDispatcher {
    * changed path is exactly one section, so a disagreement means the diff shows a change the
    * listing does not name — the change the rule cannot attribute and must not excuse. `undefined`
    * there, and a git failure, both fail the reader closed, never open.
+   *
+   * The raw listing comes back alongside the settled set (R5): on a count disagreement git *did*
+   * name files, and the failure message below must name them rather than claim git named none.
    */
-  private async bracketPaths(from: string, to: string, diff: string): Promise<string[] | undefined> {
+  private async bracketPaths(
+    from: string,
+    to: string,
+    diff: string,
+  ): Promise<{ paths: string[] | undefined; listed: string[] }> {
     try {
       const listed = await this.nameOnlyPaths(from, to);
-      return diffSectionCount(diff) === listed.length ? listed : undefined;
+      return { paths: diffSectionCount(diff) === listed.length ? listed : undefined, listed };
     } catch {
-      return undefined;
+      return { paths: undefined, listed: [] };
     }
   }
 
@@ -1135,6 +1147,9 @@ export class RoleDispatcher {
     // recorded below. The marker is never cleared within an attempt (only at the attempt start in
     // `runNode`), so a gate that throws leaves the writer un-namable-on-the-lock rather than falsely
     // attributable — the fail-closed direction.
+    // The line order is load-bearing and pinned by `N5/R3`: `gating.add` must precede the gate's
+    // *first read* below (`snapshotTree`) — a marker set after it leaves a window in which a writer
+    // that has begun gating is still namable on the lock alone (mutation N5c).
     this.gating.add(node.id);
     // N2: the tree id this gate is about to judge, taken *before* the diff so it is at-or-just-before
     // the content the gate reads. A later change between the two git calls would then show as changed
@@ -1144,16 +1159,33 @@ export class RoleDispatcher {
     const diff = await snapshotDiff(this.config.cwd, startCommit);
     // Handed back before anything else: an empty diff is also D-32's evidence (no_change).
     onDiff(diff);
+    const changed = diff.trim().length > 0;
+    // R4 (D-42): the diff becomes a subject of the run's statement *before* the path listing below.
+    // The listing is the one git call between here and the security review that can fail, and if it
+    // did the node would fail with the change left unrecorded — but D-42 says the change is recorded
+    // whether or not the node survives. An empty diff has nothing to record, exactly as before.
+    if (changed) this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff); // a subject of the run's statement (D-13)
     // The paths this gate is about to judge, kept per node (F2), so a reader whose bracket shows a
     // change can ask whether a gated writer already carried it here. Taken from git (N4) between the
     // start commit and the gate tree — the same two trees the digest is reproducible from — rather
     // than parsed out of the diff text, whose `---`/`+++` lines git does not emit for every change.
     // Recorded even when the diff is empty — the empty set answers for nothing, which is what a
     // writer that changed nothing should be able to say.
-    this.reviewedPaths.set(node.id, new Set(await this.nameOnlyPaths(startCommit, gateTree)));
+    let gatePaths: string[];
+    try {
+      gatePaths = await this.nameOnlyPaths(startCommit, gateTree);
+    } catch (err: unknown) {
+      // R4: git cannot name what this gate judged. The subject above already carries the change, so
+      // record an *empty* reviewed set — an empty set answers for nothing, and rule (b) needs each of
+      // the reader's paths in `reviewed`, so every reader fails closed against this writer — then
+      // rethrow, so the writer still fails loudly rather than its change going unrecorded.
+      this.reviewedPaths.set(node.id, new Set());
+      this.gateTrees.set(node.id, gateTree);
+      throw err;
+    }
+    this.reviewedPaths.set(node.id, new Set(gatePaths));
     this.gateTrees.set(node.id, gateTree);
-    if (!diff.trim()) return;
-    this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff); // a subject of the run's statement (D-13)
+    if (!changed) return;
 
     const securityGate = this.config.securityGate;
     if (!securityGate) return this.runReviewGate(node, startCommit, diff);

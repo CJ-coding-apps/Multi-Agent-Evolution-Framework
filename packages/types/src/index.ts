@@ -1298,13 +1298,18 @@ export interface ModelSurfaceRecord extends ModelSurface {
  * either that writer still holds the lock, so its own start-commit diff will carry the change to its
  * gate, or its gate has run and its reviewed diff already holds every path in this reader's bracket.
  * The bracket diff is recorded beside it, as the subject `<node>.attributed.diff`, so `diffSha256`
- * points at bytes in the bundle rather than at nothing.
+ * names a diff the statement carries a digest for — in `diffHashes`, like every subject — rather than
+ * naming a change written down nowhere.
  *
  * The three tree ids below are what make that digest checkable rather than merely present (N6): the
- * recorded `diffSha256` is `sha256` of `git diff --no-renames <fromTree> <toTree>` in the run's
- * repository, so a verifier holding the bundle and the repository can recompute it. `writerGateTree`
- * names the content the named writer's gate read, and is absent when the change was attributed on the
- * lock alone (rule (a)) — a writer whose gate had not yet run has no gate tree to name.
+ * recorded `diffSha256` is `sha256` of `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff
+ * --text --no-ext-diff --no-textconv --no-renames <fromTree> <toTree>` in the run's repository — the
+ * flags the digest was taken with, so a verifier recomputes it in the same shape rather than with a
+ * plain `git diff`, which differs for binary content and for a host git config. The two trees are
+ * unreachable objects, so recompute soon: `git gc` may prune them after `gc.pruneExpire` (two weeks
+ * by default). `writerGateTree` names the content the named writer's gate read, and is absent when
+ * the change was attributed on the lock alone (rule (a)) — a writer whose gate had not yet run has no
+ * gate tree to name.
  */
 export interface AttributedChange {
   nodeId:       string;
@@ -1312,7 +1317,7 @@ export interface AttributedChange {
   attributedTo: string;
   /** sha256, hex, of the bracket diff the reader's turn showed; the content of `<node>.attributed.diff`. */
   diffSha256:   string;
-  /** The reader's bracket start tree id: `git diff --no-renames <fromTree> <toTree>` reproduces `diffSha256`. */
+  /** The reader's bracket start tree id; with `toTree`, the pair `diffSha256` is reproducible from (flags in the note above). */
   fromTree:     string;
   /** The reader's bracket end tree id. */
   toTree:       string;

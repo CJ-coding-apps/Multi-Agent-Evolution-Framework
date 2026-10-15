@@ -255,10 +255,15 @@ present only when the writer was named as gated) — and it is
 judged where every writer's change is judged, against that **writer's** own start commit, by the security gate
 that reviews it. When no writer meets either condition the guard is exactly what it was: a change the bracket
 shows fails the node with `unexpected_change`, records the diff as the reader's own under the node's name, and
-names the files. The bracket diff is written down too, as `<node>.attributed.diff`, and `diffSha256` is
-reproducible from the recorded ids: `git diff --no-renames <fromTree> <toTree>` in the run's repository
-prints exactly the bytes the digest is over, so the subject pins the bytes in the bundle and the ids let a
-verifier recompute them. A `cli`-tier reader holds the writer lock itself
+names the files. The bracket diff is written down too, as the subject `<node>.attributed.diff` (its digest,
+like every subject's, in the statement's `diffHashes`), and `diffSha256` is reproducible from the recorded
+ids: `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff --text --no-ext-diff --no-textconv
+--no-renames <fromTree> <toTree>` in the run's repository prints exactly the bytes the digest is over. Those
+are the flags the digest was taken with, and they matter: without `--text` a binary change prints `Binary
+files … differ` and the bytes come out different, and because maf runs git with the host's global and system
+config off, a verifier's own `diff.*` settings must be off too. The two tree objects are unreachable in that
+repository — `git gc` may prune them once `gc.pruneExpire` passes, two weeks by default — so recompute soon
+after the run, or pin the ids under a ref. A `cli`-tier reader holds the writer lock itself
 (every `cli`-tier node does, since the backend's own file tools are unseen), so no other writer can have been
 running and any change the bracket shows is its own; the guard does not consult the ledger at all on that
 tier, and the reader's own node id is excluded from it where it is consulted. The attribution names a

@@ -83,8 +83,11 @@ a writer running concurrently with a reader is attributed to that writer rather 
   the bundle's new `attributedChanges` field and in the transcript, the bracket diff is kept as a subject under
   `<node>.attributed.diff`, and the change is judged where every writer's change is judged, against that
   writer's own start commit by the security gate that reviews it. `diffSha256` is `sha256` of
-  `git diff --no-renames <fromTree> <toTree>` in the run's repository, so a verifier can recompute it from the
-  recorded ids. A change no writer qualifies for is the
+  `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff --text --no-ext-diff --no-textconv --no-renames
+  <fromTree> <toTree>` in the run's repository (the flags the digest was taken with: plain `git diff` differs
+  for binary content, and the host's own git config must be off), so a verifier can recompute it from the
+  recorded ids — soon after the run, since the two trees are unreachable and `git gc` may prune them after
+  `gc.pruneExpire`. A change no writer qualifies for is the
   reader's own: `unexpected_change`, the diff recorded under the reader's node, failing as before. The ledger
   is not consulted at all for a `cli`-tier reader: it holds the writer lock itself, so no other writer can
   have been running and any change the bracket shows is its own. `run` is the only command that wires the

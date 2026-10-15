@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { chmod, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { snapshotTree } from '@maf/git-ops';
+import { runIsolatedGit, snapshotTree } from '@maf/git-ops';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, PolicyDecision, ToolContext, ToolInput, ToolResult,
@@ -149,7 +150,7 @@ function makeNode(role: RoleName, description = 'do the thing'): DagNode {
 interface Fixture {
   dispatcher: RoleDispatcher;
   adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter | MidTurnWriterAdapter
-    | HeldWriterAdapter | MidTurnReaderAdapter | OversizeGateAdapter;
+    | HeldWriterAdapter | MidTurnReaderAdapter | OversizeGateAdapter | NoRepoGateAdapter;
   transcript: ReturnType<typeof makeTranscriptRecorder>;
   policy: ReturnType<typeof makePolicy>;
   attestor: ReturnType<typeof makeAttestor>;
@@ -166,16 +167,26 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
-/** git's own view — sha256 of `git diff --no-renames <from> <to>`, the reproducibility N6 claims. */
+/**
+ * git's own view — sha256 of the diff the digest is over, reproducing it exactly as
+ * `docs/SECURITY.md` prescribes. `runIsolatedGit` supplies the config isolation
+ * (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`); the four flags are the ones the
+ * digest was taken with — `--text` because a plain diff prints "Binary files … differ" for a
+ * binary change rather than its bytes, `--no-ext-diff`/`--no-textconv` because a host's own
+ * `diff.*` or textconv drivers would otherwise change the output.
+ */
 async function treeDiffSha256(cwd: string, from: string, to: string): Promise<string> {
-  const { stdout } = await execFileAsync('git', ['diff', '--no-renames', from, to], { cwd });
+  const { stdout } = await runIsolatedGit(
+    cwd,
+    ['diff', '--text', '--no-ext-diff', '--no-textconv', '--no-renames', from, to],
+  );
   return crypto.createHash('sha256').update(stdout, 'utf8').digest('hex');
 }
 
 async function makeFixture(opts: {
   roleExecution: 'cli' | 'in-process';
   adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter | MidTurnWriterAdapter
-    | HeldWriterAdapter | MidTurnReaderAdapter | OversizeGateAdapter;
+    | HeldWriterAdapter | MidTurnReaderAdapter | OversizeGateAdapter | NoRepoGateAdapter;
   policyHandler: (toolId: string, input: ToolInput) => PolicyDecision;
   bundles?: HarnessConfig;
   /** The one role the set defines; read-only `analyst` unless a test needs a writer. */
@@ -185,6 +196,13 @@ async function makeFixture(opts: {
   roles?: Array<{ role: RoleName; allowedTools: string[]; execution: 'cli' | 'in-process' }>;
   /** The scheduler's writer-lock ledger (WP-3.0c); absent, the reader guard keeps its pre-3.0c behaviour. */
   writerLockLedger?: WriterLockLedger;
+  /**
+   * Run the dispatcher with its cwd inside a sub-directory of the repository (`<repo>/sub/dir`).
+   * Git names changed paths relative to the repository *top* whatever the cwd, so the reviewed-set
+   * check must anchor its pathspec at the top (`:(top,literal)`); from a sub-directory a bare
+   * pathspec resolves under the cwd and matches nothing (R2/N2h).
+   */
+  cwdSubdir?: boolean;
 }): Promise<Fixture> {
   const workDir = await mkdtemp(path.join(tmpdir(), 'maf-dispatch-'));
   await writeFile(path.join(workDir, 'hello.txt'), 'hello-world', 'utf8');
@@ -201,6 +219,11 @@ async function makeFixture(opts: {
   await execFileAsync('git', ['init', '-q'], { cwd: workDir });
   await execFileAsync('git', ['add', '-A'], { cwd: workDir });
   await execFileAsync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'base'], { cwd: workDir });
+  // R2: the dispatcher's cwd, and so every tool's root and every git call's directory, inside a
+  // sub-directory of the repository — the one arrangement in which a bare pathspec and a
+  // `:(top,literal)`-anchored one disagree.
+  const cwd = opts.cwdSubdir ? path.join(workDir, 'sub', 'dir') : workDir;
+  if (opts.cwdSubdir) await mkdir(cwd, { recursive: true });
   const roles = RoleRegistry.fromSet({
     version: 1,
     defaultRole: roleName,
@@ -234,7 +257,7 @@ async function makeFixture(opts: {
     graph: {} as MemoryGraph,
     transcript: transcript.stub,
     lcmBridge: { flush: async () => {} } as unknown as BlackboardToLcmAdapter,
-    cwd: workDir,
+    cwd,
     sessionId: 's1',
     runId: makeRunId('run-1'),
     harness,
@@ -852,6 +875,85 @@ test('N2/V9: a writer that already gated is judged by its reviewed diff, not the
   }
 });
 
+test('R2: from a sub-directory cwd a reviewed path rewritten after the gate still fails closed (kills N2h)', async () => {
+  // Same shape as N2/V9 — a gated writer answers for its reviewed diff, and the reader rewrites a
+  // path the writer reviewed — but the dispatcher's cwd is `<repo>/sub/dir`. Git names the changed
+  // path relative to the repository *top* (`sub/dir/w1.txt`), while `unchangedSince` runs from the
+  // sub-directory; its pathspec must therefore be anchored at the top (`:(top,literal)`). With the
+  // anchoring removed (N2h) git resolves the bare `sub/dir/w1.txt` *under* the cwd — a path that does
+  // not exist — matches nothing, sees an empty diff, and reports the reviewed path unchanged; the
+  // check then excuses the reader and the node succeeds with an attribution. That is the fail-open
+  // this test closes: with the cwd at the top the same mutation is harmless, which is why no
+  // top-level test ever caught it (R2).
+  const WRITER = defineRoleName('coder');
+  const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: (id) => id === writer, // it holds the lock through its own flush, after its gate has run
+  };
+  const adapter = new ReviewedWriterAdapter(
+    (dir) => writeFile(path.join(dir, 'w1.txt'), 'rewritten after the gate\n', 'utf8'),
+  );
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger, cwdSubdir: true,
+  });
+  try {
+    await f.dispatcher.runNode(writerNode); // gates on w1.txt, records its reviewed set as git named it
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change',
+      'the writer reviewed this path and the reader rewrote it, so no writer excuses it (kills N2h)');
+    assert.match(failure.message, /w1\.txt/, 'and the failure names the path git named, from the sub-directory too');
+    assert.equal(f.attestor.attributed.length, 0, 'no attribution — the reviewed path did change');
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is recorded as the reader\'s own');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+/**
+ * A reader whose one turn changes a path's *type*: `hello.txt` stops being a regular file and becomes
+ * a symlink. `git diff` writes two `diff --git` sections for it — a deletion and a creation — so the
+ * section count no longer matches the single path `git diff --name-only` lists (R5, the verifier's V14).
+ */
+class TypeChangeReaderAdapter extends StubTurnAdapter {
+  override async sendTurn(history: TurnMessage[], o: AdapterInvokeOptions): Promise<AssistantTurn> {
+    await rm(path.join(o.workingDir, 'hello.txt'));
+    await symlink('hello-world', path.join(o.workingDir, 'hello.txt'));
+    return super.sendTurn(history, o);
+  }
+}
+
+test('R5: on a type change the reader fails closed and the message names the file git named (kills "git named none")', async () => {
+  // A file-to-symlink change is not a content change: `diffSectionCount` sees two sections for the one
+  // path `nameOnlyPaths` lists, so `bracketPaths` cannot settle a set and returns `undefined` — the
+  // reader must fail closed rather than be excused (N4's defence). It must also say *what* git named:
+  // the old message read "git named none" even though git had named `hello.txt`, which is the R5 fix.
+  const adapter = new TypeChangeReaderAdapter();
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {}, writersOverlapping: () => [], isHolding: () => false,
+  };
+  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change', 'a type change still fails the reader closed');
+    assert.match(failure.message, /hello\.txt/,
+      'the message names the path git named, even though the section count disagreed (R5)');
+    assert.doesNotMatch(failure.message, /git named none/,
+      'not "git named none" when git did name a file');
+    assert.equal(f.attestor.attributed.length, 0, 'no attribution — the rule could not settle a complete set');
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is recorded as the reader\'s own');
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('F7 window: with no concurrent writer, a reader\'s changed tree still fails exactly as before (WP-3.0c)', async () => {
   const adapter = new WritingTurnAdapter();
   const ledger: WriterLockLedger = {
@@ -1160,6 +1262,128 @@ test('N5: a writer whose gate has begun but recorded no tree is not named on the
     assert.match(failure.message, /feature\.ts/);
     assert.equal(f.attestor.attributed.length, 0, 'no attribution to a gate that read no tree');
     assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is recorded as the reader\'s own');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+/**
+ * A writer whose gate's *first* read fails: on its turn it takes the repository away — `git init`'s
+ * `.git` is moved aside — so `snapshotTree`, the gate's first read, throws before it reads anything.
+ * The marker set *before* that read therefore stands, and the node fails with no gate tree recorded.
+ * The test puts `.git` back before the reader's turn.
+ */
+class NoRepoGateAdapter implements TurnAdapter {
+  readonly name = 'no-repo-gate';
+  capabilities(): AdapterCapabilities { return CAPS; }
+  async isAvailable(): Promise<boolean> { return true; }
+  async invoke(_o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    throw new Error('every role here runs the in-process loop');
+  }
+  async *stream(): AsyncGenerator<string> { yield 'x'; }
+  async sendTurn(_h: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
+    const isWriter = (opts.tools ?? []).some((t) => t.id === makeToolId('fs.write'));
+    if (isWriter) {
+      await rename(path.join(opts.workingDir, '.git'), path.join(opts.workingDir, '.git-away'));
+      return { text: 'took the repository away', toolCalls: [] };
+    }
+    await writeFile(path.join(opts.workingDir, 'feature.ts'), 'export const feature = 2;\n', 'utf8');
+    return { text: 'investigated the code', toolCalls: [] };
+  }
+}
+
+test('R3: the gate marks the writer as gating before its first read (kills N5c)', async () => {
+  // `gating.add` must precede the gate's first `snapshotTree` (R3). Nothing else in the suite pins the
+  // order: N5's writer throws in `snapshotDiff` — *after* that first read — so a marker moved to just
+  // after `snapshotTree` would already be standing when it throws, and N5 still passes (N5c survives).
+  // Here the first read itself fails, so the two orders diverge: with the ruled order the writer is
+  // marked before the read, rule (a) cannot name it, and the reader fails closed on its own change;
+  // with the marker moved after the first read (N5c) nothing is marked, rule (a) names the writer on
+  // the lock alone, and the reader's change is excused with an attribution.
+  const WRITER = defineRoleName('coder');
+  const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: (id) => id === writer, // mid-gate: it has released nothing
+  };
+  const adapter = new NoRepoGateAdapter();
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
+  const gitDir = path.join(f.workDir, '.git');
+  try {
+    await f.dispatcher.runNode(writerNode).then(
+      () => assert.fail('the gate\'s first read must fail with no repository'),
+      () => undefined,
+    );
+    await rename(`${gitDir}-away`, gitDir); // the reader's own turns need the repository back
+
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change',
+      'the writer began gating before its first read, so rule (a) must not name it (kills N5c)');
+    assert.match(failure.message, /feature\.ts/);
+    assert.equal(f.attestor.attributed.length, 0, 'no attribution — the marker was set before the gate read');
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is recorded as the reader\'s own');
+  } finally {
+    // If an assertion threw before the restore above, put `.git` back so `cleanup` can remove the tree.
+    await rename(`${gitDir}-away`, gitDir).catch(() => undefined);
+    await f.cleanup();
+  }
+});
+
+test('R4: a git failure in the writer\'s gate still records the change first (D-42)', async () => {
+  // Between `onDiff` and the path listing stands the one git call in the gate that can fail. Under
+  // the old order the listing ran first, so its failure aborted the gate before the diff was a
+  // subject — the node failed loudly, but D-42 says the change is recorded regardless. The diff must
+  // therefore be recorded first, and the listing's failure then records an empty reviewed set
+  // (readers fail closed against it) and rethrows. `onDiff` is the only seam between the two calls
+  // a test can hold — the dispatcher's own reads are out of reach — so this drives `runPostCoderGates`
+  // directly and drops the base commit's tree there, making the listing the *first* call to fail.
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    adapter: new StubTurnAdapter(),
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: defineRoleName('coder'), allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    policyHandler: ALLOW,
+  });
+  try {
+    const node = makeNode(defineRoleName('coder'), 'the writer');
+    const git = (args: string[]) => execFileAsync('git', ['-C', f.workDir, ...args]);
+    const startCommit = (await git(['rev-parse', 'HEAD'])).stdout.trim();
+    const baseTree = (await git(['rev-parse', `${startCommit}^{tree}`])).stdout.trim();
+    const treeObject = path.join(f.workDir, '.git', 'objects', baseTree.slice(0, 2), baseTree.slice(2));
+    // A change for the gate to find, so the diff is non-empty and must be recorded.
+    await writeFile(path.join(f.workDir, 'feature.ts'), 'export const feature = 2;\n', 'utf8');
+
+    const gate = f.dispatcher as unknown as {
+      reviewedPaths: Map<string, Set<string>>;
+      runPostCoderGates(node: DagNode, startCommit: string, onDiff: (diff: string) => void): Promise<void>;
+    };
+    await assert.rejects(
+      gate.runPostCoderGates(node, startCommit, (diff) => {
+        assert.match(diff, /feature\.ts/, 'the gate did read the change');
+        rmSync(treeObject); // ...and then git can no longer name the paths the gate judged
+      }),
+      /git/,
+      'the listing failure still propagates — the writer fails loudly, as D-42 requires',
+    );
+    assert.ok(
+      f.attestor.diffHashes.some((h) => h.key === 'n1.diff'),
+      'but the change is a subject of the run\'s statement first, so failing to name it leaves it recorded (R4)',
+    );
+    assert.equal(
+      gate.reviewedPaths.get(node.id)?.size, 0,
+      'and the writer is left with an empty reviewed set, so every reader fails closed against it rather than the gate aborting',
+    );
   } finally {
     await f.cleanup();
   }

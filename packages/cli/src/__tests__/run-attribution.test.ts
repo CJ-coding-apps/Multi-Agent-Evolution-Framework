@@ -244,9 +244,19 @@ function makeAttestor() {
   };
 }
 
-/** git's own view — sha256 of `git diff --no-renames <from> <to>`, the reproducibility N6 claims. */
+/**
+ * git's own view — sha256 of the diff the digest is over, reproducing it exactly as
+ * `docs/SECURITY.md` prescribes. `runIsolatedGit` supplies the config isolation
+ * (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`); the four flags are the ones the
+ * digest was taken with — `--text` because a plain diff prints "Binary files … differ" for a
+ * binary change instead of its bytes, `--no-ext-diff`/`--no-textconv` because a host's own
+ * `diff.*`/textconv drivers would otherwise change the output.
+ */
 async function treeDiffSha256(cwd: string, from: string, to: string): Promise<string> {
-  const { stdout } = await runIsolatedGit(cwd, ['diff', '--no-renames', from, to]);
+  const { stdout } = await runIsolatedGit(
+    cwd,
+    ['diff', '--text', '--no-ext-diff', '--no-textconv', '--no-renames', from, to],
+  );
   return crypto.createHash('sha256').update(stdout, 'utf8').digest('hex');
 }
 
@@ -425,10 +435,16 @@ test('F1/V1: a coder that FINISHED inside the bracket still excuses it — rule 
     assert.notEqual(attributed?.fromTree, attributed?.toTree, 'the bracket spans a change');
     assert.match(attributed?.writerGateTree ?? '', /^[0-9a-f]{40}$/,
       'rule (b) names the gate tree the writer read — absent only when the lock alone was enough');
+    // In V1's shape the coder gated after its last write and nothing in the bracket changed
+    // afterwards, so the gate tree the rule checked *is* the bracket's end tree. Asserting the
+    // value — not just its shape — is what pins N6's third id to the tree the rule actually
+    // read; a rule that named the wrong tree (fromTree, say) would still be 40 hex (N6b).
+    assert.equal(attributed?.writerGateTree, attributed?.toTree,
+      'rule (b)\'s gate tree is the one the rule read — here the bracket end tree (kills N6b)');
     assert.equal(
       await treeDiffSha256(f.cwd, attributed!.fromTree, attributed!.toTree),
       attributed?.diffSha256,
-      '`git diff --no-renames <fromTree> <toTree>` in the run\'s repository reproduces the digest (N6)',
+      'the SECURITY.md recipe (`... git diff --text --no-ext-diff --no-textconv --no-renames <fromTree> <toTree>`) reproduces the digest (N6)',
     );
     const note = f.transcript.entries.find((e) => e.content.startsWith('[attributed]'));
     assert.ok(note, 'the attribution reaches the transcript');
