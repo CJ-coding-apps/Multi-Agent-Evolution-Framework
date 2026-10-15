@@ -381,11 +381,13 @@ export interface DagNodeExecution {
   finishedAt?: Date;
   error?:      string;
   /**
-   * The node's failure as a value (L3): the kind, and — for a refusal — the rule and tool. Present
-   * only for a node that failed with a `NodeFailure`, so a machine check reads the verdict directly
-   * rather than grepping `error`. A `0.3.x` outcome carries none and still parses.
+   * The node's failure as a value (L3): the kind, and — for a refusal — the rule and tool. Present for
+   * a node that failed with any verdict — a `NodeFailure`, a `GateRefused`/`ReviewRefused` or a
+   * `PolicyViolationError` — so a machine check reads the verdict directly rather than grepping
+   * `error`. Absent means MAF did not classify the failure — a transport failure or a programming
+   * error, never a verdict. A `0.3.x` outcome carries none and still parses.
    */
-  failure?:    NodeFailureDetail;
+  failure?:    OutcomeFailureDetail;
   agentId?:    AgentId;
 }
 
@@ -401,12 +403,14 @@ export interface DagNodeExecution {
  *                         looks like (D-32).
  *  - `no_work`          — in-process: a **reader** (a role that holds no write tool) that expects a
  *                         tool call (`expectsToolCalls`) finished with a final answer having made
- *                         **no executed tool call** — the attested calls with an `Allow` verdict,
- *                         which is to say the calls that actually ran (D-46). A reader that read
- *                         nothing has not succeeded: live row 2b's analyst answered "I could not"
- *                         after the host's native tools were refused, and the old reading called it
- *                         `Succeeded` off the prose. The mirror of `no_change` for a reader, where
- *                         `no_change` is the writer's.
+ *                         **no executed tool call** — the attested calls whose result was not
+ *                         `refused`, which is to say the calls that actually ran, an approved
+ *                         `Escalate` among them (D-46, F4/A2). A reader that read nothing has not
+ *                         succeeded: live row 2b's analyst answered "I could not" after the host's
+ *                         native tools were refused, and the old reading called it `Succeeded` off
+ *                         the prose. The mirror of `no_change` for a reader, where `no_change` is
+ *                         the writer's. The count is the node's *current attempt*, so a retry that
+ *                         read only on an earlier attempt does not excuse it (F3/A4).
  *  - `unexpected_change`— a role that holds **no** write tool changed the tree anyway (F7). On
  *                         the cli tier that is what a backend with file tools of its own does
  *                         whatever the role's allowlist says; MAF never sees those calls. The
@@ -425,16 +429,52 @@ export type NodeFailureReason =
   | 'loop_failed';
 
 /**
+ * Every kind of verdict a failed node can carry in the outcome (L3/A1): the `NodeFailureReason`s, plus
+ * the three refusals the tree raises as `VerdictError`s rather than `NodeFailure`s — a security gate
+ * (`GateRefused`), a human review (`ReviewRefused`) and a policy refusal (`PolicyViolationError`). The
+ * point of the field is a machine-readable verdict, and a gate refusal is the most important verdict
+ * there is, so it gets a kind of its own rather than being left unclassified.
+ */
+export type OutcomeFailureKind =
+  | NodeFailureReason
+  | 'gate_refused'
+  | 'review_refused'
+  | 'policy_violation';
+
+/**
  * The machine-checkable half of a node failure (L3): the `kind`, and — when a policy refusal caused
  * it — the rule and the tool that refused, taken from the first refused call the F10 clause named.
  * Carried on the run outcome beside the failure's prose, so a machine check reads the verdict rather
  * than grepping the message. A `no_change` caused by anything other than a refusal (a backend that
- * simply changed nothing) names neither.
+ * simply changed nothing) names neither, as does a gate or a review refusal — those carry no rule or
+ * tool of their own.
  */
-export interface NodeFailureDetail {
-  kind:    NodeFailureReason;
+export interface OutcomeFailureDetail {
+  kind:    OutcomeFailureKind;
   ruleId?: string;
   toolId?:  string;
+}
+
+/**
+ * The kind for a node's error, or `undefined` when there is none (L3/A1). Present for any *verdict* —
+ * a `NodeFailure`, a gate or review refusal, a policy refusal — so the outcome says why a node failed
+ * for every failure that was a judgement. Absent for a transport failure (the backend timed out or
+ * never started) and for a programming error: neither is a verdict, and inventing a kind for one would
+ * have the outcome assert something the run does not know.
+ *
+ * Order matters. `ReviewRefused` extends `GateRefused`, so it is tested first; and the policy refusal
+ * is tested as its base `VerdictError`, because the two `PolicyViolationError` classes in the tree
+ * (policy-engine's `PolicyEngine` and `ViolationHandler`) both subclass it and `@maf/types` cannot
+ * depend on `@maf/policy-engine` to name either. `VerdictError` is documented as "a gate refused it,
+ * or policy forbade it", and the gate cases are already taken above, so what is left is a policy
+ * refusal.
+ */
+export function outcomeFailureKind(err: unknown): OutcomeFailureKind | undefined {
+  if (err instanceof NodeFailure) return err.reason;
+  if (err instanceof ReviewRefused) return 'review_refused';
+  if (err instanceof GateRefused) return 'gate_refused';
+  if (err instanceof VerdictError) return 'policy_violation';
+  return undefined;
 }
 
 /**

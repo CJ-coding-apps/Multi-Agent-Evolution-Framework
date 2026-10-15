@@ -1,9 +1,9 @@
 import type {
   Dag, DagNode, NodeId, RunId, AgentId, CliAdapter,
   AdapterInvokeOptions, BlackboardKey, BlackboardValue, RunOutcome, RunStatus,
-  FailureRecorder, NodeFailureRecord, WriterLockLedger, NodeFailureDetail,
+  FailureRecorder, NodeFailureRecord, WriterLockLedger, OutcomeFailureDetail,
 } from '@maf/types';
-import { makeAgentId, NodeFailure } from '@maf/types';
+import { makeAgentId, NodeFailure, outcomeFailureKind } from '@maf/types';
 import type { BlackboardStore } from '@maf/blackboard';
 import { NodeStateMachine } from './NodeStateMachine.js';
 import { withRetry } from './RetryOrchestrator.js';
@@ -246,15 +246,20 @@ function failureRecord(node: DagNode, runId: RunId, err: unknown, message: strin
 
 /**
  * The failure as a value for the run outcome (L3): the kind the dispatcher decided, and the rule and
- * tool a policy refusal named. Only a `NodeFailure` carries a verdict — a plain `Error` is a
- * transport or programming failure with no kind to report, and inventing one would have `failure`
- * assert something the run does not know. Keys with no value are left out, so a `no_work` with no
- * refusal reads as exactly `{ kind: 'no_work' }` rather than a record salted with `undefined`.
+ * tool a policy refusal named. Every verdict gets a kind — a `NodeFailure`, and a gate, review or
+ * policy refusal, which the dispatcher raises as verdict errors rather than `NodeFailure`s (A1). A
+ * plain `Error` is a transport or programming failure with no verdict to report, and inventing one
+ * would have `failure` assert something the run does not know; there the field is left absent. Keys
+ * with no value are left out, so a `no_work` with no refusal reads as exactly `{ kind: 'no_work' }`
+ * rather than a record salted with `undefined`. Only a `NodeFailure` names a rule and tool: a gate or
+ * review refusal carries neither.
  */
-function nodeFailureDetail(err: unknown): NodeFailureDetail | undefined {
-  if (!(err instanceof NodeFailure)) return undefined;
+function nodeFailureDetail(err: unknown): OutcomeFailureDetail | undefined {
+  const kind = outcomeFailureKind(err);
+  if (kind === undefined) return undefined;
+  if (!(err instanceof NodeFailure)) return { kind };
   return {
-    kind: err.reason,
+    kind,
     ...(err.ruleId !== undefined ? { ruleId: err.ruleId } : {}),
     ...(err.toolId !== undefined ? { toolId: err.toolId } : {}),
   };
