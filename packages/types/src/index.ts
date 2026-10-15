@@ -483,6 +483,79 @@ export function outcomeFailureKind(err: unknown): OutcomeFailureKind | undefined
 }
 
 /**
+ * The failure as a value for the run outcome (L3/A11): the kind the dispatcher decided, and — where a
+ * refusal named them — the rule and the tool. A plain `Error` is a transport or programming failure with
+ * no verdict to report, and inventing one would have `failure` assert something the run does not know;
+ * there the field is left absent. Keys with no value are left out, so a `no_work` with no refusal reads as
+ * exactly `{ kind: 'no_work' }` rather than a record salted with `undefined`.
+ *
+ * A `NodeFailure` names its rule and tool as its own fields; a policy refusal names them on its
+ * `decision`, read structurally for the reason `outcomeFailureKind` gives — the two
+ * `PolicyViolationError` classes both subclass `VerdictError` and neither is importable here. The read
+ * mirrors the F10 clause in the dispatcher (`refusingRuleId`): a `Deny` or `Indeterminate` names the rule
+ * on the decision, an `Escalate` on the request the gate was shown. A gate or review refusal names
+ * neither — those carry no rule or tool of their own.
+ */
+export function outcomeFailureDetail(err: unknown): OutcomeFailureDetail | undefined {
+  const kind = outcomeFailureKind(err);
+  if (kind === undefined) return undefined;
+  return { kind, ...namedRefusal(err) };
+}
+
+/** The shape a `PolicyViolationError.decision` is read by; a superset of every `PolicyDecision` member. */
+interface RefusalShape {
+  verdict:          string;
+  ruleId?:          unknown;
+  toolId?:          unknown;
+  approvalRequest?: { policyRuleId?: unknown };
+}
+
+/**
+ * The rule and tool an error names, read off it (A11). A `NodeFailure`'s own fields first; failing that,
+ * the `decision` a `PolicyViolationError` carries. `toolId` is read defensively — no `PolicyDecision`
+ * carries one today, so a bare refusal recovers only its rule; the tool reaches the outcome through the
+ * dispatcher's F10 `NodeFailure`, which knows the refused call.
+ */
+function namedRefusal(err: unknown): { ruleId?: string; toolId?: string } {
+  if (err instanceof NodeFailure) {
+    return {
+      ...(err.ruleId !== undefined ? { ruleId: err.ruleId } : {}),
+      ...(err.toolId !== undefined ? { toolId: err.toolId } : {}),
+    };
+  }
+  const decision = refusalDecision(err);
+  if (decision === undefined) return {};
+  const ruleId = ruleIdOf(decision);
+  const toolId = typeof decision.toolId === 'string' ? decision.toolId : undefined;
+  return {
+    ...(ruleId !== undefined ? { ruleId } : {}),
+    ...(toolId !== undefined ? { toolId } : {}),
+  };
+}
+
+/** The decision a policy refusal carries, duck-typed: a refusal is an object that names a verdict. */
+function refusalDecision(err: unknown): RefusalShape | undefined {
+  if (err === null || typeof err !== 'object') return undefined;
+  const decision = (err as { decision?: unknown }).decision;
+  if (decision === null || typeof decision !== 'object') return undefined;
+  return typeof (decision as { verdict?: unknown }).verdict === 'string'
+    ? (decision as RefusalShape)
+    : undefined;
+}
+
+/** The rule a refusal names — the same switch the engine and the dispatcher make (`refusingRuleId`). */
+function ruleIdOf(decision: RefusalShape): string | undefined {
+  switch (decision.verdict) {
+    case 'Deny':
+    case 'Indeterminate': return typeof decision.ruleId === 'string' ? decision.ruleId : undefined;
+    case 'Escalate':      return typeof decision.approvalRequest?.policyRuleId === 'string'
+      ? decision.approvalRequest.policyRuleId
+      : undefined;
+    default:              return undefined;
+  }
+}
+
+/**
  * A node that ran but did not finish (D-04). Before this existed, a failed adapter call and an
  * exhausted budget both came back as ordinary output, and the scheduler recorded the node as
  * succeeded. The `reason` is a field rather than a phrase in the message so that whoever

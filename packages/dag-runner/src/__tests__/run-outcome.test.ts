@@ -163,6 +163,22 @@ test('F2/A1: a gate refusal carries `gate_refused` and a review refusal `review_
 test('F2/A1: a policy refusal carries `policy_violation`, tested as the base VerdictError', async () => {
   // The two `PolicyViolationError` classes both subclass VerdictError, and `@maf/dag-runner` cannot
   // import `@maf/policy-engine` to name either — so the mapper keys the policy case on the base class.
+  // A bare VerdictError names no rule, so the failure is the kind and nothing else (A11 makes the
+  // decision-readable case its own test below).
   const outcome = await outcomeOfThrown(new VerdictError('policy refused the call'));
-  assert.equal(outcome.nodes?.[0]?.failure?.kind, 'policy_violation');
+  assert.deepEqual(outcome.nodes?.[0]?.failure, { kind: 'policy_violation' });
+});
+
+test('A11: a policy refusal copies the rule its decision named into the outcome failure', async () => {
+  // The refusal carries its decision; the rule the decision names must reach the outcome, so a machine
+  // check reads the verdict rather than grepping the message. The `decision` is attached structurally,
+  // as a real `PolicyViolationError` carries it: `@maf/dag-runner` cannot import the engine's class.
+  const refusal = Object.assign(new VerdictError('policy refused the call'), {
+    decision: { verdict: 'Deny', reason: 'deny-env-files refused the write', ruleId: 'deny-env-files' },
+  });
+
+  const outcome = await outcomeOfThrown(refusal);
+
+  assert.equal(outcome.status, 'Failed');
+  assert.deepEqual(outcome.nodes?.[0]?.failure, { kind: 'policy_violation', ruleId: 'deny-env-files' });
 });
