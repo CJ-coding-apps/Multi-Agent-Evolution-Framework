@@ -5,3 +5,4 @@ export { FAILURE_TAIL_CHARS, failureTail, turnStdout } from './failure.js';
 export {
   TOOL_PROTOCOL, serializeTools, buildTurnSystemPrompt, serializeHistory, parseTurn,
 } from './turnProtocol.js';
+export { sha256Hex, elided, cliModelSurface } from './surface.js';

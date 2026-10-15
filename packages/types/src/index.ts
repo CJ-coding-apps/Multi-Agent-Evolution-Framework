@@ -265,6 +265,48 @@ export interface RunOutcome {
   deferredWriters?: NodeId[];
 }
 
+/**
+ * A window during which a writer node held the scheduler's writer lock (WP-3.0c, the F7 window).
+ * The runner records one per writer turn; the dispatcher reads them to tell a reader's own change
+ * from a concurrent writer's — the one case the reader's two working-tree snapshots cannot separate
+ * on their own, because a sibling writer's uncommitted work in the shared tree lands inside the
+ * reader's turn.
+ */
+export interface WriterLockInterval {
+  nodeId: NodeId;
+  /** The monotonic reading (`performance.now()`) when the writer acquired the lock. */
+  from:   number;
+  /** The monotonic reading when it released it. */
+  to:     number;
+}
+
+/**
+ * The scheduler's writer lock, as the two things that need it see it: the runner records the
+ * intervals, and the dispatcher asks which writers overlapped a reader's turn, and whether one is
+ * still holding. An interface rather than the runner itself, so the dispatcher need not know the
+ * scheduler.
+ *
+ * Times are monotonic readings (`performance.now()`), never a wall clock. Only the order and the
+ * overlap of holds are ever asked about, and `Date.now()` answers both badly: it steps backwards on
+ * an NTP correction or a manual clock change, and its millisecond resolution returns the same value
+ * for a release and the very next reader's start, which would excuse that reader for its own change.
+ */
+export interface WriterLockLedger {
+  /** A writer acquired the lock. */
+  enter(nodeId: NodeId): void;
+  /** The writer released it. A no-op for a node that never entered. */
+  exit(nodeId: NodeId): void;
+  /**
+   * Every writer whose hold overlapped any part of `[from, to]`, in acquisition order: the writers
+   * that have released, oldest first — writers are serialized, so that order is the order they ran —
+   * followed by any writer still holding. Empty when no writer overlapped. The caller drops its own
+   * node, which on the cli tier holds the lock itself.
+   */
+  writersOverlapping(from: number, to: number): NodeId[];
+  /** Whether `nodeId` holds the lock right now — entered, not yet exited. */
+  isHolding(nodeId: NodeId): boolean;
+}
+
 export interface RetryPolicy {
   maxAttempts:   number;
   backoffMs:     number;
@@ -957,13 +999,23 @@ export interface AttestationBundle {
    * earlier bundle still parses; a reader must treat its absence as "unrecorded", never as "none".
    */
   policyInForce?:    PolicyInForce;
-  /** What each governed turn showed the model (F4), in order. Absent when no turn reported one. */
+  /**
+   * What each role call showed the model (F4), in order. Absent when no call reported one. Both
+   * tiers since WP-3.0c (D-45) — a governed turn and a cli-tier `invoke` alike — so "absent" is
+   * "unrecorded", never "nothing ran on the cli tier".
+   */
   modelSurfaces?:    ModelSurfaceRecord[];
   /**
    * The tier each node ran on (F7), in dispatch order. Absent when no node reported one — a
    * reader must treat that as "unrecorded", never as "every node ran governed".
    */
   executionTiers?:   ExecutionTierRecord[];
+  /**
+   * Changes a reader's turn attributed to a concurrent writer (WP-3.0c, the F7 window), in the
+   * order they were seen. Absent when none were — a reader must treat that as "none attributed",
+   * which is the same as "none happened".
+   */
+  attributedChanges?: AttributedChange[];
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;
@@ -973,14 +1025,19 @@ export interface AttestationBundle {
 export interface AttestorHandle {
   record(call: Omit<ToolCallRecord, 'id'>): Promise<void>;
   /**
-   * Attach one governed turn's model-facing surface to the bundle (F4). Optional so a test double
-   * that records only tool calls still satisfies the handle.
+   * Attach one role call's model-facing surface to the bundle (F4; both tiers since WP-3.0c, D-45).
+   * Optional so a test double that records only tool calls still satisfies the handle.
    */
   recordModelSurface?(record: ModelSurfaceRecord): void;
   /** Attach the policy in force (F6); the last call wins, as it runs once per run. */
   recordPolicyInForce?(policy: PolicyInForce): void;
   /** Attach the tier a node ran on (F7); one per node, a retry replacing the node's own entry. */
   recordExecutionTier?(record: ExecutionTierRecord): void;
+  /**
+   * Attach one change a reader's turn attributed to a concurrent writer (WP-3.0c, the F7 window).
+   * Optional so a test double that records only tool calls still satisfies the handle.
+   */
+  recordAttribution?(record: AttributedChange): void;
   /**
    * The tool calls recorded for one task (F10). A node's `no_change` failure names the policy
    * rules that denied that node's *own* calls, so the reader is told which rule stopped the write
@@ -1051,6 +1108,12 @@ export interface AdapterInvokeResult {
    * retried.
    */
   transportError?: TransportError;
+  /**
+   * The model-facing surface of this cli-tier call (WP-3.0c): what MAF showed the backend and what
+   * it answered, so a role call is in the record wherever it ran. Absent when the adapter assembles
+   * none — an HTTP backend has no argv of its own to report.
+   */
+  modelSurface?: ModelSurface;
 }
 
 export interface CliAdapter {
@@ -1155,18 +1218,44 @@ export interface AssistantTurn {
 }
 
 /**
- * What a governed (in-process) turn showed the model: the system block's digest, the tool catalogue
- * as sent, and the backend argv. It exists because a model's claim about its own tools — `fix-test`'s
- * "only one tool is actually registered: `LSP`" — cannot be adjudicated from a transcript that holds
- * neither the prompt nor the argv, and the two mechanisms that could produce the claim (the model
- * reasoning from an empty *native* tool list; something per-run exposing a plugin tool) are
- * indistinguishable without this.
+ * What one turn showed the model: the system block's digest, the tool catalogue as sent, and the
+ * backend argv. It exists because a model's claim about its own tools — `fix-test`'s "only one tool
+ * is actually registered: `LSP`" — cannot be adjudicated from a transcript that holds neither the
+ * prompt nor the argv, and the two mechanisms that could produce the claim (the model reasoning from
+ * an empty *native* tool list; something per-run exposing a plugin tool) are indistinguishable
+ * without this. Since WP-3.0c both tiers record one: a governed turn from the loop, a cli-tier call
+ * from the adapter.
  */
 export interface ModelSurface {
   /** sha256, hex, of the exact system-prompt bytes handed to the backend this turn. */
   systemPromptSha256: string;
-  /** The serialized tool catalogue exactly as the system block carried it ('' when the turn sent none). */
+  /**
+   * The serialized tool catalogue exactly as the system block carried it — MAF's own registry, the
+   * tools a governed turn runs through the policy gate. On a `tier: 'cli'` record this is always `''`,
+   * and `''` there means "MAF composed no catalogue", **not** "the model was offered no tools": MAF
+   * sends a cli-tier backend one opaque prompt and no catalogue at all, and what that backend then
+   * has is its own — see `argv` for the flags it was given and `ModelSurfaceRecord.nativeTools` for
+   * what the dispatcher asked of them.
+   */
   toolCatalog:        string;
+  /**
+   * sha256, hex, of the prompt this call sent (WP-3.0c). A cli-tier role call hands the backend one
+   * opaque prompt and there was no record of it; this is that digest. Absent on a governed turn,
+   * whose prompt is the serialized history the loop owns rather than a single string.
+   */
+  promptSha256?:      string;
+  /**
+   * sha256, hex, of what a backend that reads its prompt on stdin was actually written (WP-3.0c).
+   * Codex joins the system block and the prompt into one blob on the stream, so `systemPromptSha256`
+   * and `promptSha256` — the two parts — do not by themselves say what was sent; this is that blob.
+   * Absent when the backend takes its prompt on the command line, where `argv` shows it.
+   */
+  stdinSha256?:       string;
+  /**
+   * sha256, hex, of the output the backend returned (WP-3.0c). Absent on a governed turn, whose
+   * answer is a parsed `AssistantTurn`, not one stdout string.
+   */
+  outputSha256?:      string;
   /**
    * The backend argv. Payload positionals — the system-prompt value and the trailing prompt — are
    * replaced by `<name: N bytes, sha256 H>` markers, so the *flags* (including the empty string that
@@ -1185,6 +1274,55 @@ export interface ModelSurfaceRecord extends ModelSurface {
    * as a retry, not a duplicate.
    */
   turn:   number;
+  /**
+   * Which tier produced this surface (WP-3.0c, D-45): the governed loop's turn ('in-process') or a
+   * cli-tier `invoke` ('cli'). Optional so a 0.3.1 bundle — whose records carry no tier — still
+   * parses; a reader must treat its absence as "unrecorded", never as a tier.
+   */
+  tier?:  'cli' | 'in-process';
+  /**
+   * What the dispatcher asked of the backend's own tools on this cli-tier call: `'full'` (nothing was
+   * asked — the default, and the backend keeps its native tools), `'read-only'` (a role holding no
+   * write tool), or `'none'` (a call that needs only text). Recorded because for codex and gemini
+   * nothing in `argv` shows it: neither CLI has a flag that withholds its built-in tools, so both
+   * keep everything whatever was asked. It is what was *asked for*, not what the backend did with it.
+   */
+  nativeTools?: 'full' | 'read-only' | 'none';
+}
+
+/**
+ * A change a reader's turn saw that was a concurrent writer's (WP-3.0c, the F7 window). The reader's
+ * two working-tree snapshots cancel out uncommitted work already in the tree when it began, but a
+ * sibling writer that ran *during* the reader's turn lands inside its bracket. When the lock ledger
+ * shows a writer took the change to a gate, the change is recorded here instead of failing the node:
+ * either that writer still holds the lock, so its own start-commit diff will carry the change to its
+ * gate, or its gate has run and its reviewed diff already holds every path in this reader's bracket.
+ * The bracket diff is recorded beside it, as the subject `<node>.attributed.diff`, so `diffSha256`
+ * names a diff the statement carries a digest for — in `diffHashes`, like every subject — rather than
+ * naming a change written down nowhere.
+ *
+ * The three tree ids below are what make that digest checkable rather than merely present (N6): the
+ * recorded `diffSha256` is `sha256` of `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff
+ * --text --no-ext-diff --no-textconv --no-renames <fromTree> <toTree>` in the run's repository — the
+ * flags the digest was taken with, so a verifier recomputes it in the same shape rather than with a
+ * plain `git diff`, which differs for binary content and for a host git config. The two trees are
+ * unreachable objects, so recompute soon: `git gc` may prune them after `gc.pruneExpire` (two weeks
+ * by default). `writerGateTree` names the content the named writer's gate read, and is absent when
+ * the change was attributed on the lock alone (rule (a)) — a writer whose gate had not yet run has no
+ * gate tree to name.
+ */
+export interface AttributedChange {
+  nodeId:       string;
+  /** The writer whose reviewed diff carries the change, or that is still holding the lock over it. */
+  attributedTo: string;
+  /** sha256, hex, of the bracket diff the reader's turn showed; the content of `<node>.attributed.diff`. */
+  diffSha256:   string;
+  /** The reader's bracket start tree id; with `toTree`, the pair `diffSha256` is reproducible from (flags in the note above). */
+  fromTree:     string;
+  /** The reader's bracket end tree id. */
+  toTree:       string;
+  /** The tree the named writer's gate read; absent when the writer was named on the lock alone (rule (a)). */
+  writerGateTree?: string;
 }
 
 /**

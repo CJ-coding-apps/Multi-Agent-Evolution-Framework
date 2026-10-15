@@ -6,6 +6,7 @@ import type {
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
   RunOutcome, KeySource, ModelSurfaceRecord, PolicyInForce, ExecutionTierRecord, TaskId,
+  AttributedChange,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { jcs } from './jcs.js';
@@ -254,6 +255,7 @@ export class Attestor implements AttestorHandle {
   private securityFindings: SecurityFindingsRecord[] = [];
   private modelSurfaces: ModelSurfaceRecord[] = [];
   private executionTiers: ExecutionTierRecord[] = [];
+  private attributedChanges: AttributedChange[] = [];
   private policyInForce: PolicyInForce | undefined;
   private readonly signingSecret: string;
   private readonly keySource: KeySource;
@@ -333,8 +335,8 @@ export class Attestor implements AttestorHandle {
   }
 
   /**
-   * One governed turn's model-facing surface (F4). Append-only, in call order: every turn is kept,
-   * because the transcript it mirrors has no way back from a lost turn.
+   * One role call's model-facing surface (F4; both tiers since WP-3.0c, D-45). Append-only, in call
+   * order: every call is kept, because the transcript it mirrors has no way back from a lost turn.
    */
   recordModelSurface(record: ModelSurfaceRecord): void {
     this.modelSurfaces.push(record);
@@ -354,6 +356,15 @@ export class Attestor implements AttestorHandle {
     const at = this.executionTiers.findIndex((entry) => entry.nodeId === record.nodeId);
     if (at === -1) this.executionTiers.push(record);
     else this.executionTiers[at] = record;
+  }
+
+  /**
+   * One change a reader's turn attributed to a concurrent writer (WP-3.0c, the F7 window). Append-only
+   * in the order seen: a node's turn is bracketed once, so a repeat reads as a retry, not a second
+   * change — the same convention as `recordModelSurface`.
+   */
+  recordAttribution(record: AttributedChange): void {
+    this.attributedChanges.push(record);
   }
 
   /**
@@ -393,6 +404,7 @@ export class Attestor implements AttestorHandle {
       ...(this.policyInForce ? { policyInForce: this.policyInForce } : {}),
       ...(this.modelSurfaces.length > 0 ? { modelSurfaces: this.modelSurfaces } : {}),
       ...(this.executionTiers.length > 0 ? { executionTiers: this.executionTiers } : {}),
+      ...(this.attributedChanges.length > 0 ? { attributedChanges: this.attributedChanges } : {}),
       ...(goldens ? { goldens } : {}),
       bundledAt:        new Date(),
     };

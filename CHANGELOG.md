@@ -9,10 +9,11 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
-The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b) land together here: the
-repository builds on pnpm 10 with a regenerated v9 lockfile, and a fifth built-in role joins a reader set
+The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b and WP-3.0c) land together here:
+the repository builds on pnpm 10 with a regenerated v9 lockfile; a fifth built-in role joins a reader set
 moved onto the governed in-process tier, with a `no_change` failure that names the policy rules which refused
-the node's own calls.
+the node's own calls; and a `cli`-tier role call is now recorded — its model surface is in the bundle — while
+a writer running concurrently with a reader is attributed to that writer rather than charged to the reader.
 
 ### Added
 
@@ -36,6 +37,19 @@ the node's own calls.
   `; N tool call(s) were denied or refused by policy: <ruleId> (<toolId>)…` — at most three rules named, the
   count carrying the rest. Read per node, from the attestor's records for that task rather than the run-wide
   counts; the tool message the model saw carries no rule id, so the attestor is the only source.
+- **A model surface for `cli`-tier role calls** ([D-45](docs/DECISIONS.md), WP-3.0c). A `cli`-tier role call
+  is a model call MAF made, but the bundle recorded a surface — digests, the tool catalogue, the argv — only
+  for a governed in-process turn (F4), because that is where MAF composes the prompt. `AdapterInvokeResult`
+  now carries an optional `modelSurface`, which each of the three process-spawning adapters fills from the
+  argv it actually spawned with (`claude` elides the `--system-prompt` value and the prompt after `--`;
+  `gemini` elides the `--system-instruction` value and the value half of the joined `--prompt=`; `codex` takes
+  the prompt on stdin, so its argv is verbatim and only the digests record the text). `RoleDispatcher` records
+  it through the attestor and the transcript. Every surface now carries a `tier` of `in-process` or `cli`; the
+  `cli`-tier one also carries `promptSha256`, `outputSha256` and `nativeTools` (`full`, `read-only` or `none`
+  — the posture MAF **asked** of the backend's own tools, not what the backend then did). A role call routed
+  to `ollama` or `openrouter` spawns no process and fills no surface, so it stays unrecorded; only `claude`,
+  `codex` and `gemini` do. The planner's call and the security reviewer's call stay outside the record — MAF
+  spawns them itself, not through a role node.
 
 ### Changed
 
@@ -53,9 +67,32 @@ the node's own calls.
   fails `unexpected_change` if it changed the tree. A **custom** read-only role is unchanged: it still runs on
   the `cli` tier unless it sets `execution: 'in-process'` ([D-01](docs/DECISIONS.md)). Where the adapter cannot
   run the loop (`codex`, `gemini`, `ollama`, `openrouter`) the built-in readers fall back to `cli` with the
-  D-06 transcript note and a `fellBackFrom: 'in-process'` entry in the bundle's `executionTiers`. Until
-  WP-3.0c's attribution lands, a built-in reader whose turn overlaps a writer can fail with
-  `unexpected_change`; `wp/phase-3` is not promoted before 3.0c.
+  D-06 transcript note and a `fellBackFrom: 'in-process'` entry in the bundle's `executionTiers`.
+- **A writer running concurrently with a reader is attributed to the writer, not charged to the reader**
+  ([D-45](docs/DECISIONS.md), WP-3.0c). A reader's turn is bracketed by two working-tree snapshots (D-42);
+  the one change that bracket cannot separate on its own is a writer editing the tree *during* the reader's
+  turn. The scheduler already serializes writers (A3); it now stamps a `WriterLockLedger` of hold intervals
+  where it takes and releases the writer lock, and `RoleDispatcher` asks it — for a reader whose bracket
+  shows a change — which writer to attribute that change to. A writer answers only on evidence, never on
+  overlap alone. Two conditions qualify one, tried in this order: the writer is a node the dispatcher started
+  as a **writer**, it **still holds the lock**, and its post-coder gate has **neither begun nor run** this
+  attempt, so the gate it is about to run will read the change; or the writer is **gated** — its gate has run —
+  its reviewed diff holds **every path** the bracket showed, and those paths are **unchanged** between the tree
+  its gate read and the reader's end tree. When a writer qualifies, the
+  node no longer fails: `{nodeId, attributedTo, diffSha256, fromTree, toTree, writerGateTree?}` is recorded in
+  the bundle's new `attributedChanges` field and in the transcript, the bracket diff is kept as a subject under
+  `<node>.attributed.diff`, and the change is judged where every writer's change is judged, against that
+  writer's own start commit by the security gate that reviews it. `diffSha256` is `sha256` of
+  `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff --text --no-ext-diff --no-textconv --no-renames
+  <fromTree> <toTree>` in the run's repository (the flags the digest was taken with: plain `git diff` differs
+  for binary content, and the host's own git config must be off), so a verifier can recompute it from the
+  recorded ids — soon after the run, since the two trees are unreachable and `git gc` may prune them after
+  `gc.pruneExpire`. A change no writer qualifies for is the
+  reader's own: `unexpected_change`, the diff recorded under the reader's node, failing as before. The ledger
+  is not consulted at all for a `cli`-tier reader: it holds the writer lock itself, so no other writer can
+  have been running and any change the bracket shows is its own. `run` is the only command that wires the
+  shared ledger; `wiring.ts` — behind the single-node dispatchers `goldens` and `evolve` — builds no ledger,
+  so `attributableWriter` returns nothing there and those readers fail closed, the pre-3.0c behaviour.
 - The committed default harness re-mints and the offline goldens baseline moves once more, because the role
   set changed — a fifth role (`analyst`), and `security` and `reviewer` now carry `execution: 'in-process'`
   (this repository's `.maf/roles.yaml` follows the built-in set, except that its `tester` also holds
@@ -81,6 +118,13 @@ Breaking for code that calls the packages directly:
 - `@maf/types`: `AttestorHandle` gains an additive optional `toolCallsForTask?(taskId)`, so a hand-written
   handle still compiles; `Attestor` implements it, and `@maf/roles` reads it to name the policy rules that
   refused a node's own calls (F10).
+- `@maf/types` (WP-3.0c): the record's new fields, all optional, so nothing hand-written stops compiling —
+  `AdapterInvokeResult.modelSurface?`, `ModelSurface.promptSha256?`/`outputSha256?`,
+  `ModelSurfaceRecord.tier?`, `AttestationBundle.attributedChanges?`, `AttestorHandle.recordAttribution?`, and
+  the `WriterLockLedger`/`WriterLockInterval`/`AttributedChange` types. `@maf/dag-runner` exports
+  `createWriterLockLedger` and takes an optional `DagRunnerOptions.writerLockLedger`; `@maf/roles` takes an
+  optional `RoleDispatcherConfig.writerLockLedger`. A 0.3.1 bundle, whose model-surface records carry no
+  `tier`, still parses and verifies.
 
 ## [0.3.2] - 2026-10-14
 

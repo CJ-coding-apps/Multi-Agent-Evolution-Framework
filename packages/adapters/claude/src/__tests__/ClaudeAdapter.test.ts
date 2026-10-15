@@ -296,6 +296,8 @@ test('a prompt that starts with a dash follows --, on invoke, stream and sendTur
 const sha256Hex = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 const elided = (name: string, value: string): string =>
   `<${name}: ${Buffer.byteLength(value, 'utf8')} bytes, sha256 ${sha256Hex(value)}>`;
+/** The sha256 an elided marker carries, so a test can tie it to the digest the record holds (F7). */
+const markerSha = (marker: string): string => /sha256 ([0-9a-f]{64})/.exec(marker)?.[1] ?? '';
 
 /** A tool the loop would advertise: only id, permissionLevel, description and an input shape matter here. */
 const TOOLS: ToolPlugin[] = [
@@ -336,4 +338,52 @@ test('a turn with no tools records the empty catalogue rather than omitting it (
   const bare = await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, systemPrompt: 'be brief' });
 
   assert.equal(bare.modelSurface?.toolCatalog, serializeTools(undefined), 'no tools is stated, not omitted');
+});
+
+// ORACLE (WP-3.0c, D-45). On the cli tier `invoke` is the whole model call, and until now it left no
+// trace of what the backend was shown: a bundle could say a reviewer role ran without saying with
+// which flags or from which prompt. invoke now reports the same surface sendTurn does for a governed
+// turn — the prompt digest, the backend's own argv with its payload positionals elided, and the
+// output digest — so "every role call is in the record" holds on both tiers.
+
+test('invoke records the cli-tier model surface, its own argv elided (WP-3.0c)', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'the answer', stderr: '', exitCode: 0, duration: 1 });
+  const out = await new ClaudeAdapter({ spawn }).invoke({
+    ...CALL, systemPrompt: 'be brief', nativeTools: 'read-only',
+  });
+
+  const surface = out.modelSurface;
+  assert.ok(surface, 'a cli-tier call carries a surface');
+  assert.equal(surface.systemPromptSha256, sha256Hex('be brief'));
+  assert.equal(surface.promptSha256, sha256Hex('say hi'));
+  assert.equal(surface.outputSha256, sha256Hex('the answer'));
+  assert.equal(surface.toolCatalog, '', 'a cli-tier backend is handed no catalogue of MAF tools');
+  assert.deepEqual(surface.argv, [
+    '--print', '--system-prompt', elided('--system-prompt', 'be brief'),
+    '--tools', 'Read,Glob,Grep', ...MCP_ISOLATION,
+    '-p', '--', elided('prompt', 'say hi'),
+  ], 'flags verbatim — including the reader tool set — and both payloads elided');
+  assert.equal(surface.argv.some((a) => a.includes('be brief')), false, 'no prompt text in the record');
+  assert.equal(surface.argv.some((a) => a.includes('say hi')), false);
+  // The recorded digest is over the bytes that reached the binary, not a second derivation of them.
+  assert.equal(surface.argv.at(-1), elided('prompt', String(calls[0]?.args.at(-1))));
+  assert.equal(calls[0]?.args.at(-1), 'say hi', 'the binary itself still got the prompt');
+  // F7: the record's digest and the digest written into its own argv marker are computed in two
+  // places; tying them is what makes the argv a *check* on the record rather than a second copy of
+  // it — an elision that hashed different bytes than the record would show here.
+  assert.equal(surface.promptSha256, markerSha(surface.argv.at(-1) ?? ''), 'the prompt digest is the marker\'s');
+  assert.equal(surface.systemPromptSha256, markerSha(surface.argv[2] ?? ''), 'and so is the system-prompt digest');
+});
+
+test('a recorded digest is over the exact bytes sent: leading and trailing whitespace survives (F7)', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'ok', stderr: '', exitCode: 0, duration: 1 });
+  const prompt = ' say hi\n';
+  const out = await new ClaudeAdapter({ spawn }).invoke({ ...CALL, prompt, systemPrompt: 'be brief' });
+
+  const surface = out.modelSurface;
+  assert.ok(surface, 'a cli-tier call carries a surface');
+  assert.equal(calls[0]?.args.at(-1), prompt, 'the binary got the prompt byte for byte');
+  assert.equal(surface.promptSha256, sha256Hex(prompt), 'the digest is over the untrimmed prompt');
+  assert.notEqual(surface.promptSha256, sha256Hex(prompt.trim()), 'a digest over trimmed bytes would show here');
+  assert.equal(surface.promptSha256, markerSha(surface.argv.at(-1) ?? ''), 'and the marker carries that same digest');
 });
