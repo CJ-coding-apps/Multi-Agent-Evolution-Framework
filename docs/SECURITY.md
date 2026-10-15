@@ -350,10 +350,12 @@ A role runs in one of two tiers:
   `WebFetch` or any other it may believe it has — are not available this turn and that a request for one is
   refused, so what the prompt claims of the backend matches what `--tools ""` did to it
   ([D-46](DECISIONS.md)). A non-writer node here that finishes with an answer after **zero executed tool
-  calls** fails with `no_work`: a reader that made no call did not answer the question it was given, and a
-  call the policy engine denied (and escalated, then refused) never ran and is not work. The check is made
-  only where a per-call record exists — the `in-process` tier — and a role whose job is not to call a tool
-  opts out with `expectsToolCalls: false` ([D-46](DECISIONS.md)).
+  calls** fails with `no_work`: a reader that made no call did not answer the question it was given. A call
+  **ran** — and so is work — when `result.metadata.refused !== true`: an `Allow`, and an `Escalate` the
+  approval gate then approved. A `Deny`, an `Escalate` that was not approved, and an `Indeterminate` (an
+  engine rule that could not be evaluated, or the `builtin:input-schema` refusal of a malformed call) never
+  ran and are not work. The check is made only where a per-call record exists — the `in-process` tier — and a
+  role whose job is not to call a tool opts out with `expectsToolCalls: false` ([D-46](DECISIONS.md)).
 - **`cli`** — maf hands the backend CLI one prompt and reads back one result. The agent
   runs its own tools, so maf sees **no individual tool call**: not the arguments, not the policy verdict,
   not the path. MAF passes no hook flags, and no permission flags but one: Codex is invoked with
@@ -370,6 +372,18 @@ such a diff, not only a writer: a role that holds a write tool has its diff revi
 and, if one is wired, the review gate, while a role without one has its turn's change checked and fails with
 `unexpected_change` if there was one (F7). Policy refusals, approved escalations, redaction and tool-call
 records exist on the `in-process` tier alone; the human review gate reviews a writer's diff on either tier.
+
+**A node's verdict is read from the record, not from what the model said.** A writer — a role that holds a
+write tool — that answers with an empty diff against the commit it started from fails `no_change` whatever its
+prose claimed, and the evidence is the diff the security gate reviewed, named as a subject of the run's signed
+statement ([D-32](DECISIONS.md)). A reader fails `no_work` when the record holds **no executed call**: the
+evidence is the per-call `ToolCallRecord` count and the role's own `expectsToolCalls` declaration, and the
+answer is quoted in the message only as context, never as proof ([D-46](DECISIONS.md)). In both cases a run's
+own record decides whether the node did its work, so a confident answer over an empty record fails.
+**Not in this release:** the broader F12 check — a node whose *narrated output* describes tool output with
+**no** matching attested call at all. D-46 ships only the minimal form above, the two live cases the WP-3.0c
+rows hit.
+
 What the `cli` tier records is the call's **surface**, not its tool calls ([D-45](DECISIONS.md)): a `cli`-tier
 *role* call contributes a `modelSurfaces` entry too, marked `tier: "cli"` — the digest of the system prompt
 MAF composed, of the prompt and of the output, and the argv the backend was spawned with, its payload

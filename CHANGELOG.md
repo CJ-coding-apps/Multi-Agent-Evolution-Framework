@@ -55,20 +55,30 @@ own tools are off, and a failed node's failure is a value in the run outcome.
 - **A non-writer that answers without calling a tool fails `no_work`** ([D-46](docs/DECISIONS.md), WP-3.1).
   A read-only role on the in-process tier can finish with an answer the model produced without running
   anything — "the feature is there" after reading nothing — and the node counted as a success. A non-writer
-  node that finishes with an answer after **zero executed tool calls** now fails `no_work`; "executed" is a
-  call the policy engine allowed (`policyDecision.verdict === 'Allow'`), so a call that was denied and
-  escalated did not run and is not work. The message names the role, the number of turns and the answer's
-  first 200 characters (whitespace collapsed), and carries the F10 deny clause when the node's own calls were
-  refused. The check runs only where a per-call record exists — the in-process tier — because the `cli` tier
-  attests no per-call record for a role call. A role whose job is not to call a tool sets
-  `expectsToolCalls: false` (default `true` for a non-writer that lists a tool, `false` for one that lists
-  none); no built-in sets it, so the three built-in readers keep `true`. `RoleCatalogEntry` does not change.
+  node that finishes with an answer after **zero executed tool calls** now fails `no_work`. "Executed" is a
+  call that **ran**: one the policy engine allowed, or an `Escalate` the approval gate then approved. A `Deny`,
+  an `Escalate` that was not approved, and an `Indeterminate` — an engine rule it could not evaluate, or the
+  `builtin:input-schema` refusal of a malformed call — never ran and are not work. The message names the role,
+  the number of turns and the answer's first 200 characters — **credentials masked first**, then whitespace
+  collapsed, since the message reaches the signed bundle and the memory graph — and carries the F10 deny clause
+  when the node's own calls were refused. The check runs only where a per-call record exists — the in-process
+  tier — because the `cli` tier attests no per-call record for a role call, and it counts the **current
+  attempt's** calls, so a retried node that read only on an earlier attempt does not excuse this one. A role
+  whose job is not to call a tool sets `expectsToolCalls: false` (default `true` for a non-writer that lists a
+  tool, `false` for one that lists none); no built-in sets it, so the three built-in readers keep `true`. The
+  set is refused at load if `expectsToolCalls: true` is declared on a role with no tool (it could never be
+  satisfied) or on a writer (which is judged by `no_change`, never by its call count). `RoleCatalogEntry` does
+  not change.
 - **A failed node's failure is a value in the run outcome** ([D-46](docs/DECISIONS.md), WP-3.1; live-row
-  finding L3). `RunOutcome.nodes[].failure` is now `{ kind, ruleId?, toolId? }` — the `NodeFailureReason` the
-  dispatcher decided, and the rule id and tool id a policy refusal named — where the node previously carried
-  only a message. `NodeFailure` carries the two ids and `DagRunner` fills `failure` from it; a plain `Error`
-  (a transport or programming failure with no verdict) leaves `failure` absent rather than inventing a kind,
-  and a `no_work` with no refusal reads as exactly `{ kind: 'no_work' }`.
+  finding L3). `RunOutcome.nodes[].failure` is now `{ kind, ruleId?, toolId? }` — the kind the dispatcher
+  decided, and the rule id and tool id a policy refusal named — where the node previously carried only a
+  message. `kind` covers every verdict, not only a dispatcher failure: a `NodeFailureReason`, and also
+  `'gate_refused'` (a security or review gate's `GateRefused`), `'review_refused'` (a `ReviewRefused`) and
+  `'policy_violation'` (a `PolicyViolationError`), which are `VerdictError`s rather than `NodeFailure`s and
+  previously got no `failure` at all. Only a transport failure or a programming error — a plain `Error` with no
+  verdict — leaves `failure` absent; **absent means MAF did not classify the failure, never that there was no
+  verdict**. `NodeFailure` carries the two ids and `DagRunner` fills `failure` from it; a `no_work` with no
+  refusal reads as exactly `{ kind: 'no_work' }`.
 
 ### Changed
 
