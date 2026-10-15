@@ -253,13 +253,12 @@ function noChangeShortfall(
 function unexpectedChange(
   role: RoleConfig,
   adapterName: string,
-  diff: string,
+  files: string[],
   cwd: string,
 ): NodeFailure {
-  const files = changedFiles(diff);
   const named = files.length > 0
     ? `${files.length} file${files.length === 1 ? '' : 's'}: ${files.join(', ')}`
-    : 'at least one file (the diff names none)';
+    : 'at least one file (git named none)';
   return new NodeFailure(
     'unexpected_change',
     `role "${role.role}" holds no write tool, so adapter "${adapterName}" was not expected to ` +
@@ -270,29 +269,28 @@ function unexpectedChange(
 }
 
 /**
- * The paths a unified diff touches, read from its file headers — both sides of each, so a creation
- * (`--- /dev/null`) and a deletion (`+++ /dev/null`) are each named by the side that has a path, and
- * git's quotes come off a path with special characters in it.
+ * How many files a unified diff changes, counted from its `diff --git` section headers (N4).
  *
- * Only outside a hunk: a *content* line of the file is prefixed with its own `+`/`-`/space, so a
- * line the agent wrote that reads `-- x` or `++ y` reaches us as `--- x` / `+++ y` and would
- * otherwise be reported as a file that was never touched. Headers come before the first `@@` of a
- * file section and `diff --git` starts the next one.
+ * Counted rather than parsed for paths: git writes the paths into those headers C-quoted, so a
+ * non-ASCII name arrives as `"b/caf\303\251.txt"` and every consumer of the *text* would have to
+ * undo git's quoting to name the file at all — and a header is not even emitted per path in the
+ * ways that matter (a mode-only change has none, and a rename collapses two paths into one section
+ * unless rename detection is off). The count is what the rule needs: with `--no-renames` every
+ * changed path is exactly one `diff --git` section, so this is the number of paths a correct
+ * `--name-only` listing of the same two trees must have, and a disagreement between the two is the
+ * signal that the rule cannot name a change it knows exists — the case that must fail closed rather
+ * than be excused.
+ *
+ * Only at column zero of a section header: a *content* line of the file is prefixed with its own
+ * `+`/`-`/space, so a line an agent wrote that reads `diff --git …` reaches us as `+diff --git …`
+ * or ` diff --git …`, never as a header.
  */
-function changedFiles(diff: string): string[] {
-  const paths = new Set<string>();
-  let inHunk = false;
+function diffSectionCount(diff: string): number {
+  let count = 0;
   for (const line of diff.split('\n')) {
-    if (line.startsWith('diff --git ')) { inHunk = false; continue; }
-    if (line.startsWith('@@')) { inHunk = true; continue; }
-    if (inHunk) continue;
-    if (!line.startsWith('--- ') && !line.startsWith('+++ ')) continue;
-    let p = line.slice(4).trim();
-    if (p.startsWith('"') && p.endsWith('"') && p.length > 1) p = p.slice(1, -1);
-    if (p === '' || p === '/dev/null') continue;
-    paths.add(p.startsWith('a/') || p.startsWith('b/') ? p.slice(2) : p);
+    if (line.startsWith('diff --git ')) count += 1;
   }
-  return [...paths];
+  return count;
 }
 
 /**
@@ -396,6 +394,30 @@ export class RoleDispatcher {
    * second must show the change was already the content its gate read.
    */
   private readonly gateTrees = new Map<string, string>();
+
+  /**
+   * The node ids this dispatcher started as *writers* (WP-3.0c, N5). Rule (a) names a writer on the
+   * strength of the lock alone, so it must be a node that will actually run a gate: a cli-tier
+   * *reader* holds the writer lock (the scheduler serializes every cli-tier role, D-01/A3) but never
+   * gates, so naming it on the lock would excuse the reader's own change to a node that will never
+   * judge it. "Writer" is `isWriterRole`, decided by the tools the role holds (D-07), so a custom
+   * writer role is a candidate and a read-only role of any tier is not. Set once per node, where the
+   * node starts; a node's role does not change between attempts.
+   */
+  private readonly writerNodes = new Set<string>();
+
+  /**
+   * The writer nodes whose post-coder gate is *in flight* — set the instant the gate starts and
+   * before its first read, cleared at each attempt start (WP-3.0c, N5). Rule (a) is true only while
+   * the writer's gate has not yet read the tree; without this marker there is a window between the
+   * gate's `snapshotTree` and the recording of that tree id in `gateTrees` where a change that
+   * landed *after* the read would still be "not yet gated" and so named to the writer — a change
+   * its gate will never read. With the marker, rule (a) is false for that window, rule (b) fails
+   * closed (no gate tree is recorded yet), and the reader fails rather than passing a change no gate
+   * saw. A gate that throws before recording its tree leaves the marker set, so the writer is never
+   * named on the lock again this attempt — the fail-closed direction.
+   */
+  private readonly gating = new Set<string>();
 
   /**
    * The node has ended, succeeded or failed, and will not be attempted again: forget its
@@ -519,6 +541,7 @@ export class RoleDispatcher {
     // the next one's bracket.
     this.reviewedPaths.delete(node.id);
     this.gateTrees.delete(node.id);
+    this.gating.delete(node.id);
 
     // Captured BEFORE the node does anything, and before any model call is spent. A
     // writer that commits its own work would otherwise diff clean against HEAD, so the
@@ -532,6 +555,11 @@ export class RoleDispatcher {
     // (`snapshotTree` below).
     const startCommit = await this.baselineFor(node.id);
     const isWriter = isWriterRole(role);
+    // N5: rule (a) names a writer on the strength of the lock alone, so it must be a node this
+    // dispatcher started as a *writer*. A cli-tier reader holds the writer lock (A3 serializes every
+    // cli-tier role) but runs no gate, and naming it would excuse its own change to a node that never
+    // judges it. Recorded here, where the node starts; a node's role does not change between attempts.
+    if (isWriter) this.writerNodes.add(node.id);
     // F7: a reader is judged on the change *it* made, not on the tree it found. This brackets the
     // reader's turn with two working-tree snapshots and diffs those, so a sibling writer's
     // uncommitted work in the shared worktree — or the user's own dirty checkout under
@@ -888,12 +916,24 @@ export class RoleDispatcher {
     // The moment the reader's turn closed, taken the same way `bracket.at` was and after the end
     // snapshot, so the window covers both snapshots' own durations.
     const endedAt = performance.now();
-    const writer = tier === 'in-process'
-      ? await this.attributableWriter(node, diff, bracket.at, endedAt, endTree)
+    // The paths, from git rather than from the diff text (N4): a non-ASCII name, a mode-only change
+    // and a pure rename each defeat a `---`/`+++` parse — git C-quotes the first, emits no file
+    // lines for the second, and collapses the third into one header — so a parsed set can silently
+    // omit a path the diff actually changed, and the omission is what excuses the change. `undefined`
+    // means the rule cannot name what changed (git failed, or the section count disagrees) and the
+    // reader fails closed below rather than being handed an empty set that matches nothing.
+    const paths = await this.bracketPaths(bracket.tree, endTree, diff);
+    const writer = paths !== undefined && tier === 'in-process'
+      ? await this.attributableWriter(node, paths, bracket.at, endedAt, endTree)
       : undefined;
     if (writer !== undefined) {
+      // The three tree ids the rule used (N6): the digest below is reproducible from the first two
+      // with `git diff --no-renames <fromTree> <toTree>`, and the third names the content the named
+      // writer's gate read — absent under rule (a), where the writer had not gated yet.
       const attributed: AttributedChange = {
         nodeId: node.id, attributedTo: writer, diffSha256: sha256Hex(diff),
+        fromTree: bracket.tree, toTree: endTree,
+        ...(this.gateTrees.get(writer) !== undefined ? { writerGateTree: this.gateTrees.get(writer)! } : {}),
       };
       this.config.attestor.recordAttribution?.(attributed);
       // The bracket diff as a subject of the run's statement, under its own name: the digest above
@@ -907,30 +947,76 @@ export class RoleDispatcher {
         `showed and those paths are unchanged since, or it still held the lock with its gate not yet ` +
         `run, so its own diff will carry them. The change is judged by that writer's own ` +
         `reviewed diff, not charged to this reader.`,
-        { agentRole: role.role, nodeId: node.id, attributedTo: writer, diffSha256: attributed.diffSha256 },
+        { agentRole: role.role, nodeId: node.id, attributedTo: writer, diffSha256: attributed.diffSha256,
+          fromTree: attributed.fromTree, toTree: attributed.toTree,
+          ...(attributed.writerGateTree !== undefined ? { writerGateTree: attributed.writerGateTree } : {}) },
       );
       return;
     }
     this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff);
-    throw unexpectedChange(role, this.config.adapter.name, diff, this.config.cwd);
+    throw unexpectedChange(role, this.config.adapter.name, paths ?? [], this.config.cwd);
+  }
+
+  /**
+   * The paths the bracket diff changed, from git (N4), or `undefined` when the rule cannot settle
+   * them. Both halves come from the same invocation — `git diff --name-only -z --no-renames <from>
+   * <to>` — so a name git would C-quote on a `---`/`+++` line arrives raw and the set is complete
+   * for a mode-only change and a rename alike. `-z` is NUL separation, which is also what keeps a
+   * path with a newline or a quote in it intact.
+   *
+   * The count is checked against the diff's own `diff --git` sections: with `--no-renames` each
+   * changed path is exactly one section, so a disagreement means the diff shows a change the
+   * listing does not name — the change the rule cannot attribute and must not excuse. `undefined`
+   * there, and a git failure, both fail the reader closed, never open.
+   */
+  private async bracketPaths(from: string, to: string, diff: string): Promise<string[] | undefined> {
+    try {
+      const listed = await this.nameOnlyPaths(from, to);
+      return diffSectionCount(diff) === listed.length ? listed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * git's own list of the paths that differ between two trees (N4) — `--name-only -z --no-renames`,
+   * NUL-separated and unquoted, so a non-ASCII or otherwise special name is returned as the bytes it
+   * is on disk and can be handed straight to a `:(top,literal)` pathspec. `--no-renames` so a rename
+   * reads as a deletion plus an addition, matching the diff the rule digests. Throws on a git
+   * failure; callers decide whether that is a failure or a fail-closed `undefined`.
+   */
+  private async nameOnlyPaths(from: string, to: string): Promise<string[]> {
+    const { stdout } = await runIsolatedGit(
+      this.config.cwd,
+      ['diff', '--name-only', '-z', '--no-renames', from, to],
+      { env: { GIT_LITERAL_PATHSPECS: '0' } },
+    );
+    return stdout.split('\0').filter((p) => p.length > 0);
   }
 
   /**
    * Which of the writers that overlapped `[from, to]` can answer for the reader's bracket diff, or
    * none (F2, tightened by N2). Two conditions qualify, and both keep the change inside a gate:
    *
-   *  - **(a) A writer still holding the lock whose gate has not run yet this attempt.** Its
-   *    post-coder gates have not read the tree, and its start-commit diff will, because the change is
-   *    already in the tree it is about to diff. The reader cannot wait for it, so it is named on the
-   *    strength of the lock alone. `!gateTrees.has` is what makes "not yet run" exact: a writer whose
-   *    gate already ran — the coder holds the lock through transcript append and the LCM flush after
-   *    its gate — falls through to (b) instead, where it must show the change is the content its gate
-   *    read.
-   *  - **(b) A writer whose gate has run**, whose reviewed diff holds every path in the bracket *and*
+   *  - **(a) A writer this dispatcher started as a writer, still holding the lock, whose gate has
+   *    neither begun nor run this attempt.** Its post-coder gates have not read the tree, and its
+   *    start-commit diff will, because the change is already in the tree it is about to diff. The
+   *    reader cannot wait for it, so it is named on the strength of the lock alone. Three conditions
+   *    make that sound and each closes a window (N5). `writerNodes.has` excludes a cli-tier *reader*,
+   *    which holds the same lock (A3) but never gates, so naming it would excuse a change no gate
+   *    will ever judge. `!gating.has` excludes a writer whose gate has *started* — the marker is set
+   *    before the gate's first read, so a change landing between that read and the recording of the
+   *    gate tree is not named on the lock. `!gateTrees.has` excludes a writer whose gate has already
+   *    run: the coder holds the lock through transcript append and the LCM flush after its gate, so
+   *    it is still holding long after it gated, and it must fall through to (b) to show the change
+   *    is the content its gate read.
+   *  - **(b) A gating or gated writer**, whose reviewed diff holds every path in the bracket *and*
    *    those paths are unchanged between the tree its gate read and the reader's end tree. The content
    *    check is N2 — a reviewed path can be rewritten after the gate, and path containment alone would
    *    excuse the rewrite as reviewed. Both conditions are needed: `reviewedPaths` is a set of names,
-   *    and a name later rewritten names a change the gate never judged.
+   *    and a name later rewritten names a change the gate never judged. A writer that has begun
+   *    gating but whose gate tree is not yet recorded has no `gateTrees` entry, so (b) fails closed
+   *    until the gate records it — the window (a) no longer covers.
    *
    * (a) is tried first, so a still-holding writer whose gate is ahead of it is named on the lock
    * alone; (b) covers the completed and the already-gated. With two coders overlapping one reader, the
@@ -947,7 +1033,7 @@ export class RoleDispatcher {
    */
   private async attributableWriter(
     node: DagNode,
-    bracketDiff: string,
+    paths: string[],
     from: number,
     to: number,
     endTree: string,
@@ -955,10 +1041,9 @@ export class RoleDispatcher {
     const ledger = this.config.writerLockLedger;
     if (!ledger) return undefined;
     const candidates = ledger.writersOverlapping(from, to).filter((id) => id !== node.id);
-    const paths = changedFiles(bracketDiff);
     if (paths.length === 0) return undefined;
     for (const id of candidates) {
-      if (ledger.isHolding(id) && !this.gateTrees.has(id)) return id;
+      if (this.writerNodes.has(id) && ledger.isHolding(id) && !this.gating.has(id) && !this.gateTrees.has(id)) return id;
     }
     for (const id of candidates) {
       if (await this.reviewedHolds(id, paths, endTree)) return id;
@@ -984,18 +1069,21 @@ export class RoleDispatcher {
    * Whether `paths` carry the same content in `gateTree` and `endTree` — an empty
    * `git diff <gateTree> <endTree> -- <paths>`. Both trees are `snapshotTree` ids taken through the
    * same throwaway index, so they are content-ids of the whole working tree and a path unchanged in
-   * both contributes nothing. The pathspec is `:(top,literal)`-anchored because `changedFiles` yields
-   * repository-top-relative paths while `cwd` may be a subdirectory, and the paths came from the agent
-   * and may contain glob metacharacters. `--text --no-ext-diff --no-textconv` are there for the reason
-   * the other diffs carry them: an agent-written `.gitattributes` must not change how its own change
-   * reads. A `git` failure answers `false` — the rule cannot settle it, and settling it as "reviewed"
-   * would be the fail-open this closes.
+   * both contributes nothing. The pathspec is `:(top,literal)`-anchored because the paths are
+   * repository-top-relative (git's `--name-only` yields them so, N4) while `cwd` may be a
+   * subdirectory, and the paths came from the agent and may contain glob metacharacters. `--text
+   * --no-ext-diff --no-textconv` are there for the reason the other diffs carry them: an
+   * agent-written `.gitattributes` must not change how its own change reads. `--no-renames` matches
+   * the listing and the bracket diff, so a rename reads the same way on all three and this check's
+   * verdict does not depend on the repository's `diff.renames` config (N4). A `git` failure answers
+   * `false` — the rule cannot settle it, and settling it as "reviewed" would be the fail-open this
+   * closes.
    */
   private async unchangedSince(gateTree: string, endTree: string, paths: string[]): Promise<boolean> {
     try {
       const { stdout } = await runIsolatedGit(
         this.config.cwd,
-        ['diff', '--text', '--no-ext-diff', '--no-textconv', gateTree, endTree, '--',
+        ['diff', '--text', '--no-ext-diff', '--no-textconv', '--no-renames', gateTree, endTree, '--',
          ...paths.map((p) => `:(top,literal)${p}`)],
         { env: { GIT_LITERAL_PATHSPECS: '0' } },
       );
@@ -1040,6 +1128,14 @@ export class RoleDispatcher {
     // is reviewed like any other change — see packages/git-ops/src/SnapshotDiff.ts.
     // A failure here is an error, never an empty diff: "we could not look" and "nothing
     // changed" must not be the same verdict.
+    // N5: this writer's gate has *started*, marked before its first read. Rule (a) names a still-
+    // holding writer on the lock alone, and it must stop the instant the gate begins reading — a
+    // change landing after the gate's first snapshot is one the gate will not read, so it must not be
+    // named on the lock; with the marker set, (a) is false and (b) fails closed until the gate tree is
+    // recorded below. The marker is never cleared within an attempt (only at the attempt start in
+    // `runNode`), so a gate that throws leaves the writer un-namable-on-the-lock rather than falsely
+    // attributable — the fail-closed direction.
+    this.gating.add(node.id);
     // N2: the tree id this gate is about to judge, taken *before* the diff so it is at-or-just-before
     // the content the gate reads. A later change between the two git calls would then show as changed
     // and fail the reader closed, never the reverse. Same `snapshotTree` the reader's end tree uses, so
@@ -1049,10 +1145,12 @@ export class RoleDispatcher {
     // Handed back before anything else: an empty diff is also D-32's evidence (no_change).
     onDiff(diff);
     // The paths this gate is about to judge, kept per node (F2), so a reader whose bracket shows a
-    // change can ask whether a finished writer already carried it here. Recorded even when the diff
-    // is empty — the empty set answers for nothing, which is what a writer that changed nothing
-    // should be able to say.
-    this.reviewedPaths.set(node.id, new Set(changedFiles(diff)));
+    // change can ask whether a gated writer already carried it here. Taken from git (N4) between the
+    // start commit and the gate tree — the same two trees the digest is reproducible from — rather
+    // than parsed out of the diff text, whose `---`/`+++` lines git does not emit for every change.
+    // Recorded even when the diff is empty — the empty set answers for nothing, which is what a
+    // writer that changed nothing should be able to say.
+    this.reviewedPaths.set(node.id, new Set(await this.nameOnlyPaths(startCommit, gateTree)));
     this.gateTrees.set(node.id, gateTree);
     if (!diff.trim()) return;
     this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff); // a subject of the run's statement (D-13)

@@ -74,14 +74,17 @@ a writer running concurrently with a reader is attributed to that writer rather 
   turn. The scheduler already serializes writers (A3); it now stamps a `WriterLockLedger` of hold intervals
   where it takes and releases the writer lock, and `RoleDispatcher` asks it — for a reader whose bracket
   shows a change — which writer to attribute that change to. A writer answers only on evidence, never on
-  overlap alone. Two conditions qualify one, tried in this order: the writer **still holds the lock** and its
-  post-coder gate has **not yet run** for this attempt, so the gate it is about to run will read the change;
-  or the writer has **finished**, its reviewed diff holds **every path** the bracket showed, and those paths
-  are **unchanged** between the tree its gate read and the reader's end tree. When a writer qualifies, the
-  node no longer fails: `{nodeId, attributedTo, diffSha256}` is recorded in the bundle's new
-  `attributedChanges` field and in the transcript, the bracket diff is kept as a subject under
+  overlap alone. Two conditions qualify one, tried in this order: the writer is a node the dispatcher started
+  as a **writer**, it **still holds the lock**, and its post-coder gate has **neither begun nor run** this
+  attempt, so the gate it is about to run will read the change; or the writer is **gated** — its gate has run —
+  its reviewed diff holds **every path** the bracket showed, and those paths are **unchanged** between the tree
+  its gate read and the reader's end tree. When a writer qualifies, the
+  node no longer fails: `{nodeId, attributedTo, diffSha256, fromTree, toTree, writerGateTree?}` is recorded in
+  the bundle's new `attributedChanges` field and in the transcript, the bracket diff is kept as a subject under
   `<node>.attributed.diff`, and the change is judged where every writer's change is judged, against that
-  writer's own start commit by the security gate that reviews it. A change no writer qualifies for is the
+  writer's own start commit by the security gate that reviews it. `diffSha256` is `sha256` of
+  `git diff --no-renames <fromTree> <toTree>` in the run's repository, so a verifier can recompute it from the
+  recorded ids. A change no writer qualifies for is the
   reader's own: `unexpected_change`, the diff recorded under the reader's node, failing as before. The ledger
   is not consulted at all for a `cli`-tier reader: it holds the writer lock itself, so no other writer can
   have been running and any change the bracket shows is its own. `run` is the only command that wires the

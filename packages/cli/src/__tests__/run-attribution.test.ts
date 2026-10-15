@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -243,6 +244,12 @@ function makeAttestor() {
   };
 }
 
+/** git's own view — sha256 of `git diff --no-renames <from> <to>`, the reproducibility N6 claims. */
+async function treeDiffSha256(cwd: string, from: string, to: string): Promise<string> {
+  const { stdout } = await runIsolatedGit(cwd, ['diff', '--no-renames', from, to]);
+  return crypto.createHash('sha256').update(stdout, 'utf8').digest('hex');
+}
+
 /** A ledger that answers exactly as the real one would, and remembers the windows it was asked. */
 function spyingLedger(inner: WriterLockLedger) {
   const windows: Array<{ from: number; to: number }> = [];
@@ -410,16 +417,35 @@ test('F1/V1: a coder that FINISHED inside the bracket still excuses it — rule 
     assert.equal(f.attestor.diffHashes.some((h) => h.key === 'ask.diff'), false, 'the change is not charged to the reader');
     assert.ok(f.attestor.diffHashes.some((h) => h.key === 'ask.attributed.diff'), 'the bracket diff is a subject instead');
     assert.equal(windows.length, 1, 'the ledger was asked once for the one reader');
+
+    // N6: the three tree ids the rule used are recorded, and the digest is reproducible from two of
+    // them in the run's repository — the claim docs/SECURITY.md makes, made checkable.
+    assert.match(attributed?.fromTree ?? '', /^[0-9a-f]{40}$/, 'the bracket\'s start tree id');
+    assert.match(attributed?.toTree ?? '', /^[0-9a-f]{40}$/, 'and its end tree id');
+    assert.notEqual(attributed?.fromTree, attributed?.toTree, 'the bracket spans a change');
+    assert.match(attributed?.writerGateTree ?? '', /^[0-9a-f]{40}$/,
+      'rule (b) names the gate tree the writer read — absent only when the lock alone was enough');
+    assert.equal(
+      await treeDiffSha256(f.cwd, attributed!.fromTree, attributed!.toTree),
+      attributed?.diffSha256,
+      '`git diff --no-renames <fromTree> <toTree>` in the run\'s repository reproduces the digest (N6)',
+    );
+    const note = f.transcript.entries.find((e) => e.content.startsWith('[attributed]'));
+    assert.ok(note, 'the attribution reaches the transcript');
+    assert.equal(note.metadata['fromTree'], attributed?.fromTree, 'and it carries the tree ids the rule used');
+    assert.equal(note.metadata['toTree'], attributed?.toTree);
+    assert.equal(note.metadata['writerGateTree'], attributed?.writerGateTree);
   } finally {
     await f.cleanup();
   }
 });
 
 test('F1/V4: two coders overlap the bracket and the SECOND wrote — the attribution names the second', async () => {
-  // `code1` runs, changes nothing, so its reviewed diff is empty and it can answer for no path;
-  // `code2` reviewed the one path the bracket shows. The ledger lists both (closed, oldest first);
-  // `attributedTo` must be `code2`, the writer whose reviewed diff actually holds the change, not
-  // the first overlapping writer it happens to list.
+  // `code1` edits `app.js`, which `code2` then reverts: the path `code1` reviewed (`app.js`) is not
+  // the path the bracket shows (`feature.ts`), so `code1` reviewed nothing the bracket holds and can
+  // answer for no path in it; `code2` reviewed the one path the bracket does show. The ledger lists
+  // both (closed, oldest first); `attributedTo` must be `code2`, the writer whose reviewed diff
+  // actually holds the change, not the first overlapping writer it happens to list.
   const f = await makeFixture([], [
     { id: 'code1', label: 'implement part one', agentRole: 'coder' },
     { id: 'code2', label: 'implement part two', agentRole: 'coder', dependencies: ['code1'] },

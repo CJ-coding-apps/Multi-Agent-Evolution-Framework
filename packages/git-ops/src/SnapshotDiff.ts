@@ -223,13 +223,16 @@ export async function snapshotTree(cwd: string): Promise<string> {
  * The change between two `snapshotTree` ids, as a diff. Both trees hold only the paths
  * `snapshotTree` kept, so no pathspec is needed here. `--text --no-ext-diff --no-textconv` are,
  * for the reason `snapshotDiff` gives: an agent-written `.gitattributes` must not change how its
- * own change reads. An oversized result is an error, never a truncation (D-07).
+ * own change reads. `--no-renames` is the attribution rule's requirement (N4): a rename must read
+ * as a deletion plus an addition, so the diff has one `diff --git` section per changed path and
+ * its bytes do not depend on the repository's `diff.renames` config. An oversized result is an
+ * error, never a truncation (D-07).
  */
 export async function diffTrees(cwd: string, from: string, to: string): Promise<string> {
   try {
     const { stdout } = await runIsolatedGit(
       cwd,
-      ['diff', '--text', '--no-ext-diff', '--no-textconv', from, to],
+      ['diff', '--text', '--no-ext-diff', '--no-textconv', '--no-renames', from, to],
       { maxBuffer: MAX_DIFF_BYTES },
     );
     return stdout;

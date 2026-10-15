@@ -1296,9 +1296,15 @@ export interface ModelSurfaceRecord extends ModelSurface {
  * sibling writer that ran *during* the reader's turn lands inside its bracket. When the lock ledger
  * shows a writer took the change to a gate, the change is recorded here instead of failing the node:
  * either that writer still holds the lock, so its own start-commit diff will carry the change to its
- * gate, or it finished and its reviewed diff already holds every path in this reader's bracket. The
- * bracket diff is recorded beside it, as the subject `<node>.attributed.diff`, so `diffSha256` points
- * at bytes in the bundle rather than at nothing.
+ * gate, or its gate has run and its reviewed diff already holds every path in this reader's bracket.
+ * The bracket diff is recorded beside it, as the subject `<node>.attributed.diff`, so `diffSha256`
+ * points at bytes in the bundle rather than at nothing.
+ *
+ * The three tree ids below are what make that digest checkable rather than merely present (N6): the
+ * recorded `diffSha256` is `sha256` of `git diff --no-renames <fromTree> <toTree>` in the run's
+ * repository, so a verifier holding the bundle and the repository can recompute it. `writerGateTree`
+ * names the content the named writer's gate read, and is absent when the change was attributed on the
+ * lock alone (rule (a)) — a writer whose gate had not yet run has no gate tree to name.
  */
 export interface AttributedChange {
   nodeId:       string;
@@ -1306,6 +1312,12 @@ export interface AttributedChange {
   attributedTo: string;
   /** sha256, hex, of the bracket diff the reader's turn showed; the content of `<node>.attributed.diff`. */
   diffSha256:   string;
+  /** The reader's bracket start tree id: `git diff --no-renames <fromTree> <toTree>` reproduces `diffSha256`. */
+  fromTree:     string;
+  /** The reader's bracket end tree id. */
+  toTree:       string;
+  /** The tree the named writer's gate read; absent when the writer was named on the lock alone (rule (a)). */
+  writerGateTree?: string;
 }
 
 /**

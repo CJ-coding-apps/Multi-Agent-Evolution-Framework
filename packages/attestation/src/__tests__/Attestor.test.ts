@@ -181,14 +181,18 @@ test('an attributed change flows into the signed bundle; unrecorded, the field i
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-attest-'));
   try {
     const attestor = new Attestor(makeRunId('r-3c-attr'), stubGraph, dir, { secret: 'test-secret' });
-    attestor.recordAttribution({ nodeId: 'reader-1' as never, attributedTo: 'writer-2' as never, diffSha256: 'd'.repeat(64) });
+    attestor.recordAttribution({
+      nodeId: 'reader-1' as never, attributedTo: 'writer-2' as never, diffSha256: 'd'.repeat(64),
+      fromTree: 'a'.repeat(40), toTree: 'b'.repeat(40), writerGateTree: 'c'.repeat(40),
+    });
 
     const bundle = await attestor.bundle(BUILDER, INVOCATION, [], { status: 'Succeeded', unscheduled: [] });
 
     assert.deepEqual(
       bundle.attributedChanges,
-      [{ nodeId: 'reader-1', attributedTo: 'writer-2', diffSha256: 'd'.repeat(64) }],
-      'the attribution is in the bundle, naming the reader and the writer',
+      [{ nodeId: 'reader-1', attributedTo: 'writer-2', diffSha256: 'd'.repeat(64),
+         fromTree: 'a'.repeat(40), toTree: 'b'.repeat(40), writerGateTree: 'c'.repeat(40) }],
+      'the attribution is in the bundle, naming the reader, the writer and the three tree ids (N6)',
     );
     assert.equal(Attestor.verify(bundle, { secret: 'test-secret' }), true, 'inside the signed payload, not beside it');
   } finally {
@@ -210,6 +214,9 @@ test('a surface recorded without a `tier` is written that way and the bundle sig
   try {
     const attestor = new Attestor(makeRunId('r-3c-old'), stubGraph, dir, { secret: 'test-secret' });
     // Three digests and the argv, no tier — the shape a 0.3.1 build recorded.
+    // The check is minted, not fixture-backed: no offline scripted path in the v0.3.1 tree records
+    // `modelSurfaces` (measured — the `inprocess-demo` bundle and every bundle in that run carry no
+    // such field), so there is no 0.3.1 bundle to run this against.
     attestor.recordModelSurface({
       role: 'analyst', taskId: 't1' as never, turn: 1,
       systemPromptSha256: 'f'.repeat(64), promptSha256: 'e'.repeat(64),

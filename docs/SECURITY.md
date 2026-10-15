@@ -242,18 +242,23 @@ indistinguishable from the reader's own change by the two snapshots alone. The s
 it (A3): the scheduler serializes writers, and the runner stamps a ledger where it takes and releases the
 lock, one interval per writer turn, so the reader's guard can ask who held the lock across its own turn.
 A writer answers for the turn only on evidence, never merely because its interval overlapped. Two
-conditions qualify one, tried in this order: the writer **still holds** the lock at the reader's end snapshot
-and its post-coder gate has **not yet run**, so the gate it is about to run will read the change; or the
-writer has **finished**, its reviewed diff — the diff its own post-coder gate produced — holds **every path**
-in the bracket diff, and those paths are **unchanged** between the tree that gate read and the reader's end
-snapshot (`git diff <writerGateTree> <readerEndTree> -- <paths>` is empty). When a writer qualifies, the node
+conditions qualify one, tried in this order: the writer is a node the dispatcher started as a **writer**, it
+**still holds** the lock at the reader's end snapshot, and its post-coder gate has **neither begun nor run**
+this attempt, so the gate it is about to run will read the change; or the writer is **gated** — its
+post-coder gate has run — its reviewed diff holds **every path** in the bracket diff, and those paths are
+**unchanged** between the tree that gate read and the reader's end snapshot
+(`git diff <writerGateTree> <readerEndTree> -- <paths>` is empty). When a writer qualifies, the node
 does **not** fail: the change is recorded in the bundle's `attributedChanges` as
-`{nodeId, attributedTo, diffSha256}` — the reader's node, the writer, and a digest of the diff — and it is
+`{nodeId, attributedTo, diffSha256, fromTree, toTree, writerGateTree?}` — the reader's node, the writer, a
+digest of the bracket diff, and the two tree ids the digest is taken between (with the writer's gate tree,
+present only when the writer was named as gated) — and it is
 judged where every writer's change is judged, against that **writer's** own start commit, by the security gate
 that reviews it. When no writer meets either condition the guard is exactly what it was: a change the bracket
 shows fails the node with `unexpected_change`, records the diff as the reader's own under the node's name, and
-names the files. The bracket diff is written down too, as `<node>.attributed.diff`, so the digest in
-`attributedChanges` points at bytes a verifier can read. A `cli`-tier reader holds the writer lock itself
+names the files. The bracket diff is written down too, as `<node>.attributed.diff`, and `diffSha256` is
+reproducible from the recorded ids: `git diff --no-renames <fromTree> <toTree>` in the run's repository
+prints exactly the bytes the digest is over, so the subject pins the bytes in the bundle and the ids let a
+verifier recompute them. A `cli`-tier reader holds the writer lock itself
 (every `cli`-tier node does, since the backend's own file tools are unseen), so no other writer can have been
 running and any change the bracket shows is its own; the guard does not consult the ledger at all on that
 tier, and the reader's own node id is excluded from it where it is consulted. The attribution names a
@@ -437,9 +442,9 @@ What that separates, and what it does not:
   caught by the `unexpected_change` guard to keep the run from handing the branch back at all (F7), and
   that guard sees only the change the reader's own turn made — a difference between the two snapshots that
   bracket it. A writer's edit made concurrently with that turn is attributed to that writer
-  ([D-45](DECISIONS.md)) — one still holding the lock whose gate has not yet run for the attempt, or one
-  finished whose reviewed diff holds every path the bracket showed and those paths are unchanged since its gate
-  read them — not charged to the reader, and is judged in that writer's own reviewed diff.
+  ([D-45](DECISIONS.md)) — one still holding the lock whose gate has neither begun nor run for the attempt, or
+  one gated whose reviewed diff holds every path the bracket showed and those paths are unchanged since its
+  gate read them — not charged to the reader, and is judged in that writer's own reviewed diff.
 - **Rollbacks are not on the run path.** `RollbackManager`, which refuses any reset outside a run's
   worktree, is not used by `maf run` in 0.3.0. The coder's own `git.reset` tool can reset `--hard`, and it
   acts on whatever the run works in: in a worktree, the run's branch — and only there, because every git

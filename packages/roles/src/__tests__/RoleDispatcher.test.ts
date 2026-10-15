@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import crypto from 'node:crypto';
+import { chmod, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { snapshotTree } from '@maf/git-ops';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, PolicyDecision, ToolContext, ToolInput, ToolResult,
@@ -146,7 +148,8 @@ function makeNode(role: RoleName, description = 'do the thing'): DagNode {
 
 interface Fixture {
   dispatcher: RoleDispatcher;
-  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter | MidTurnWriterAdapter;
+  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter | MidTurnWriterAdapter
+    | HeldWriterAdapter | MidTurnReaderAdapter | OversizeGateAdapter;
   transcript: ReturnType<typeof makeTranscriptRecorder>;
   policy: ReturnType<typeof makePolicy>;
   attestor: ReturnType<typeof makeAttestor>;
@@ -156,9 +159,23 @@ interface Fixture {
 
 const execFileAsync = promisify(execFile);
 
+/** A promise and its resolver, so an ordering the test depends on is a resolution, not a sleep. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+/** git's own view — sha256 of `git diff --no-renames <from> <to>`, the reproducibility N6 claims. */
+async function treeDiffSha256(cwd: string, from: string, to: string): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['diff', '--no-renames', from, to], { cwd });
+  return crypto.createHash('sha256').update(stdout, 'utf8').digest('hex');
+}
+
 async function makeFixture(opts: {
   roleExecution: 'cli' | 'in-process';
-  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter | MidTurnWriterAdapter;
+  adapter: StubTurnAdapter | CliOnlyAdapter | WritingCliAdapter | MidTurnWriterAdapter
+    | HeldWriterAdapter | MidTurnReaderAdapter | OversizeGateAdapter;
   policyHandler: (toolId: string, input: ToolInput) => PolicyDecision;
   bundles?: HarnessConfig;
   /** The one role the set defines; read-only `analyst` unless a test needs a writer. */
@@ -666,30 +683,97 @@ test('cli tier: an adapter that reports no model surface records none — absent
   }
 });
 
-test('F2: an in-process reader is not failed for a writer still holding the lock across its turn (WP-3.0c)', async () => {
-  const adapter = new WritingTurnAdapter();
-  adapter.turnsToServe = [{ text: 'Reviewed. APPROVED.', toolCalls: [] }];
+/**
+ * A reader whose turn drives a writer node that stays *in its turn*: the writer edits the tree, then
+ * parks on a deferred, so when the reader's change guard runs the writer is still a node this
+ * dispatcher started as a writer (`writerNodes`), the ledger reports it holding, its gate has not
+ * begun (`gating` unset) and its gate tree is not recorded (`gateTrees` unset) — rule (a)'s three
+ * conditions, all true. That is the F7 window's live case, and the one thing N5's restriction must
+ * not break. With `park = false` the writer instead loops on read-only turns, so the node runs out
+ * of its budget: the gate runs and the node still fails — a first attempt to retry from.
+ *
+ * `fixture` is assigned right after `makeFixture` returns; the test releases the writer in `finally`
+ * and awaits the nested run, so it finishes before the workdir is removed.
+ */
+class HeldWriterAdapter implements TurnAdapter {
+  readonly name = 'held-writer';
+  fixture!: Fixture;
+  park = true;
+  writerDone: Promise<unknown> | undefined;
+  private readonly writerStarted = deferred();
+  private readonly writerRelease = deferred();
+  constructor(private readonly writerNode: DagNode) {}
+  capabilities(): AdapterCapabilities { return CAPS; }
+  async isAvailable(): Promise<boolean> { return true; }
+  async invoke(_o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    throw new Error('every role here runs the in-process loop');
+  }
+  async *stream(): AsyncGenerator<string> { yield 'x'; }
+  async sendTurn(_h: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
+    const isWriter = (opts.tools ?? []).some((t) => t.id === makeToolId('fs.write'));
+    if (isWriter) {
+      if (!this.park) {
+        return { text: 'reading', toolCalls: [{ toolUseId: 'r1', toolName: 'fs.read', input: { path: 'hello.txt' } }] };
+      }
+      // On disk before the reader's turn ends, so the reader's bracket shows it; the writer then
+      // parks, so its own gate is still ahead of it when the reader's guard runs.
+      await writeFile(path.join(opts.workingDir, 'feature.ts'), 'export const feature = 2;\n', 'utf8');
+      this.writerStarted.resolve();
+      await this.writerRelease.promise;
+      return { text: 'wrote feature.ts', toolCalls: [] };
+    }
+    this.writerDone = this.fixture.dispatcher.runNode(this.writerNode);
+    await this.writerStarted.promise;
+    return { text: 'investigated the code', toolCalls: [] };
+  }
+  release(): void { this.writerRelease.resolve(); }
+}
+
+test('F2: an in-process reader is excused for a writer still holding the lock across its turn (rule (a), WP-3.0c)', async () => {
+  const WRITER = defineRoleName('coder');
   const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
   const ledger: WriterLockLedger = {
     enter() {}, exit() {},
     writersOverlapping: () => [writer],
-    isHolding: (id) => id === writer, // the writer is still running: its own gates have not read the tree yet
+    isHolding: (id) => id === writer, // the writer is mid-turn: it holds the lock and its gate is ahead of it
   };
-  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
+  const adapter = new HeldWriterAdapter(writerNode);
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
+  adapter.fixture = f;
   try {
     const out = await f.dispatcher.runNode(makeNode(ANALYST));
     const output = out['output'];
     if (!output || output.kind !== 'string') assert.fail('expected string output');
-    assert.equal(output.value, 'Reviewed. APPROVED.', 'the reader answers for its own turn, not the writer\'s change');
+    assert.equal(output.value, 'investigated the code', 'the reader answers for its own turn, not the writer\'s change');
 
     assert.equal(f.attestor.attributed.length, 1, 'the change is attributed, once');
     const attributed = f.attestor.attributed[0];
     assert.equal(attributed?.nodeId, 'n1');
     assert.equal(attributed?.attributedTo, writer, 'named to the writer that held the lock across the turn');
     assert.match(attributed?.diffSha256 ?? '', /^[0-9a-f]{64}$/, 'a digest of the diff, not the diff text');
+    // N6: the tree ids the rule used are in the record, and the digest is reproducible from two of
+    // them in the run's repository — the claim docs/SECURITY.md makes, made checkable.
+    assert.match(attributed?.fromTree ?? '', /^[0-9a-f]{40}$/, 'the bracket\'s start tree id');
+    assert.match(attributed?.toTree ?? '', /^[0-9a-f]{40}$/, 'and its end tree id');
+    assert.notEqual(attributed?.fromTree, attributed?.toTree, 'the bracket spans a change');
+    assert.equal(attributed?.writerGateTree, undefined,
+      'absent under rule (a): the named writer had not gated, so there is no gate tree to name');
+    assert.equal(
+      await treeDiffSha256(f.workDir, attributed!.fromTree, attributed!.toTree),
+      attributed?.diffSha256,
+      '`git diff --no-renames <fromTree> <toTree>` in the run\'s repository reproduces the digest (N6)',
+    );
     assert.ok(
       f.attestor.diffHashes.some((h) => h.key === 'n1.attributed.diff'),
-      'the bracket diff is a subject of the run\'s statement, so the digest above points at bytes in the bundle (F2)',
+      'the bracket diff is a subject of the run\'s statement, so the digest above points at it (F2)',
     );
     assert.equal(
       f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), false,
@@ -700,29 +784,69 @@ test('F2: an in-process reader is not failed for a writer still holding the lock
     assert.ok(note, 'the attribution reaches the transcript');
     assert.equal(note.metadata['attributedTo'], writer);
     assert.equal(note.metadata['diffSha256'], attributed?.diffSha256, 'the transcript and the bundle agree');
+    assert.equal(note.metadata['fromTree'], attributed?.fromTree, 'and the transcript carries the tree ids (N6)');
+    assert.equal(note.metadata['toTree'], attributed?.toTree);
+    assert.equal('writerGateTree' in note.metadata, false, 'absent under (a) in the transcript too');
   } finally {
+    adapter.release();
+    if (adapter.writerDone) await adapter.writerDone.catch(() => undefined);
     await f.cleanup();
   }
 });
 
-test('F2: a finished writer whose reviewed diff does not hold the path does not excuse the reader (WP-3.0c)', async () => {
-  // The heart of F2: overlapping in time is not evidence of authorship. The writer released the lock,
-  // but nothing it reviewed carries `sneaky.txt` (no entry in `reviewedPaths` at all here), so the
-  // change belongs to no gate and must fail the reader rather than be credited to it.
-  const adapter = new WritingTurnAdapter();
+/**
+ * A writer that writes one file through a tool call and gates on it; the reader then makes
+ * `readerChange` directly, in-process. Runs the writer's whole node with the real dispatcher, so
+ * `reviewedPaths`/`gateTrees` are the ones a real gate records — the evidence rule (b) reads.
+ */
+class ReviewedWriterAdapter extends StubTurnAdapter {
+  private writerTurns = 0;
+  constructor(private readonly readerChange: (dir: string) => Promise<void>) { super(); }
+  override async sendTurn(history: TurnMessage[], o: AdapterInvokeOptions): Promise<AssistantTurn> {
+    const isWriter = (o.tools ?? []).some((t) => t.id === makeToolId('fs.write'));
+    if (isWriter) {
+      this.writerTurns += 1;
+      if (this.writerTurns === 1) {
+        return { text: 'writing', toolCalls: [{ toolUseId: 'w1', toolName: 'fs.write', input: { path: 'w1.txt', content: 'v1\n' } }] };
+      }
+      return { text: 'wrote w1.txt', toolCalls: [] };
+    }
+    await this.readerChange(o.workingDir);
+    return super.sendTurn(history, o);
+  }
+}
+
+test('N2/V9: a writer that already gated is judged by its reviewed diff, not the lock it still holds (kills N2a)', async () => {
+  // V9: the writer lock is held through the post-gate flush, so "still holding" is not "has not
+  // gated". The writer here gated on `w1.txt` and finished; the reader's turn then writes
+  // `sneaky.txt`, a path the reviewed set does not hold. Rule (a) must refuse to name a writer whose
+  // gate tree is recorded — that is the only thing standing between this reader and a false excuse,
+  // since a rule that tested `isHolding` alone (N2a) would name it and pass.
+  const WRITER = defineRoleName('coder');
   const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
   const ledger: WriterLockLedger = {
     enter() {}, exit() {},
     writersOverlapping: () => [writer],
-    isHolding: () => false, // it finished — and its reviewed diff holds nothing this turn showed
+    isHolding: (id) => id === writer, // it holds the lock through its own flush, after its gate has run
   };
-  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW, writerLockLedger: ledger });
+  const adapter = new ReviewedWriterAdapter((dir) => writeFile(path.join(dir, 'sneaky.txt'), 'edited in-process\n', 'utf8'));
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
   try {
+    await f.dispatcher.runNode(writerNode); // gates on w1.txt, records its gate tree, releases nothing yet
+
     const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
-    assert.equal(failure.reason, 'unexpected_change', 'a writer whose diff does not hold the path answers for nothing');
+    assert.equal(failure.reason, 'unexpected_change', 'a gated writer answers for nothing the reader changed');
     assert.match(failure.message, /sneaky\.txt/);
-    assert.equal(f.attestor.attributed.length, 0);
-    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'and the change is recorded as the reader\'s own');
+    assert.equal(f.attestor.attributed.length, 0, 'the recorded gate tree is what refuses rule (a) here (kills N2a)');
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is recorded as the reader\'s own');
   } finally {
     await f.cleanup();
   }
@@ -860,6 +984,312 @@ test('N2: a writer that reviewed one of the two bracket paths does not excuse th
       'the writer did gate on feature.ts — the reviewed path — so the rule turns on the unreviewed one',
     );
     assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'and the change is recorded as the reader\'s own');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('N2/N2d: a retrying writer is named on the lock only for the attempt whose gate is ahead (WP-3.0c)', async () => {
+  // Rule (a) reads `gateTrees.has`, and each attempt's start clears this node's gate evidence, so the
+  // entry means "gated *this* attempt". Attempt 1 runs out of its budget, so a gate runs and the node
+  // still fails, leaving a gate tree behind. Attempt 2 is a fresh `runNode`: it is mid-turn while the
+  // reader's guard runs, and rule (a) must fire — a rule that kept attempt 1's gate tree (N2d) would
+  // see `gateTrees.has(id)` and refuse, failing the reader for a change the writer's current gate will
+  // read. Of the two per-attempt clears, this test pins `gateTrees`; dropping the `reviewedPaths` clear
+  // too (N2e) makes no difference on its own, because the gate's `reviewedPaths.set` overwrites that
+  // key when it runs and rule (b) requires a *current* gate tree to get that far — the pair is
+  // load-bearing, the one clear is not.
+  const WRITER = defineRoleName('coder');
+  const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: (id) => id === writer,
+  };
+  const adapter = new HeldWriterAdapter(writerNode);
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
+  adapter.fixture = f;
+  try {
+    adapter.park = false;
+    const first = await failureOf(f.dispatcher.runNode(writerNode));
+    assert.equal(first.reason, 'budget_exhausted', 'attempt 1 gates and then fails, leaving its gate evidence behind');
+
+    adapter.park = true;
+    const out = await f.dispatcher.runNode(makeNode(ANALYST));
+    const output = out['output'];
+    if (!output || output.kind !== 'string') assert.fail('expected string output');
+    assert.equal(output.value, 'investigated the code', 'the retrying writer is still ahead of its gate');
+    assert.equal(f.attestor.attributed.length, 1, 'rule (a) fires — attempt 1\'s gate tree was cleared (kills N2d)');
+    assert.equal(f.attestor.attributed[0]?.attributedTo, writer);
+  } finally {
+    adapter.release();
+    if (adapter.writerDone) await adapter.writerDone.catch(() => undefined);
+    await f.cleanup();
+  }
+});
+
+/**
+ * A reader whose turn drives a *cli-tier reader* node — a role that holds the writer lock (A3
+ * serializes every cli-tier role) but runs no gate — so it is "holding and not gated" for its whole
+ * turn: rule (a)'s two remaining conditions, and the V8 case. The outer reader's own change lands
+ * after the holder's turn, inside the outer bracket.
+ */
+class MidTurnReaderAdapter implements TurnAdapter {
+  readonly name = 'mid-turn-reader';
+  fixture!: Fixture;
+  constructor(private readonly lookNode: DagNode) {}
+  capabilities(): AdapterCapabilities { return CAPS; }
+  async isAvailable(): Promise<boolean> { return true; }
+  async invoke(_o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    return { success: true, output: 'looked', toolCallLog: [], exitCode: 0, duration: 1 };
+  }
+  async *stream(): AsyncGenerator<string> { yield 'x'; }
+  async sendTurn(_h: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
+    await this.fixture.dispatcher.runNode(this.lookNode); // its whole turn, inside the outer bracket
+    await writeFile(path.join(opts.workingDir, 'sneaky.txt'), 'edited by the analyst\n', 'utf8');
+    return { text: 'investigated the code', toolCalls: [] };
+  }
+}
+
+test('N5/V8: a lock-holder this dispatcher did not start as a writer is never named (WP-3.0c)', async () => {
+  // A cli-tier reader holds the lock for its whole turn but runs no gate, so it is "holding and not
+  // gated". Rule (a) restricted to writer nodes is what stops it being named: the holder was started
+  // by this dispatcher and the ledger says it holds, but it is not a writer node, so the reader's own
+  // change must fail rather than be credited to it. Without the restriction the V8 live row appears —
+  // a reader's edit excused by a reader that never gated.
+  const LOOK = defineRoleName('look');
+  const look = makeNodeId('look');
+  const lookNode: DagNode = { ...makeNode(LOOK, 'look at the code'), id: look };
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [look],
+    isHolding: (id) => id === look,
+  };
+  const adapter = new MidTurnReaderAdapter(lookNode);
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'], execution: 'in-process' },
+      { role: LOOK,    allowedTools: ['fs.read'], execution: 'cli' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
+  adapter.fixture = f;
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change', 'the holder answers for nothing — it never gates');
+    assert.match(failure.message, /sneaky\.txt/);
+    assert.equal(f.attestor.attributed.length, 0, 'no attribution to a node that runs no gate (the V8 live-row hazard)');
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is recorded as the reader\'s own');
+    assert.deepEqual(
+      f.attestor.tiers.find((t) => t.nodeId === look),
+      { nodeId: look, role: 'look', tier: 'cli', adapter: 'mid-turn-reader' },
+      'the holder really was a cli-tier reader — holding the lock without ever gating',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+/**
+ * A writer whose gate throws *after* the `gating` marker is set but before its gate tree is recorded:
+ * a file past the documented diff cap makes `snapshotDiff` refuse, and the marker it set before its
+ * first read stands. The reader then changes its own tree.
+ */
+class OversizeGateAdapter implements TurnAdapter {
+  readonly name = 'oversize-gate';
+  capabilities(): AdapterCapabilities { return CAPS; }
+  async isAvailable(): Promise<boolean> { return true; }
+  async invoke(_o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    throw new Error('every role here runs the in-process loop');
+  }
+  async *stream(): AsyncGenerator<string> { yield 'x'; }
+  async sendTurn(_h: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
+    const isWriter = (opts.tools ?? []).some((t) => t.id === makeToolId('fs.write'));
+    if (isWriter) {
+      // Past the 8 MiB gate cap: the writer's own gate throws in `snapshotDiff`, its tree is never
+      // recorded, and the `gating` marker it set before its first read stands.
+      await writeFile(path.join(opts.workingDir, 'bulk.txt'), 'a'.repeat(9 * 1024 * 1024), 'utf8');
+      return { text: 'wrote a large file', toolCalls: [] };
+    }
+    await writeFile(path.join(opts.workingDir, 'feature.ts'), 'export const feature = 2;\n', 'utf8');
+    return { text: 'investigated the code', toolCalls: [] };
+  }
+}
+
+test('N5: a writer whose gate has begun but recorded no tree is not named on the lock (WP-3.0c)', async () => {
+  // Rule (a)'s first window: the gate's `snapshotTree`/`snapshotDiff` run before `gateTrees.set`, so a
+  // writer there is still holding the lock with no gate tree — the two conditions that would put it in
+  // rule (a). The `gating` marker must exclude it, and rule (b) then fails closed until the tree is
+  // recorded. A gate that throws leaves the marker set persistently: its diff is past the documented
+  // size cap, so `snapshotDiff` refuses it after the marker is set and before the tree is recorded.
+  const WRITER = defineRoleName('coder');
+  const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: (id) => id === writer, // mid-gate: it has released nothing
+  };
+  const adapter = new OversizeGateAdapter();
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
+  try {
+    await f.dispatcher.runNode(writerNode).then(
+      () => assert.fail('the gate must refuse a diff past its size cap'),
+      () => undefined,
+    );
+
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change',
+      'a writer whose gate has begun is not named on the lock — rule (b) fails closed until the tree is recorded');
+    assert.match(failure.message, /feature\.ts/);
+    assert.equal(f.attestor.attributed.length, 0, 'no attribution to a gate that read no tree');
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is recorded as the reader\'s own');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+/** A reader that makes `change` during its turn — the exotic changes a `---`/`+++` parse misses (N4). */
+class ChangeTurnAdapter extends StubTurnAdapter {
+  constructor(private readonly change: (dir: string) => Promise<void>) { super(); }
+  override async sendTurn(history: TurnMessage[], o: AdapterInvokeOptions): Promise<AssistantTurn> {
+    await this.change(o.workingDir);
+    return super.sendTurn(history, o);
+  }
+}
+
+// ─── N4: the path sets come from git, not from a parse of `---`/`+++` ─────────────────────────────
+// A diff-header parse yields a path set git does not: it C-quotes a non-ASCII name (so the name
+// matches nothing), emits no `---`/`+++` lines at all for a mode-only change, and collapses a pure
+// rename into one header. Each of the three made the reader's change *excusable* before the fix,
+// because the path list came back empty or short. Both sets now come from `git diff --name-only -z
+// --no-renames`, so each change is named and fails.
+
+test('N4/V10: a non-ASCII filename in the bracket is named as git reports it, not C-quoted (WP-3.0c)', async () => {
+  const adapter = new ChangeTurnAdapter((dir) => writeFile(path.join(dir, 'café.txt'), 'bonjour\n', 'utf8'));
+  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change');
+    assert.match(failure.message, /café\.txt/, 'the raw name git lists — what a `---`/`+++` parse C-quotes away');
+    assert.doesNotMatch(failure.message, /\\303/, 'no octal escape reaches the message');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('N4/V11: a mode-only change is named and fails the reader (WP-3.0c)', async () => {
+  const adapter = new ChangeTurnAdapter((dir) => chmod(path.join(dir, 'hello.txt'), 0o755));
+  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change', 'an executable bit is a change like any other');
+    assert.match(failure.message, /hello\.txt/, 'the mode-only path git names but a diff parse does not');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('N4/V12: a pure rename is named on both sides and fails the reader (WP-3.0c)', async () => {
+  const adapter = new ChangeTurnAdapter((dir) => rename(path.join(dir, 'hello.txt'), path.join(dir, 'hi.txt')));
+  const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
+  try {
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change');
+    assert.match(failure.message, /hello\.txt/, 'the deletion side, which rename detection collapses into the header');
+    assert.match(failure.message, /hi\.txt/, 'and the addition side');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('N2/V3b: a reviewed path rewritten after the gate is not excused — the content check (kills N2c)', async () => {
+  // Rule (b) needs both halves: `reviewedPaths` is a set of names, and a name rewritten after the gate
+  // names a change the gate never judged. `w1.txt` is the writer's reviewed path and the reader's turn
+  // rewrites it, so path containment holds and only `unchangedSince` can refuse — a rule with the
+  // content check removed (N2c) would name the writer and excuse the rewrite.
+  const WRITER = defineRoleName('coder');
+  const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: () => false, // it finished: only the content check is left
+  };
+  const adapter = new ReviewedWriterAdapter((dir) => writeFile(path.join(dir, 'w1.txt'), 'v2 — not what the gate read\n', 'utf8'));
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
+  try {
+    await f.dispatcher.runNode(writerNode); // gates on w1.txt = v1
+
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change');
+    assert.match(failure.message, /w1\.txt/);
+    assert.equal(f.attestor.attributed.length, 0,
+      'the path is in the writer\'s reviewed set — only the content check refuses (kills N2c)');
+    assert.ok(f.attestor.diffHashes.some((h) => h.key === 'n1.diff'), 'the change is recorded as the reader\'s own');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('N2/N2b: a git failure in the content check fails the reader closed, never "reviewed" (WP-3.0c)', async () => {
+  // `unchangedSince` asks git whether the gate tree still carries the bracket's path. If git cannot
+  // answer, the only honest verdict is "not unchanged" — the change is unattested. Removing the gate
+  // tree's object makes that one call fail while every other call in the guard still works, so a
+  // content check that treats an error as "unchanged" (N2b) would name the writer and excuse it.
+  const WRITER = defineRoleName('coder');
+  const writer = makeNodeId('writer-elsewhere');
+  const writerNode: DagNode = { ...makeNode(WRITER, 'the writer'), id: writer };
+  const ledger: WriterLockLedger = {
+    enter() {}, exit() {},
+    writersOverlapping: () => [writer],
+    isHolding: () => false,
+  };
+  const adapter = new ReviewedWriterAdapter((dir) => writeFile(path.join(dir, 'w1.txt'), 'v2\n', 'utf8'));
+  const f = await makeFixture({
+    roleExecution: 'in-process',
+    roles: [
+      { role: ANALYST, allowedTools: ['fs.read'],  execution: 'in-process' },
+      { role: WRITER,  allowedTools: ['fs.write'], execution: 'in-process' },
+    ],
+    adapter, policyHandler: ALLOW, writerLockLedger: ledger,
+  });
+  try {
+    await f.dispatcher.runNode(writerNode); // gates on w1.txt = v1
+    // The gate tree, computed the same way the dispatcher took it (content-identical ⇒ same id), then
+    // made unreadable to git. `extra.txt` is added afterwards so the reader's own bracket start tree is
+    // a *different* object — otherwise deleting the gate tree would break the bracket diff instead.
+    const gateTree = await snapshotTree(f.workDir);
+    await writeFile(path.join(f.workDir, 'extra.txt'), 'x\n', 'utf8');
+    await rm(path.join(f.workDir, '.git', 'objects', gateTree.slice(0, 2), gateTree.slice(2)), { force: true });
+
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'unexpected_change', 'git cannot settle the content check, so the change is not "reviewed"');
+    assert.match(failure.message, /w1\.txt/);
+    assert.equal(f.attestor.attributed.length, 0, 'a content check that fails open (N2b) would name the writer here');
   } finally {
     await f.cleanup();
   }
