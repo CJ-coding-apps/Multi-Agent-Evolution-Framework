@@ -29,8 +29,10 @@ export function isWriterRole(role: { readonly allowedTools: readonly ToolId[] })
  *
  * The role's own declaration when it makes one, else the tools it holds: a role with at least one
  * tool is a role with something to call, and one with an empty allowlist has nothing and answers
- * from the prompt by design. The caller asks this of a **reader** only — a writer is judged by
- * `no_change` (D-32), and this predicate says nothing about a writer's success.
+ * from the prompt by design. The caller asks this of a role that does **not** expect a change — the
+ * built-in `tester` included, since it holds `test.run` and is judged by `no_work` (A2). A role that
+ * expects a change (`expectsChange: true`, the built-in `coder`) is judged by `no_change` (D-32), and
+ * this predicate says nothing about it.
  */
 export function expectsToolCalls(
   role: { readonly allowedTools: readonly ToolId[]; readonly expectsToolCalls?: boolean },

@@ -103,9 +103,11 @@ test('fromSet throws when defaultRole missing from roles', () => {
 
 // F8/M19: `expectsToolCalls: true` is a promise about the call count, so it must be able to mean
 // something. On a role with no tool it can never be satisfied — the node has nothing to call, so every
-// run ends `no_work`. On a writer it is inert whatever its value (R7), because no_change (D-32) judges
-// the writer by the tree, never by its call count — so the setting is read and discarded. Both are
-// refused where the set is validated.
+// run ends `no_work`. On a role that *expects a change* it is inert whatever its value (R7), because
+// no_change (D-32) judges such a role by the tree, never by its call count — so the setting is read
+// and discarded. The predicate is `expectsChange`, not "holds a write tool" (A2, the 0.4.0 audit): the
+// built-in `tester` holds `test.run` but expects no change, so it is judged by `no_work` and must be
+// allowed to declare this.
 
 test('F8: fromSet refuses expectsToolCalls: true on a role that holds no tool', () => {
   const tools = createDefaultRegistry();
@@ -124,41 +126,59 @@ test('F8: fromSet refuses expectsToolCalls: true on a role that holds no tool', 
   );
 });
 
-test('F8: fromSet refuses expectsToolCalls: true on a writer, which no_change judges instead', () => {
+test('F8/A2: fromSet refuses expectsToolCalls: true on a role that expects a change, which no_change judges instead', () => {
   const tools = createDefaultRegistry();
   assert.throws(
     () => RoleRegistry.fromSet(
       {
         version: 1,
         defaultRole: defineRoleName('coder'),
-        roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [makeToolId('fs.write')], expectsToolCalls: true }],
+        roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [makeToolId('fs.write')], expectsChange: true, expectsToolCalls: true }],
       },
       '/tmp',
       tools,
     ),
     (err: unknown) => err instanceof RoleConfigError
-      && /coder/.test(err.message) && /write tool/.test(err.message),
+      && /coder/.test(err.message) && /expects a change/.test(err.message),
   );
 });
 
-test('R7: fromSet refuses expectsToolCalls: false on a writer too — the value is never read', () => {
-  // R7 widened F8. `true` on a writer is inert, and so is `false`: no_change (D-32) judges a writer by
-  // the tree whatever it declares, so the ruling refuses *any* declared value on a writer rather than
-  // let one be accepted and discarded.
+test('R7: fromSet refuses expectsToolCalls: false on a role that expects a change too — the value is never read', () => {
+  // R7 widened F8. `true` on such a role is inert, and so is `false`: no_change (D-32) judges it by
+  // the tree whatever it declares, so the ruling refuses *any* declared value rather than let one be
+  // accepted and discarded.
   const tools = createDefaultRegistry();
   assert.throws(
     () => RoleRegistry.fromSet(
       {
         version: 1,
         defaultRole: defineRoleName('coder'),
-        roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [makeToolId('fs.write')], expectsToolCalls: false }],
+        roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [makeToolId('fs.write')], expectsChange: true, expectsToolCalls: false }],
       },
       '/tmp',
       tools,
     ),
     (err: unknown) => err instanceof RoleConfigError
-      && /coder/.test(err.message) && /write tool/.test(err.message),
+      && /coder/.test(err.message) && /expects a change/.test(err.message),
   );
+});
+
+test('A2: fromSet accepts expectsToolCalls on a writer that does not expect a change — the tester shape', () => {
+  // A2 (the 0.4.0 audit): a role that holds a write tool but expects no change is judged by `no_work`,
+  // so its `expectsToolCalls` is read, not discarded — it must construct. This is exactly the built-in
+  // `tester`, which holds `test.run` and declares no `expectsChange`; the old "holds a write tool"
+  // refusal denied it the only knob that would catch it.
+  const tools = createDefaultRegistry();
+  const reg = RoleRegistry.fromSet(
+    {
+      version: 1,
+      defaultRole: defineRoleName('tester'),
+      roles: [{ role: defineRoleName('tester'), systemPrompt: 'a', allowedTools: [makeToolId('test.run')], expectsToolCalls: true }],
+    },
+    '/tmp',
+    tools,
+  );
+  assert.equal(reg.getDefault().expectsToolCalls, true);
 });
 
 test('F8: a reader that holds a tool and declares expectsToolCalls is still accepted', () => {
