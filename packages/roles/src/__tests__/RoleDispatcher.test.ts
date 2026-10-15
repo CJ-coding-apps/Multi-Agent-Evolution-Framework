@@ -12,7 +12,7 @@ import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, PolicyDecision, ToolContext, ToolInput, ToolResult,
   RoleName, PartialNodeOutcome, ExecutionTierRecord, ModelSurfaceRecord, AttributedChange,
-  WriterLockLedger,
+  WriterLockLedger, ToolCallRecord, TaskId,
 } from '@maf/types';
 import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
@@ -115,7 +115,7 @@ function makePolicy(handler: (toolId: string, input: ToolInput) => PolicyDecisio
 }
 
 function makeAttestor() {
-  const records: Array<{ toolId: string; result: ToolResult }> = [];
+  const records: Array<Omit<ToolCallRecord, 'id'>> = [];
   const diffHashes: Array<{ key: string; diff: string }> = [];
   const tiers: ExecutionTierRecord[] = [];
   const surfaces: ModelSurfaceRecord[] = [];
@@ -127,7 +127,12 @@ function makeAttestor() {
     surfaces,
     attributed,
     stub: {
-      record: async (c: { toolId: string; result: ToolResult }) => { records.push(c); },
+      record: async (c: Omit<ToolCallRecord, 'id'>) => { records.push(c); },
+      // The real Attestor answers this by task; the dispatcher reads it to count a reader's executed
+      // calls (D-46). A double that omitted it would read as "no calls at all", which is the
+      // unwatched case, not the did-no-work one — so the fixture answers it as the real one does.
+      toolCallsForTask: (taskId: TaskId): ToolCallRecord[] =>
+        records.filter((c) => c.taskId === taskId).map((c, i) => ({ id: `rec-${i}`, ...c })),
       recordDiffHash: (key: string, diff: string) => { diffHashes.push({ key, diff }); },
       recordExecutionTier: (record: ExecutionTierRecord) => { tiers.push(record); },
       recordModelSurface: (record: ModelSurfaceRecord) => { surfaces.push(record); },
@@ -317,7 +322,11 @@ test('in-process role: policy Deny prevents execution and feeds the model an err
     policyHandler: () => ({ verdict: 'Deny', reason: 'test denies all' }),
   });
   try {
-    await f.dispatcher.runNode(makeNode(ANALYST));
+    // D-46: the reader's only call was refused, so it made no executed call — it did no work, and the
+    // node now fails `no_work`. The Deny path itself is unchanged; the node just no longer reads as
+    // Succeeded off the prose that followed the refusal.
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'no_work');
     const turn2 = adapter.histories[1] ?? [];
     const toolMsg = turn2.find((m) => m.kind === 'tool');
     assert.ok(toolMsg && toolMsg.kind === 'tool' && toolMsg.isError);
@@ -337,7 +346,10 @@ test('in-process role: tool outside the allowlist is rejected before policy', as
   ];
   const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
   try {
-    await f.dispatcher.runNode(makeNode(ANALYST));
+    // D-46: the reader's only call was refused before policy (not on the allowlist), so no call
+    // executed — the node fails `no_work`. The rejection itself is unchanged.
+    const failure = await failureOf(f.dispatcher.runNode(makeNode(ANALYST)));
+    assert.equal(failure.reason, 'no_work');
     const turn2 = adapter.histories[1] ?? [];
     const toolMsg = turn2.find((m) => m.kind === 'tool');
     assert.ok(toolMsg && toolMsg.kind === 'tool' && toolMsg.isError);
@@ -440,7 +452,12 @@ test('in-process loop: a node with allowPartial succeeds on budget_exhausted and
 
 test('in-process loop: a node that finishes returns no partial outcome', async () => {
   const adapter = new StubTurnAdapter();
-  adapter.turnsToServe = [{ text: 'all done', toolCalls: [] }];
+  // One executed read, then the answer: the reader did its work (D-46), so it finishes and no
+  // partial outcome is invented for it. A zero-call finish would now fail `no_work` instead.
+  adapter.turnsToServe = [
+    { text: 'reading', toolCalls: [{ toolUseId: 'u1', toolName: 'fs.read', input: { path: 'hello.txt' } }] },
+    { text: 'all done', toolCalls: [] },
+  ];
   const f = await makeFixture({ roleExecution: 'in-process', adapter, policyHandler: ALLOW });
   try {
     const out = await f.dispatcher.runNode({ ...makeNode(ANALYST), allowPartial: true });
@@ -723,6 +740,7 @@ class HeldWriterAdapter implements TurnAdapter {
   fixture!: Fixture;
   park = true;
   writerDone: Promise<unknown> | undefined;
+  private readerStarted = false;
   private readonly writerStarted = deferred();
   private readonly writerRelease = deferred();
   constructor(private readonly writerNode: DagNode) {}
@@ -745,8 +763,16 @@ class HeldWriterAdapter implements TurnAdapter {
       await this.writerRelease.promise;
       return { text: 'wrote feature.ts', toolCalls: [] };
     }
-    this.writerDone = this.fixture.dispatcher.runNode(this.writerNode);
-    await this.writerStarted.promise;
+    // The reader does its own work — one executed read (D-46) — before it answers, so its node
+    // genuinely succeeds and the bracket's change is the *writer's*, which is the case under test.
+    // The writer is spawned exactly once, on this first turn; the second turn only supplies the
+    // final answer, so the writer is not re-entered (which would start a second nested run).
+    if (!this.readerStarted) {
+      this.readerStarted = true;
+      this.writerDone = this.fixture.dispatcher.runNode(this.writerNode);
+      await this.writerStarted.promise;
+      return { text: 'investigating', toolCalls: [{ toolUseId: 'q1', toolName: 'fs.read', input: { path: 'hello.txt' } }] };
+    }
     return { text: 'investigated the code', toolCalls: [] };
   }
   release(): void { this.writerRelease.resolve(); }

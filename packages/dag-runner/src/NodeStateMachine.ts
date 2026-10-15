@@ -1,4 +1,4 @@
-import type { DagNodeStatus, NodeId, RunId, AgentId } from '@maf/types';
+import type { DagNodeStatus, NodeId, RunId, AgentId, NodeFailureDetail } from '@maf/types';
 
 // Valid transitions (Symphony-style state machine)
 const TRANSITIONS: Record<DagNodeStatus, DagNodeStatus[]> = {
@@ -20,6 +20,8 @@ export interface NodeExecutionState {
   startedAt?:  Date;
   finishedAt?: Date;
   error?:      string;
+  /** The failure as a value (L3), when the node failed with a `NodeFailure`; see `DagNodeExecution`. */
+  failure?:    NodeFailureDetail;
 }
 
 export class NodeStateMachine {
@@ -29,7 +31,13 @@ export class NodeStateMachine {
     this.states.set(nodeId, { nodeId, runId, status: 'Unclaimed', attempt: 0 });
   }
 
-  transition(nodeId: NodeId, to: DagNodeStatus, agentId?: AgentId, error?: string): void {
+  transition(
+    nodeId: NodeId,
+    to: DagNodeStatus,
+    agentId?: AgentId,
+    error?: string,
+    failure?: NodeFailureDetail,
+  ): void {
     const state = this.states.get(nodeId);
     if (!state) throw new Error(`Unknown node: ${nodeId}`);
 
@@ -42,6 +50,7 @@ export class NodeStateMachine {
     state.status = to;
     if (agentId) state.agentId = agentId;
     if (error)   state.error = error;
+    if (failure) state.failure = failure;
 
     if (to === 'Claimed')   state.claimedAt = now;
     if (to === 'Running')   state.startedAt = now;

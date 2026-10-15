@@ -24,6 +24,20 @@ export function isWriterRole(role: { readonly allowedTools: readonly ToolId[] })
   return role.allowedTools.some((id) => WRITE_TOOLS.has(id));
 }
 
+/**
+ * Whether a role is expected to make a tool call (D-46), the predicate behind `no_work`.
+ *
+ * The role's own declaration when it makes one, else the tools it holds: a role with at least one
+ * tool is a role with something to call, and one with an empty allowlist has nothing and answers
+ * from the prompt by design. The caller asks this of a **reader** only — a writer is judged by
+ * `no_change` (D-32), and this predicate says nothing about a writer's success.
+ */
+export function expectsToolCalls(
+  role: { readonly allowedTools: readonly ToolId[]; readonly expectsToolCalls?: boolean },
+): boolean {
+  return role.expectsToolCalls ?? role.allowedTools.length > 0;
+}
+
 type TierFields = Pick<RoleConfig, 'allowedTools' | 'execution'>;
 
 /**

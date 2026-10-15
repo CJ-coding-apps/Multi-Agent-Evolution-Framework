@@ -9,8 +9,15 @@ import { describeToolInput } from '@maf/types';
  * engine + processor pipeline intercept every call — unlike the legacy opaque
  * invoke() path. Kept in @maf/adapter-base (depends only on @maf/types) so no
  * adapter duplicates the format and no cycle through @maf/roles is introduced.
+ *
+ * D-46(i): the first paragraph names what the turn does *not* have. A governed turn runs the backend
+ * with `--tools ''` (CLAUDE_TURN_ISOLATION_ARGS), so the host's native Read/Write/Bash/Glob/Grep are
+ * gone — but the backend's own system prompt still advertises them, and this block used only to say
+ * the model "MAY request tools" by fenced block. Live row 2b of the 3.0c pass: the model reached for
+ * a native tool, was refused, and gave up. Saying which tools exist is the turn saying what it has.
  */
 export const TOOL_PROTOCOL = [
+  "The host's own tools — Read, Write, Edit, Bash, Glob, Grep, WebFetch, or any other tool you may believe you have — are not available in this turn, and a request for one is refused. The only tools you have are the ones listed below; request one with a fenced block exactly as described, by its id.",
   'You MAY request tools. To request a tool, emit exactly one fenced block per call:',
   '```tool_call',
   '{"toolName":"<tool-id>","input":{...}}',

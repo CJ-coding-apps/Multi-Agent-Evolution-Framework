@@ -380,6 +380,12 @@ export interface DagNodeExecution {
   startedAt?:  Date;
   finishedAt?: Date;
   error?:      string;
+  /**
+   * The node's failure as a value (L3): the kind, and — for a refusal — the rule and tool. Present
+   * only for a node that failed with a `NodeFailure`, so a machine check reads the verdict directly
+   * rather than grepping `error`. A `0.3.x` outcome carries none and still parses.
+   */
+  failure?:    NodeFailureDetail;
   agentId?:    AgentId;
 }
 
@@ -393,6 +399,14 @@ export interface DagNodeExecution {
  *                         either tier, but its diff against the node's start commit is empty —
  *                         what a backend that refused the edit under its own permission settings
  *                         looks like (D-32).
+ *  - `no_work`          — in-process: a **reader** (a role that holds no write tool) that expects a
+ *                         tool call (`expectsToolCalls`) finished with a final answer having made
+ *                         **no executed tool call** — the attested calls with an `Allow` verdict,
+ *                         which is to say the calls that actually ran (D-46). A reader that read
+ *                         nothing has not succeeded: live row 2b's analyst answered "I could not"
+ *                         after the host's native tools were refused, and the old reading called it
+ *                         `Succeeded` off the prose. The mirror of `no_change` for a reader, where
+ *                         `no_change` is the writer's.
  *  - `unexpected_change`— a role that holds **no** write tool changed the tree anyway (F7). On
  *                         the cli tier that is what a backend with file tools of its own does
  *                         whatever the role's allowlist says; MAF never sees those calls. The
@@ -405,9 +419,23 @@ export type NodeFailureReason =
   | 'adapter_failed'
   | 'empty_output'
   | 'no_change'
+  | 'no_work'
   | 'unexpected_change'
   | 'budget_exhausted'
   | 'loop_failed';
+
+/**
+ * The machine-checkable half of a node failure (L3): the `kind`, and — when a policy refusal caused
+ * it — the rule and the tool that refused, taken from the first refused call the F10 clause named.
+ * Carried on the run outcome beside the failure's prose, so a machine check reads the verdict rather
+ * than grepping the message. A `no_change` caused by anything other than a refusal (a backend that
+ * simply changed nothing) names neither.
+ */
+export interface NodeFailureDetail {
+  kind:    NodeFailureReason;
+  ruleId?: string;
+  toolId?:  string;
+}
 
 /**
  * A node that ran but did not finish (D-04). Before this existed, a failed adapter call and an
@@ -419,12 +447,23 @@ export class NodeFailure extends Error {
   readonly reason:   NodeFailureReason;
   /** The adapter's exit code, when the failure came from a CLI-tier invocation. */
   readonly exitCode: number | undefined;
+  /** The policy rule that refused the call this failure is about, when one did (L3). */
+  readonly ruleId:   string | undefined;
+  /** The tool the refused call named, when the failure is about a refusal (L3). */
+  readonly toolId:   string | undefined;
 
-  constructor(reason: NodeFailureReason, message: string, exitCode?: number) {
+  constructor(
+    reason: NodeFailureReason,
+    message: string,
+    exitCode?: number,
+    detail?: { ruleId?: string; toolId?: string },
+  ) {
     super(message);
     this.name = 'NodeFailure';
     this.reason = reason;
     this.exitCode = exitCode;
+    this.ruleId = detail?.ruleId;
+    this.toolId = detail?.toolId;
   }
 }
 

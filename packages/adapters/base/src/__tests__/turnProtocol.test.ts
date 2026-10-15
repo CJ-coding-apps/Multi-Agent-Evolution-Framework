@@ -140,3 +140,27 @@ test('the protocol says the input must use exactly the catalog\'s field names, a
   assert.match(out, /answered with an error and not run/);
   assert.match(out, /"diff": string \(required\)/);
 });
+
+// ── D-46(i): the governed turn says what it has, before it lists anything ─────────────────────
+// A governed turn runs `claude --tools ''` (CLAUDE_TURN_ISOLATION_ARGS), so the host's native tools
+// are gone — but Claude Code's own system prompt still advertises Read/Write/Bash/Glob/Grep. Live row
+// 2b of the 3.0c pass: the model tried the host's tools, was refused ("No such tool available", not
+// MAF's string), and gave up. The protocol now names the tools it has and the ones it does not, and
+// does so before the catalogue it points at.
+
+test('the protocol tells the model its host tools are off, and says it before the catalogue (D-46)', () => {
+  const out = buildTurnSystemPrompt('BASE', [fakeTool('fs.read', 'Read File', 'read a file')]);
+
+  assert.match(
+    out,
+    /The host's own tools — Read, Write, Edit, Bash, Glob, Grep, WebFetch, or any other tool you may believe you have — are not available in this turn, and a request for one is refused\./,
+  );
+  assert.match(
+    out,
+    /The only tools you have are the ones listed below; request one with a fenced block exactly as described, by its id\./,
+  );
+  assert.ok(
+    out.indexOf("The host's own tools") < out.indexOf('AVAILABLE TOOLS'),
+    'the sentence must precede the catalogue it names',
+  );
+});

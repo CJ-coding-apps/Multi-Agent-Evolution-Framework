@@ -1,7 +1,7 @@
 import type {
   Dag, DagNode, NodeId, RunId, AgentId, CliAdapter,
   AdapterInvokeOptions, BlackboardKey, BlackboardValue, RunOutcome, RunStatus,
-  FailureRecorder, NodeFailureRecord, WriterLockLedger,
+  FailureRecorder, NodeFailureRecord, WriterLockLedger, NodeFailureDetail,
 } from '@maf/types';
 import { makeAgentId, NodeFailure } from '@maf/types';
 import type { BlackboardStore } from '@maf/blackboard';
@@ -181,7 +181,7 @@ export class DagRunner {
       opts.onNodeEnd?.(node.id, 'Succeeded');
     } catch (err: unknown) {
       const error = err instanceof Error ? err.message : String(err);
-      this.sm.transition(node.id, 'Failed', undefined, error);
+      this.sm.transition(node.id, 'Failed', undefined, error, nodeFailureDetail(err));
       board.setDagState(node.id, 'Failed');
       await recordFailure(
         opts.failureRecorder, opts.failureRecordTimeoutMs ?? FAILURE_RECORD_TIMEOUT_MS, node, runId, err, error,
@@ -241,6 +241,22 @@ function failureRecord(node: DagNode, runId: RunId, err: unknown, message: strin
     reason:  failureReason(err),
     message,
     ...(err instanceof NodeFailure && err.exitCode !== undefined ? { exitCode: err.exitCode } : {}),
+  };
+}
+
+/**
+ * The failure as a value for the run outcome (L3): the kind the dispatcher decided, and the rule and
+ * tool a policy refusal named. Only a `NodeFailure` carries a verdict — a plain `Error` is a
+ * transport or programming failure with no kind to report, and inventing one would have `failure`
+ * assert something the run does not know. Keys with no value are left out, so a `no_work` with no
+ * refusal reads as exactly `{ kind: 'no_work' }` rather than a record salted with `undefined`.
+ */
+function nodeFailureDetail(err: unknown): NodeFailureDetail | undefined {
+  if (!(err instanceof NodeFailure)) return undefined;
+  return {
+    kind: err.reason,
+    ...(err.ruleId !== undefined ? { ruleId: err.ruleId } : {}),
+    ...(err.toolId !== undefined ? { toolId: err.toolId } : {}),
   };
 }
 

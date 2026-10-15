@@ -18,7 +18,7 @@ import type { MemoryGraph } from '@maf/memory-graph';
 import type { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, AssistantTurn,
-  AttributedChange, BlackboardValue, ExecutionTierRecord, ModelSurfaceRecord, ToolResult,
+  AttributedChange, BlackboardValue, ExecutionTierRecord, ModelSurfaceRecord, TaskId, ToolCallRecord,
   TurnAdapter, TurnMessage, WriterLockLedger,
 } from '@maf/types';
 import { makeRunId } from '@maf/types';
@@ -83,6 +83,7 @@ class OverlapAdapter implements TurnAdapter {
   private readonly coderWrote = deferred();
   private readonly analystReady = deferred();
   private coderTurns = 0;
+  private analystTurns = 0;
   constructor(private readonly holdMs: number) {}
   capabilities(): AdapterCapabilities { return IN_PROCESS_CAPS; }
   async isAvailable(): Promise<boolean> { return true; }
@@ -104,7 +105,13 @@ class OverlapAdapter implements TurnAdapter {
       await sleep(this.holdMs);  // and the coder keeps holding the lock across the analyst's guard
       return { text: 'wrote feature.ts', toolCalls: [] };
     }
-    this.analystReady.resolve();
+    // Reader: one executed call (D-46 requires a reader to have done work), then the answer. The
+    // first turn opens the bracket and lets the coder write; the second waits for the write to land.
+    this.analystTurns += 1;
+    if (this.analystTurns === 1) {
+      this.analystReady.resolve();
+      return { text: 'reading the tree first', toolCalls: [{ toolUseId: 'r1', toolName: 'fs.read', input: { path: 'app.js' } }] };
+    }
     await this.coderWrote.promise;
     return { text: 'the feature is there', toolCalls: [] };
   }
@@ -148,6 +155,7 @@ class FinishedCoderAdapter implements TurnAdapter {
   readonly name = 'finished-coder';
   private readonly analystReady = deferred();
   private coderTurns = 0;
+  private analystTurns = 0;
   constructor(private readonly coderEnded: Deferred) {}
   capabilities(): AdapterCapabilities { return IN_PROCESS_CAPS; }
   async isAvailable(): Promise<boolean> { return true; }
@@ -167,7 +175,11 @@ class FinishedCoderAdapter implements TurnAdapter {
       }
       return { text: 'wrote feature.ts', toolCalls: [] };
     }
-    this.analystReady.resolve();
+    this.analystTurns += 1;
+    if (this.analystTurns === 1) {
+      this.analystReady.resolve();
+      return { text: 'reading the tree first', toolCalls: [{ toolUseId: 'r1', toolName: 'fs.read', input: { path: 'app.js' } }] };
+    }
     await this.coderEnded.promise; // the coder's node has ended — lock released and gate run
     return { text: 'the feature is there', toolCalls: [] };
   }
@@ -187,6 +199,7 @@ class TwoCodersAdapter implements TurnAdapter {
   readonly name = 'two-coders';
   private readonly analystReady = deferred();
   private coderTurns = 0;
+  private analystTurns = 0;
   constructor(private readonly secondCoderEnded: Deferred) {}
   capabilities(): AdapterCapabilities { return IN_PROCESS_CAPS; }
   async isAvailable(): Promise<boolean> { return true; }
@@ -211,7 +224,11 @@ class TwoCodersAdapter implements TurnAdapter {
           return { text: 'wrote feature.ts', toolCalls: [] };
       }
     }
-    this.analystReady.resolve();
+    this.analystTurns += 1;
+    if (this.analystTurns === 1) {
+      this.analystReady.resolve();
+      return { text: 'reading the tree first', toolCalls: [{ toolUseId: 'r1', toolName: 'fs.read', input: { path: 'app.js' } }] };
+    }
     await this.secondCoderEnded.promise;
     return { text: 'the feature is there', toolCalls: [] };
   }
@@ -228,14 +245,21 @@ function makeTranscript() {
 }
 
 function makeAttestor() {
+  const records: Array<Omit<ToolCallRecord, 'id'>> = [];
   const diffHashes: Array<{ key: string; diff: string }> = [];
   const tiers: ExecutionTierRecord[] = [];
   const surfaces: ModelSurfaceRecord[] = [];
   const attributed: AttributedChange[] = [];
   return {
-    diffHashes, tiers, surfaces, attributed,
+    records, diffHashes, tiers, surfaces, attributed,
     stub: {
-      record: async (_c: { toolId: string; result: ToolResult }) => undefined,
+      record: async (c: Omit<ToolCallRecord, 'id'>) => { records.push(c); },
+      // The real Attestor answers this by task; the dispatcher reads it to count a reader's executed
+      // calls (D-46). A double that omitted it would read as "no calls at all", which is the
+      // did-no-work case — so the fixture answers it as the real one does, and every reader below
+      // makes a real call through the gate.
+      toolCallsForTask: (taskId: TaskId): ToolCallRecord[] =>
+        records.filter((c) => c.taskId === taskId).map((c, i) => ({ id: `rec-${i}`, ...c })),
       recordDiffHash: (key: string, diff: string) => { diffHashes.push({ key, diff }); },
       recordExecutionTier: (record: ExecutionTierRecord) => { tiers.push(record); },
       recordModelSurface: (record: ModelSurfaceRecord) => { surfaces.push(record); },

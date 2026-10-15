@@ -8,7 +8,7 @@ import path from 'node:path';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, ToolPlugin, ToolContext, ToolResult, SecurityReviewResult,
-  ToolId, ExecutionTierRecord,
+  ToolId, ExecutionTierRecord, ToolCallRecord, TaskId,
 } from '@maf/types';
 import { makeNodeId, makeRunId, makeToolId, GateRefused, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
@@ -189,6 +189,9 @@ async function makeFixture(opts: {
   const stderr: string[] = [];
   const transcript: Array<{ role: string; content: string }> = [];
   const tiers: ExecutionTierRecord[] = [];
+  // Every call the loop attests, so `toolCallsForTask` can answer as the real Attestor does — the
+  // reader's executed-call count (D-46) is read from here.
+  const calls: Array<Omit<ToolCallRecord, 'id'>> = [];
   const dispatcher = new RoleDispatcher({
     adapter: opts.adapter,
     baseTools,
@@ -196,7 +199,9 @@ async function makeFixture(opts: {
     injector: { assemble: async () => ({ systemPromptPrefix: '' }) } as unknown as GraphAwareInjector,
     policy: { evaluate: async () => ({ verdict: 'Allow' }) } as unknown as PolicyEngine,
     attestor: {
-      record: async () => {},
+      record: async (call: Omit<ToolCallRecord, 'id'>) => { calls.push(call); },
+      toolCallsForTask: (taskId: TaskId): ToolCallRecord[] =>
+        calls.filter((c) => c.taskId === taskId).map((c, i) => ({ id: `rec-${i}`, ...c })),
       recordSecurityFindings: () => {},
       recordExecutionTier: (record: ExecutionTierRecord) => { tiers.push(record); },
     } as unknown as Attestor,
@@ -644,12 +649,17 @@ test('a loop that fails on malformed tool calls under a bundle without the secur
 
 test('a built-in reader (analyst) runs in-process on an adapter that can drive the loop', async () => {
   const adapter = new TurnStub();
-  adapter.turns = [{ text: 'the flag is read at config.ts:41', toolCalls: [] }];
+  // One executed read, then the answer: the reader does its work (D-46), so the node succeeds and
+  // the tier record is what this test reads.
+  adapter.turns = [
+    { text: 'reading', toolCalls: [{ toolUseId: 'u1', toolName: 'fs.read', input: { path: 'hello.txt' } }] },
+    { text: 'the flag is read at config.ts:41', toolCalls: [] },
+  ];
   const fx = await makeFixture({ adapter, role: getDefaultRoleConfig(defineRoleName('analyst'))! });
   try {
     await fx.dispatcher.runNode(nodeFor('analyst'));
     assert.equal(adapter.invoked, 0, 'not the single opaque cli call');
-    assert.equal(adapter.turnsTaken, 1, 'the loop drove the backend turn by turn');
+    assert.equal(adapter.turnsTaken, 2, 'the loop drove the backend turn by turn — the read, then the answer');
     assert.deepEqual(fx.tiers, [{ nodeId: 'n1', role: 'analyst', tier: 'in-process', adapter: 'turn-stub' }]);
   } finally {
     await fx.cleanup();

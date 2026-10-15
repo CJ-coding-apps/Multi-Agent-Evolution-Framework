@@ -345,7 +345,15 @@ A role runs in one of two tiers:
   empty `--mcp-config`, so it has no MCP tool either: the only tools in the loop are MAF's
   ([D-33](DECISIONS.md)). The catalog the model is shown carries each tool's input schema, and a call
   whose input does not match it is answered with an error and not executed — no paths declared, no policy
-  asked — and recorded as `Indeterminate` under rule id `builtin:input-schema`.
+  asked — and recorded as `Indeterminate` under rule id `builtin:input-schema`. The loop's tool protocol
+  opens by telling the model that the host's own tools — `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`,
+  `WebFetch` or any other it may believe it has — are not available this turn and that a request for one is
+  refused, so what the prompt claims of the backend matches what `--tools ""` did to it
+  ([D-46](DECISIONS.md)). A non-writer node here that finishes with an answer after **zero executed tool
+  calls** fails with `no_work`: a reader that made no call did not answer the question it was given, and a
+  call the policy engine denied (and escalated, then refused) never ran and is not work. The check is made
+  only where a per-call record exists — the `in-process` tier — and a role whose job is not to call a tool
+  opts out with `expectsToolCalls: false` ([D-46](DECISIONS.md)).
 - **`cli`** — maf hands the backend CLI one prompt and reads back one result. The agent
   runs its own tools, so maf sees **no individual tool call**: not the arguments, not the policy verdict,
   not the path. MAF passes no hook flags, and no permission flags but one: Codex is invoked with
