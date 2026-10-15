@@ -47,9 +47,18 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
   pattern set would mangle the evidence the bundle exists to be. So a credential in another format, or one
   nested a level down inside the input, is recorded as written. Treat a bundle as containing whatever the
   run printed and whatever the agent chose to type. Failure messages, which also reach the bundle's
-  run outcome and the memory graph, are masked the same way: a failed node's output tail with those eight
-  formats, and a backend's stderr or HTTP error-body tail with five of them (bearer tokens, `sk-` keys,
-  Google, GitHub and AWS keys).
+  run outcome and the memory graph, are masked the same way — every text a failure quotes is scrubbed
+  before it is quoted: a failed node's output tail with those eight formats; a backend's stderr or HTTP
+  error-body tail with five of them (bearer tokens, `sk-` keys, Google, GitHub and AWS keys); the `no_work`
+  answer excerpt (the first 200 characters of the model's answer, masked and then whitespace-collapsed, with
+  the eight formats); the malformed-`tool_call` snippet a parse error carries, and the security gate's
+  `Raw:` tail, both with the eight formats. Each is masked **before** the slice that shortens it, so a key the
+  cut would split is recognised whole rather than preserved by its head. Two masks here are not the same
+  mask, and the difference is deliberate but worth naming: the **model-view** processor that feeds text back
+  to the model marks `[REDACTED:<label>]` too, but from a **broader** pattern set (it adds a `generic-secret`
+  heuristic), while the record's mask strips credential *formats* only — so a heuristic secret is masked in
+  the history and stays in the record; and the adapters' failure-tail mask uses a third, unlabelled
+  `[REDACTED]`. Bringing all three onto one scrubber is a Phase-backlog item, not a 0.4.0 change.
 - **A refused escalation leaves a record in the clear** at `.maf/approvals/pending/<id>.json` when no one
   could be asked: the approval request (its id, the run, the task, the tool and the rule), the request's
   hash, the declared paths, a timestamp and the reason. The tool's input is not written there.
@@ -396,10 +405,9 @@ backend's own tools, not what the backend then did. So a `cli`-tier role call th
 what MAF handed the backend and what came back is in the bundle, distinct from the individual tool calls the
 backend ran, which MAF still does not see. A role call routed to `ollama` or `openrouter` is **not** covered:
 those adapters compose no argv and fill no `modelSurface`, so a `cli`-tier call through them is still
-unrecorded — the tier is not by itself the thing being claimed. Two `cli`-tier calls
-are still without a surface — the planner's call and the security reviewer's call, which MAF spawns itself
-rather than through a role node. The planner's call and the security reviewer's call are `cli`-tier calls in
-this sense, whatever tier the roles run on, with one difference: they need only text, so `claude` is spawned for them with `--tools ""`,
+unrecorded — the tier is not by itself the thing being claimed. Two `cli`-tier calls are still without a
+surface — the planner's call and the security reviewer's call, which MAF spawns itself rather than through a
+role node, whatever tier the roles run on. One difference: they need only text, so `claude` is spawned for them with `--tools ""`,
 its own tools off, as for an in-process turn. `codex` and `gemini` have no known flag for that, and keep
 their tools on these calls; a reader's own `cli`-tier call gets `--tools Read,Glob,Grep` on `claude`.
 

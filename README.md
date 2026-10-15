@@ -303,7 +303,7 @@ pnpm -r test            # node:test on dist/__tests__/
 
 TypeScript settings (see `tsconfig.base.json`): `strict`, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `noImplicitOverride`. Branded ID types (RunId, TaskId, ToolId, NodeId, AgentId, EdgeId) — construct via the `make*` helpers in `@maf/types`.
 
-Tests live in `src/__tests__/` and run from `dist/__tests__/`. Each package that has tests declares `"test": "node --test dist/__tests__/*.test.js"` in its `package.json`. Tests that open the LCM store skip where `better-sqlite3` does not load, and cannot skip in CI. CI also runs the job `e2e · demo · attestation · offline goldens`: the built demo, `maf attest verify` on its bundle, and the offline goldens compared with `tests/goldens/baseline.json` by `scripts/compare-goldens.mjs`.
+Tests live in `src/__tests__/` and run from `dist/__tests__/`. Each package that has tests declares `"test": "node --test dist/__tests__/*.test.js"` in its `package.json`. Because the suite runs the **compiled** output and `tsc` never prunes it, a stale `dist/` after a branch switch can still hold a test file whose source is gone; if a run looks wrong, remove that package's `dist/` and rebuild before the suite. CI checks out clean and is not affected. Tests that open the LCM store skip where `better-sqlite3` does not load, and cannot skip in CI. CI also runs the job `e2e · demo · attestation · offline goldens`: the built demo, `maf attest verify` on its bundle, and the offline goldens compared with `tests/goldens/baseline.json` by `scripts/compare-goldens.mjs`.
 
 ## Acknowledgements
 

@@ -150,6 +150,16 @@ own tools are off, and a failed node's failure is a value in the run outcome.
   the committed default harness re-mints again,
   `d81facc5…` → `7e0a5503…`; as before the corpus sha, the task list and every task's outcomes are unchanged.
 
+### Upgrading
+
+- **A `.maf/roles.yaml` written before 0.4.0 keeps loading — but two settings are worth copying into it.**
+  The built-in readers (`security`, `reviewer`, `analyst`) now run `in-process` by default ([D-44](docs/DECISIONS.md)),
+  so a repo that re-declares them by hand should add `execution: 'in-process'` to each, or leave them on the
+  `cli` tier on purpose; a role that holds no write tool otherwise defaults to `cli` ([D-01](docs/DECISIONS.md)).
+  A reader's `maxToolIterations` should also be at least the in-process loop's default (10) — one capped below
+  it can fail `budget_exhausted` mid-investigation (F2). Both are optional, and a role that holds a write tool
+  already defaults to `in-process` without either.
+
 Breaking for code that calls the packages directly:
 
 - `@maf/roles`: `RoleCatalogEntry` gains two required fields, `writes` and `expectsChange` (D-43), so a
@@ -161,12 +171,18 @@ Breaking for code that calls the packages directly:
   handle still compiles; `Attestor` implements it, and `@maf/roles` reads it to name the policy rules that
   refused a node's own calls (F10).
 - `@maf/types` (WP-3.0c): the record's new fields, all optional, so nothing hand-written stops compiling —
-  `AdapterInvokeResult.modelSurface?`, `ModelSurface.promptSha256?`/`outputSha256?`,
-  `ModelSurfaceRecord.tier?`, `AttestationBundle.attributedChanges?`, `AttestorHandle.recordAttribution?`, and
-  the `WriterLockLedger`/`WriterLockInterval`/`AttributedChange` types. `@maf/dag-runner` exports
+  `AdapterInvokeResult.modelSurface?`, `ModelSurface.promptSha256?`/`stdinSha256?`/`outputSha256?`,
+  `ModelSurfaceRecord.tier?`/`nativeTools?`, `AttestationBundle.attributedChanges?`,
+  `AttestorHandle.recordAttribution?`, and the
+  `WriterLockLedger`/`WriterLockInterval`/`AttributedChange` types. `@maf/dag-runner` exports
   `createWriterLockLedger` and takes an optional `DagRunnerOptions.writerLockLedger`; `@maf/roles` takes an
   optional `RoleDispatcherConfig.writerLockLedger`. A 0.3.1 bundle, whose model-surface records carry no
   `tier`, still parses and verifies.
+- `@maf/adapter-base`: three helpers the `cli`-tier surface work needed are exported, so an adapter outside
+  the package builds the same bytes rather than a second copy of the format — `sha256Hex(text)`,
+  `elided(name, value)` (the `<name: N bytes, sha256 H>` argv marker), and
+  `cliModelSurface(systemPrompt, prompt, argv, output, stdin?)`, the builder each process-spawning adapter
+  fills `AdapterInvokeResult.modelSurface` from.
 - `@maf/types` (WP-3.1): `NodeFailureReason` gains `'no_work'`; `NodeFailure` gains a read-only `ruleId` and
   `toolId` and an optional fourth constructor argument; new `OutcomeFailureKind = NodeFailureReason |
   'gate_refused' | 'review_refused' | 'policy_violation'`, `OutcomeFailureDetail { kind: OutcomeFailureKind;

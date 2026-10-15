@@ -194,7 +194,7 @@ The scheduler's writer lock — which stops two nodes editing the tree at once �
 
 The catalogue the planner is handed renders each role's writer flag and whether it must change the tree — `- analyst (read-only): …`, `- coder (default, must change the tree): …` — from the role's own tools, never from its name ([D-43](DECISIONS.md)). That is the same predicate the dispatcher uses ([D-07](DECISIONS.md)): a role called `coder` that holds only read tools renders as read-only, and the planner routes on that, not on the label.
 
-If the LLM emits a node with `agentRole: "ghost"` and the role set does not define `ghost`, the plan is **rejected**: `plan()` throws `planner: node "n1" asks for unknown agentRole "ghost". Known roles: coder, tester, ...`. Substituting the default was the escalation — the default is `coder`, a writer — so a plan the model got wrong must not be quietly re-planned as a privileged one.
+If the LLM emits a node with `agentRole: "ghost"` and the role set does not define `ghost`, the plan is **rejected**: `plan()` throws `planner: node "n1" asks for unknown agentRole "ghost". Known roles: coder, tester, ...`. Substituting the default was the escalation — the default is `coder`, a writer — so a plan the model got wrong must not be quietly re-planned as a privileged one. **Known limit:** the planner does not retry a rejected plan. The throw fails the run; recovering means re-running, not a second planning pass the harness performs on its own, so a model that once emits an unknown role name fails that run rather than being steered back.
 
 ## Read-only roles
 
