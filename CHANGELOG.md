@@ -9,11 +9,13 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
-The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b and WP-3.0c) land together here:
-the repository builds on pnpm 10 with a regenerated v9 lockfile; a fifth built-in role joins a reader set
+The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b, WP-3.0c and WP-3.1) land together
+here: the repository builds on pnpm 10 with a regenerated v9 lockfile; a fifth built-in role joins a reader set
 moved onto the governed in-process tier, with a `no_change` failure that names the policy rules which refused
-the node's own calls; and a `cli`-tier role call is now recorded — its model surface is in the bundle — while
-a writer running concurrently with a reader is attributed to that writer rather than charged to the reader.
+the node's own calls; a `cli`-tier role call is now recorded — its model surface is in the bundle — while a
+writer running concurrently with a reader is attributed to that writer rather than charged to the reader; and a
+reader that answers without ever calling a tool now fails `no_work`, the governed turn's prompt says the host's
+own tools are off, and a failed node's failure is a value in the run outcome.
 
 ### Added
 
@@ -50,8 +52,45 @@ a writer running concurrently with a reader is attributed to that writer rather 
   to `ollama` or `openrouter` spawns no process and fills no surface, so it stays unrecorded; only `claude`,
   `codex` and `gemini` do. The planner's call and the security reviewer's call stay outside the record — MAF
   spawns them itself, not through a role node.
+- **A non-writer that answers without calling a tool fails `no_work`** ([D-46](docs/DECISIONS.md), WP-3.1).
+  A read-only role on the in-process tier can finish with an answer the model produced without running
+  anything — "the feature is there" after reading nothing — and the node counted as a success. A non-writer
+  node that finishes with an answer after **zero executed tool calls** now fails `no_work`. "Executed" is a
+  call that **ran**: one the policy engine allowed, or an `Escalate` the approval gate then approved. A `Deny`,
+  an `Escalate` that was not approved, and an `Indeterminate` — an engine rule it could not evaluate, or the
+  `builtin:input-schema` refusal of a malformed call — never ran and are not work. The message names the role,
+  the number of turns and the answer's first 200 characters — **credentials masked first**, then whitespace
+  collapsed, since the message reaches the signed bundle and the memory graph — and carries the F10 deny clause
+  when the node's own calls were refused. The check runs only where a per-call record exists — the in-process
+  tier — because the `cli` tier attests no per-call record for a role call, and it counts the **current
+  attempt's** calls, so a retried node that read only on an earlier attempt does not excuse this one. A role
+  whose job is not to call a tool sets `expectsToolCalls: false` (default `true` for a non-writer that lists a
+  tool, `false` for one that lists none); no built-in sets it, so the three built-in readers keep `true`. The
+  set is refused at load if `expectsToolCalls: true` is declared on a role with no tool (it could never be
+  satisfied) or on a writer (which is judged by `no_change`, never by its call count). `RoleCatalogEntry` does
+  not change.
+- **A failed node's failure is a value in the run outcome** ([D-46](docs/DECISIONS.md), WP-3.1; live-row
+  finding L3). `RunOutcome.nodes[].failure` is now `{ kind, ruleId?, toolId? }` — the kind the dispatcher
+  decided, and the rule id and tool id a policy refusal named — where the node previously carried only a
+  message. `kind` covers every verdict, not only a dispatcher failure: a `NodeFailureReason`, and also
+  `'gate_refused'` (a security or review gate's `GateRefused`), `'review_refused'` (a `ReviewRefused`) and
+  `'policy_violation'` (a `PolicyViolationError`), which are `VerdictError`s rather than `NodeFailure`s and
+  previously got no `failure` at all. Only a plain `Error` leaves `failure` absent rather than inventing a kind:
+  **absent means MAF did not classify the failure — a transport failure or a programming error; it was never a
+  verdict.** `NodeFailure` carries the two ids and `DagRunner` fills `failure` from it; a `no_work` with no
+  refusal reads as exactly `{ kind: 'no_work' }`.
 
 ### Changed
+
+- **The in-process tool protocol now states that the host's own tools are off** ([D-46](docs/DECISIONS.md),
+  WP-3.1; live-row finding L2). The loop spawns the backend with its native tools off — `claude` with
+  `--tools ""` ([D-33](docs/DECISIONS.md)) — but the prompt's `TOOL_PROTOCOL` block described how to request a
+  MAF tool and never said the backend's own tools were gone, so a model could answer by asking for `Read`,
+  `Bash`, or a tool it believed it had, a request the loop had no way to honour. The block now opens by telling
+  the model the host's own tools (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, any other) are not
+  available in this turn and a request for one is refused, and that the only tools it has are the ones listed
+  below. No committed harness moves: `TOOL_PROTOCOL` is not part of `HarnessConfig`, the value
+  `computeHarnessSha` hashes.
 
 - **Toolchain floor** ([D-21](docs/DECISIONS.md), WP-2.11). The root `package.json` now declares `engines`
   (Node ≥ 22, pnpm ≥ 10) and pins `packageManager: pnpm@10.34.7`, and names the two native modules whose
@@ -125,6 +164,16 @@ Breaking for code that calls the packages directly:
   `createWriterLockLedger` and takes an optional `DagRunnerOptions.writerLockLedger`; `@maf/roles` takes an
   optional `RoleDispatcherConfig.writerLockLedger`. A 0.3.1 bundle, whose model-surface records carry no
   `tier`, still parses and verifies.
+- `@maf/types` (WP-3.1): `NodeFailureReason` gains `'no_work'`; `NodeFailure` gains a read-only `ruleId` and
+  `toolId` and an optional fourth constructor argument; new `OutcomeFailureKind = NodeFailureReason |
+  'gate_refused' | 'review_refused' | 'policy_violation'`, `OutcomeFailureDetail { kind: OutcomeFailureKind;
+  ruleId?; toolId? }`, and the classifier `outcomeFailureKind(err): OutcomeFailureKind | undefined`;
+  `DagNodeExecution` gains an optional `failure?: OutcomeFailureDetail`. `@maf/dag-runner`'s
+  `NodeStateMachine.transition` takes an optional fifth `failure` argument. All additive except the enum
+  member, which an exhaustive `switch` over `NodeFailureReason` must now handle.
+- `@maf/roles` and `@maf/harness-config` (WP-3.1): `RoleConfig` and the harness's role entry gain an optional
+  `expectsToolCalls?: boolean`, which the bridge validates and copies both ways. Optional, and copied only
+  when set, so a hand-written role set still compiles and a minted harness does not move.
 
 ## [0.3.2] - 2026-10-14
 

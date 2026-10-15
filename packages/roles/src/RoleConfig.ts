@@ -46,6 +46,14 @@ export interface RoleConfig {
    * Only a role that holds a write tool may set it — the registry refuses it on any other.
    */
   expectsChange?:     boolean;
+  /**
+   * Whether the role is expected to make a tool call (D-46): an in-process **reader** (one that
+   * holds no write tool) that answers having made zero *executed* tool calls fails with `no_work`.
+   * Default `true` for a reader that holds at least one tool, and `false` for a role whose
+   * `allowedTools` is empty — it has nothing to call and answers from the prompt by design. A
+   * writer is untouched (`no_change` judges it, D-32).
+   */
+  expectsToolCalls?:  boolean;
   timeoutMs?:         number;
   maxToolIterations?: number;
   tokenBudget?:       number;

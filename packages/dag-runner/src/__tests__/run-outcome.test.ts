@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BlackboardStore } from '@maf/blackboard';
 import type { BlackboardValue, DagNode } from '@maf/types';
-import { makeNodeId, makeRunId } from '@maf/types';
+import { makeNodeId, makeRunId, NodeFailure, GateRefused, ReviewRefused, VerdictError } from '@maf/types';
 import { DagRunner, DagParser, DagValidationError } from '../index.js';
 import { testRoleResolver } from './roleResolver.js';
 
@@ -104,4 +104,65 @@ test('DagParser refuses a duplicate node id instead of keeping the last one', ()
     () => dagOf([{ id: 'a', label: 'first' }, { id: 'a', label: 'second' }]),
     /duplicate node id "a"/,
   );
+});
+
+// ── L3: a failed node's *kind* is a field, not a phrase to be grepped out of the prose ────────
+// The run outcome carried a node failure as `status: "Failed"` plus prose, so a machine check of the
+// reason had to grep the message. The kind the dispatcher already decided is surfaced beside it.
+
+/** A one-node DAG whose only node fails by throwing `err`. maxAttempts 1: the throw is not retried. */
+async function outcomeOfThrown(err: unknown) {
+  return new DagRunner().run({
+    dag: dagOf([{ id: 'a', label: 'a', retry: { maxAttempts: 1 } }]),
+    board: new BlackboardStore(),
+    executor: async () => { throw err; },
+  });
+}
+
+test('a failed node carries its failure kind, and the rule and tool that refused it (L3)', async () => {
+  const outcome = await outcomeOfThrown(
+    new NodeFailure('no_change', 'role "coder" changed nothing', undefined,
+      { ruleId: 'deny-env-files', toolId: 'patch.apply' }),
+  );
+
+  assert.equal(outcome.status, 'Failed');
+  assert.deepEqual(outcome.nodes?.[0]?.failure, {
+    kind: 'no_change', ruleId: 'deny-env-files', toolId: 'patch.apply',
+  });
+});
+
+test('a no_work failure carries its kind and nothing else: no rule, no tool (L3)', async () => {
+  const outcome = await outcomeOfThrown(new NodeFailure('no_work', 'role "analyst" made no tool call'));
+
+  assert.deepEqual(outcome.nodes?.[0]?.failure, { kind: 'no_work' });
+});
+
+test('a node that failed with a plain Error carries no failure kind: there was no verdict (L3)', async () => {
+  const outcome = await outcomeOfThrown(new Error('boom'));
+
+  assert.equal(outcome.status, 'Failed');
+  assert.equal(outcome.nodes?.[0]?.error, 'boom', 'the prose is still there');
+  assert.equal(outcome.nodes?.[0]?.failure, undefined, 'and no kind was invented for it');
+});
+
+// F2/A1: the outcome names *every* verdict, not only a NodeFailure. A security-gate or review refusal
+// is a VerdictError, not a NodeFailure, so before the mapping these got no `failure` at all — the
+// README claim that the outcome names each failed node's failure was false for the two most important
+// refusals there are. Only a transport failure or a programming error now leaves `failure` absent.
+
+test('F2/A1: a gate refusal carries `gate_refused` and a review refusal `review_refused`', async () => {
+  const gate = await outcomeOfThrown(new GateRefused('the security gate refused the change', []));
+  assert.equal(gate.status, 'Failed');
+  assert.deepEqual(gate.nodes?.[0]?.failure, { kind: 'gate_refused' });
+
+  // ReviewRefused extends GateRefused, so the mapper must test it first or it would read as a gate.
+  const review = await outcomeOfThrown(new ReviewRefused('the reviewer did not approve', 'req-1'));
+  assert.deepEqual(review.nodes?.[0]?.failure, { kind: 'review_refused' });
+});
+
+test('F2/A1: a policy refusal carries `policy_violation`, tested as the base VerdictError', async () => {
+  // The two `PolicyViolationError` classes both subclass VerdictError, and `@maf/dag-runner` cannot
+  // import `@maf/policy-engine` to name either — so the mapper keys the policy case on the base class.
+  const outcome = await outcomeOfThrown(new VerdictError('policy refused the call'));
+  assert.equal(outcome.nodes?.[0]?.failure?.kind, 'policy_violation');
 });

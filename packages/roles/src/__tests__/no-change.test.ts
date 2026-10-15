@@ -581,6 +581,33 @@ test('R2: an Indeterminate the engine reached is counted; a builtin:* one is not
   }
 });
 
+// ─── F5: the rule and tool the dispatcher decided reach the failure a machine reads ───────────
+// The L3 test in `@maf/dag-runner` (run-outcome.test.ts) throws a hand-built NodeFailure, so it
+// proves the field is carried but not that the *dispatcher's own* rule id and tool id get into it.
+// This drives a real refusal through the dispatcher and reads the field back.
+
+test('F5: a policy refusal puts the dispatcher\'s own rule id and tool id on the failure (L3 wire)', async () => {
+  // `patch.apply` on a `.env` diff, refused by `deny-env-files` — the pairing D-05 was about: the very
+  // tool that used to defeat every path rule. The role expects a change, so a refused write is a
+  // no_change, and the rule and tool travel on the NodeFailure (and from there into the run outcome).
+  const attestor = new RecordingAttestor();
+  const patcher = roleNamed('patcher', { allowedTools: ['fs.read', 'patch.apply'].map(makeToolId), expectsChange: true });
+  const turns = [calling('patch.apply', { diff: '--- a/.env\n+++ b/.env\n@@ -0,0 +1 @@\n+SECRET=1\n' }, 1)];
+  const fx = await makeFixture(patcher, new ScriptedTurns(turns, 'I could not patch .env.'), {
+    attestor: attestor as unknown as Attestor,
+    policy: denyingPolicy('patch.apply', 'deny-env-files'),
+  });
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('patcher')));
+    assert.equal(failure.reason, 'no_change');
+    assert.equal(failure.ruleId, 'deny-env-files', 'the rule the policy named is on the failure');
+    assert.equal(failure.toolId, 'patch.apply', 'and the tool the refused call named');
+    assert.match(failure.message, /; 1 tool call was denied or refused by policy: deny-env-files \(patch\.apply\)$/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 // ─── where the expectation is declared ───────────────────────────────────────
 
 test('the built-in coder is the only built-in role that expects a change', () => {

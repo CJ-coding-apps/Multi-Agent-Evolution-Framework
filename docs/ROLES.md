@@ -4,7 +4,7 @@ Every DAG node in MAF runs as a *role*. A role bundles:
 
 1. A **system prompt** (inline or loaded from a file).
 2. An **allowed tool set** — the only tools the role is allowed to call on the `in-process` tier, where a [writer](#writer-roles) runs by default. On the `cli` tier — the default for a *custom* read-only role, and a writer's only with `--allow-ungoverned` — the allowlist is not passed to the backend CLI, which uses its own tools.
-3. Optional **execution** tier, **expectsChange**, and **model**, **timeout**, **token budget** and **policyTag** overrides.
+3. Optional **execution** tier, **expectsChange** / **expectsToolCalls**, and **model**, **timeout**, **token budget** and **policyTag** overrides.
 
 A run does not dispatch from the roles file directly. It resolves a *harness* first — by default `legacy-default`, minted from the roles file as it is when the run starts, each prompt file's text included — and dispatches from the role set that harness carries, so the sha its attestation names is the content that ran. See the README's "Which harness runs".
 
@@ -71,6 +71,7 @@ Fields:
 | `maxToolIterations` | no       | Cap on tool-call iterations (turns) in the loop. |
 | `execution`         | no       | `'in-process'` or `'cli'`. Default: `'in-process'` for a [writer](#writer-roles), `'cli'` for any other role ([D-01](DECISIONS.md)). `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair) and needs a `TurnAdapter` with the `inProcessLoop` capability. Without one, a read-only role falls back to `cli` and notes the fallback in the run's transcript and in the bundle's `executionTiers` (`fellBackFrom: 'in-process'`), while a writer refuses to start unless the run allows ungoverned writers (`--allow-ungoverned`). A writer set to `'cli'` needs the same flag. Any other value is a `RoleConfigError`. See the README "In-process execution" section. |
 | `expectsChange`     | no       | `true` when the role's job is to change the tree ([D-32](DECISIONS.md)). A node of such a role that finishes with an answer — a `cli`-tier backend that exits 0, or an in-process loop that completes — but leaves no diff against its start commit fails with `no_change`, the output tail (in-process, the loop's last text) in the error. On the `cli` tier that is what a backend that refused the edit under its own permission settings looks like; in-process, a coder whose every tool call failed and that said so. An in-process loop that stops any other way keeps its own failure (`budget_exhausted`, `loop_failed`). Only a writer may set it; on any other role it is a `RoleConfigError`. The built-in `coder` and this repository's `.maf/roles.yaml` coder set it; the tester does not, because a tester that adds no test has often done its job. |
+| `expectsToolCalls`  | no       | `true` when a non-writer's job is to *call* a tool ([D-46](DECISIONS.md)). An `in-process` node of such a role that finishes with an answer after **zero executed tool calls** fails with `no_work` — an answer produced without looking at anything. "Executed" is a call that **ran** (`result.metadata.refused !== true`): an `Allow`, or an `Escalate` the approval gate approved. A `Deny`, an unapproved `Escalate`, and an `Indeterminate` (an engine rule that could not be evaluated, or a malformed call's `builtin:input-schema` refusal) never ran and do not count. The count is this attempt's, while the refusal clause and the named ids span the node's attempts, as on `no_change`. A set that sets it `true` on a role with no tool (it could never be satisfied), or sets it at all — `true` or `false` — on a writer, is refused at load: writers are not accepted, because a writer is judged by `expectsChange`, never by its call count. Default: `true` for a non-writer that lists at least one tool, `false` for a role that lists none. Only meaningful for a non-writer on the `in-process` tier — the `cli` tier attests no per-call record, so the check is not made there. |
 
 ### YAML or JSON?
 
@@ -132,6 +133,9 @@ RoleDispatcher.runNode(node):
   9. otherwise, either tier — a cli answer, or a loop that completed —, role.expectsChange and the
      step-7 diff is empty:
        throw NodeFailure('no_change')                // the output tail in the message (D-32)
+ 10. otherwise, an in-process non-writer whose role expects tool calls and whose executed-call
+     count is zero (D-46):
+       throw NodeFailure('no_work')                  // role, turn count, answer excerpt in the message
 ```
 
 A node that fails, after its last attempt, is handed to the failure recorder: the memory graph gets a `Task` (the node's instruction, with the run's title in its properties) joined to a `Failure` by a `CAUSED_FAILURE` edge, which the planner recalls the next time a title with the same first three words is planned ([D-37](DECISIONS.md)).
@@ -202,5 +206,6 @@ That is belt-and-suspenders with the tool allowlist: even if a future role confi
 4. Add a policy rule with `predicate.agentRole: "<role>"` for any path/operation restrictions that aren't already implied by the tool list.
 5. (Optional) Set `model`, `timeoutMs`, or `maxToolIterations` if the role has special performance needs.
 6. (Optional) Set `expectsChange: true` if the role's job is to change the tree, so a `cli`-tier node that changes nothing fails rather than succeeds.
+7. (Optional) Set `expectsToolCalls: false` on a read-only role whose job is not to call a tool, so an in-process node of it that answers after zero executed calls succeeds rather than fails ([D-46](DECISIONS.md)). The default for a reader that lists a tool is `true`.
 
 The planner picks up the new role automatically through `roles.catalog()`.

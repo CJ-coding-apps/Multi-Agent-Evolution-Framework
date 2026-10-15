@@ -48,6 +48,11 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       // bypassing the gate. The RoleDispatcher gate requires BOTH sendTurn and
       // this flag, so Codex stays on the CLI path until a non-autonomous Codex
       // invocation is verified against a live binary — then flip to true.
+      //
+      // When that happens, the D-46 TOOL_PROTOCOL paragraph (which tells the model the host's own
+      // tools are off) must be made true first: it assumes the turn runs with the backend's native
+      // tools disabled, which claude does with `--tools ''` (D-33). No Codex flag is known to do the
+      // same, so flipping this to true without finding one would spawn a turn whose prompt lies.
       inProcessLoop:       false,
       maxConcurrentTasks:  4,
       nativePlugins:       [],
