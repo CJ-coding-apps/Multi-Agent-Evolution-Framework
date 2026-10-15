@@ -792,7 +792,7 @@ test('F2: an in-process reader is excused for a writer still holding the lock ac
     assert.equal(
       await treeDiffSha256(f.workDir, attributed!.fromTree, attributed!.toTree),
       attributed?.diffSha256,
-      '`git diff --no-renames <fromTree> <toTree>` in the run\'s repository reproduces the digest (N6)',
+      'the SECURITY.md recipe (`... git diff --text --no-ext-diff --no-textconv --no-renames <fromTree> <toTree>`) reproduces the digest (N6)',
     );
     assert.ok(
       f.attestor.diffHashes.some((h) => h.key === 'n1.attributed.diff'),
