@@ -75,9 +75,9 @@ own tools are off, and a failed node's failure is a value in the run outcome.
   message. `kind` covers every verdict, not only a dispatcher failure: a `NodeFailureReason`, and also
   `'gate_refused'` (a security or review gate's `GateRefused`), `'review_refused'` (a `ReviewRefused`) and
   `'policy_violation'` (a `PolicyViolationError`), which are `VerdictError`s rather than `NodeFailure`s and
-  previously got no `failure` at all. Only a transport failure or a programming error — a plain `Error` with no
-  verdict — leaves `failure` absent; **absent means MAF did not classify the failure, never that there was no
-  verdict**. `NodeFailure` carries the two ids and `DagRunner` fills `failure` from it; a `no_work` with no
+  previously got no `failure` at all. Only a plain `Error` leaves `failure` absent rather than inventing a kind:
+  **absent means MAF did not classify the failure — a transport failure or a programming error; it was never a
+  verdict.** `NodeFailure` carries the two ids and `DagRunner` fills `failure` from it; a `no_work` with no
   refusal reads as exactly `{ kind: 'no_work' }`.
 
 ### Changed
@@ -165,8 +165,10 @@ Breaking for code that calls the packages directly:
   optional `RoleDispatcherConfig.writerLockLedger`. A 0.3.1 bundle, whose model-surface records carry no
   `tier`, still parses and verifies.
 - `@maf/types` (WP-3.1): `NodeFailureReason` gains `'no_work'`; `NodeFailure` gains a read-only `ruleId` and
-  `toolId` and an optional fourth constructor argument; new `NodeFailureDetail { kind; ruleId?; toolId? }`;
-  `DagNodeExecution` gains an optional `failure?: NodeFailureDetail`. `@maf/dag-runner`'s
+  `toolId` and an optional fourth constructor argument; new `OutcomeFailureKind = NodeFailureReason |
+  'gate_refused' | 'review_refused' | 'policy_violation'`, `OutcomeFailureDetail { kind: OutcomeFailureKind;
+  ruleId?; toolId? }`, and the classifier `outcomeFailureKind(err): OutcomeFailureKind | undefined`;
+  `DagNodeExecution` gains an optional `failure?: OutcomeFailureDetail`. `@maf/dag-runner`'s
   `NodeStateMachine.transition` takes an optional fifth `failure` argument. All additive except the enum
   member, which an exhaustive `switch` over `NodeFailureReason` must now handle.
 - `@maf/roles` and `@maf/harness-config` (WP-3.1): `RoleConfig` and the harness's role entry gain an optional

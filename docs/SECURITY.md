@@ -373,13 +373,15 @@ and, if one is wired, the review gate, while a role without one has its turn's c
 `unexpected_change` if there was one (F7). Policy refusals, approved escalations, redaction and tool-call
 records exist on the `in-process` tier alone; the human review gate reviews a writer's diff on either tier.
 
-**A node's verdict is read from the record, not from what the model said.** A writer — a role that holds a
-write tool — that answers with an empty diff against the commit it started from fails `no_change` whatever its
-prose claimed, and the evidence is the diff the security gate reviewed, named as a subject of the run's signed
-statement ([D-32](DECISIONS.md)). A reader fails `no_work` when the record holds **no executed call**: the
-evidence is the per-call `ToolCallRecord` count and the role's own `expectsToolCalls` declaration, and the
-answer is quoted in the message only as context, never as proof ([D-46](DECISIONS.md)). In both cases a run's
-own record decides whether the node did its work, so a confident answer over an empty record fails.
+**A node's verdict is read from the record, not from what the model said.** A role that **expects a change**
+(`expectsChange`; the built-in `coder`) and answers with an empty diff against the commit it started from fails
+`no_change` whatever its prose claimed, and the evidence is the diff the security gate reviewed, named as a
+subject of the run's signed statement ([D-32](DECISIONS.md)). An **in-process** reader that **expects tool
+calls** (`expectsToolCalls`, the default for a read-only role that lists a tool) and executes none fails
+`no_work`: the evidence is the per-call `ToolCallRecord` count and the role's own `expectsToolCalls`
+declaration, and the answer is quoted in the message only as context, never as proof ([D-46](DECISIONS.md)). A
+`cli`-tier reader is not judged this way, because the record holds no per-call entry for a `cli`-tier role call.
+In both judged cases a run's own record decides whether the node did its work.
 **Not in this release:** the broader F12 check — a node whose *narrated output* describes tool output with
 **no** matching attested call at all. D-46 ships only the minimal form above, the two live cases the WP-3.0c
 rows hit.

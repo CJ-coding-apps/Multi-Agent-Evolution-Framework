@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { TransportError, makeToolId } from '@maf/types';
 import type { AdapterInvokeOptions, TurnMessage, ToolPlugin } from '@maf/types';
 import type { SpawnResult, spawnAndCollect } from '@maf/adapter-base';
-import { serializeTools, TOOL_PROTOCOL } from '@maf/adapter-base';
+import { serializeTools } from '@maf/adapter-base';
 import { ClaudeAdapter } from '../index.js';
 
 // ORACLE (F4, F8; D-04, D-06).
@@ -350,11 +350,15 @@ test('sendTurn puts the D-46 protocol paragraph before the tool catalogue in arg
   await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, systemPrompt: 'be brief', tools: TOOLS });
 
   const block = calls[0]?.args[2] ?? '';
-  const protocolAt = block.indexOf(TOOL_PROTOCOL);
-  const catalogueAt = block.indexOf('AVAILABLE TOOLS');
-  assert.ok(protocolAt >= 0, 'the D-46 paragraph is in the turn system block');
+  // R5: match the paragraph's own opening, not `TOOL_PROTOCOL`, and the catalogue's real text, not the
+  // substring `AVAILABLE TOOLS` — which appears *inside* TOOL_PROTOCOL ("…from the AVAILABLE TOOLS
+  // list…"), so `indexOf('AVAILABLE TOOLS')` matched that line rather than the catalogue header and the
+  // paragraph's position was not actually pinned (mutation N8 moved it after the catalogue and survived).
+  const paragraphAt = block.indexOf("The host's own tools");
+  const catalogueAt = block.indexOf(serializeTools(TOOLS));
+  assert.ok(paragraphAt >= 0, 'the D-46 paragraph is in the turn system block');
   assert.ok(catalogueAt >= 0, 'and the catalogue is too');
-  assert.ok(protocolAt < catalogueAt, 'the paragraph that says the host tools are gone comes before the list');
+  assert.ok(paragraphAt < catalogueAt, 'the paragraph that says the host tools are gone comes before the list');
   assert.match(block, /are not available in this turn/, 'the paragraph still says the host tools are gone');
 });
 

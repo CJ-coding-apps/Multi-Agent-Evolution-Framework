@@ -103,8 +103,9 @@ test('fromSet throws when defaultRole missing from roles', () => {
 
 // F8/M19: `expectsToolCalls: true` is a promise about the call count, so it must be able to mean
 // something. On a role with no tool it can never be satisfied — the node has nothing to call, so every
-// run ends `no_work`. On a writer it is inert — no_change (D-32) judges the writer by the tree, never by
-// its call count, so the setting is read and discarded. Both are refused where the set is validated.
+// run ends `no_work`. On a writer it is inert whatever its value (R7), because no_change (D-32) judges
+// the writer by the tree, never by its call count — so the setting is read and discarded. Both are
+// refused where the set is validated.
 
 test('F8: fromSet refuses expectsToolCalls: true on a role that holds no tool', () => {
   const tools = createDefaultRegistry();
@@ -131,6 +132,26 @@ test('F8: fromSet refuses expectsToolCalls: true on a writer, which no_change ju
         version: 1,
         defaultRole: defineRoleName('coder'),
         roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [makeToolId('fs.write')], expectsToolCalls: true }],
+      },
+      '/tmp',
+      tools,
+    ),
+    (err: unknown) => err instanceof RoleConfigError
+      && /coder/.test(err.message) && /write tool/.test(err.message),
+  );
+});
+
+test('R7: fromSet refuses expectsToolCalls: false on a writer too — the value is never read', () => {
+  // R7 widened F8. `true` on a writer is inert, and so is `false`: no_change (D-32) judges a writer by
+  // the tree whatever it declares, so the ruling refuses *any* declared value on a writer rather than
+  // let one be accepted and discarded.
+  const tools = createDefaultRegistry();
+  assert.throws(
+    () => RoleRegistry.fromSet(
+      {
+        version: 1,
+        defaultRole: defineRoleName('coder'),
+        roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [makeToolId('fs.write')], expectsToolCalls: false }],
       },
       '/tmp',
       tools,

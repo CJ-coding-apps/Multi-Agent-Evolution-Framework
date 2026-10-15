@@ -345,6 +345,11 @@ export class TransportError extends Error {
  * same question to the same judge, and a refusal that a retry can overturn was never a
  * refusal — so a VerdictError is terminal and never retried (D-06). Gate and policy errors
  * subclass it.
+ *
+ * R8: a new subclass here needs its own kind in `outcomeFailureKind` (below). The classifier keys the
+ * policy case on this base class — because the two `PolicyViolationError` classes both subclass it and
+ * this package cannot name either — so a subclass that is neither a `GateRefused` nor a `ReviewRefused`
+ * would otherwise be reported in a run's outcome as `'policy_violation'`.
  */
 export class VerdictError extends Error {
   constructor(message: string, options?: ErrorOptions) {
