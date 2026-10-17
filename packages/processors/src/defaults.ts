@@ -2,7 +2,7 @@ import type { ProcessorRef } from '@maf/harness-config';
 import type { HarnessEvent, ToolResultEvent, StepEndEvent, TaskEndEvent, ToolCallEvent } from './events.js';
 import { Processor, ProcessorInterrupt, StaticProcessorRegistry } from './Processor.js';
 import type { ProcessorDeps } from './Processor.js';
-import { redactText, redactRecord } from './redaction.js';
+import { redactText, redactRecord } from '@maf/types';
 
 /**
  * The default bundle. Each processor's

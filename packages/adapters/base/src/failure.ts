@@ -1,28 +1,19 @@
+import { redactCredentials } from '@maf/types';
 import type { SpawnResult } from './ProcessSpawner.js';
 
 /** Enough of a failed backend's stderr or error body to show its last error. */
 export const FAILURE_TAIL_CHARS = 300;
 
 /**
- * Error messages are logged and kept in node state, and an authentication failure is exactly when
- * a backend echoes the key it was sent. These are the high-confidence credential formats from the
- * processors' redaction list, repeated because adapter-base may depend on @maf/types alone.
- */
-const CREDENTIAL_SHAPES: readonly RegExp[] = [
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
-  /\bsk-[A-Za-z0-9_-]{16,}/g,
-  /\bAIza[0-9A-Za-z_-]{35}\b/g,
-  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-];
-
-/**
  * The end of `text`, credential-shaped substrings masked, quoted so an empty or whitespace-only
  * tail is still visible. Masking runs over the whole text before the cut, so a key the cut would
- * split is still recognised.
+ * split is still recognised. The mask is `@maf/types`' `redactCredentials` — the same scrubber the
+ * rest of the record uses — rather than a second, narrower pattern list, which had quietly dropped
+ * a Slack token and a private key the shared list catches. Error messages are logged and kept in
+ * node state, and an authentication failure is exactly when a backend echoes the key it was sent.
  */
 export function failureTail(text: string, chars: number = FAILURE_TAIL_CHARS): string {
-  const masked = CREDENTIAL_SHAPES.reduce((s, re) => s.replace(re, '[REDACTED]'), text);
+  const masked = redactCredentials(text);
   return JSON.stringify(masked.length > chars ? `…${masked.slice(-chars)}` : masked);
 }
 

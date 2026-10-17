@@ -1,9 +1,9 @@
 import type {
   Dag, DagNode, NodeId, RunId, AgentId, CliAdapter,
   AdapterInvokeOptions, BlackboardKey, BlackboardValue, RunOutcome, RunStatus,
-  FailureRecorder, NodeFailureRecord, WriterLockLedger, OutcomeFailureDetail,
+  FailureRecorder, NodeFailureRecord, WriterLockLedger,
 } from '@maf/types';
-import { makeAgentId, NodeFailure, outcomeFailureKind } from '@maf/types';
+import { makeAgentId, NodeFailure, outcomeFailureDetail } from '@maf/types';
 import type { BlackboardStore } from '@maf/blackboard';
 import { NodeStateMachine } from './NodeStateMachine.js';
 import { withRetry } from './RetryOrchestrator.js';
@@ -181,7 +181,7 @@ export class DagRunner {
       opts.onNodeEnd?.(node.id, 'Succeeded');
     } catch (err: unknown) {
       const error = err instanceof Error ? err.message : String(err);
-      this.sm.transition(node.id, 'Failed', undefined, error, nodeFailureDetail(err));
+      this.sm.transition(node.id, 'Failed', undefined, error, outcomeFailureDetail(err));
       board.setDagState(node.id, 'Failed');
       await recordFailure(
         opts.failureRecorder, opts.failureRecordTimeoutMs ?? FAILURE_RECORD_TIMEOUT_MS, node, runId, err, error,
@@ -241,27 +241,6 @@ function failureRecord(node: DagNode, runId: RunId, err: unknown, message: strin
     reason:  failureReason(err),
     message,
     ...(err instanceof NodeFailure && err.exitCode !== undefined ? { exitCode: err.exitCode } : {}),
-  };
-}
-
-/**
- * The failure as a value for the run outcome (L3): the kind the dispatcher decided, and the rule and
- * tool a policy refusal named. Every verdict gets a kind — a `NodeFailure`, and a gate, review or
- * policy refusal, which the dispatcher raises as verdict errors rather than `NodeFailure`s (A1). A
- * plain `Error` is a transport or programming failure with no verdict to report, and inventing one
- * would have `failure` assert something the run does not know; there the field is left absent. Keys
- * with no value are left out, so a `no_work` with no refusal reads as exactly `{ kind: 'no_work' }`
- * rather than a record salted with `undefined`. Only a `NodeFailure` names a rule and tool: a gate or
- * review refusal carries neither.
- */
-function nodeFailureDetail(err: unknown): OutcomeFailureDetail | undefined {
-  const kind = outcomeFailureKind(err);
-  if (kind === undefined) return undefined;
-  if (!(err instanceof NodeFailure)) return { kind };
-  return {
-    kind,
-    ...(err.ruleId !== undefined ? { ruleId: err.ruleId } : {}),
-    ...(err.toolId !== undefined ? { toolId: err.toolId } : {}),
   };
 }
 

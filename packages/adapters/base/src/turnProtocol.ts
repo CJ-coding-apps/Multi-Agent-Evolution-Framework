@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { TurnMessage, AssistantTurn, ToolCallRequest, ToolPlugin } from '@maf/types';
-import { describeToolInput } from '@maf/types';
+import { describeToolInput, redactCredentials } from '@maf/types';
 
 /**
  * MAF's in-process tool-call wire protocol, shared by every TurnAdapter
@@ -81,8 +81,14 @@ export function serializeHistory(history: TurnMessage[]): string {
 
 const TOOL_CALL_RE = /```tool_call\s*\n([\s\S]*?)\n```/g;
 
+/**
+ * A short quote of a malformed `tool_call` block, for the parse error the loop and the record keep.
+ * The body is model-authored and the error text is node state, so credential-shaped substrings are
+ * masked BEFORE the 80-char cut: a key the cut would split is no longer recognisable to the pattern,
+ * so masking after the slice would preserve the head of a leaked key as evidence.
+ */
 function snippet(s: string): string {
-  const one = s.replace(/\s+/g, ' ').trim();
+  const one = redactCredentials(s.replace(/\s+/g, ' ').trim());
   return one.length > 80 ? `${one.slice(0, 77)}...` : one;
 }
 

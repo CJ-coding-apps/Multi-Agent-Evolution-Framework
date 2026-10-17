@@ -48,13 +48,27 @@ test('failureTail keeps the last characters, marks the cut, and quotes an empty 
 });
 
 test('failureTail masks credentials before the cut, so a key the cut splits is still masked', () => {
-  // The cut at -300 falls inside the key: masking after slicing would leak its tail.
+  // The raw cut at -300 falls inside the key: masking after slicing would leak its tail. Masking
+  // first replaces the key in place, so the 300-char tail then holds the whole label.
   const key = `sk-${'Z'.repeat(40)}`;
-  const text = `${'a'.repeat(1_000)} ${key} ${'b'.repeat(280)}`;
+  const text = `${'a'.repeat(1_000)} ${key} ${'b'.repeat(277)}`;
   const tail = failureTail(text);
   assert.ok(!tail.includes('ZZZZ'), `the key leaked into the tail: ${tail}`);
-  assert.ok(tail.includes('[REDACTED]'));
+  assert.match(tail, /\[REDACTED:openai-key\]/, `the key was not masked: ${tail}`);
 
   const header = failureTail('401: invalid header Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123');
   assert.ok(!header.includes('abcdefghij'), `the bearer token leaked: ${header}`);
+});
+
+test('failureTail masks with the shared scrubber, so a Slack token and a private key are caught (B6)', () => {
+  // The local list this used to carry knew five shapes; `@maf/types`' knows eight, and a Slack
+  // token and a PEM private key are two the local list missed. One scrubber, so they cannot drift.
+  const tail = failureTail(
+    'slack said xoxb-1234567890-ABCDEFGHIJKL and then\n'
+    + '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
+  );
+  assert.doesNotMatch(tail, /xoxb-/, `the Slack token leaked: ${tail}`);
+  assert.doesNotMatch(tail, /PRIVATE KEY/, `the private key leaked: ${tail}`);
+  assert.match(tail, /\[REDACTED:slack-token\]/);
+  assert.match(tail, /\[REDACTED:private-key\]/);
 });

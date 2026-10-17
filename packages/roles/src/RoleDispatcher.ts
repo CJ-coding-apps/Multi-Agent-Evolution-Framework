@@ -273,24 +273,30 @@ function noChangeShortfall(
 }
 
 /**
- * D-46(ii): the governed turn says what it has, and a reader that did no work has not succeeded.
+ * D-46(ii): the governed turn says what it has, and a role that did no work has not succeeded.
  *
- * A **reader** — a role that holds no write tool, so `no_change` cannot be its reason — finished with
- * a final answer having made **no executed tool call**: every attested call it made was refused, or it
- * made none at all. Live row 2b of the 3.0c pass is the case: an in-process `analyst` with the host's
- * native tools disabled tried `Read`/`Glob`/`Grep` anyway, was refused ("No such tool available"), and
- * gave up — and the run read `Succeeded` off the prose. The record said what happened: zero executed
- * calls, one turn, a refusal. Judged from the record, not the narrative: a call that ran is work, and a
- * refused call is not — it left the tree exactly as it found it. "Ran" is `metadata.refused !== true`,
- * the mark `executeToolGated` sets on every call it did not execute (F4/A2): a `Deny`, an `Escalate`
- * the gate did not approve, an `Indeterminate`, a malformed call. An approved `Escalate` ran, keeps its
- * `Escalate` verdict, and carries no such mark, so it is work.
+ * A role that was **not expected to change the tree** — `expectsChange` is not `true`, so `no_change`
+ * cannot be its reason — finished with a final answer having made **no executed tool call**: every
+ * attested call it made was refused, or it made none at all. The predicate is `expectsChange`, not
+ * "holds a write tool" (A2, the 0.4.0 audit): the built-in `tester` holds `test.run`, so the old
+ * `isWriterRole` test excused it, and a tester answering "All tests pass" with zero calls succeeded on
+ * the exact shape this check exists to catch. Live row 2b of the 3.0c pass is the reader case: an
+ * in-process `analyst` with the host's native tools disabled tried `Read`/`Glob`/`Grep` anyway, was
+ * refused ("No such tool available"), and gave up — and the run read `Succeeded` off the prose. The
+ * record said what happened: zero executed calls, one turn, a refusal. Judged from the record, not the
+ * narrative: a call that ran is work, and a refused call is not — it left the tree exactly as it found
+ * it. "Ran" is `metadata.refused !== true`, the mark `executeToolGated` sets on every call it did not
+ * execute (F4/A2): a `Deny`, an `Escalate` the gate did not approve, an `Indeterminate`, a malformed
+ * call. An approved `Escalate` ran, keeps its `Escalate` verdict, and carries no such mark, so it is
+ * work.
  *
- * Only a reader is judged this way. A writer that made no call owes a *change* and fails `no_change`
- * (D-32); a reader that holds no tool, or opted out with `expectsToolCalls: false`, expects nothing
- * and answers from the prompt by design. The message names the role, that no call was executed, the
- * turns it had to make one across, and its own answer; the F10 clause is appended when its calls were
- * refused, so the reader who was refused and the one who never tried read differently.
+ * Only a role that does not expect a change is judged this way. One that does (`expectsChange: true`,
+ * the built-in `coder`) owes a *change* and fails `no_change` (D-32), which is the only case the
+ * registry refuses `expectsToolCalls` for. A role that holds no tool, or opted out with
+ * `expectsToolCalls: false`, expects nothing and answers from the prompt by design. The message names
+ * the role, that no call was executed, the turns it had to make one across, and its own answer; the F10
+ * clause is appended when its calls were refused, so the role that was refused and the one that never
+ * tried read differently.
  */
 function noWorkShortfall(
   role: RoleConfig,
@@ -810,17 +816,21 @@ export class RoleDispatcher {
         review?.diff?.trim() === '') {
       shortfall = noChangeShortfall(role, adapter.name, answer, startCommit, denied);
     }
-    // D-46(ii): a reader that made no executed tool call has not done its work, whatever its prose
-    // says. Judged from the record, not the narrative (live row 2b). Checked after the writer's
-    // `no_change` — the two are disjoint, `expectsChange` needing a write tool and this needing a
-    // reader — and only on the in-process tier, where a per-call `ToolCallRecord` exists at all: the
-    // cli tier attests none, so an empty call set there means "unwatched", not "did no work", and a
-    // cli-tier reader (live row 1) is left exactly as it was. `expectsToolCalls` is the role's own
-    // declaration, else its tools: a reader with none to call, or one that opted out, expects nothing.
-    // The count is this attempt's delta (F3/A4), so a retried node that read only on an earlier
-    // attempt does not excuse this one.
+    // D-46(ii): a role that was not expected to change the tree, and made no executed tool call, has
+    // not done its work, whatever its prose says. Judged from the record, not the narrative (live row
+    // 2b). The predicate is `expectsChange`, not "holds a write tool" (A2, the 0.4.0 audit): the
+    // built-in `tester` holds `test.run` — a write tool — so it is a writer, but its job is to run the
+    // tests, not to change the code, and it declares no `expectsChange`. Keying on `isWriterRole` left
+    // it judged by neither guard, so a tester answering "All tests pass" with zero calls succeeded on
+    // the exact shape this check exists to catch. Checked after the writer's `no_change` — the two are
+    // disjoint, `expectsChange === true` here and not-true there — and only on the in-process tier,
+    // where a per-call `ToolCallRecord` exists at all: the cli tier attests none, so an empty call set
+    // there means "unwatched", not "did no work", and a cli-tier node (live row 1) is left exactly as
+    // it was. `expectsToolCalls` is the role's own declaration, else its tools: a role with none to
+    // call, or one that opted out, expects nothing. The count is this attempt's delta (F3/A4), so a
+    // retried node that read only on an earlier attempt does not excuse this one.
     const executedThisAttempt = this.executedCallCount(taskId) - executedAtAttemptStart;
-    if (shortfall === undefined && answer?.tier === 'in-process' && !isWriterRole(role) &&
+    if (shortfall === undefined && answer?.tier === 'in-process' && role.expectsChange !== true &&
         expectsToolCalls(role) && executedThisAttempt === 0) {
       shortfall = noWorkShortfall(role, answer, denied);
     }
