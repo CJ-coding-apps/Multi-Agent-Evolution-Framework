@@ -197,3 +197,49 @@ test('a credential the 600-character slice would split is masked, not truncated 
   assert.equal(res.passed, false);
   assert.doesNotMatch(res.summary, /sk-ant/, 'no part of the split key survives the slice');
 });
+
+// ── B2 (0.4.0 audit round 2): the review that DOES parse reaches the record too ──────────────────
+// `summary` and every string field of a finding become the `GateRefused` message, the outcome, the
+// bundle, the memory graph and `<past-failures>` — and the realistic case is a reviewer quoting the
+// key it just found. Masking is part of the parse, not of the fail-closed path alone.
+
+test("a parsed review's summary has its credentials masked before it is kept (B2)", () => {
+  const key = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const raw = JSON.stringify({
+    findings: [],
+    summary: `The diff is clean apart from a hard-coded key (${key}) in config.ts.`,
+    passed: true,
+  });
+  const res = parseSecurityOutput(raw);
+  assert.equal(res.findings.length, 0);
+  assert.doesNotMatch(res.summary, /sk-ant/, 'the key the reviewer quoted must not survive');
+  assert.match(res.summary, /\[REDACTED:anthropic-key\]/, 'and the position it occupied is marked');
+});
+
+test('a parsed finding is masked in every string field — rationale, remediation, file, category (B2)', () => {
+  const key = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const raw = JSON.stringify({
+    findings: [
+      {
+        severity:    'high',
+        category:    `secrets-${key}`,
+        file:        `src/${key}.ts`,
+        rationale:   `The value ${key} is committed in the clear.`,
+        remediation: `Rotate ${key} and read it from the environment.`,
+      },
+    ],
+    summary: '',
+    passed:  false,
+  });
+  const res = parseSecurityOutput(raw);
+  const f = res.findings[0];
+  assert.ok(f, 'the finding is kept — a high finding is not dropped for a masked field');
+  for (const [name, value] of Object.entries(f)) {
+    if (typeof value !== 'string') continue;
+    assert.doesNotMatch(value, /sk-ant/, `the key survived in finding.${name}: ${value}`);
+  }
+  assert.match(f.rationale,   /\[REDACTED:anthropic-key\]/);
+  assert.match(f.remediation, /\[REDACTED:anthropic-key\]/);
+  assert.match(f.file,        /\[REDACTED:anthropic-key\]/);
+  assert.match(f.category,    /\[REDACTED:anthropic-key\]/);
+});

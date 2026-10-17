@@ -188,3 +188,17 @@ test('a malformed block with no credential is quoted verbatim (A5: masking is no
   assert.match(turn.parseErrors?.[0] ?? '', /"fs\.read"/);
   assert.match(turn.parseErrors?.[0] ?? '', /a\.txt/);
 });
+
+test('a credential straddling the 80-character cut is still masked, not truncated (N4)', () => {
+  // The snippet cuts at 77 characters. Put the key so the cut lands four characters into its body:
+  // 60 filler + `sk-ant-api03-` (13) + 4 = 77. Masking AFTER the cut would leave `sk-ant-api03-AAAA`,
+  // whose remaining body is under the pattern's 20 characters, so the head would survive as evidence.
+  // Masking before the cut replaces the whole key in place, so the cut can only fall inside the label.
+  // Dots, not letters: the pattern anchors on \b, so the key must be preceded by a non-word character.
+  const body = `${'.'.repeat(60)}sk-ant-api03-${'A'.repeat(40)}`;
+  const turn = parseTurn('```tool_call\n' + body + '\n```');
+  const err = turn.parseErrors?.[0] ?? '';
+  assert.match(err, /not valid JSON/, 'the block is still reported as malformed');
+  assert.doesNotMatch(err, /sk-ant/, 'a key the cut splits must not survive as evidence');
+  assert.match(err, /\[REDACTED/, 'and the position it occupied is marked');
+});

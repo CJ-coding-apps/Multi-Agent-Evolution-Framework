@@ -14,7 +14,7 @@ here: the repository builds on pnpm 10 with a regenerated v9 lockfile; a fifth b
 moved onto the governed in-process tier, with a `no_change` failure that names the policy rules which refused
 the node's own calls; a `cli`-tier role call is now recorded — its model surface is in the bundle — while a
 writer running concurrently with a reader is attributed to that writer rather than charged to the reader; and a
-reader that answers without ever calling a tool now fails `no_work`, the governed turn's prompt says the host's
+role that does not expect a change and answers without ever calling a tool now fails `no_work`, the governed turn's prompt says the host's
 own tools are off, and a failed node's failure is a value in the run outcome.
 
 ### Added
@@ -69,9 +69,15 @@ own tools are off, and a failed node's failure is a value in the run outcome.
   expect a change and lists a tool, `false` for one that lists none); no built-in sets it, so the three
   built-in readers keep `true`, and the built-in `tester` — a writer by its tools, since it holds `test.run`,
   but expected by no rule to change the tree — is judged by this rule too. The set is refused at load if
-  `expectsToolCalls: true` is declared on a role with no tool (it could never be satisfied) or on a role that
-  expects a change (which is judged by `no_change`, never by its call count). `RoleCatalogEntry` does
-  not change.
+  `expectsToolCalls: true` is declared on a role with no tool (it could never be satisfied), or if
+  `expectsToolCalls` is declared at all on a role that expects a change (which is judged by `no_change`, never
+  by its call count, so either value is meaningless there). `RoleCatalogEntry` does not change. **What it does
+  not catch:** the count is of the calls a node *made*, not of the call the task needed — a `tester` that reads
+  one file and never runs `test.run` still Succeeds, and two of the three live-row attempts did exactly that.
+  The root is upstream: the planner is told nothing about the executor's tools, so a node's description may
+  speak shell, and a role cannot say which tool its task requires. Naming MAF tool ids to the planner and
+  letting a role declare a required tool (`requiresTool: test.run`) is 0.5.0 work — the narrow form of F12,
+  BUILD_PLAN Phase 3b.
 - **A failed node's failure is a value in the run outcome** ([D-46](docs/DECISIONS.md), WP-3.1; live-row
   finding L3). `RunOutcome.nodes[].failure` is now `{ kind, ruleId?, toolId? }` — the kind the dispatcher
   decided, and the rule id and tool id a policy refusal named — where the node previously carried only a
@@ -159,6 +165,10 @@ own tools are off, and a failed node's failure is a value in the run outcome.
   A reader's `maxToolIterations` should also be at least the in-process loop's default (10) — one capped below
   it can fail `budget_exhausted` mid-investigation (F2). Both are optional, and a role that holds a write tool
   already defaults to `in-process` without either.
+- **`no_work` now reaches a custom in-process role that holds a write tool but does not declare
+  `expectsChange`.** The check keys on `expectsChange`, not on the role's tools: any in-process role whose
+  `expectsChange` is not `true` that finishes with an answer and no executed tool call fails. A role whose job
+  is not to call a tool sets `expectsToolCalls: false` to opt out.
 
 Breaking for code that calls the packages directly:
 
@@ -190,6 +200,13 @@ Breaking for code that calls the packages directly:
   `DagNodeExecution` gains an optional `failure?: OutcomeFailureDetail`. `@maf/dag-runner`'s
   `NodeStateMachine.transition` takes an optional fifth `failure` argument. All additive except the enum
   member, which an exhaustive `switch` over `NodeFailureReason` must now handle.
+- `@maf/types` (0.4.0 audit): `outcomeFailureDetail(err)` is exported beside `outcomeFailureKind`, returning
+  the `OutcomeFailureDetail` an error maps to (`undefined` for a plain `Error`) — it is what `@maf/dag-runner`
+  fills `DagNodeExecution.failure` from. And the credential scrubber moved: `redactCredentials`,
+  `redactSecrets`, `redactText`, `redactRecord` and `redactCredentialsRecord` now live in `@maf/types` (they
+  were in `@maf/processors`), so the adapters' failure tail can share the one scrubber rather than keep its
+  own shorter list. `@maf/processors` re-exports all five, so an existing import from there still resolves
+  and nothing that compiled before stops compiling.
 - `@maf/roles` and `@maf/harness-config` (WP-3.1): `RoleConfig` and the harness's role entry gain an optional
   `expectsToolCalls?: boolean`, which the bridge validates and copies both ways. Optional, and copied only
   when set, so a hand-written role set still compiles and a minted harness does not move.

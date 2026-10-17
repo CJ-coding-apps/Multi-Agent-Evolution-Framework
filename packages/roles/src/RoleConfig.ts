@@ -47,11 +47,12 @@ export interface RoleConfig {
    */
   expectsChange?:     boolean;
   /**
-   * Whether the role is expected to make a tool call (D-46): an in-process **reader** (one that
-   * holds no write tool) that answers having made zero *executed* tool calls fails with `no_work`.
-   * Default `true` for a reader that holds at least one tool, and `false` for a role whose
-   * `allowedTools` is empty — it has nothing to call and answers from the prompt by design. A
-   * writer is untouched (`no_change` judges it, D-32).
+   * Whether the role is expected to make a tool call (D-46): an in-process role that does not
+   * expect a change (`expectsChange` is not true) — the built-in readers and the `tester` — that
+   * answers having made zero *executed* tool calls fails with `no_work`. Default `true` for such a
+   * role that holds at least one tool, and `false` for a role whose `allowedTools` is empty — it
+   * has nothing to call and answers from the prompt by design. A role that expects a change is
+   * untouched (`no_change` judges it, D-32).
    */
   expectsToolCalls?:  boolean;
   timeoutMs?:         number;

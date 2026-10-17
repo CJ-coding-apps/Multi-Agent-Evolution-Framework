@@ -406,16 +406,18 @@ export interface DagNodeExecution {
  *                         either tier, but its diff against the node's start commit is empty —
  *                         what a backend that refused the edit under its own permission settings
  *                         looks like (D-32).
- *  - `no_work`          — in-process: a **reader** (a role that holds no write tool) that expects a
- *                         tool call (`expectsToolCalls`) finished with a final answer having made
+ *  - `no_work`          — in-process: a role that does not expect a change (`expectsChange` is not
+ *                         `true`) — the built-in readers and the `tester` — that expects a tool
+ *                         call (`expectsToolCalls`) finished with a final answer having made
  *                         **no executed tool call** — the attested calls whose result was not
  *                         `refused`, which is to say the calls that actually ran, an approved
- *                         `Escalate` among them (D-46, F4/A2). A reader that read nothing has not
- *                         succeeded: live row 2b's analyst answered "I could not" after the host's
+ *                         `Escalate` among them (D-46, F4/A2). A role that called nothing has not
+ *                         done its job: live row 2b's analyst answered "I could not" after the host's
  *                         native tools were refused, and the old reading called it `Succeeded` off
- *                         the prose. The mirror of `no_change` for a reader, where `no_change` is
- *                         the writer's. The count is the node's *current attempt*, so a retry that
- *                         read only on an earlier attempt does not excuse it (F3/A4).
+ *                         the prose. The mirror of `no_change` for a role judged by its calls, where
+ *                         `no_change` is the one judged by the tree. The count is the node's *current
+ *                         attempt*, so a retry that read only on an earlier attempt does not excuse it
+ *                         (F3/A4).
  *  - `unexpected_change`— a role that holds **no** write tool changed the tree anyway (F7). On
  *                         the cli tier that is what a backend with file tools of its own does
  *                         whatever the role's allowlist says; MAF never sees those calls. The

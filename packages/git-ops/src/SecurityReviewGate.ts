@@ -131,7 +131,11 @@ export function parseSecurityOutput(raw: string): SecurityReviewResult {
     };
   }
   const { findings, unclassified } = sanitizeFindings(rawFindings);
-  let summary = typeof obj['summary'] === 'string' ? obj['summary'] : '';
+  // The summary and the findings are the reviewer's own words, and they reach the `GateRefused`
+  // message, the outcome, the bundle, the memory graph and `<past-failures>` — the realistic case
+  // being a reviewer that quotes the key it just found. Every string the parse keeps is masked
+  // before it is kept, so nothing downstream has to remember to.
+  let summary = typeof obj['summary'] === 'string' ? redactCredentials(obj['summary']) : '';
   if (unclassified > 0) {
     const note =
       `${unclassified} finding(s) had no recognisable severity (expected critical, high, ` +
@@ -159,24 +163,29 @@ function extractJsonBlock(raw: string): string | null {
  * An entry is dropped only when dropping it cannot change the verdict. A blocking finding with
  * no category or file is kept, since dropping it would pass the diff; an entry whose severity
  * cannot be read is counted as `unclassified`, since it may have been critical.
+ *
+ * Every string a kept finding carries is masked first (see `parseSecurityOutput`): a finding is
+ * reviewer-authored text that becomes node state and the record, so the same reason the summary
+ * is masked applies to it field by field.
  */
 function sanitizeFindings(raw: readonly unknown[]): { findings: SecurityFinding[]; unclassified: number } {
   const out: SecurityFinding[] = [];
   let unclassified = 0;
+  const str = (v: unknown): string | undefined => (typeof v === 'string' ? redactCredentials(v) : undefined);
   for (const item of raw) {
     if (!item || typeof item !== 'object') { unclassified++; continue; }
     const f = item as Record<string, unknown>;
     const severity = normalizeSeverity(f['severity']);
     if (!severity) { unclassified++; continue; }
-    const category = typeof f['category'] === 'string' ? f['category'] : undefined;
-    const file     = typeof f['file']     === 'string' ? f['file']     : undefined;
+    const category = str(f['category']);
+    const file     = str(f['file']);
     if ((category === undefined || file === undefined) && !BLOCKING_SEVERITIES.has(severity)) continue;
     const finding: SecurityFinding = {
       severity,
       category:    category ?? UNSPECIFIED,
       file:        file     ?? UNSPECIFIED,
-      rationale:   typeof f['rationale']   === 'string' ? f['rationale']   : '',
-      remediation: typeof f['remediation'] === 'string' ? f['remediation'] : '',
+      rationale:   str(f['rationale'])   ?? '',
+      remediation: str(f['remediation']) ?? '',
     };
     if (typeof f['line'] === 'number') finding.line = f['line'];
     out.push(finding);

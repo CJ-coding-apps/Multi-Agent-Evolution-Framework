@@ -252,7 +252,7 @@ Status table rows flipped to *shipped* only for behaviour landed in this phase, 
 
 ---
 
-## 7. Phase 3 — release 0.4.0
+## 7. Phase 3 — 3a released as 0.4.0; 3b planned for 0.5.0
 
 > **Deviation recorded 2026-10-14:** PR #31 was merged to `main` by the coder, under the maintainer's `gh` credential, rather than by the maintainer (D-26). The runbook the architect wrote put the merge commands beside the coder's conflict-resolution steps without re-labelling them as the maintainer's, and the maintainer handed the runbook over whole. The merge was reviewed, verifier-passed and CI-green and is not reverted; the §3.3 clause is the consequence.
 
@@ -267,7 +267,7 @@ Status table rows flipped to *shipped* only for behaviour landed in this phase, 
 | **WP-3.1** — the no-work work | the governed turn states what it has; a role that does not expect a change, and made no executed tool call, fails `no_work`; each node's failure is a value in the outcome (D-46) | #43 |
 | **WP-2.11** — the toolchain floor | `engines`, `packageManager: pnpm@10.x`, the v9 lockfile and pnpm 10 in CI, carried from Phase 2 (D-21) | #36 |
 
-**The shipped WP-3.1 keeps its name.** The renumbered LCM item is *also* WP-3.2, and the shipped no-work work is WP-3.1 — they do not collide, because the one that moved has no PR, no citation and no commit behind it, while the one that stayed is what commits, PR titles and [DECISIONS.md](DECISIONS.md) cite. Renaming shipped work to match a plan that did not exist when it was built would break every reference to it (D-47).
+**The shipped WP-3.1 keeps its name.** The renumbered LCM item is WP-3.2, and the shipped no-work work is WP-3.1 — they do not collide, because the one that moved has no PR, no citation and no commit behind it, while the one that stayed is what commits, PR titles and [DECISIONS.md](DECISIONS.md) cite. Renaming shipped work to match a plan that did not exist when it was built would break every reference to it (D-47).
 
 ### WP-3.0 Carried into Phase 3 — not a lane
 
@@ -328,14 +328,16 @@ Wires WP-3.3, 3.4, 3.5, 3.6 into the entry points. **Acceptance:** a scripted ru
 **Files:** `packages/cli/src/__tests__/` (every command, `wiring.ts`), `packages/adapters/*/src/__tests__/` (fake `claude`/`gemini`/`codex` binaries on `PATH`; verify the real `claude` flag set once on the maintainer's machine and pin it in a test fixture), `.github/workflows/nightly.yml` (live goldens with the Anthropic key, `$50` cap via run limits; evolve weekly, `$150`), `scripts/check-test-scripts.mjs` (every package with `src/` must have tests).
 **Acceptance:** no package the CLI depends on is untested; the nightly job runs the live goldens and posts the result as a workflow summary; CI total time under 10 minutes.
 
-### WP-3.13 Documentation pass, exit audit, release 0.4.0 — `todo` [maintainer merges]
-Status table: every row *shipped* names its check; LCM, evolver, failover, patch-test, DAG-from-spec, Kùzu rows flipped; CHANGELOG `[0.4.0]`; `DECISIONS.md` statuses. Then the exit audit: a verifier with no prior context runs the three criteria of §1 and reports. Release only on a clean report.
+### WP-3.13 Documentation pass, exit audit, release 0.5.0 — `todo` [maintainer merges]
+Status table: every row *shipped* names its check; LCM, evolver, failover, patch-test, DAG-from-spec, Kùzu rows flipped; CHANGELOG `[0.5.0]`; `DECISIONS.md` statuses. Then the exit audit: a verifier with no prior context runs the three criteria of §1 and reports. Release only on a clean report.
 
 ---
 
 ## 8. Phase 3b + Phase 4 — release 0.5.0 (scoped later)
 
 **Phase 3b — the items 0.4.0 did not take.** [D-47](DECISIONS.md) re-dated the LCM/failover/evolver phase to 0.5.0, and §7's WP-3.2 … WP-3.13 are its work packages unchanged — LCM built properly (D-17), run persistence and checkpoint (D-05, D-18), provider failover and pause (D-05), the patch-test coder strategy (D-18), DAG-from-spec (D-18), the evolver as claimed (D-15), Kùzu 0.11.3 (D-20), hardening (D-10, D-11) and consolidation (D-18). Their files, acceptance and lane layout stay as §7 writes them; only the release number moved.
+
+**Phase 3b — a WP the readers work leaves behind.** A `no_work` node counts the calls it *made*, not the call its task *needed*: a `tester` can read one file, never run `test.run`, and Succeed — and two of the three live-row attempts did exactly that (the WP-3.1 `no_work` entry in [CHANGELOG.md](../CHANGELOG.md)). The root is upstream — the planner is told nothing about the executor's tools, so a node's description speaks shell — and no role can say which tool its task requires. One WP closes both halves: the planner names **MAF tool ids** and is told there is no shell, and `RoleConfig` gains an optional `requiresTool?: ToolId`, so a role can declare the one call its task needs (`requiresTool: test.run`) and a node that executes none of it fails `no_work`. This is the **narrow form of F12** — it checks the call that was *required*, not every call the model narrated.
 
 **Phase 4 — the port.** Port from `maf-v1` into the public trunk (owner decision 7): `@maf/mcp-tools` with the known fixes — injected parameters override model input (`{...input, ...injected}`), filtered env for stdio servers, the Cognitive Fabric preset's `analyze`/`detect` rated destructive per CF 0.1.0's published annotations — then `resolveHarnessForRun`, encryption at rest (E1, AgentVenture key design: OS-keychain master key behind a provider interface, HKDF subkeys, per-record AES-256-GCM, fail closed), and the prompt-injector test script. The architect writes the WPs from the v1 checklist after 0.4.0 ships.
 
