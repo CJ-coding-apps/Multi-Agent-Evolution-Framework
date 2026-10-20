@@ -15,10 +15,12 @@ Rules are evaluated in **descending priority** order. The first rule whose predi
 
 ## The policy file
 
-`maf run` reads `.maf/policy.yaml` in the target directory, or the file `--policy <path>` names (resolved against the target directory). `PolicyLoader` (`packages/policy-engine/src/PolicyLoader.ts`) loads it with a real YAML parser; JSON is valid YAML, so a JSON policy file loads too.
+`maf run` reads `.maf/policy.yaml` in the target directory, or the file `--policy <path>` names (resolved against the target directory); with neither, it runs under the policy the package ships ([D-49](DECISIONS.md)). `PolicyLoader` (`packages/policy-engine/src/PolicyLoader.ts`) loads it with a real YAML parser; JSON is valid YAML, so a JSON policy file loads too.
 
-- **A missing file** prints one warning line and loads no rules. Path confinement (below) still applies.
-- **A file that exists but cannot be used stops the run**: one that cannot be read, is not valid YAML, or fails validation. The error carries the parse error, or every validation problem at once. An empty or comment-only file is refused; write `rules: []` to run with no rules on purpose.
+- **No file and no `--policy`** — the built-in policy applies: the `.maf/policy.yaml` this repository ships, embedded in the package byte for byte (a drift test compares the two in both directions). The run prints one line naming the built-in policy and its rule count, and its bundle records `policyInForce.source: "built-in"` with no `path` and no `sha256`, because no user file was read.
+- **`--policy none`** is the explicit opt-out: no rules apply, and the bundle records `source: "none"`. Path confinement (below) still applies either way.
+- **A `--policy <path>` that names no file** prints one warning line and loads no rules; the bundle records `source: "file"` with the path and no digest, which is what tells it apart from `--policy none`.
+- **A file that exists but cannot be used stops the run**: one that cannot be read, is not valid YAML, or fails validation. The error carries the parse error, or every validation problem at once. The built-in default covers **absence**, never a file that exists and does not load — a typo in a Deny rule must not silently become different rules. An empty or comment-only file is refused; write `rules: []` to run with no rules on purpose.
 - **Validation.** Each rule needs `id` (unique across the file), `priority` (a finite number), `predicate` (a mapping; `{}` matches every call) and `action`; `description` is optional. A `Deny` action needs `reason`, and an `Escalate` action needs `requiresApproval` (`true` or `false`) — although the engine does not read it: an `Escalate` rule asks for approval whichever it says. An unknown field is refused wherever it appears — the document, a rule, a predicate, a `memoryPattern`, an action — because a misspelt `agentRole` would otherwise widen a rule to every role. An empty glob and an empty list are refused too: the engine would read either as "no condition".
 - **Quote every glob.** YAML reads a bare value starting with `*` as an alias and one starting with `{` as a mapping.
 

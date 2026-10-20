@@ -9,6 +9,49 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+0.5.0 is the packaging release ([D-48](docs/DECISIONS.md)): `maf` installs from npm, `maf init`
+prepares a repository, and a run with no policy file is governed by the built-in policy instead of by
+nothing. The LCM/failover/evolver work [D-47](docs/DECISIONS.md) put in 0.5.0 moves to 0.6.0.
+
+### Added
+
+- **A published package, `@cj-coding-apps/maf`** ([D-48](docs/DECISIONS.md)). The 26 internal `@maf/*`
+  packages are bundled into one `dist/main.js` with esbuild; the six third-party runtime dependencies stay
+  real dependencies, pinned to the versions this workspace resolved, because `better-sqlite3` and `kuzu`
+  carry native code that must be installed against the user's Node. The manifest carries no `workspace:`
+  link and no `@maf/*` name, and the package ships the bundle, the assets a run reads (`.maf/`'s policy,
+  roles, config and prompts, and the goldens corpus), the README and the licence. A new CI job,
+  `package · npm pack · install · run`, packs the artifact with npm, installs the tarball into an empty
+  prefix and runs `maf --version`, `maf inprocess-demo` and `maf goldens run --adapter scripted` from a
+  directory that is not this repository — the checks a checkout-based job cannot make.
+- **`maf init`** writes the shipped `.maf/` into a repository: `policy.yaml`, `roles.yaml`, `config.yaml`
+  and `prompts/`, byte-identical to the package's assets (which the drift test pins to this repository's
+  `.maf/` and `tests/goldens/`), plus the `.gitignore` that keeps runtime state out of the user's history.
+  It reports each file it wrote or kept, prints the next command, refuses a directory that is not a
+  committed git repository — a run has no HEAD to start from there — and keeps an edited file on a second
+  run; `--force` replaces it.
+- **A built-in policy default** ([D-49](docs/DECISIONS.md)). With no `--policy` typed and no
+  `.maf/policy.yaml` in the target, `run` now applies the policy shipped in the package — this repository's
+  own `.maf/policy.yaml`, byte for byte — prints one line naming it and its rule count, and records
+  `policyInForce.source: "built-in"`. Before this, such a run applied no rules at all, and the bundle
+  could not tell that apart from a policy that was loaded and never fired. `--policy none` opts out
+  explicitly and records `source: "none"`; a file that exists but does not load still stops the run, so a
+  broken policy never falls back silently.
+- **The goldens fall back to the packaged corpus.** `goldens run` in an installed package, where there is
+  no `tests/goldens`, now uses the corpus shipped beside `dist/` and says so, instead of failing on a path
+  that only exists in a checkout.
+
+### Changed
+
+- **`policyInForce.source` is a source kind, not a path** — breaking for anything that reads a bundle's
+  policy record. `source` is now `"file"`, `"built-in"` or `"none"`; a file's resolved path moved to the new
+  `path` field, present exactly when `source` is `"file"`. `sha256` keeps its rule — absent exactly when no
+  file was read — so `source: "file"` with no digest still means a requested file that was not found. A
+  bundle written by an earlier release parses unchanged; only code reading `source` as a path is affected.
+- **Phase 3b is 0.6.0.** [D-48](docs/DECISIONS.md) amends [D-47](docs/DECISIONS.md): packaging takes
+  0.5.0 and the LCM/failover/evolver phase moves to the next minor. `docs/BUILD_PLAN.md` §2, §7 and §8 carry the
+  new numbers.
+
 ## [0.4.0] - 2026-10-20
 
 The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b, WP-3.0c and WP-3.1) land together

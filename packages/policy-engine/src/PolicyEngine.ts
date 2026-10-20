@@ -3,14 +3,18 @@ import crypto from 'node:crypto';
 import type {
   PolicyEngineHandle, PolicyRule, PolicyDecision, PolicyAction,
   ToolId, ToolInput, ToolContext, ApprovalRequest, GraphQueryRunner,
-  PolicyInForce, PolicyRuleSummary, PolicyVerdictCounts,
+  PolicyInForce, PolicyRuleSummary, PolicyVerdictCounts, PolicySourceKind,
 } from '@maf/types';
 import { resolveInside, PathEscapeError, VerdictError } from '@maf/types';
 import { bindPolicyTemplate } from './policyTemplate.js';
 
-/** Where a rule set came from, and the digest of those bytes when there were bytes to digest. */
+/**
+ * Where a rule set came from, and the digest of those bytes when there were bytes to digest.
+ * `path` is present exactly for `kind: 'file'`, the same rule the record follows.
+ */
 export interface PolicySource {
-  path:    string;
+  kind:    PolicySourceKind;
+  path?:   string;
   sha256?: string;
 }
 
@@ -66,13 +70,15 @@ export class PolicyEngine implements PolicyEngineHandle {
 
   /**
    * The rules that governed this engine and how its calls fell so far (F6). Read after the run, when
-   * the counts are final. `source.sha256` is absent exactly when no file was read, so a reader can
-   * tell "no policy file" from "a file with no rules" — the two runs F6 says are indistinguishable
-   * from the `toolCalls` and `securityFindings` alone.
+   * the counts are final. `source` says how the rules were chosen (a file, the built-in policy, or
+   * none), `source.sha256` is absent exactly when no file was read, and `path` is present exactly
+   * for a file — so a reader can tell "no policy file" from "a file with no rules" and from the
+   * built-in default, the runs F6 says are indistinguishable from `toolCalls` and `securityFindings`.
    */
   inForce(): PolicyInForce {
     return {
-      ...(this.source ? { source: this.source.path } : {}),
+      ...(this.source ? { source: this.source.kind } : {}),
+      ...(this.source?.path !== undefined ? { path: this.source.path } : {}),
       ...(this.source?.sha256 !== undefined ? { sha256: this.source.sha256 } : {}),
       ruleCount: this.rules.length,
       rules: this.rules.map(summarizeRule),

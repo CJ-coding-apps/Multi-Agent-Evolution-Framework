@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { mafVersion } from '@maf/attestation';
 import { createAdapterRegistry } from './AdapterRegistry.js';
 import { registerRunCommand } from './commands/run.js';
+import { registerInitCommand } from './commands/init.js';
 import { registerHarnessCommand } from './commands/harness.js';
 import { registerGoldensCommand } from './commands/goldens.js';
 import { registerEvolveCommand } from './commands/evolve.js';
@@ -17,6 +18,7 @@ program
   .version(mafVersion());
 
 registerRunCommand(program);
+registerInitCommand(program);
 registerHarnessCommand(program);
 registerGoldensCommand(program);
 registerEvolveCommand(program);

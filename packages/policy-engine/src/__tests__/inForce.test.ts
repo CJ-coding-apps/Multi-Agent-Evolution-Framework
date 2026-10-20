@@ -27,18 +27,31 @@ const baseCtx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
 const rule = (id: string, priority: number, predicate: PolicyRule['predicate'], action: PolicyRule['action']): PolicyRule =>
   ({ id, description: '', priority, predicate, action });
 
-test('inForce names the source and its sha when the rules came from a file, and omits the sha when they did not', () => {
+test('inForce names how the rules were chosen, the file when there was one, and its sha only when bytes were read', () => {
   const fromFile = new PolicyEngine(stubGraph);
-  fromFile.loadRules([], { path: '.maf/policy.yaml', sha256: 'abc123' });
+  fromFile.loadRules([], { kind: 'file', path: '.maf/policy.yaml', sha256: 'abc123' });
   const named = fromFile.inForce();
-  assert.equal(named.source, '.maf/policy.yaml');
+  assert.equal(named.source, 'file');
+  assert.equal(named.path, '.maf/policy.yaml');
   assert.equal(named.sha256, 'abc123');
 
   const noFile = new PolicyEngine(stubGraph);
-  noFile.loadRules([], { path: '.maf/policy.yaml' });
+  noFile.loadRules([], { kind: 'file', path: '.maf/policy.yaml' });
   const bare = noFile.inForce();
-  assert.equal(bare.source, '.maf/policy.yaml', 'the path was still looked at');
+  assert.equal(bare.source, 'file', 'the path was still looked at');
+  assert.equal(bare.path, '.maf/policy.yaml');
   assert.equal('sha256' in bare, false, 'no file was read, so there are no bytes to digest');
+
+  // D-49: the shipped default and the explicit opt-out are their own sources, with no user path.
+  const builtIn = new PolicyEngine(stubGraph);
+  builtIn.loadRules([], { kind: 'built-in' });
+  assert.equal(builtIn.inForce().source, 'built-in');
+  assert.equal('path' in builtIn.inForce(), false, 'no user file was named');
+
+  const none = new PolicyEngine(stubGraph);
+  none.loadRules([], { kind: 'none' });
+  assert.equal(none.inForce().source, 'none');
+  assert.equal('path' in none.inForce(), false);
 });
 
 test('inForce summarises each rule as id, effect and what it matches', () => {

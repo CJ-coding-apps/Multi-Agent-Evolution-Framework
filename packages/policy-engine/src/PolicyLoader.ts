@@ -3,7 +3,19 @@ import crypto from 'node:crypto';
 import { LineCounter, isAlias, isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, visit } from 'yaml';
 import type { GraphQueryRunner, PolicyAction, PolicyPredicate, PolicyRule } from '@maf/types';
 import { makeToolId } from '@maf/types';
-import { PolicyEngine } from './PolicyEngine.js';
+import { PolicyEngine, type PolicySource } from './PolicyEngine.js';
+
+/** How `resolve` chooses the rules, beyond the path itself (D-49). */
+export interface PolicyLoadOptions {
+  /** `--policy none`: run with no rules at all, recorded as `source: "none"`. */
+  none?: boolean;
+  /**
+   * The shipped default policy, applied when `policyPath` does not exist and nothing was read
+   * (D-49). Parsed with a fixed label naming the package asset, and recorded as `"built-in"` with
+   * no digest — no user file was read.
+   */
+  builtInText?: string;
+}
 
 /**
  * Reads a policy file into rules, and refuses a file it cannot read in full (D-08).
@@ -28,9 +40,13 @@ export class PolicyLoader {
 
   /**
    * `load`, with the sha256 of the bytes it read (F6). The digest is absent exactly when no file was
-   * read, so a caller recording the policy in force can tell a missing file from an empty one.
+   * read, so a caller recording the policy in force can tell a missing file from an empty one;
+   * `missing` says which case it was when the warning is the caller's to print.
    */
-  static async loadWithSource(policyPath: string): Promise<{ rules: PolicyRule[]; sha256?: string }> {
+  static async loadWithSource(
+    policyPath: string,
+    options: { quiet?: boolean } = {},
+  ): Promise<{ rules: PolicyRule[]; sha256?: string; missing?: true }> {
     let text: string;
     try {
       text = await readFile(policyPath, 'utf8');
@@ -39,11 +55,13 @@ export class PolicyLoader {
       // to point at has gone, which is not the same as the user having no policy.
       if (isNotFound(err) && !(await nameExists(policyPath))) {
         // JSON-quoted so the warning stays one line whatever the path contains.
-        console.warn(
-          `[maf] policy: no policy file at ${JSON.stringify(policyPath)}; ` +
-          'running with no policy rules (path confinement still applies).',
-        );
-        return { rules: [] };
+        if (!options.quiet) {
+          console.warn(
+            `[maf] policy: no policy file at ${JSON.stringify(policyPath)}; ` +
+            'running with no policy rules (path confinement still applies).',
+          );
+        }
+        return { rules: [], missing: true };
       }
       throw new Error(
         `Policy file ${JSON.stringify(policyPath)} exists but could not be read, and a policy ` +
@@ -53,11 +71,55 @@ export class PolicyLoader {
     return { rules: parsePolicy(text, policyPath), sha256: crypto.createHash('sha256').update(text, 'utf8').digest('hex') };
   }
 
-  /** A `PolicyEngine` holding the rules `load` returns, so a call site cannot load one without the other. */
-  static async loadEngine(policyPath: string, graph: GraphQueryRunner): Promise<PolicyEngine> {
+  /**
+   * The rules to run under, and where they came from (D-49).
+   *
+   * `none` runs with no rules by explicit choice. A missing file runs under `builtInText` when one
+   * is supplied — the shipped default — or with no rules when it is not. A file that exists but
+   * does not parse still throws: the built-in default covers absence, never a broken file.
+   */
+  static async resolve(
+    policyPath: string,
+    options: PolicyLoadOptions = {},
+  ): Promise<{ rules: PolicyRule[]; source: PolicySource }> {
+    if (options.none) {
+      console.warn('[maf] policy: --policy none; running with no policy rules (path confinement still applies).');
+      return { rules: [], source: { kind: 'none' } };
+    }
+    const { rules, sha256, missing } = await PolicyLoader.loadWithSource(policyPath, { quiet: true });
+    if (missing) {
+      if (options.builtInText !== undefined) {
+        const builtIn = parsePolicy(options.builtInText, 'the built-in policy (assets/policy.yaml)');
+        console.warn(
+          `[maf] policy: no policy file at ${JSON.stringify(policyPath)}; using the built-in ` +
+          `policy (${builtIn.length} ${builtIn.length === 1 ? 'rule' : 'rules'}). ` +
+          'Pass --policy none to run without rules.',
+        );
+        return { rules: builtIn, source: { kind: 'built-in' } };
+      }
+      console.warn(
+        `[maf] policy: no policy file at ${JSON.stringify(policyPath)}; ` +
+        'running with no policy rules (path confinement still applies).',
+      );
+      return { rules: [], source: { kind: 'file', path: policyPath } };
+    }
+    return {
+      rules,
+      source: sha256 === undefined
+        ? { kind: 'file', path: policyPath }
+        : { kind: 'file', path: policyPath, sha256 },
+    };
+  }
+
+  /** A `PolicyEngine` holding the rules `resolve` returns, so a call site cannot load one without the other. */
+  static async loadEngine(
+    policyPath: string,
+    graph: GraphQueryRunner,
+    options: PolicyLoadOptions = {},
+  ): Promise<PolicyEngine> {
     const engine = new PolicyEngine(graph);
-    const { rules, sha256 } = await PolicyLoader.loadWithSource(policyPath);
-    engine.loadRules(rules, sha256 === undefined ? { path: policyPath } : { path: policyPath, sha256 });
+    const { rules, source } = await PolicyLoader.resolve(policyPath, options);
+    engine.loadRules(rules, source);
     return engine;
   }
 

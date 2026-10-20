@@ -457,7 +457,8 @@ What that separates, and what it does not:
   finds are the ones it learned for the run's worktree — a `.git` link rewritten to your `.git`, by any
   route including `test.run`, keeps the worktree as the top and is caught by the git directory (see
   *The agent's git tools*; `cli/worktree-escape.test.ts` and `tools/worktree-confinement.test.ts` replay
-  deleting or rewriting the worktree's `.git` and then resetting or committing, with no policy file). MAF reads your status with
+  deleting or rewriting the worktree's `.git` and then resetting or committing; those refusals are
+  tool-level and made before the policy is asked). MAF reads your status with
   `GIT_OPTIONAL_LOCKS=0` so git does not refresh your index. What a run adds to the repository is the
   branch `maf/<runId>`, git's record of the worktree, and the run's state under `.maf/`. A run never
   deletes its worktree or its branch.
@@ -561,7 +562,8 @@ What this refuses:
 
 The check happens in two places, and neither is redundant. In the **policy engine** it runs before the
 rule list, so a path outside the root is refused with a `Deny` even when no rule is loaded — confinement
-is not a rule and an empty policy file does not turn it off. In each **fs tool's and `grep`'s `execute`** the
+is not a rule, and neither an empty policy file nor the deliberate `--policy none` turns it off
+([D-49](DECISIONS.md)). In each **fs tool's and `grep`'s `execute`** the
 same function runs again, so a tool called directly, without passing through the policy engine, is
 confined identically (`grep` answers a path outside the root with a failed result). Through the gate, a
 path an fs tool resolves outside the root as it runs — a link swapped in after the policy engine confined

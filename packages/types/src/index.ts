@@ -926,14 +926,21 @@ export interface PolicyVerdictCounts {
   indeterminate: number;
 }
 
+/** How the rules in force were chosen (D-49). */
+export type PolicySourceKind = 'file' | 'built-in' | 'none';
+
 /**
- * The policy in force for a run (F6): the file it came from and its digest, the rules, and the
- * counts. `sha256` is absent exactly when no file was read — which is how `source` names a file that
- * was asked for but not found, distinct from a file that was read and held zero rules.
+ * The policy in force for a run (F6, D-49): how the rules were chosen, the file when there was one,
+ * its digest, the rules, and the counts. `sha256` is absent exactly when no file was read — which is
+ * how `source: "file"` names a file that was asked for but not found, distinct from a file that was
+ * read and held zero rules. `path` is present exactly when `source` is `"file"`: the built-in policy
+ * has no user path, and `none` has no policy at all.
  */
 export interface PolicyInForce {
-  /** The path the rules were loaded from; the run's resolved `--policy`, whether or not it exists. */
-  source?:  string;
+  /** How the rules were chosen: a policy file, the shipped built-in policy, or no policy at all. */
+  source?:  PolicySourceKind;
+  /** The run's resolved `--policy`, present exactly when `source` is `"file"`. */
+  path?:    string;
   /** sha256 of the policy file's bytes. Absent when there was no file to read. */
   sha256?:  string;
   ruleCount: number;

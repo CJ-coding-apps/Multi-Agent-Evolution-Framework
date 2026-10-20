@@ -20,6 +20,7 @@ import { LEGACY_DEFAULT_ID, resolveHarnessRef } from '@maf/harness-config';
 import type { HarnessConfig, HarnessStore, ResolvedHarness } from '@maf/harness-config';
 import type { TaskDispatcher } from '@maf/eval-harness';
 import { importHarness, locateStoredHarness } from './commands/harness.js';
+import { goldensAssetRoot } from './assets.js';
 
 /**
  * Shared CLI wiring for run/goldens/evolve commands: one component stack per
@@ -173,9 +174,10 @@ export async function resolveRunHarness(o: RunHarnessOptions): Promise<ResolvedH
 }
 
 /**
- * Resolve the golden corpus root (L6). Prefers the requested path; if it has no
- * corpus.json, falls back to the repo's committed seed corpus at tests/goldens
- * (which holds corpus.json AND rubrics/, so rubricFile resolution still works).
+ * Resolve the golden corpus root (L6). Prefers the requested path; if it has no `corpus.json`,
+ * falls back to the seed corpus a source checkout keeps at `tests/goldens`, then — for an installed
+ * package, where no checkout exists — to the corpus the package ships beside `dist/`. All three hold
+ * `corpus.json` AND `rubrics/`, so rubric resolution works the same way from any of them.
  */
 export async function resolveCorpusRoot(cwd: string, optPath: string): Promise<string> {
   const primary = path.resolve(cwd, optPath);
@@ -183,11 +185,17 @@ export async function resolveCorpusRoot(cwd: string, optPath: string): Promise<s
     await readFile(path.join(primary, 'corpus.json'), 'utf8');
     return primary;
   } catch { /* fall through to the seed corpus */ }
-  const fallback = path.resolve(cwd, 'tests', 'goldens');
+  const checkout = path.resolve(cwd, 'tests', 'goldens');
   try {
-    await readFile(path.join(fallback, 'corpus.json'), 'utf8');
-    console.log(`[maf] corpus not found at ${primary}; using seed corpus at ${fallback}`);
-    return fallback;
+    await readFile(path.join(checkout, 'corpus.json'), 'utf8');
+    console.log(`[maf] corpus not found at ${primary}; using seed corpus at ${checkout}`);
+    return checkout;
+  } catch { /* fall through to the packaged corpus */ }
+  const packaged = goldensAssetRoot();
+  try {
+    await readFile(path.join(packaged, 'corpus.json'), 'utf8');
+    console.log(`[maf] corpus not found at ${primary}; using the corpus shipped with maf at ${packaged}`);
+    return packaged;
   } catch {
     return primary; // let the caller's own read surface a clear error for the requested path
   }

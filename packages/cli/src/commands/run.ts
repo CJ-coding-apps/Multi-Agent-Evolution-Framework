@@ -24,6 +24,7 @@ import type { ToolRegistry } from '@maf/tools';
 import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterRole, roleSetFromHarness } from '@maf/roles';
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
+import { readAsset } from '../assets.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { resolveRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
@@ -56,7 +57,7 @@ export interface RunOptions {
 }
 
 /** The flags whose commander default must be told apart from the same value typed. */
-export type GivenFlag = 'adapter' | 'worktree' | 'roles';
+export type GivenFlag = 'adapter' | 'worktree' | 'roles' | 'policy';
 
 /** What `run` takes from the process. A test replaces any of it. */
 export interface RunIo {
@@ -92,7 +93,7 @@ export function registerRunCommand(program: Command, deps: RunDeps = {}): void {
     .option('-m, --model <model>', 'Model name (adapter-specific)')
     .option('-d, --dir <path>', 'Working directory', process.cwd())
     .option('--no-worktree', 'Disable git worktree isolation')
-    .option('--policy <path>', 'Path to policy YAML file', '.maf/policy.yaml')
+    .option('--policy <path>', 'Path to policy YAML file (default: .maf/policy.yaml, else the built-in policy); "none" runs without rules', '.maf/policy.yaml')
     .option('--roles <path>', 'Path to roles YAML file', '.maf/roles.yaml')
     .option('--harness <ref>', 'Harness id, sha, or "current" (default: CURRENT if set, else legacy-default from --roles (overrides --roles when given))')
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
@@ -247,7 +248,16 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       summarize: async (messages) => messages.map((m) => m.content.slice(0, 200)).join('\n'),
     });
     graph           = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
-    const policy    = await PolicyLoader.loadEngine(path.resolve(dir, opts.policy), graph);
+    // D-49: a policy the user names is theirs — present or absent, it is loaded as before. With no
+    // `--policy`, a missing .maf/policy.yaml falls back to the policy shipped in the package, so an
+    // installed `maf` governs a repository that has never run `maf init`.
+    const policy    = await PolicyLoader.loadEngine(
+      path.resolve(dir, opts.policy),
+      graph,
+      ctx.given('policy')
+        ? (opts.policy === 'none' ? { none: true } : {})
+        : { builtInText: await readAsset('policy.yaml') },
+    );
     const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
       logDir: path.join(mafDir, 'transcripts'),
       softThreshold: 20_000,

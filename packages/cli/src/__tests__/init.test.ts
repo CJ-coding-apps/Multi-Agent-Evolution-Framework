@@ -1,0 +1,159 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { Command } from 'commander';
+import { runIsolatedGit } from '@maf/git-ops';
+import { MAF_DIR_GITIGNORE } from '../ensureMafDir.js';
+import { initFiles, runInit, registerInitCommand } from '../commands/init.js';
+import type { InitDeps } from '../commands/init.js';
+import { readAsset } from '../assets.js';
+import { createDemoFixture } from '../commands/inprocessDemo.js';
+import { collector } from './runFixture.js';
+
+// ORACLE (WP-P1, acceptance 3): an installed `maf` must be able to set a repository up for a run.
+// `maf init` writes the same policy, roles, config and prompts the package runs from (D-49), plus the
+// `.gitignore` that keeps runtime state out of the user's history; running it twice must not clobber
+// a file the user has since edited, and `--force` is the explicit way to replace one. It refuses a
+// directory a run could not use — no git, or no commit — and it names the next command instead of
+// leaving the user to guess.
+
+/** `maf init <args>` through commander, as main.ts registers it, collecting what it printed. */
+async function driveInit(args: readonly string[], deps: InitDeps = {}) {
+  const out = collector();
+  const program = new Command();
+  program.exitOverride();
+  registerInitCommand(program, { out, ...deps });
+  let error: unknown;
+  try {
+    await program.parseAsync(['init', ...args], { from: 'user' });
+  } catch (err: unknown) {
+    error = err;
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  return { out: out.text(), ...(error !== undefined ? { error } : {}) };
+}
+
+/** The files in the order `init` reports them, with the separators a printed line carries. */
+async function shipped(): Promise<string[]> {
+  return (await initFiles()).map((relative) => relative.split(path.sep).join('/'));
+}
+
+async function absent(file: string): Promise<boolean> {
+  try {
+    await access(file);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+test('a fresh repository gets every shipped .maf file, byte-identical to the package, plus the state .gitignore', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-fresh-'));
+  try {
+    const repo = await createDemoFixture(root);
+    const run = await driveInit(['--dir', repo]);
+    assert.equal(run.error, undefined, run.out);
+
+    const files = await shipped();
+    assert.ok(files.length >= 5, `init writes at least five files; it wrote ${files.length}`);
+
+    for (const relative of files) {
+      assert.equal(
+        await readFile(path.join(repo, '.maf', relative), 'utf8'),
+        await readAsset(relative),
+        `.maf/${relative} is the package's own bytes, not a copy that can drift`,
+      );
+      assert.ok(
+        run.out.includes(`[maf] init: wrote .maf/${relative}`),
+        `the report names .maf/${relative}: ${run.out}`,
+      );
+    }
+
+    assert.equal(
+      await readFile(path.join(repo, '.maf', '.gitignore'), 'utf8'),
+      MAF_DIR_GITIGNORE,
+      'the state .gitignore is there, so a run leaves `git status` clean',
+    );
+    assert.match(run.out, /^Next steps:$/m);
+    assert.ok(run.out.includes('export MAF_SIGNING_KEY="$(openssl rand -hex 32)"'), run.out);
+    assert.match(run.out, /^\s+maf run /m, 'and the command that does the work');
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('a second init writes nothing and names each file it kept', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-twice-'));
+  try {
+    const repo = await createDemoFixture(root);
+    const first = await runInit({ dir: repo, out: collector() });
+    assert.equal(first.skipped.length, 0, 'the first run has nothing to keep');
+
+    // A file the user has since changed is the case "kept" exists for.
+    const policy = path.join(repo, '.maf', 'policy.yaml');
+    await writeFile(policy, '# mine now\n', 'utf8');
+
+    const second = await driveInit(['--dir', repo]);
+    assert.equal(second.error, undefined, second.out);
+    assert.equal(await readFile(policy, 'utf8'), '# mine now\n', 'init does not clobber an existing file');
+    assert.ok(!second.out.includes('[maf] init: wrote'), `nothing was written: ${second.out}`);
+    for (const relative of await shipped()) {
+      assert.ok(
+        second.out.includes(`[maf] init: kept .maf/${relative} (already exists; use --force to overwrite)`),
+        `the report names .maf/${relative} as kept: ${second.out}`,
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('--force overwrites the files init owns, restoring the shipped bytes', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-force-'));
+  try {
+    const repo = await createDemoFixture(root);
+    await runInit({ dir: repo, out: collector() });
+    for (const relative of ['policy.yaml', 'prompts/coder.md']) {
+      await writeFile(path.join(repo, '.maf', relative), 'edited\n', 'utf8');
+    }
+
+    const forced = await driveInit(['--dir', repo, '--force']);
+    assert.equal(forced.error, undefined, forced.out);
+    for (const relative of ['policy.yaml', 'prompts/coder.md']) {
+      assert.equal(await readFile(path.join(repo, '.maf', relative), 'utf8'), await readAsset(relative), relative);
+      assert.ok(forced.out.includes(`[maf] init: wrote .maf/${relative}`), forced.out);
+    }
+    assert.ok(!forced.out.includes('[maf] init: kept'), forced.out);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('a directory that is not a git repository is refused, and nothing is written', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-nogit-'));
+  try {
+    await assert.rejects(
+      runInit({ dir: root, out: collector() }),
+      /is not inside a git repository\..*must be in a git repository with at least one commit/s,
+    );
+    assert.ok(await absent(path.join(root, '.maf')), 'a refused init leaves no .maf behind');
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('a repository with no commits is refused, because a run has no HEAD to start from', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-nocommit-'));
+  try {
+    await runIsolatedGit(root, ['init', '-q']);
+    await assert.rejects(
+      runInit({ dir: root, out: collector() }),
+      /has no commits yet\..*must be in a git repository with at least one commit/s,
+    );
+    assert.ok(await absent(path.join(root, '.maf')));
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
