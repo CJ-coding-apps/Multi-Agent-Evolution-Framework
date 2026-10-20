@@ -20,6 +20,15 @@ export function goldensAssetRoot(): string {
   return path.join(assetsRoot(), 'goldens');
 }
 
+/**
+ * The default harness the package ships (`assets/harnesses`, F1). A repository that never ran
+ * `maf init` and never ran a task has no harness of its own, and the golden suite still has to
+ * evaluate something; this is that something.
+ */
+export function harnessesAssetRoot(): string {
+  return path.join(assetsRoot(), 'harnesses');
+}
+
 /** The text of one embedded file, refused if `relative` does not stay under `assets/`. */
 export async function readAsset(relative: string): Promise<string> {
   return readFile(assetPath(relative), 'utf8');

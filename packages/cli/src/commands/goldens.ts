@@ -18,8 +18,10 @@ import {
 } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
+import { harnessesAssetRoot } from '../assets.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { RESOLVER_REFS, buildRunStack, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
+import type { PolicyChoice } from '../wiring.js';
 import { committedDefaults, loadHarnessFile, locateStoredHarness } from './harness.js';
 
 /**
@@ -40,10 +42,14 @@ export function goldenRunStatus(result: GoldenSuiteResult): RunStatus {
 
 /**
  * The harness a golden run evaluates and `evolve` starts from: `--harness` (a stored ref, or a
- * harness file), else CURRENT, else the committed `.maf/harnesses/default-<sha>.json` — which is
- * all a fresh clone that has never run maf has. The committed default also answers to its id and
- * (short) sha, and is read in place, not imported into the store. A stored ref and CURRENT go
- * through `run`'s own resolution (`resolveRunHarness`).
+ * harness file), else CURRENT, else the committed `.maf/harnesses/default-<sha>.json`, else the
+ * default the package itself ships (`assets/harnesses/`, F1). The committed default also answers to
+ * its id and (short) sha, and is read in place, not imported into the store. A stored ref and
+ * CURRENT go through `run`'s own resolution (`resolveRunHarness`).
+ *
+ * The packaged default is what makes `maf goldens run --adapter scripted` work in a repository that
+ * has neither run `maf init` nor run maf at all: before it, the command demanded a harness no
+ * package contained, and the packaging check hid that by copying one in from the checkout.
  */
 export async function resolveGoldensHarness(mafDir: string, ref?: string): Promise<{ harness: HarnessConfig; source: string }> {
   const store = new HarnessStore(mafDir);
@@ -57,17 +63,27 @@ export async function resolveGoldensHarness(mafDir: string, ref?: string): Promi
   }
   if (plain && (await store.current()) === undefined) {
     const defaults = await committedDefaults(store);
-    if (defaults.length !== 1) {
+    if (defaults.length > 1) {
       throw new Error(
-        `goldens: no harness to evaluate — no --harness, no CURRENT in ${store.dir}, and ` +
-        `${defaults.length === 0 ? 'no' : 'more than one'} committed default-<sha>.json there. ` +
-        'Pass --harness, or run maf once to mint one.',
+        `goldens: more than one committed default-<sha>.json in ${store.dir} ` +
+        `(${defaults.map((f) => path.basename(f)).join(', ')}); pass --harness to say which one to evaluate.`,
       );
     }
-    // Located by its sha, like a typed ref, so `evolve` starting from it and `goldens` measuring it
-    // name one harness; a copy `run` imported into the store is the same content.
-    const file = defaults[0] as string;
-    return locateStoredHarness(store, path.basename(file).slice('default-'.length, -'.json'.length));
+    if (defaults.length === 1) {
+      // Located by its sha, like a typed ref, so `evolve` starting from it and `goldens` measuring it
+      // name one harness; a copy `run` imported into the store is the same content.
+      const file = defaults[0] as string;
+      return locateStoredHarness(store, path.basename(file).slice('default-'.length, -'.json'.length));
+    }
+    const packaged = await packagedDefaultHarness();
+    if (packaged !== undefined) return packaged;
+    // Not "run maf once": a run mints legacy-default and points CURRENT at it, and this branch is
+    // reached only with no CURRENT. An empty asset directory means the installation is incomplete.
+    throw new Error(
+      `goldens: no harness to evaluate — no --harness, no CURRENT in ${store.dir}, no committed ` +
+      `default-<sha>.json there, and no default harness in this maf installation (${harnessesAssetRoot()}). ` +
+      'Reinstall maf, or pass --harness.',
+    );
   }
   // Everything else is resolved as `run` resolves it, so a CURRENT that tracks the roles file
   // evaluates the roles file now, and a harness whose prompts are not in its sha is refused.
@@ -75,6 +91,23 @@ export async function resolveGoldensHarness(mafDir: string, ref?: string): Promi
     store, ref: plain ? undefined : ref, rolesPath: path.join(mafDir, 'roles.yaml'), mafDir, baseTools: createDefaultRegistry(),
   });
   return { harness, source: (await store.configSource(harness)).uri };
+}
+
+/** The one default harness the installation ships, validated as any harness file is; undefined if none. */
+async function packagedDefaultHarness(): Promise<{ harness: HarnessConfig; source: string } | undefined> {
+  const root = harnessesAssetRoot();
+  const names = (await readdir(root).catch(() => [] as string[]))
+    .filter((name) => /^default-[0-9a-f]{64}\.json$/.test(name))
+    .sort();
+  if (names.length === 0) return undefined;
+  if (names.length > 1) {
+    throw new Error(
+      `goldens: this maf installation ships more than one default harness in ${root} ` +
+      `(${names.join(', ')}); pass --harness to say which one to evaluate.`,
+    );
+  }
+  const file = path.join(root, names[0] as string);
+  return { harness: await loadHarnessFile(file), source: file };
 }
 
 /**
@@ -115,7 +148,8 @@ export interface GoldenSuiteOptions {
   model?: string;
   judge: { adapter: CliAdapter; model?: string };
   attempts: number;
-  policyPath: string;
+  /** The `--policy` flag as received; resolved by the one D-49 rule every command uses (F7). */
+  policy: PolicyChoice;
   runId: RunId;
   /** `--allow-ungoverned`: a writer role may run on the cli tier, outside MAF's gates (D-01). */
   allowUngoverned?: boolean;
@@ -143,7 +177,7 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
   try {
     await stagePromptFiles(o.harness, mafDir, evalDir);
     const stack = await buildRunStack({
-      cwd: o.cwd, mafDir: evalDir, policyPath: o.policyPath, adapter: o.agent, runId: o.runId,
+      cwd: o.cwd, mafDir: evalDir, policy: o.policy, adapter: o.agent, runId: o.runId,
       harnessSha: o.harness.sha, headless: true, ...model,
       ...(o.allowUngoverned === true ? { allowUngoverned: true } : {}),
     });
@@ -279,7 +313,7 @@ export function registerGoldensCommand(program: Command): void {
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .description('Run the golden corpus under a harness, isolated from past runs (temperature pinned to 0 where the backend supports it)')
-    .action(async (opts: GoldenOpts) => {
+    .action(async (opts: GoldenOpts, cmd: Command) => {
       const cwd = path.resolve(opts.dir);
       const mafDir = await ensureMafDir(path.join(cwd, '.maf'));
       const corpusRoot = await resolveCorpusRoot(cwd, opts.corpus);
@@ -296,7 +330,9 @@ export function registerGoldensCommand(program: Command): void {
       const { result, bundlePath } = await runGoldenSuite({
         cwd, corpusRoot, harness, harnessSource: source, agent, ...(opts.model ? { model: opts.model } : {}),
         judge: { adapter: judgeAdapter, ...(judgeModel ? { model: judgeModel } : {}) },
-        attempts: Number(opts.attempts) || 2, policyPath: path.resolve(cwd, opts.policy), runId,
+        attempts: Number(opts.attempts) || 2, runId,
+        // D-49, F7: a typed path means that file or a stop; only an absent flag falls back.
+        policy: { value: opts.policy, typed: cmd.getOptionValueSource('policy') === 'cli' },
         ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
       });
 

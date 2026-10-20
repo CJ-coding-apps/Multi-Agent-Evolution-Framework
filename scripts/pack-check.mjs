@@ -16,13 +16,15 @@
  *   - the installed `maf` reports the manifest version, and its bundle keeps the `env -S` shebang
  *     and is executable inside the tarball;
  *   - `maf inprocess-demo` runs end to end;
- *   - `maf goldens run --adapter scripted` runs from a repository with no checkout and no corpus of
- *     its own, using the corpus and harness the package ships.
+ *   - `maf init` then `maf goldens run --adapter scripted` works in a repository with no checkout,
+ *     after nothing but those two commands: the corpus, the harness and the policy are the ones the
+ *     package ships. Nothing is copied in from this repository — seeding a harness here is exactly
+ *     how a package that shipped none passed this check before (F1).
  *
  * Usage: node scripts/pack-check.mjs
  */
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,16 +70,6 @@ async function remove(dir) {
   await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
-/** The one harness a fresh checkout gives a user, which the goldens proof needs. */
-async function committedHarness() {
-  const dir = path.join(ROOT, '.maf', 'harnesses');
-  const files = (await readdir(dir)).filter((name) => name.endsWith('.json')).sort();
-  if (files.length !== 1) {
-    fail(`pack-check: expected one committed harness in .maf/harnesses, found ${files.length}`);
-  }
-  return path.join(dir, files[0]);
-}
-
 export async function packCheck() {
   const { dir: staging, manifest: pkg } = await buildPackage();
   const work = await mkdtemp(path.join(tmpdir(), 'maf-pack-check-'));
@@ -116,6 +108,11 @@ export async function packCheck() {
     for (const required of ['package.json', 'README.md', 'LICENSE', 'dist/main.js']) {
       if (!shipped.includes(required)) fail(`the tarball does not ship ${required}`);
     }
+    // The goldens proof below depends on this file existing inside the package (F1); naming it here
+    // means a missing harness is reported as a packaging defect, not as a mystifying goldens error.
+    if (!shipped.some((file) => /^assets\/harnesses\/default-[0-9a-f]{64}\.json$/.test(file))) {
+      fail('the tarball does not ship a default harness (assets/harnesses/default-<sha>.json)');
+    }
     for (const file of shipped) {
       if (/\.(ts|map|d\.ts)$/.test(file) || file.startsWith('src/')) {
         fail(`the tarball ships build input: ${file}`);
@@ -150,14 +147,12 @@ export async function packCheck() {
     const demo = run(maf, ['inprocess-demo'], { cwd: demoDir }).stdout;
     if (!demo.includes('[demo] OK:')) fail(`inprocess-demo did not report success:\n${demo}`);
 
-    // 6. Goldens from a repository that has no checkout: the corpus and the harness the package
-    // ships must carry the run. A fresh checkout's committed harness is seeded because a user who
-    // ran `maf run` once would have one; the corpus is the package's own.
+    // 6. Goldens from a repository that has no checkout and has run exactly `maf init`: the corpus,
+    // the harness and the policy the package ships must carry the run. Nothing is seeded from this
+    // repository, and no harness is imported or set current — a user who types what the README says
+    // gets no such step (F1).
     const repo = path.join(work, 'repo');
-    const harnesses = path.join(repo, '.maf', 'harnesses');
-    await mkdir(harnesses, { recursive: true });
-    const harness = path.basename(await committedHarness());
-    await writeFile(path.join(harnesses, harness), await readFile(await committedHarness(), 'utf8'), 'utf8');
+    await mkdir(repo, { recursive: true });
     await writeFile(path.join(repo, 'README.md'), 'pack check\n', 'utf8');
     run('git', ['init', '-q'], { cwd: repo });
     run('git', ['config', 'user.email', 'pack-check@example.invalid'], { cwd: repo });
@@ -166,8 +161,10 @@ export async function packCheck() {
     run('git', ['commit', '-qm', 'pack check'], { cwd: repo });
 
     const env = { ...process.env, MAF_SIGNING_KEY: THROWAWAY_SIGNING_KEY };
-    run(maf, ['harness', 'import', path.join(harnesses, harness)], { cwd: repo, env });
-    run(maf, ['harness', 'set-current', 'default'], { cwd: repo, env });
+    const init = run(maf, ['init'], { cwd: repo, env }).stdout;
+    if (!/\.maf\/harnesses\/default-[0-9a-f]{64}\.json/.test(init)) {
+      fail(`maf init did not write the default harness:\n${init}`);
+    }
     const goldens = run(maf, ['goldens', 'run', '--adapter', 'scripted'], { cwd: repo, env }).stdout;
     if (!/\[maf\] goldens: solved \d+\/\d+/.test(goldens)) {
       fail(`goldens did not report a score:\n${goldens}`);

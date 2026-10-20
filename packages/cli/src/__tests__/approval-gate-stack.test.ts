@@ -41,7 +41,10 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
       { tool: 'fs.write', input: { path: 'sum.js', content: FIXED } },
     ] }]);
     const runId = makeRunId(crypto.randomUUID());
-    const stack = await buildRunStack({ cwd: repo, mafDir, policyPath, adapter, runId, harnessSha: harness.sha, headless: true });
+    const stack = await buildRunStack({
+      cwd: repo, mafDir, policy: { value: policyPath, typed: true }, adapter, runId,
+      harnessSha: harness.sha, headless: true,
+    });
     try {
       await stack.dispatchTask(harness, 'coder', PROMPT, repo, 60_000, 0);
       await stack.attestor.bundle({ id: 'test', modelVersion: 'scripted' },

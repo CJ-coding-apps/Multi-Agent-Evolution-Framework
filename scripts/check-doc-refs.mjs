@@ -111,10 +111,16 @@ function stripFences(text) {
   return text.replace(/^[ \t]*```.*?^[ \t]*```/gms, ' ');
 }
 
-/** Resolve a cited path the way a reader would: beside the file, then from the root. */
+// The CLI's asset tree mirrors the `.maf/` directory `init` writes: `prompts/` and the
+// harnesses that name them sit side by side at its root. A path in a file inside it is
+// therefore `.maf/`-relative — from the asset root, not from the file that names it.
+const ASSET_ROOT = path.join(ROOT, 'packages/cli/assets');
+
+/** Resolve a cited path the way a reader would: beside the file, from the asset root, then the root. */
 async function resolves(file, token) {
   const cleaned = token.replace(/^\.\//, '');
   if (await exists(path.join(path.dirname(file), cleaned))) return true;
+  if (file.startsWith(ASSET_ROOT + path.sep) && await exists(path.join(ASSET_ROOT, cleaned))) return true;
   return exists(path.join(ROOT, cleaned));
 }
 

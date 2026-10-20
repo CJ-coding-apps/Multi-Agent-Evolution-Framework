@@ -13,12 +13,6 @@ import { resolveCorpusRoot } from '../wiring.js';
 
 const REPO = path.resolve(__dirname, '..', '..', '..', '..');
 
-/** source directory → asset directory, for everything embedded in the package. */
-const PAIRS: ReadonlyArray<readonly [string, string]> = [
-  ['.maf', 'assets'],
-  ['tests/goldens', 'assets/goldens'],
-];
-
 const TOP_LEVEL_FILES = ['policy.yaml', 'roles.yaml', 'config.yaml'];
 
 async function walk(root: string, rel = ''): Promise<string[]> {
@@ -40,6 +34,13 @@ test('every embedded asset is byte-identical to the repository file it came from
   }
   for (const name of await walk(path.join(REPO, 'tests', 'goldens'))) {
     sources.set(path.join('goldens', name), path.join(REPO, 'tests', 'goldens', name));
+  }
+  // The default harness (F1). Filtered to `default-<sha>.json`: `.maf/harnesses/` also holds a
+  // run's own `<sha>.yaml`, `index.json` and `CURRENT`, which are runtime state and never shipped.
+  for (const name of await walk(path.join(REPO, '.maf', 'harnesses'))) {
+    if (/^default-[0-9a-f]{64}\.json$/.test(name)) {
+      sources.set(path.join('harnesses', name), path.join(REPO, '.maf', 'harnesses', name));
+    }
   }
 
   const embedded = await walk(assetsRoot());

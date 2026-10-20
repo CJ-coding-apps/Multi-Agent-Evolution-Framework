@@ -12,7 +12,6 @@ import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor, componentId } from '@maf/attestation';
 import { createApprovalGate } from '@maf/approval-gate';
-import { PolicyLoader } from '@maf/policy-engine';
 import { GIT_EMPTY_TREE, ReviewGate, SecurityReviewGate, WorktreeManager, resolveWorkingDir, runIsolatedGit, snapshotDiff } from '@maf/git-ops';
 import type { FinishResult, Reviewer, RunWorktree } from '@maf/git-ops';
 import { DagRunner, createWriterLockLedger, withRetry } from '@maf/dag-runner';
@@ -24,9 +23,8 @@ import type { ToolRegistry } from '@maf/tools';
 import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterRole, roleSetFromHarness } from '@maf/roles';
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
-import { readAsset } from '../assets.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { resolveRunHarness } from '../wiring.js';
+import { loadCommandPolicy, resolveRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
 import type { MafConfig } from '../config/ConfigLoader.js';
@@ -172,6 +170,16 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   // Dispatched FROM the harness, so the sha the attestation names is the content that ran.
   const roles = RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), mafDir, baseTools);
   say(`[maf] harness: ${harness.id} (${shortSha(harness.sha)}) [${harnessSource}]`);
+  // F2: the built-in role set is not the shipped `.maf/roles.yaml` — their prompts differ, and so do
+  // the tester's tools. A run without the file therefore uses roles `maf init` would not have
+  // written. The docs used to call the two identical; say which one is in force at the point it
+  // happens, before any agent acts.
+  if (harnessSource === 'legacy') {
+    const rolesPath = path.resolve(dir, opts.roles);
+    if (!(await nameExists(rolesPath))) {
+      say(`[maf] roles: no ${path.relative(dir, rolesPath)} — using the built-in role set (maf init writes the shipped one)`);
+    }
+  }
 
   // ── Tiers (D-01): the dispatcher refuses an ungoverned writer when its node comes up; refusing
   // here, before planning, saves the planner's tokens and the worktree.
@@ -248,16 +256,11 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       summarize: async (messages) => messages.map((m) => m.content.slice(0, 200)).join('\n'),
     });
     graph           = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
-    // D-49: a policy the user names is theirs — present or absent, it is loaded as before. With no
-    // `--policy`, a missing .maf/policy.yaml falls back to the policy shipped in the package, so an
-    // installed `maf` governs a repository that has never run `maf init`.
-    const policy    = await PolicyLoader.loadEngine(
-      path.resolve(dir, opts.policy),
-      graph,
-      ctx.given('policy')
-        ? (opts.policy === 'none' ? { none: true } : {})
-        : { builtInText: await readAsset('policy.yaml') },
-    );
+    // D-49, F7: the same resolution `goldens` and `evolve` take. With no `--policy`, a missing
+    // .maf/policy.yaml falls back to the policy shipped in the package, so an installed `maf`
+    // governs a repository that has never run `maf init`; a typed path that names no file stops
+    // the run (F4), and only `--policy none` asks for no rules.
+    const policy    = await loadCommandPolicy(dir, { value: opts.policy, typed: ctx.given('policy') }, graph);
     const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
       logDir: path.join(mafDir, 'transcripts'),
       softThreshold: 20_000,
@@ -443,6 +446,20 @@ export function planGenerator(
  */
 export function writerLock(roles: RoleRegistry, adapter: CliAdapter, baseTools: ToolRegistry): (node: DagNode) => boolean {
   return (node) => roles.hasRole(node.agentRole) ? isWriterForLock(roles.getRole(node.agentRole), adapter, baseTools) : true;
+}
+
+/**
+ * Whether a path exists by name. `lstat`, not `stat`: a dangling symlink exists, and the role
+ * registry refuses it rather than treating it as "no roles file" — the text it pointed at is gone,
+ * which is not the same as there having been none.
+ */
+async function nameExists(p: string): Promise<boolean> {
+  try {
+    await lstat(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

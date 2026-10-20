@@ -13,6 +13,7 @@ import { MemoryGraph } from '@maf/memory-graph';
 import { GraphAwareInjector } from '@maf/prompt-injector';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
+import { harnessesAssetRoot } from '../assets.js';
 import { incomparable, resolveGoldensHarness, runGoldenSuite } from '../commands/goldens.js';
 import { loadHarnessFile, loadStoredHarness } from '../commands/harness.js';
 
@@ -112,7 +113,7 @@ test('a poisoned project graph and an earlier attempt\'s memory never reach the 
     }]);
     const { result } = await runGoldenSuite({
       cwd: root, corpusRoot: corpus, harness, harnessSource: 'test', agent: scripted, judge: { adapter: scripted },
-      attempts: 2, policyPath: path.join(root, '.maf/policy.yaml'), runId: makeRunId('isolation-run'),
+      attempts: 2, policy: { value: path.join(root, '.maf/policy.yaml'), typed: true }, runId: makeRunId('isolation-run'),
     });
 
     assert.deepEqual(result.solvedTaskIds, ['coder-sum'], JSON.stringify(result.tasks));
@@ -192,6 +193,25 @@ test('goldens picks --harness, else CURRENT, else the committed default — and 
     const tampered = path.join(root, `default-${fallback.harness.sha}.json`);
     await writeFile(tampered, (await readFile(committed, 'utf8')).replace('"maxToolIterations": 12', '"maxToolIterations": 99'), 'utf8');
     await assert.rejects(() => resolveGoldensHarness(mafDir, tampered), /content hashes to/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ORACLE (F1). The installed package has no repository to read a harness from. `goldens run` must
+// still evaluate something that exists: the default harness shipped in `assets/harnesses`, the one
+// `maf init` writes, rather than telling the user to run `maf run` first (which no longer produces a
+// harness goldens would look at).
+
+test('with no CURRENT and no committed default, goldens falls back to the harness the package ships', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-goldens-packaged-'));
+  try {
+    const mafDir = path.join(root, '.maf');
+    await mkdir(mafDir, { recursive: true });
+    const found = await resolveGoldensHarness(mafDir);
+    assert.equal(path.dirname(found.source), harnessesAssetRoot(), 'read from the packaged asset');
+    assert.equal(path.basename(found.source), `default-${found.harness.sha}.json`);
+    assert.equal(new HarnessStore(mafDir).mint(found.harness.roleSet, found.harness.id).sha, found.harness.sha);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

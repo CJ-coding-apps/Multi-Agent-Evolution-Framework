@@ -45,7 +45,7 @@ export function registerEvolveCommand(program: Command): void {
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
     .option('--approve-sensitive', 'Pre-approve edits to safety-adjacent roles (security/reviewer)', false)
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
-    .action(async (opts: EvolveCliOpts) => {
+    .action(async (opts: EvolveCliOpts, cmd: Command) => {
       const cwd = path.resolve(opts.dir);
       const mafDir = path.join(cwd, '.maf');
       const corpusRoot = await resolveCorpusRoot(cwd, opts.corpus);
@@ -58,7 +58,9 @@ export function registerEvolveCommand(program: Command): void {
 
       const adapter = await resolveAdapter(opts.adapter, createAdapterRegistry());
       const stack = await buildRunStack({
-        cwd, mafDir, policyPath: path.resolve(cwd, opts.policy), adapter, runId,
+        cwd, mafDir, adapter, runId,
+        // D-49, F7: the same resolution `run` and `goldens` take.
+        policy: { value: opts.policy, typed: cmd.getOptionValueSource('policy') === 'cli' },
         harnessSha: base.sha, headless: true, ...(opts.model ? { model: opts.model } : {}),
         ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
       });

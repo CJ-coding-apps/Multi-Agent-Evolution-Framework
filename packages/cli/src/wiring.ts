@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { makeAgentId, makeNodeId, makeTaskId } from '@maf/types';
-import type { DagNode, CliAdapter, RunId } from '@maf/types';
+import type { DagNode, CliAdapter, GraphQueryRunner, RunId } from '@maf/types';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
@@ -10,6 +10,7 @@ import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor } from '@maf/attestation';
 import { createApprovalGate } from '@maf/approval-gate';
 import { PolicyLoader } from '@maf/policy-engine';
+import type { PolicyEngine } from '@maf/policy-engine';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { GraphAwareInjector } from '@maf/prompt-injector';
 import { TranscriptLogger } from '@maf/transcript';
@@ -20,7 +21,7 @@ import { LEGACY_DEFAULT_ID, resolveHarnessRef } from '@maf/harness-config';
 import type { HarnessConfig, HarnessStore, ResolvedHarness } from '@maf/harness-config';
 import type { TaskDispatcher } from '@maf/eval-harness';
 import { importHarness, locateStoredHarness } from './commands/harness.js';
-import { goldensAssetRoot } from './assets.js';
+import { goldensAssetRoot, readAsset } from './assets.js';
 
 /**
  * Shared CLI wiring for run/goldens/evolve commands: one component stack per
@@ -30,6 +31,43 @@ import { goldensAssetRoot } from './assets.js';
 
 export const SECURITY_REVIEW_FALLBACK_PROMPT = `You are a security auditor. Review the supplied diff for vulnerabilities. Respond with a strict JSON block:
 { "findings": [ { "severity": "critical|high|medium|low|info", "category": "t", "file": "f", "line": 0, "rationale": "r", "remediation": "x" } ], "summary": "s", "passed": true }`;
+
+/**
+ * What a command was told about its policy: the `--policy` value (the flag's default when it was
+ * not typed) and whether the user typed it. The second half is what makes an absent flag mean the
+ * shipped default and a typed path mean that file and nothing else (D-49, F4).
+ */
+export interface PolicyChoice {
+  readonly value: string;
+  readonly typed: boolean;
+}
+
+/**
+ * The rules an executing command runs under, decided in one place (F7, D-49). `run`, `goldens`,
+ * `evolve` and the in-process demo all call this, so they cannot disagree about what an absent
+ * `--policy` means.
+ *
+ * - untyped flag: `.maf/policy.yaml` if it is there, else the policy shipped in the package;
+ * - typed path that names no file: the run stops (F4) — a typo must not become "no rules", which is
+ *   the fail-open class D-49 exists to close;
+ * - typed `none`: no rules at all, recorded as `sourceKind: "none"`.
+ */
+export async function loadCommandPolicy(
+  cwd: string,
+  choice: PolicyChoice,
+  graph: GraphQueryRunner,
+): Promise<PolicyEngine> {
+  const none = choice.typed && choice.value === 'none';
+  return PolicyLoader.loadEngine(
+    path.resolve(cwd, choice.value),
+    graph,
+    none
+      ? { none: true }
+      : choice.typed
+        ? { explicit: true }
+        : { builtInText: await readAsset('policy.yaml') },
+  );
+}
 
 export interface RunStack {
   adapter: CliAdapter;
@@ -51,7 +89,8 @@ export interface RunStack {
 export async function buildRunStack(cfg: {
   cwd: string;
   mafDir: string;
-  policyPath: string;
+  /** The `--policy` flag as the command received it; resolved by {@link loadCommandPolicy}. */
+  policy: PolicyChoice;
   adapter: CliAdapter;
   model?: string;
   runId: RunId;
@@ -63,7 +102,7 @@ export async function buildRunStack(cfg: {
 }): Promise<RunStack> {
   const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
   const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
-  const policy = await PolicyLoader.loadEngine(cfg.policyPath, graph);
+  const policy = await loadCommandPolicy(cfg.cwd, cfg.policy, graph);
   // One gate for every task of the stack, outside dispatchTask, so request ids are unique across them.
   const approvalGate = createApprovalGate({
     recorder: attestor, mafDir: cfg.mafDir,

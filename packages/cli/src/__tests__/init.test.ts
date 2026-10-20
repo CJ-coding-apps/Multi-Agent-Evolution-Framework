@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
@@ -58,6 +58,12 @@ test('a fresh repository gets every shipped .maf file, byte-identical to the pac
 
     const files = await shipped();
     assert.ok(files.length >= 5, `init writes at least five files; it wrote ${files.length}`);
+    // F1: the default harness ships with the package and `init` copies it, so a repository that ran
+    // `init` can run `goldens run` with nothing else brought in.
+    assert.ok(
+      files.some((f) => /^harnesses\/default-[0-9a-f]{64}\.json$/.test(f)),
+      `init writes the packaged default harness; it wrote ${files.join(', ')}`,
+    );
 
     for (const relative of files) {
       assert.equal(
@@ -76,6 +82,9 @@ test('a fresh repository gets every shipped .maf file, byte-identical to the pac
       MAF_DIR_GITIGNORE,
       'the state .gitignore is there, so a run leaves `git status` clean',
     );
+    // F9(a): the state `.gitignore` is named in the report too, so a reader sees which file keeps
+    // runtime state out of their history rather than finding an unexplained entry.
+    assert.ok(run.out.includes('[maf] init: wrote .maf/.gitignore'), run.out);
     assert.match(run.out, /^Next steps:$/m);
     assert.ok(run.out.includes('export MAF_SIGNING_KEY="$(openssl rand -hex 32)"'), run.out);
     assert.match(run.out, /^\s+maf run /m, 'and the command that does the work');
@@ -98,6 +107,7 @@ test('a second init writes nothing and names each file it kept', async () => {
     const second = await driveInit(['--dir', repo]);
     assert.equal(second.error, undefined, second.out);
     assert.equal(await readFile(policy, 'utf8'), '# mine now\n', 'init does not clobber an existing file');
+    assert.ok(second.out.includes('[maf] init: kept .maf/.gitignore (already exists)'), second.out);
     assert.ok(!second.out.includes('[maf] init: wrote'), `nothing was written: ${second.out}`);
     for (const relative of await shipped()) {
       assert.ok(
@@ -125,7 +135,8 @@ test('--force overwrites the files init owns, restoring the shipped bytes', asyn
       assert.equal(await readFile(path.join(repo, '.maf', relative), 'utf8'), await readAsset(relative), relative);
       assert.ok(forced.out.includes(`[maf] init: wrote .maf/${relative}`), forced.out);
     }
-    assert.ok(!forced.out.includes('[maf] init: kept'), forced.out);
+    // `.gitignore` is the one file `--force` does not own: an existing one is the user's to keep.
+    assert.doesNotMatch(forced.out, /\[maf\] init: kept \.maf\/(?!\.gitignore)/, forced.out);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
@@ -153,6 +164,75 @@ test('a repository with no commits is refused, because a run has no HEAD to star
       /has no commits yet\..*must be in a git repository with at least one commit/s,
     );
     assert.ok(await absent(path.join(root, '.maf')));
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+// ORACLE (F6). `--force` says "replace the files init owns"; it does not say "write wherever a link
+// points". A symlinked `.maf`, or a symlinked destination inside it, would carry the write out of the
+// repository the user named — and in the second case silently replace a file outside it.
+
+test('a symlinked .maf is refused, with or without --force, before anything is written through it', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-symlink-dir-'));
+  try {
+    const repo = await createDemoFixture(root);
+    const outside = path.join(root, 'outside-maf');
+    await mkdir(outside);
+    await symlink(outside, path.join(repo, '.maf'));
+
+    for (const force of [false, true]) {
+      await assert.rejects(
+        runInit({ dir: repo, ...(force ? { force: true } : {}), out: collector() }),
+        /\.maf is a symbolic link; refusing to write through it/,
+        `--force must not make a symlinked .maf acceptable (force=${force})`,
+      );
+      assert.deepEqual(await readdir(outside), [], 'the link target gains no file');
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('a symlinked destination inside .maf is refused, with or without --force, and its target is unchanged', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-symlink-file-'));
+  const original = "the user's file outside the repository\n";
+  try {
+    const repo = await createDemoFixture(root);
+    const outside = path.join(root, 'outside-policy.yaml');
+    await writeFile(outside, original, 'utf8');
+    await mkdir(path.join(repo, '.maf'), { recursive: true });
+    await symlink(outside, path.join(repo, '.maf', 'policy.yaml'));
+
+    for (const force of [false, true]) {
+      await assert.rejects(
+        runInit({ dir: repo, ...(force ? { force: true } : {}), out: collector() }),
+        /policy\.yaml is a symbolic link; refusing to write through it/,
+        `--force must not overwrite through a link (force=${force})`,
+      );
+      assert.equal(await readFile(outside, 'utf8'), original, 'the link target is left as it was');
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+// ORACLE (F9b). `.maf/` belongs at the root of a work tree. Inside `.git`, `git rev-parse` succeeds
+// and answers `false`; a run there has no working tree to review and `init` would write into git's
+// own directory, so it is refused rather than attempted.
+
+test('init into .git, or a directory inside it, is refused as not a work tree', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-gitdir-'));
+  try {
+    const repo = await createDemoFixture(root);
+    for (const dir of [path.join(repo, '.git'), path.join(repo, '.git', 'refs')]) {
+      await assert.rejects(
+        runInit({ dir, out: collector() }),
+        /is inside a git directory.*not a work tree/s,
+        `init -d ${dir}`,
+      );
+      assert.ok(await absent(path.join(dir, '.maf')), `a refused init leaves no .maf in ${dir}`);
+    }
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

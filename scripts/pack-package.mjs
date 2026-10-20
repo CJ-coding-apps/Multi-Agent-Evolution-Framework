@@ -78,7 +78,8 @@ export async function manifest() {
     license: 'Apache-2.0',
     engines: { node: '>=22' },
     bin: { maf: './dist/main.js' },
-    main: './dist/main.js',
+    // No `main`: this package is a command, not a library, and `dist/main.js` runs the CLI on
+    // import. A `main` field would invite `require('@cj-coding-apps/maf')` to start a program (F9(c)).
     files: ['dist/', 'assets/'],
     repository: { type: 'git', url: 'git+https://github.com/CJ-coding-apps/Multi-Agent-Evolution-Framework.git' },
     homepage: 'https://github.com/CJ-coding-apps/Multi-Agent-Evolution-Framework#readme',
