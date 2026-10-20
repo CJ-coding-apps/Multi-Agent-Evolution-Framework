@@ -227,6 +227,6 @@ That is belt-and-suspenders with the tool allowlist: even if a future role confi
 4. Add a policy rule with `predicate.agentRole: "<role>"` for any path/operation restrictions that aren't already implied by the tool list.
 5. (Optional) Set `model`, `timeoutMs`, or `maxToolIterations` if the role has special performance needs.
 6. (Optional) Set `expectsChange: true` if the role's job is to change the tree, so a `cli`-tier node that changes nothing fails rather than succeeds.
-7. (Optional) Set `expectsToolCalls: false` on a read-only role whose job is not to call a tool, so an in-process node of it that answers after zero executed calls succeeds rather than fails ([D-46](DECISIONS.md)). The default for a reader that lists a tool is `true`.
+7. (Optional) Set `expectsToolCalls: false` on a role that does not expect a change (a reader or the tester) whose job is not to call a tool, so an in-process node of it that answers after zero executed calls succeeds rather than fails ([D-46](DECISIONS.md)). The default for such a role that lists a tool is `true`.
 
 The planner picks up the new role automatically through `roles.catalog()`.
