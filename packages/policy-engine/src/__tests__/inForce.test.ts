@@ -4,11 +4,15 @@ import type { ToolContext, ToolInput, PolicyRule, GraphQueryRunner } from '@maf/
 import { makeRunId, makeTaskId, makeAgentId, makeToolId } from '@maf/types';
 import { PolicyEngine } from '../PolicyEngine.js';
 
-// ORACLE (F6 of the 0.3.1 sweep). A signed bundle could not say which policy governed the run: two
-// runs — one with no policy file, one whose file a Deny rule never fired from — were indistinguishable
-// from `toolCalls` and `securityFindings` alone. `inForce()` is that record: where the rules came from,
-// what they are, and how the calls fell. These pin the parts a reader relies on: the source is named
-// only when there was one, the digest is absent exactly when no file was read, and the counts move.
+// ORACLE (F6 of the 0.3.1 sweep; F5 of the packaging sweep). A signed bundle could not say which
+// policy governed the run: two runs — one with no policy file, one whose file a Deny rule never fired
+// from — were indistinguishable from `toolCalls` and `securityFindings` alone. `inForce()` is that
+// record: where the rules came from, what they are, and how the calls fell.
+//
+// D-49 gave that record three sources (a file, the shipped built-in policy, `none`). F5 keeps the
+// 0.4.0 reading intact: `source` is still the file's path and is absent when no user file supplied
+// the rules, so a reader written against 0.4.0 never sees a kind where it expects a path. Which kind
+// chose the rules is the additive `sourceKind`; `sha256` is the digest of the bytes in force.
 
 const stubGraph = {} as never;
 
@@ -27,31 +31,37 @@ const baseCtx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
 const rule = (id: string, priority: number, predicate: PolicyRule['predicate'], action: PolicyRule['action']): PolicyRule =>
   ({ id, description: '', priority, predicate, action });
 
-test('inForce names how the rules were chosen, the file when there was one, and its sha only when bytes were read', () => {
+test('inForce names the file when there was one, how the rules were chosen, and a sha only when bytes were read', () => {
   const fromFile = new PolicyEngine(stubGraph);
   fromFile.loadRules([], { kind: 'file', path: '.maf/policy.yaml', sha256: 'abc123' });
   const named = fromFile.inForce();
-  assert.equal(named.source, 'file');
-  assert.equal(named.path, '.maf/policy.yaml');
+  // A 0.4.0 reader's field keeps its 0.4.0 meaning: the path.
+  assert.equal(named.source, '.maf/policy.yaml');
+  assert.equal(named.sourceKind, 'file');
   assert.equal(named.sha256, 'abc123');
+  assert.equal('path' in named, false, 'the source is a path, not an object with one');
 
-  const noFile = new PolicyEngine(stubGraph);
-  noFile.loadRules([], { kind: 'file', path: '.maf/policy.yaml' });
-  const bare = noFile.inForce();
-  assert.equal(bare.source, 'file', 'the path was still looked at');
-  assert.equal(bare.path, '.maf/policy.yaml');
+  const unread = new PolicyEngine(stubGraph);
+  unread.loadRules([], { kind: 'file', path: '.maf/policy.yaml' });
+  const bare = unread.inForce();
+  assert.equal(bare.source, '.maf/policy.yaml', 'the path was still looked at');
+  assert.equal(bare.sourceKind, 'file');
   assert.equal('sha256' in bare, false, 'no file was read, so there are no bytes to digest');
 
   // D-49: the shipped default and the explicit opt-out are their own sources, with no user path.
   const builtIn = new PolicyEngine(stubGraph);
-  builtIn.loadRules([], { kind: 'built-in' });
-  assert.equal(builtIn.inForce().source, 'built-in');
-  assert.equal('path' in builtIn.inForce(), false, 'no user file was named');
+  builtIn.loadRules([], { kind: 'built-in', sha256: 'def456' });
+  const shipped = builtIn.inForce();
+  assert.equal(shipped.sourceKind, 'built-in');
+  assert.equal('source' in shipped, false, 'no user file was named');
+  assert.equal(shipped.sha256, 'def456', "the shipped asset's digest, so a reader knows which text applied");
 
   const none = new PolicyEngine(stubGraph);
   none.loadRules([], { kind: 'none' });
-  assert.equal(none.inForce().source, 'none');
-  assert.equal('path' in none.inForce(), false);
+  const optedOut = none.inForce();
+  assert.equal(optedOut.sourceKind, 'none');
+  assert.equal('source' in optedOut, false);
+  assert.equal('sha256' in optedOut, false, 'no rules means no bytes to digest');
 });
 
 test('inForce summarises each rule as id, effect and what it matches', () => {

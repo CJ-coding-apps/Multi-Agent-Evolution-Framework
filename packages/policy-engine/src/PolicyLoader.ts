@@ -7,12 +7,17 @@ import { PolicyEngine, type PolicySource } from './PolicyEngine.js';
 
 /** How `resolve` chooses the rules, beyond the path itself (D-49). */
 export interface PolicyLoadOptions {
-  /** `--policy none`: run with no rules at all, recorded as `source: "none"`. */
+  /** `--policy none`: run with no rules at all, recorded as `sourceKind: "none"`. */
   none?: boolean;
   /**
-   * The shipped default policy, applied when `policyPath` does not exist and nothing was read
-   * (D-49). Parsed with a fixed label naming the package asset, and recorded as `"built-in"` with
-   * no digest — no user file was read.
+   * The path was named by the user. A file that is not there then stops the run (F4): a typo must
+   * not silently become "no rules", and `--policy none` is the only way to ask for that.
+   */
+  explicit?: boolean;
+  /**
+   * The shipped default policy, applied when `policyPath` does not exist, the user did not name a
+   * path, and nothing was read (D-49). Parsed with a fixed label naming the package asset, and
+   * recorded as `sourceKind: "built-in"` with the digest of the shipped text.
    */
   builtInText?: string;
 }
@@ -74,9 +79,11 @@ export class PolicyLoader {
   /**
    * The rules to run under, and where they came from (D-49).
    *
-   * `none` runs with no rules by explicit choice. A missing file runs under `builtInText` when one
-   * is supplied — the shipped default — or with no rules when it is not. A file that exists but
-   * does not parse still throws: the built-in default covers absence, never a broken file.
+   * `none` runs with no rules by explicit choice. A path the user named that does not exist stops
+   * the run (F4): `--policy none` is the only way to ask for no rules. A missing default path runs
+   * under `builtInText` when one is supplied — the shipped default — or with no rules when it is
+   * not. A file that exists but does not parse still throws: the built-in default covers absence,
+   * never a broken file.
    */
   static async resolve(
     policyPath: string,
@@ -88,6 +95,13 @@ export class PolicyLoader {
     }
     const { rules, sha256, missing } = await PolicyLoader.loadWithSource(policyPath, { quiet: true });
     if (missing) {
+      // One refusal for every spelling of the path — relative, absolute, the default written out —
+      // because the user typed a file and a typo must not become a different rule set.
+      if (options.explicit === true) {
+        throw new Error(
+          `Policy file ${JSON.stringify(policyPath)} not found; pass --policy none to run without rules.`,
+        );
+      }
       if (options.builtInText !== undefined) {
         const builtIn = parsePolicy(options.builtInText, 'the built-in policy (assets/policy.yaml)');
         console.warn(
@@ -95,7 +109,13 @@ export class PolicyLoader {
           `policy (${builtIn.length} ${builtIn.length === 1 ? 'rule' : 'rules'}). ` +
           'Pass --policy none to run without rules.',
         );
-        return { rules: builtIn, source: { kind: 'built-in' } };
+        return {
+          rules: builtIn,
+          source: {
+            kind: 'built-in',
+            sha256: crypto.createHash('sha256').update(options.builtInText, 'utf8').digest('hex'),
+          },
+        };
       }
       console.warn(
         `[maf] policy: no policy file at ${JSON.stringify(policyPath)}; ` +
