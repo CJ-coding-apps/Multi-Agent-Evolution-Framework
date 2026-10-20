@@ -329,3 +329,22 @@ The second and third are paper-level designs: neither those names nor those
 mechanisms appear in the HarnessX codebase. What MAF borrows throughout is the
 design, not the code. See [`NOTICE`](NOTICE) for what corresponds to what, and
 for HarnessX's MIT license.
+
+## How this was built
+
+Releases 0.2.1 through 0.4.0 were built by a fleet of agents working under the rules this framework enforces for the agents it runs. The record is in the repository: the plan ([docs/BUILD_PLAN.md](docs/BUILD_PLAN.md)); the decisions each change cites ([docs/DECISIONS.md](docs/DECISIONS.md), D-01–D-47); the pull requests (#7–#45); and the commit messages, 166 of the 173 since 0.2.0 citing the work package, decision or finding they implement.
+
+- **One work package, one agent, one pull request.** Each implementer worked on its own branch with a written scope (the files it owned, the shared contracts it could not touch) and with acceptance tests stated before the code. CI ran on every PR.
+- **A verifier that never saw the implementation** reviewed each PR from a clean checkout, with the spec, the diff and the suite. Its job was to break the change: mutate the code and confirm a test fails, invent the inputs the spec left out, and check every claim in the PR body and the docs against the code. Fixes went back to the same verifier until a pass found nothing above LOW; one attribution rule took five passes. The record, 208 findings, is in [docs/VERIFICATION.md](docs/VERIFICATION.md).
+- **A fresh-context audit of the whole branch** ran before each release PR, and each time found what no per-package verifier could see. For 0.3.0 it found a worktree escape through the agent's git tools, and a `.gitattributes` that hid a diff from the security gate. For 0.4.0 it found a release that contradicted its own plan, a built-in role that could claim work it never did, and two more places where model text reached the signed record unmasked.
+- **Nothing an agent did could reach `main`.** Pushes to `main`, tags, releases, repository settings and edits to reserved files (lockfiles, workflows, version fields) were the maintainer's by rule (D-26, D-27), and moved to an agent only by a written exception for one named PR. The one time an agent merged to `main` itself, it is recorded as a deviation in the plan, with the rule that came from it.
+- **Live runs on a real model found what scripted tests could not.** Every change to what the model is shown, or to the policy that governs its calls, carried a run on a real `claude`. Those runs found:
+  - a flag the binary does not have;
+  - a `Succeeded` with nothing changed;
+  - a tool catalogue without field names;
+  - a read-only role that could edit the tree while the bundle attested success;
+  - a shipped `.env` rule that a real model walked around with `patch.apply`, fixed in the 0.3.2 hotfix.
+
+  Each is in the CHANGELOG with its fix.
+
+Agents implemented and verified. The architecture, every decision in `docs/DECISIONS.md`, and every release were the maintainer's.
