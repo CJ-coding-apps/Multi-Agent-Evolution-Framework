@@ -329,3 +329,22 @@ The second and third are paper-level designs: neither those names nor those
 mechanisms appear in the HarnessX codebase. What MAF borrows throughout is the
 design, not the code. See [`NOTICE`](NOTICE) for what corresponds to what, and
 for HarnessX's MIT license.
+
+## How this was built
+
+Releases 0.2.1 through 0.4.0 were built by a fleet of agents working under the rules this framework enforces for the agents it runs. The record is in the repository: the plan ([docs/BUILD_PLAN.md](docs/BUILD_PLAN.md)); the decisions each change cites ([docs/DECISIONS.md](docs/DECISIONS.md), D-01–D-47); the pull requests (#7–#45; #32, #39 and #40 were closed unmerged); and the commit messages, 168 of the 173 non-merge commits between `v0.2.0` and `v0.4.0` naming the work package, decision or finding they implement (`WP-x.y`, `D-nn`, `F<n>`).
+
+- **One work package, one agent, one pull request**, with the exceptions the plan records (Phase 1 and Phase 2 each shipped through an integration branch, WP-2.7 was split across two stacked PRs, and WP-2.11 was split — the shebang half as #34, the toolchain floor as #36 from the maintainer's machine). Each implementer worked on its own branch with a written scope (the files it owned, the shared contracts it could not touch) and with acceptance tests stated before the code. CI ran on every PR.
+- **A verifier that never saw the implementation** reviewed the work-package PRs and release branches listed in the record, from a clean checkout with the spec, the diff and the suite (the record notes the 0.3.2 hotfix as the one release without a separate pass). Its job was to break the change: mutate the code and confirm a test fails, invent the inputs the spec left out, and check every claim in the PR body and the docs against the code. Fixes went back to the same verifier until a pass found nothing above LOW; one attribution rule took five passes. The record — at least 208 findings — is in [docs/VERIFICATION.md](docs/VERIFICATION.md).
+- **A fresh-context audit of the whole branch** ran before the 0.3.0 and 0.4.0 release PRs, and each time found what no per-package verifier could see. For 0.3.0 it found a worktree escape through the agent's git tools, and a `.gitattributes` that hid a diff from the security gate. For 0.4.0 it found a release that contradicted its own plan, a built-in role that could claim work it never did, and two more places where model text reached the signed record unmasked.
+- **The maintainer was the gate on `main`, with one agent merge recorded as a deviation.** Direct pushes to `main` were prohibited (BUILD_PLAN §3.2, D-27); tags, releases, repository settings and merges of PRs touching `run.ts`, `RoleDispatcher.ts`, `wiring.ts`, workflow files or versions were the maintainer's (D-26, D-27), and `pnpm-lock.yaml` beyond a mechanical bump was reserved by the plan (§3.2). Package-confined PRs could be merged by the implementing agent when CI was green and a verifier had passed. #31 touched `RoleDispatcher.ts`, was merged by the coder under the maintainer's credential, is recorded as a deviation in the plan, and produced the rule that every merge is the maintainer's — even when the instruction arrives in their own message or a runbook they hand over.
+- **Live runs on a real model found what scripted tests could not.** The plan requires a live run on a real `claude` for every change to the model-facing surface — what the model is shown or how it answers — and the practice extended to the policy that governs its calls. Those runs found:
+  - a flag the binary does not have;
+  - a `Succeeded` with nothing changed;
+  - a tool catalogue without field names;
+  - a read-only role that could edit the tree while the bundle attested success;
+  - a shipped `.env` rule that a real model walked around with `patch.apply`, fixed in the 0.3.2 hotfix.
+
+  Each is in the CHANGELOG with its fix.
+
+Agents implemented and verified. The architecture, every decision in `docs/DECISIONS.md`, and every release were the maintainer's.
