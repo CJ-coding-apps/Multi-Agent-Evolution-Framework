@@ -406,16 +406,18 @@ export interface DagNodeExecution {
  *                         either tier, but its diff against the node's start commit is empty —
  *                         what a backend that refused the edit under its own permission settings
  *                         looks like (D-32).
- *  - `no_work`          — in-process: a **reader** (a role that holds no write tool) that expects a
- *                         tool call (`expectsToolCalls`) finished with a final answer having made
+ *  - `no_work`          — in-process: a role that does not expect a change (`expectsChange` is not
+ *                         `true`) — the built-in readers and the `tester` — that expects a tool
+ *                         call (`expectsToolCalls`) finished with a final answer having made
  *                         **no executed tool call** — the attested calls whose result was not
  *                         `refused`, which is to say the calls that actually ran, an approved
- *                         `Escalate` among them (D-46, F4/A2). A reader that read nothing has not
- *                         succeeded: live row 2b's analyst answered "I could not" after the host's
+ *                         `Escalate` among them (D-46, F4/A2). A role that called nothing has not
+ *                         done its job: live row 2b's analyst answered "I could not" after the host's
  *                         native tools were refused, and the old reading called it `Succeeded` off
- *                         the prose. The mirror of `no_change` for a reader, where `no_change` is
- *                         the writer's. The count is the node's *current attempt*, so a retry that
- *                         read only on an earlier attempt does not excuse it (F3/A4).
+ *                         the prose. The mirror of `no_change` for a role judged by its calls, where
+ *                         `no_change` is the one judged by the tree. The count is the node's *current
+ *                         attempt*, so a retry that read only on an earlier attempt does not excuse it
+ *                         (F3/A4).
  *  - `unexpected_change`— a role that holds **no** write tool changed the tree anyway (F7). On
  *                         the cli tier that is what a backend with file tools of its own does
  *                         whatever the role's allowlist says; MAF never sees those calls. The
@@ -480,6 +482,79 @@ export function outcomeFailureKind(err: unknown): OutcomeFailureKind | undefined
   if (err instanceof GateRefused) return 'gate_refused';
   if (err instanceof VerdictError) return 'policy_violation';
   return undefined;
+}
+
+/**
+ * The failure as a value for the run outcome (L3/A11): the kind the dispatcher decided, and — where a
+ * refusal named them — the rule and the tool. A plain `Error` is a transport or programming failure with
+ * no verdict to report, and inventing one would have `failure` assert something the run does not know;
+ * there the field is left absent. Keys with no value are left out, so a `no_work` with no refusal reads as
+ * exactly `{ kind: 'no_work' }` rather than a record salted with `undefined`.
+ *
+ * A `NodeFailure` names its rule and tool as its own fields; a policy refusal names them on its
+ * `decision`, read structurally for the reason `outcomeFailureKind` gives — the two
+ * `PolicyViolationError` classes both subclass `VerdictError` and neither is importable here. The read
+ * mirrors the F10 clause in the dispatcher (`refusingRuleId`): a `Deny` or `Indeterminate` names the rule
+ * on the decision, an `Escalate` on the request the gate was shown. A gate or review refusal names
+ * neither — those carry no rule or tool of their own.
+ */
+export function outcomeFailureDetail(err: unknown): OutcomeFailureDetail | undefined {
+  const kind = outcomeFailureKind(err);
+  if (kind === undefined) return undefined;
+  return { kind, ...namedRefusal(err) };
+}
+
+/** The shape a `PolicyViolationError.decision` is read by; a superset of every `PolicyDecision` member. */
+interface RefusalShape {
+  verdict:          string;
+  ruleId?:          unknown;
+  toolId?:          unknown;
+  approvalRequest?: { policyRuleId?: unknown };
+}
+
+/**
+ * The rule and tool an error names, read off it (A11). A `NodeFailure`'s own fields first; failing that,
+ * the `decision` a `PolicyViolationError` carries. `toolId` is read defensively — no `PolicyDecision`
+ * carries one today, so a bare refusal recovers only its rule; the tool reaches the outcome through the
+ * dispatcher's F10 `NodeFailure`, which knows the refused call.
+ */
+function namedRefusal(err: unknown): { ruleId?: string; toolId?: string } {
+  if (err instanceof NodeFailure) {
+    return {
+      ...(err.ruleId !== undefined ? { ruleId: err.ruleId } : {}),
+      ...(err.toolId !== undefined ? { toolId: err.toolId } : {}),
+    };
+  }
+  const decision = refusalDecision(err);
+  if (decision === undefined) return {};
+  const ruleId = ruleIdOf(decision);
+  const toolId = typeof decision.toolId === 'string' ? decision.toolId : undefined;
+  return {
+    ...(ruleId !== undefined ? { ruleId } : {}),
+    ...(toolId !== undefined ? { toolId } : {}),
+  };
+}
+
+/** The decision a policy refusal carries, duck-typed: a refusal is an object that names a verdict. */
+function refusalDecision(err: unknown): RefusalShape | undefined {
+  if (err === null || typeof err !== 'object') return undefined;
+  const decision = (err as { decision?: unknown }).decision;
+  if (decision === null || typeof decision !== 'object') return undefined;
+  return typeof (decision as { verdict?: unknown }).verdict === 'string'
+    ? (decision as RefusalShape)
+    : undefined;
+}
+
+/** The rule a refusal names — the same switch the engine and the dispatcher make (`refusingRuleId`). */
+function ruleIdOf(decision: RefusalShape): string | undefined {
+  switch (decision.verdict) {
+    case 'Deny':
+    case 'Indeterminate': return typeof decision.ruleId === 'string' ? decision.ruleId : undefined;
+    case 'Escalate':      return typeof decision.approvalRequest?.policyRuleId === 'string'
+      ? decision.approvalRequest.policyRuleId
+      : undefined;
+    default:              return undefined;
+  }
 }
 
 /**
@@ -1473,3 +1548,15 @@ export { canonicalJson } from './canonicalJson.js';
  */
 export { describeToolInput, toolInputProblem, toolFailureMessage } from './toolInput.js';
 export type { ToolInputCheckOptions } from './toolInput.js';
+
+// The secret scrubber lives here, in the package every other @maf package already depends on,
+// rather than in `@maf/processors` where it grew up. Two of its callers — the security gate
+// (`@maf/git-ops`, which the workspace-deps guard keeps a leaf on `@maf/types` alone) and the
+// tool protocol (`@maf/adapter-base`) — must mask model text before it reaches a record, and
+// neither may take a new edge to do it. One home, reached without a new dependency; the
+// processors package re-exports these names so no existing importer moves.
+export {
+  CREDENTIAL_PATTERNS, ASSIGNMENT_PATTERNS, DEFAULT_PATTERNS,
+  redactCredentials, redactSecrets, redactText,
+  redactCredentialsRecord, redactRecord,
+} from './redaction.js';

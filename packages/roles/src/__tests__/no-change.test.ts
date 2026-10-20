@@ -334,12 +334,16 @@ test('the same in-process coder with one successful write succeeds, and its diff
   }
 });
 
-test('an in-process tester that changes nothing succeeds: it does not expect a change', async () => {
+test('A2: an in-process tester that answers with no executed call fails no_work, not Succeeded', async () => {
+  // A2 (the 0.4.0 audit) replaces this row's old expectation. The tester holds `test.run` — so it is a
+  // writer for the gate — but it declares no `expectsChange`: its job is to run the tests, not to change
+  // the code. It is therefore judged by `no_work`, and a tester that answers without running anything has
+  // not done its work. (Before A2 this same node read `Succeeded` off the prose — the gap A2 closes.)
   const tester = roleNamed('tester', { allowedTools: ['fs.read', 'patch.apply', 'test.run'].map(makeToolId) });
-  const fx = await makeFixture(tester, new ScriptedTurns([calling('fs.read', { path: 'missing.txt' }, 1)], 'no test to add'));
+  const fx = await makeFixture(tester, new ScriptedTurns([], 'no test to add'));
   try {
-    const out = await fx.dispatcher.runNode(nodeFor('tester'));
-    assert.deepEqual(out['output'], { kind: 'string', value: 'no test to add' });
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('tester')));
+    assert.equal(failure.reason, 'no_work');
   } finally {
     await fx.cleanup();
   }

@@ -27,8 +27,10 @@ export {
   TranscriptProcessor,
   SecurityGateProcessor,
 } from './defaults.js';
+// Re-exported from @maf/types, which its other callers (git-ops, adapter-base) already depend
+// on, so the scrubber has one home and no package grows a dependency to reach this one.
 export {
   redactSecrets, redactCredentials, redactText,
   redactRecord, redactCredentialsRecord,
   DEFAULT_PATTERNS, CREDENTIAL_PATTERNS, ASSIGNMENT_PATTERNS,
-} from './redaction.js';
+} from '@maf/types';

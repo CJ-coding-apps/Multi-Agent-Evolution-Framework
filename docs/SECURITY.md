@@ -47,9 +47,19 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
   pattern set would mangle the evidence the bundle exists to be. So a credential in another format, or one
   nested a level down inside the input, is recorded as written. Treat a bundle as containing whatever the
   run printed and whatever the agent chose to type. Failure messages, which also reach the bundle's
-  run outcome and the memory graph, are masked the same way: a failed node's output tail with those eight
-  formats, and a backend's stderr or HTTP error-body tail with five of them (bearer tokens, `sk-` keys,
-  Google, GitHub and AWS keys).
+  run outcome and the memory graph, are masked the same way — every text a failure quotes is scrubbed
+  before it is quoted: a failed node's output tail, a backend's stderr or HTTP error-body tail, the `no_work`
+  answer excerpt (the first 200 characters of the model's answer, masked and then whitespace-collapsed), the
+  malformed-`tool_call` snippet a parse error carries, and the security gate's `Raw:` tail — **all with the
+  same eight formats**, because all five call the one scrubber, `@maf/types`' `redactCredentials` (the
+  adapters' failure tail was brought onto that shared scrubber in 0.4.0, replacing a local list of five).
+  Each is masked **before** the slice that shortens it, so a key the cut would split is recognised whole
+  rather than preserved by its head. One mask here is deliberately not the same mask: the **model-view**
+  processor that feeds text back to the model marks `[REDACTED:<label>]` too, but from a **broader** pattern
+  set (it adds a `generic-secret` heuristic), while the record's mask strips credential *formats* only — so a
+  heuristic secret is masked in the history and stays in the record. That divergence is by design and is now
+  the only one: the record's mask is one implementation, `@maf/types`; the model-view's broader set is the
+  other.
 - **A refused escalation leaves a record in the clear** at `.maf/approvals/pending/<id>.json` when no one
   could be asked: the approval request (its id, the run, the task, the tool and the rule), the request's
   hash, the declared paths, a timestamp and the reason. The tool's input is not written there.
@@ -349,8 +359,9 @@ A role runs in one of two tiers:
   opens by telling the model that the host's own tools — `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`,
   `WebFetch` or any other it may believe it has — are not available this turn and that a request for one is
   refused, so what the prompt claims of the backend matches what `--tools ""` did to it
-  ([D-46](DECISIONS.md)). A non-writer node here that finishes with an answer after **zero executed tool
-  calls** fails with `no_work`: a reader that made no call did not answer the question it was given. A call
+  ([D-46](DECISIONS.md)). A node here whose role does not expect a change (`expectsChange` is not true) — a
+  reader, or the `tester` — and finishes with an answer after **zero executed tool calls** fails with
+  `no_work`: a role that made no call did not do its job. A call
   **ran** — and so is work — when `result.metadata.refused !== true`: an `Allow`, and an `Escalate` the
   approval gate then approved. A `Deny`, an `Escalate` that was not approved, and an `Indeterminate` (an
   engine rule that could not be evaluated, or the `builtin:input-schema` refusal of a malformed call) never
@@ -376,9 +387,9 @@ records exist on the `in-process` tier alone; the human review gate reviews a wr
 **A node's verdict is read from the record, not from what the model said.** A role that **expects a change**
 (`expectsChange`; the built-in `coder`) and answers with an empty diff against the commit it started from fails
 `no_change` whatever its prose claimed, and the evidence is the diff the security gate reviewed, named as a
-subject of the run's signed statement ([D-32](DECISIONS.md)). An **in-process** reader that **expects tool
-calls** (`expectsToolCalls`, the default for a read-only role that lists a tool) and executes none fails
-`no_work`: the evidence is the per-call `ToolCallRecord` count and the role's own `expectsToolCalls`
+subject of the run's signed statement ([D-32](DECISIONS.md)). An **in-process** node whose role does not
+expect a change and **expects tool calls** (`expectsToolCalls`, the default for such a role that lists a
+tool) and executes none fails `no_work`: the evidence is the per-call `ToolCallRecord` count and the role's own `expectsToolCalls`
 declaration, and the answer is quoted in the message only as context, never as proof ([D-46](DECISIONS.md)). A
 `cli`-tier reader is not judged this way, because the record holds no per-call entry for a `cli`-tier role call.
 In both judged cases a run's own record decides whether the node did its work.
@@ -396,10 +407,9 @@ backend's own tools, not what the backend then did. So a `cli`-tier role call th
 what MAF handed the backend and what came back is in the bundle, distinct from the individual tool calls the
 backend ran, which MAF still does not see. A role call routed to `ollama` or `openrouter` is **not** covered:
 those adapters compose no argv and fill no `modelSurface`, so a `cli`-tier call through them is still
-unrecorded — the tier is not by itself the thing being claimed. Two `cli`-tier calls
-are still without a surface — the planner's call and the security reviewer's call, which MAF spawns itself
-rather than through a role node. The planner's call and the security reviewer's call are `cli`-tier calls in
-this sense, whatever tier the roles run on, with one difference: they need only text, so `claude` is spawned for them with `--tools ""`,
+unrecorded — the tier is not by itself the thing being claimed. Two `cli`-tier calls are still without a
+surface — the planner's call and the security reviewer's call, which MAF spawns itself rather than through a
+role node, whatever tier the roles run on. One difference: they need only text, so `claude` is spawned for them with `--tools ""`,
 its own tools off, as for an in-process turn. `codex` and `gemini` have no known flag for that, and keep
 their tools on these calls; a reader's own `cli`-tier call gets `--tools Read,Glob,Grep` on `claude`.
 

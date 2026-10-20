@@ -386,14 +386,20 @@ test('a writer role with execution: cli runs on the cli tier with allowUngoverne
 // changed. It is a writer now: in-process by default, and the security-gate processor reviews its diff.
 test('a role holding test.run and no write tool runs in-process, and its change is security-reviewed', async () => {
   const adapter = new TurnStub();
-  adapter.turns = [{ text: 'ran the tests', toolCalls: [] }];
+  // A2 (the 0.4.0 audit): a role holding `test.run` but no `expectsChange` is judged by `no_work`, so
+  // it makes a real call before answering — the point of the row is the tier and the gate, not the
+  // guard, and a runner that calls nothing has not run anything.
+  adapter.turns = [
+    { text: 'running the tests', toolCalls: [{ toolUseId: 'u1', toolName: 'test.run', input: { runner: 'node' } }] },
+    { text: 'ran the tests', toolCalls: [] },
+  ];
   const fx = await makeFixture({ adapter, role: role('runner', ['fs.read', 'test.run']) });
   try {
     // What a test script can do to the tree while the node runs.
     await writeFile(path.join(fx.workDir, 'hello.txt'), 'rewritten by a test script', 'utf8');
     await fx.dispatcher.runNode(nodeFor('runner'));
     assert.equal(adapter.invoked, 0, 'not the cli tier');
-    assert.equal(adapter.turnsTaken, 1);
+    assert.equal(adapter.turnsTaken, 2);
     assert.equal(fx.reviewed.length, 1, 'the security gate reviewed the node\'s diff');
     assert.match(fx.reviewed[0] ?? '', /rewritten by a test script/);
   } finally {

@@ -27,13 +27,16 @@ import { DEFAULT_ROLE_SET } from '../defaults.js';
 import { isWriterRole, expectsToolCalls } from '../isWriterRole.js';
 import { roleSetFromHarness } from '../harnessBridge.js';
 
-// ORACLE: D-46(ii) (WP-3.1) — a verdict is read from the record, not the narrative. Live row 2b of
-// the 3.0c pass: an in-process `analyst` ran with the host's native tools disabled (`--tools ''`),
-// tried Read/Glob/Grep anyway, was refused ("No such tool available"), gave up — and MAF read
-// `Succeeded` off the prose. The record said what happened: zero calls, one turn, a refusal. A
-// non-writer role that finishes with a final answer after making no executed tool call now fails
-// `no_work`; a writer with zero calls still fails `no_change` (D-32), never `no_work`. `Allow` is a
-// call that ran — a call the policy refused left the tree exactly as it found it, so it is no work.
+// ORACLE: D-46(ii) (WP-3.1), generalised by the 0.4.0 audit (A2) — a verdict is read from the record,
+// not the narrative. Live row 2b of the 3.0c pass: an in-process `analyst` ran with the host's native
+// tools disabled (`--tools ''`), tried Read/Glob/Grep anyway, was refused ("No such tool available"),
+// gave up — and MAF read `Succeeded` off the prose. The record said what happened: zero calls, one
+// turn, a refusal. A role that was **not expected to change the tree** (`expectsChange` is not `true`)
+// and finishes with a final answer after making no executed tool call fails `no_work`; a role that
+// does expect a change (`expectsChange: true`, the built-in `coder`) is judged by `no_change` (D-32),
+// never `no_work`. The predicate is `expectsChange`, not "holds a write tool": the built-in `tester`
+// holds `test.run` yet expects no change, so it is judged here (A2). `Allow` is a call that ran — a
+// call the policy refused left the tree exactly as it found it, so it is no work.
 
 const execFileAsync = promisify(execFile);
 
@@ -355,6 +358,75 @@ test('a role named analyst that holds fs.write is a writer: no_change, never no_
     const failure = await failureOf(fx.dispatcher.runNode(nodeFor('analyst')));
     assert.equal(failure.reason, 'no_change');
     assert.equal(isWriterRole(writerRole('analyst')), true, 'the fixture really holds a write tool');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+// ─── A2 (0.4.0 audit): the guard is `expectsChange`, not "holds a write tool" — the tester ─────
+
+test('A2: the built-in tester that answers with no tool call fails no_work', async () => {
+  // The tester holds `test.run` (a write tool, so a writer for the gate) but declares no
+  // `expectsChange`: its job is to run the tests, not to change the code. The old `isWriterRole` test
+  // excused it, so "All tests pass." on turn one succeeded — the exact shape no_work exists to catch.
+  const tester = DEFAULT_ROLE_SET.roles.find((r) => r.role === 'tester');
+  assert.ok(tester, 'the built-in tester exists');
+  assert.equal(isWriterRole(tester), true, 'the tester holds test.run, so it is a writer for the gate');
+  assert.equal(tester.expectsChange, undefined, 'and it declares no expectsChange');
+  const attestor = new RecordingAttestor();
+  const fx = await makeFixture(tester, new ScriptedTurns([], 'All tests pass.'), {
+    attestor: attestor as unknown as Attestor,
+  });
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('tester')));
+    assert.equal(failure.reason, 'no_work');
+    assert.match(
+      failure.message,
+      /^role "tester" made no executed tool call across 1 turn; its answer: "All tests pass\."$/,
+    );
+    assert.equal(attestor.toolCallsForTask(makeTaskId('tester-1')).length, 0, 'the record says it made no call');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('A2: a tester that runs the tests succeeds — the guard is "made no call", not "made no change"', async () => {
+  const tester = DEFAULT_ROLE_SET.roles.find((r) => r.role === 'tester');
+  assert.ok(tester);
+  const attestor = new RecordingAttestor();
+  const fx = await makeFixture(tester, new ScriptedTurns([calling('test.run', { runner: 'node' }, 1)], 'All tests pass.'), {
+    attestor: attestor as unknown as Attestor,
+  });
+  try {
+    const out = await fx.dispatcher.runNode(nodeFor('tester'));
+    assert.deepEqual(out['output'], { kind: 'string', value: 'All tests pass.' });
+    assert.equal(attestor.toolCallsForTask(makeTaskId('tester-1'))[0]?.policyDecision.verdict, 'Allow');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('A2: the tester may opt out with expectsToolCalls: false and succeeds with zero calls', async () => {
+  const tester = DEFAULT_ROLE_SET.roles.find((r) => r.role === 'tester');
+  assert.ok(tester);
+  const optedOut: RoleConfig = { ...tester, expectsToolCalls: false };
+  const fx = await makeFixture(optedOut, new ScriptedTurns([], 'Nothing to test.'));
+  try {
+    const out = await fx.dispatcher.runNode(nodeFor('tester'));
+    assert.deepEqual(out['output'], { kind: 'string', value: 'Nothing to test.' });
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('A2: a role that expects a change is still judged by no_change, never no_work — even holding a write tool', async () => {
+  // The generalisation must not swallow the writer: `expectsChange: true` (the built-in coder) stays
+  // under no_change, and no_work is the complement, not an addition.
+  const fx = await makeFixture(writerRole('coder', { expectsChange: true }), new ScriptedTurns([], 'I changed nothing.'));
+  try {
+    const failure = await failureOf(fx.dispatcher.runNode(nodeFor('coder')));
+    assert.equal(failure.reason, 'no_change');
+    assert.notEqual(failure.reason, 'no_work');
   } finally {
     await fx.cleanup();
   }
