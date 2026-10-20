@@ -244,6 +244,39 @@ test('a 0.2.1 bundle (custom JSON with keySource) inspects as legacy and verifie
   assert.equal(Attestor.inspect(parseBundle(JSON.stringify(old, null, 2)), { secret: 's3cret' }).legacy, true);
 });
 
+// ORACLE (WP-3.0c, F9). "The reader still accepts what an older writer produced" is a claim about a
+// bundle an older writer actually produced — not one this code made and handed to itself, which would
+// answer the same whatever the reader did. This fixture was produced by a v0.3.1 build (tag `v0.3.1`,
+// commit `8a3af0aa`): a scratch clone at that tag was built and `maf inprocess-demo` run in it — the
+// offline scripted adapter, under a temp directory, so the signed bytes carry no model text and no
+// personal path, only the throwaway `/var/folders/...` fixture the demo made. It is committed
+// byte-for-byte; editing it would change the signed bytes and leave a different, unsigned bundle,
+// which is why the temp path stays. 0.3.1 predates WP-3.0c, so the predicate has no
+// `attributedChanges` — the newer field the current reader must keep treating as optional.
+const BUNDLE_0_3_1 = path.join(__dirname, '..', '..', 'src', '__tests__', 'fixtures', '0.3.1-inprocess-demo.bundle.json');
+
+test('a bundle a 0.3.1 build wrote still verifies under the current reader', async () => {
+  const parsed = parseBundle(await readFile(BUNDLE_0_3_1, 'utf8'));
+  if (!('_type' in parsed)) {
+    assert.fail(`the fixture is the 0.3.0 statement layout, so it carries a _type; it has ${Object.keys(parsed).join(', ')}`);
+  }
+
+  // The artifact attests its own version, so a later change that breaks this test cannot be silenced
+  // by swapping in a bundle the current code wrote.
+  assert.equal(parsed.predicate.provenance.builder.id, '@maf/inprocess-demo@0.3.1');
+  assert.equal(
+    'attributedChanges' in parsed.predicate, false,
+    'a 0.3.1 run carries no attributedChanges — that field arrived with WP-3.0c',
+  );
+  assert.equal(
+    'modelSurfaces' in parsed.predicate, false,
+    'and no model surface: the scripted adapter\'s turn carries none, so a 0.3.1 demo records no field at all',
+  );
+
+  assert.deepEqual(Attestor.inspect(parsed, {}), { valid: true, keySource: 'dev', legacy: false });
+  assert.equal(Attestor.verify(parsed, {}), true);
+});
+
 test('a statement of another type or predicate does not verify, and the report says why', async () => {
   const { signed } = await attestedRun({ secret: 's3cret' });
   const resign = (s: Omit<SignedRunStatement, 'signature'>): SignedRunStatement => ({

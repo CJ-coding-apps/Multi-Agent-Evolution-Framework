@@ -9,7 +9,7 @@ On the `in-process` tier, every tool call a role makes passes through `executeTo
 | `Escalate`      | A person at the terminal is asked about this one call, and it runs only if they approve it. Refused as `Deny` is — with the rule id, and the decision recorded — when they do not, when no one answers in time, when the run is headless, or when the run has no approval gate. See [Escalate: asking a person](#escalate-asking-a-person). |
 | `Indeterminate` | The policy could not be evaluated: a rule's `memoryPattern` query failed, or named a parameter that cannot be bound. Refused like `Deny`, and recorded with the rule id. |
 
-A refused call is thrown inside `executeToolGated` as `PolicyViolationError`; the in-process loop turns that into an error result for the model, and the loop carries on. A call to a tool outside the role's allowlist never reaches the policy engine: the loop answers it with an error before policy, and it is not recorded in the bundle.
+A refused call is thrown inside `executeToolGated` as `PolicyViolationError`; the in-process loop turns that into an error result for the model, and the loop carries on. Two classes carry that name, and which one a caller catches matters: the engine's (`@maf/policy-engine`'s `PolicyEngine`, the one `executeToolGated` throws) and the older `ViolationHandler`'s, re-exported as `PolicyViolationHandlerError` — both extend `VerdictError`, so a caller that wants either should catch `VerdictError`. Unifying them is a known backlog item, not a 0.4.0 change. A call to a tool outside the role's allowlist never reaches the policy engine: the loop answers it with an error before policy, and it is not recorded in the bundle.
 
 Rules are evaluated in **descending priority** order. The first rule whose predicate matches the call wins. If no rule matches, the verdict is `Allow`.
 
@@ -198,7 +198,7 @@ The policy shipped in this repository:
 | 95  | `protect-lock-files` | Escalate (ask a person) writes, patches and deletes to `**/*.lock`. |
 | 90  | `protect-migrations` | Escalate (ask a person) writes, patches and deletes to `**/migrations/**`. |
 | 90  | `coder-no-secrets-dir` | Deny `coder` writes to `**/secrets/**`. |
-| 85  | `deny-readonly-roles`  | Deny mutating tools for `reviewer`/`security`. |
+| 85  | `deny-readonly-roles`  | Deny mutating tools for `reviewer`/`security`/`analyst`. |
 | 81  | `tester-no-ci-config` | Deny `tester` writes/patches/deletes under `{.github,.github/**}`: once globs matched dotfiles, `**/*test*` reached `.github/workflows/test.yml`, which is CI configuration, not a test ([D-30](DECISIONS.md)). |
 | 80  | `tester-write-only-tests` | Deny `tester` writes outside test path patterns. |
 

@@ -8,7 +8,7 @@ import path from 'node:path';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, ToolPlugin, ToolContext, ToolResult, SecurityReviewResult,
-  ToolId, ExecutionTierRecord,
+  ToolId, ExecutionTierRecord, ToolCallRecord, TaskId,
 } from '@maf/types';
 import { makeNodeId, makeRunId, makeToolId, GateRefused, NodeFailure, TransportError } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
@@ -26,6 +26,7 @@ import { RoleDispatcher } from '../RoleDispatcher.js';
 import { RoleRegistry, RoleConfigError } from '../RoleRegistry.js';
 import { defineRoleName } from '../RoleConfig.js';
 import type { RoleConfig } from '../RoleConfig.js';
+import { getDefaultRoleConfig } from '../defaults.js';
 import { effectiveTier, isWriterForLock } from '../isWriterRole.js';
 
 // ORACLE: D-01 — governed in-process execution is the default for writer roles. A role holding a
@@ -188,6 +189,9 @@ async function makeFixture(opts: {
   const stderr: string[] = [];
   const transcript: Array<{ role: string; content: string }> = [];
   const tiers: ExecutionTierRecord[] = [];
+  // Every call the loop attests, so `toolCallsForTask` can answer as the real Attestor does — the
+  // reader's executed-call count (D-46) is read from here.
+  const calls: Array<Omit<ToolCallRecord, 'id'>> = [];
   const dispatcher = new RoleDispatcher({
     adapter: opts.adapter,
     baseTools,
@@ -195,7 +199,9 @@ async function makeFixture(opts: {
     injector: { assemble: async () => ({ systemPromptPrefix: '' }) } as unknown as GraphAwareInjector,
     policy: { evaluate: async () => ({ verdict: 'Allow' }) } as unknown as PolicyEngine,
     attestor: {
-      record: async () => {},
+      record: async (call: Omit<ToolCallRecord, 'id'>) => { calls.push(call); },
+      toolCallsForTask: (taskId: TaskId): ToolCallRecord[] =>
+        calls.filter((c) => c.taskId === taskId).map((c, i) => ({ id: `rec-${i}`, ...c })),
       recordSecurityFindings: () => {},
       recordExecutionTier: (record: ExecutionTierRecord) => { tiers.push(record); },
     } as unknown as Attestor,
@@ -380,14 +386,20 @@ test('a writer role with execution: cli runs on the cli tier with allowUngoverne
 // changed. It is a writer now: in-process by default, and the security-gate processor reviews its diff.
 test('a role holding test.run and no write tool runs in-process, and its change is security-reviewed', async () => {
   const adapter = new TurnStub();
-  adapter.turns = [{ text: 'ran the tests', toolCalls: [] }];
+  // A2 (the 0.4.0 audit): a role holding `test.run` but no `expectsChange` is judged by `no_work`, so
+  // it makes a real call before answering — the point of the row is the tier and the gate, not the
+  // guard, and a runner that calls nothing has not run anything.
+  adapter.turns = [
+    { text: 'running the tests', toolCalls: [{ toolUseId: 'u1', toolName: 'test.run', input: { runner: 'node' } }] },
+    { text: 'ran the tests', toolCalls: [] },
+  ];
   const fx = await makeFixture({ adapter, role: role('runner', ['fs.read', 'test.run']) });
   try {
     // What a test script can do to the tree while the node runs.
     await writeFile(path.join(fx.workDir, 'hello.txt'), 'rewritten by a test script', 'utf8');
     await fx.dispatcher.runNode(nodeFor('runner'));
     assert.equal(adapter.invoked, 0, 'not the cli tier');
-    assert.equal(adapter.turnsTaken, 1);
+    assert.equal(adapter.turnsTaken, 2);
     assert.equal(fx.reviewed.length, 1, 'the security gate reviewed the node\'s diff');
     assert.match(fx.reviewed[0] ?? '', /rewritten by a test script/);
   } finally {
@@ -630,6 +642,46 @@ test('a loop that fails on malformed tool calls under a bundle without the secur
     });
     assert.equal(fx.reviewed.length, 1);
     assert.match(fx.reviewed[0] ?? '', /written in-process/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+// ─── D-44: the built-in readers run in-process, where the gate and the record are ──────────────
+// The tier is decided by the role set, not the dispatcher's caller: a shipped reader that said
+// no `execution` ran ungoverned on the cli tier, and a reader on the cli tier is handed the
+// backend's own file tools. In-process is where policy verdicts, redaction and attested tool
+// calls exist, so it is the tier a built-in audit or review now asks for.
+
+test('a built-in reader (analyst) runs in-process on an adapter that can drive the loop', async () => {
+  const adapter = new TurnStub();
+  // One executed read, then the answer: the reader does its work (D-46), so the node succeeds and
+  // the tier record is what this test reads.
+  adapter.turns = [
+    { text: 'reading', toolCalls: [{ toolUseId: 'u1', toolName: 'fs.read', input: { path: 'hello.txt' } }] },
+    { text: 'the flag is read at config.ts:41', toolCalls: [] },
+  ];
+  const fx = await makeFixture({ adapter, role: getDefaultRoleConfig(defineRoleName('analyst'))! });
+  try {
+    await fx.dispatcher.runNode(nodeFor('analyst'));
+    assert.equal(adapter.invoked, 0, 'not the single opaque cli call');
+    assert.equal(adapter.turnsTaken, 2, 'the loop drove the backend turn by turn — the read, then the answer');
+    assert.deepEqual(fx.tiers, [{ nodeId: 'n1', role: 'analyst', tier: 'in-process', adapter: 'turn-stub' }]);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a built-in reader falls back to the cli tier on an adapter without the loop, and the record names it', async () => {
+  const adapter = new CliOnly();
+  const fx = await makeFixture({ adapter, role: getDefaultRoleConfig(defineRoleName('security'))! });
+  try {
+    await fx.dispatcher.runNode(nodeFor('security'));
+    assert.equal(adapter.invoked, 1, 'the cli tier, not the loop');
+    assert.ok(fx.transcript.some((e) => e.content.includes('falling back to CLI dispatch')));
+    assert.deepEqual(fx.tiers, [
+      { nodeId: 'n1', role: 'security', tier: 'cli', adapter: 'cli-only', fellBackFrom: 'in-process' },
+    ]);
   } finally {
     await fx.cleanup();
   }

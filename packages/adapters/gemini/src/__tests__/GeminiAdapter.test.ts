@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { TransportError } from '@maf/types';
 import type { AdapterInvokeOptions } from '@maf/types';
 import type { SpawnResult, spawnAndCollect } from '@maf/adapter-base';
@@ -13,6 +14,11 @@ import { GeminiAdapter } from '../index.js';
 // and every failure is exactly the one the case names.
 
 const CALL: AdapterInvokeOptions = { prompt: 'say hi', workingDir: process.cwd(), timeoutMs: 5_000 };
+
+/** The digest and the elision marker the surface uses, recomputed here (WP-3.0c). */
+const sha256Hex = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
+const elided = (name: string, value: string): string =>
+  `<${name}: ${Buffer.byteLength(value, 'utf8')} bytes, sha256 ${sha256Hex(value)}>`;
 
 interface SpawnCall { cmd: string; args: string[] }
 
@@ -124,4 +130,30 @@ test('a prompt that starts with a dash, or holds = and newlines, is one --prompt
   assert.equal(args.at(-1), `--prompt=${hostile}`);
   assert.equal(args.includes('-p'), false);
   assert.equal(args.includes('--yolo'), false, 'no part of the prompt is an argument of its own');
+});
+
+// ORACLE (WP-3.0c, D-45). invoke on the cli tier is a model call MAF made, so it belongs in the
+// record. Gemini carries its two payloads inside argv — the `--system-instruction` value and the
+// value half of the joined `--prompt=` token — so each is elided where the flag stays readable.
+
+test('invoke records the cli-tier model surface, its own argv elided (WP-3.0c)', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  const out = await new GeminiAdapter({ spawn }).invoke({ ...CALL, systemPrompt: 'be brief' });
+
+  const surface = out.modelSurface;
+  assert.ok(surface, 'a cli-tier call carries a surface');
+  assert.equal(surface.systemPromptSha256, sha256Hex('be brief'));
+  assert.equal(surface.promptSha256, sha256Hex('say hi'));
+  assert.equal(surface.outputSha256, sha256Hex('hi'));
+  assert.equal(surface.toolCatalog, '');
+  assert.deepEqual(surface.argv, [
+    '--system-instruction', elided('--system-instruction', 'be brief'),
+    '--allowed-mcp-server-names', 'maf-allows-no-mcp-server',
+    `--prompt=${elided('prompt', 'say hi')}`,
+  ], 'the flag stays readable inside the joined token, its value elided');
+  assert.equal(
+    surface.argv.some((a) => a.includes('be brief') || a.includes('say hi')), false,
+    'no payload text in the record',
+  );
+  assert.equal(calls[0]?.args.at(-1), '--prompt=say hi', 'the binary itself still got the prompt');
 });

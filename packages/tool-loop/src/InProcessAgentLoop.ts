@@ -276,14 +276,17 @@ export class InProcessAgentLoop {
   ): Promise<void> {
     const surface = turn.modelSurface;
     if (!surface) return;
+    // `tier` names which half of the run produced this call (WP-3.0c): the loop's own governed turn
+    // is 'in-process', and a cli-tier `invoke` the dispatcher records is 'cli'. Same record shape
+    // both places, so "every role call is in the record" is one array, not two.
     const record: ModelSurfaceRecord = {
-      role: base.role, taskId: base.taskId, turn: stepIndex + 1, ...surface,
+      role: base.role, taskId: base.taskId, turn: stepIndex + 1, ...surface, tier: 'in-process',
     };
     this.deps.attestor.recordModelSurface?.(record);
     await this.deps.transcript?.append(
       'system',
       `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; argv ${JSON.stringify(record.argv)}`,
-      { agentRole: record.role, taskId: record.taskId, turn: record.turn,
+      { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
         systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv },
     );
   }

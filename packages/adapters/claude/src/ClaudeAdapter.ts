@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord,
@@ -9,6 +8,7 @@ import { BaseAdapter } from '@maf/adapter-base';
 import {
   spawnAndCollect, spawnStreaming, turnStdout,
   buildTurnSystemPrompt, serializeHistory, parseTurn, serializeTools,
+  sha256Hex, elided, cliModelSurface,
 } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
@@ -154,6 +154,11 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       // Forwarded so the dispatcher can tell a timeout or a silent exit — retryable (D-06) —
       // from an answer that happens to be a failure.
       ...(result.transportError !== undefined ? { transportError: result.transportError } : {}),
+      // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c): the same
+      // evidence a governed turn reports, built from the argv this call spawned with — with the two
+      // payload positionals elided, exactly as the governed turn's surface elides them, so the
+      // record carries a digest of the prompt rather than the prompt.
+      modelSurface: cliModelSurface(options.systemPrompt, options.prompt, elidePayloads(args), result.stdout),
     };
   }
 
@@ -215,12 +220,4 @@ function elidePayloads(argv: readonly string[]): string[] {
     if (argv[i - 1] === '--' && i === argv.length - 1) return elided('prompt', arg);
     return arg;
   });
-}
-
-function elided(name: string, value: string): string {
-  return `<${name}: ${Buffer.byteLength(value, 'utf8')} bytes, sha256 ${sha256Hex(value)}>`;
-}
-
-function sha256Hex(text: string): string {
-  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }

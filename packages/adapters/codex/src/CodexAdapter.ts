@@ -6,7 +6,7 @@ import type {
 } from '@maf/types';
 import {
   BaseAdapter, spawnAndCollect, spawnStreaming, turnStdout,
-  buildTurnSystemPrompt, serializeHistory, parseTurn,
+  buildTurnSystemPrompt, serializeHistory, parseTurn, cliModelSurface,
 } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
@@ -48,6 +48,11 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       // bypassing the gate. The RoleDispatcher gate requires BOTH sendTurn and
       // this flag, so Codex stays on the CLI path until a non-autonomous Codex
       // invocation is verified against a live binary — then flip to true.
+      //
+      // When that happens, the D-46 TOOL_PROTOCOL paragraph (which tells the model the host's own
+      // tools are off) must be made true first: it assumes the turn runs with the backend's native
+      // tools disabled, which claude does with `--tools ''` (D-33). No Codex flag is known to do the
+      // same, so flipping this to true without finding one would spawn a turn whose prompt lies.
       inProcessLoop:       false,
       maxConcurrentTasks:  4,
       nativePlugins:       [],
@@ -114,6 +119,11 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       // Forwarded so the dispatcher can tell a timeout or a silent exit — retryable (D-06) —
       // from an answer that happens to be a failure.
       ...(result.transportError !== undefined ? { transportError: result.transportError } : {}),
+      // The cli-tier call's model-facing surface (WP-3.0c). The argv has no payload positional — the
+      // binary takes the prompt on stdin — so it is carried verbatim; the prompt digest is of what
+      // was composed and `stdinSha256` of the blob codex was actually written, which joins the
+      // system block and the prompt (F7): the two parts do not by themselves say what was sent.
+      modelSurface: cliModelSurface(options.systemPrompt, options.prompt, args, result.stdout, fullPrompt),
     };
   }
 

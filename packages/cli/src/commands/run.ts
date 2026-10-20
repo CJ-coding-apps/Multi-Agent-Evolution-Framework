@@ -15,7 +15,7 @@ import { createApprovalGate } from '@maf/approval-gate';
 import { PolicyLoader } from '@maf/policy-engine';
 import { GIT_EMPTY_TREE, ReviewGate, SecurityReviewGate, WorktreeManager, resolveWorkingDir, runIsolatedGit, snapshotDiff } from '@maf/git-ops';
 import type { FinishResult, Reviewer, RunWorktree } from '@maf/git-ops';
-import { DagRunner, withRetry } from '@maf/dag-runner';
+import { DagRunner, createWriterLockLedger, withRetry } from '@maf/dag-runner';
 import { GraphAwareInjector } from '@maf/prompt-injector';
 import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
 import { TranscriptLogger } from '@maf/transcript';
@@ -290,6 +290,13 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       generatePlan: planGenerator(adapter, { workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry, ...model }),
     });
 
+    // The scheduler's writer lock, as a ledger the dispatcher can read (WP-3.0c, the F7 window):
+    // when an in-process reader's bracket shows a change, the dispatcher asks who held the lock
+    // across its turn, and attributes the change to that writer rather than failing the reader for
+    // it. One ledger, shared by the two — the runner stamps it, the dispatcher reads it, so the two
+    // can never disagree about who held the lock when.
+    const writerLockLedger = createWriterLockLedger();
+
     const dispatcher = new RoleDispatcher({
       adapter,
       baseTools: agentTools,
@@ -307,6 +314,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       sessionId,
       runId,
       harness,
+      writerLockLedger,
       ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
       stderr,
       ...(cfg.model !== undefined ? { modelOverride: cfg.model } : {}),
@@ -332,6 +340,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       board,
       executor: (node) => dispatcher.runNode(node),
       isWriter: writerLock(roles, adapter, baseTools),
+      writerLockLedger,
       // Each failed node leaves a Task and its Failure joined by CAUSED_FAILURE, which the planner
       // recalls by the run's title (D-16, D-37); the recorder's wait is bounded.
       failureRecorder: graph,

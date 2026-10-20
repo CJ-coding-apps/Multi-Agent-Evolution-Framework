@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDefaultRegistry } from '@maf/tools';
+import { makeToolId } from '@maf/types';
 import { RoleRegistry, RoleConfigError } from '../RoleRegistry.js';
 import { defineRoleName } from '../RoleConfig.js';
 import { DEFAULT_ROLE_SET } from '../defaults.js';
@@ -100,6 +101,122 @@ test('fromSet throws when defaultRole missing from roles', () => {
   );
 });
 
+// F8/M19: `expectsToolCalls: true` is a promise about the call count, so it must be able to mean
+// something. On a role with no tool it can never be satisfied — the node has nothing to call, so every
+// run ends `no_work`. On a role that *expects a change* it is inert whatever its value (R7), because
+// no_change (D-32) judges such a role by the tree, never by its call count — so the setting is read
+// and discarded. The predicate is `expectsChange`, not "holds a write tool" (A2, the 0.4.0 audit): the
+// built-in `tester` holds `test.run` but expects no change, so it is judged by `no_work` and must be
+// allowed to declare this.
+
+test('F8: fromSet refuses expectsToolCalls: true on a role that holds no tool', () => {
+  const tools = createDefaultRegistry();
+  assert.throws(
+    () => RoleRegistry.fromSet(
+      {
+        version: 1,
+        defaultRole: defineRoleName('analyst'),
+        roles: [{ role: defineRoleName('analyst'), systemPrompt: 'a', allowedTools: [], expectsToolCalls: true }],
+      },
+      '/tmp',
+      tools,
+    ),
+    (err: unknown) => err instanceof RoleConfigError
+      && /analyst/.test(err.message) && /expectsToolCalls/.test(err.message),
+  );
+});
+
+test('F8/A2: fromSet refuses expectsToolCalls: true on a role that expects a change, which no_change judges instead', () => {
+  const tools = createDefaultRegistry();
+  assert.throws(
+    () => RoleRegistry.fromSet(
+      {
+        version: 1,
+        defaultRole: defineRoleName('coder'),
+        roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [makeToolId('fs.write')], expectsChange: true, expectsToolCalls: true }],
+      },
+      '/tmp',
+      tools,
+    ),
+    (err: unknown) => err instanceof RoleConfigError
+      && /coder/.test(err.message) && /expects a change/.test(err.message),
+  );
+});
+
+test('R7: fromSet refuses expectsToolCalls: false on a role that expects a change too — the value is never read', () => {
+  // R7 widened F8. `true` on such a role is inert, and so is `false`: no_change (D-32) judges it by
+  // the tree whatever it declares, so the ruling refuses *any* declared value rather than let one be
+  // accepted and discarded.
+  const tools = createDefaultRegistry();
+  assert.throws(
+    () => RoleRegistry.fromSet(
+      {
+        version: 1,
+        defaultRole: defineRoleName('coder'),
+        roles: [{ role: defineRoleName('coder'), systemPrompt: 'a', allowedTools: [makeToolId('fs.write')], expectsChange: true, expectsToolCalls: false }],
+      },
+      '/tmp',
+      tools,
+    ),
+    (err: unknown) => err instanceof RoleConfigError
+      && /coder/.test(err.message) && /expects a change/.test(err.message),
+  );
+});
+
+test('A2: fromSet accepts expectsToolCalls on a writer that does not expect a change — the tester shape', () => {
+  // A2 (the 0.4.0 audit): a role that holds a write tool but expects no change is judged by `no_work`,
+  // so its `expectsToolCalls` is read, not discarded — it must construct. This is exactly the built-in
+  // `tester`, which holds `test.run` and declares no `expectsChange`; the old "holds a write tool"
+  // refusal denied it the only knob that would catch it.
+  const tools = createDefaultRegistry();
+  const reg = RoleRegistry.fromSet(
+    {
+      version: 1,
+      defaultRole: defineRoleName('tester'),
+      roles: [{ role: defineRoleName('tester'), systemPrompt: 'a', allowedTools: [makeToolId('test.run')], expectsToolCalls: true }],
+    },
+    '/tmp',
+    tools,
+  );
+  assert.equal(reg.getDefault().expectsToolCalls, true);
+});
+
+test('F8: a reader that holds a tool and declares expectsToolCalls is still accepted', () => {
+  // The refusal above must not widen to every reader: a reader with tools is exactly the config the
+  // setting is for, so it constructs.
+  const tools = createDefaultRegistry();
+  const reg = RoleRegistry.fromSet(
+    {
+      version: 1,
+      defaultRole: defineRoleName('analyst'),
+      roles: [{ role: defineRoleName('analyst'), systemPrompt: 'a', allowedTools: [makeToolId('fs.read')], expectsToolCalls: true }],
+    },
+    '/tmp',
+    tools,
+  );
+  assert.equal(reg.getDefault().expectsToolCalls, true);
+});
+
+test('F8: a roles file whose expectsToolCalls is not a boolean is refused at the shape check', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-roles-'));
+  try {
+    const yamlPath = path.join(dir, 'roles.yaml');
+    // `isRoleSet` only checked `allowedTools` and the like; an `expectsToolCalls: "yes"` slipped through
+    // and reached the dispatcher as a truthy string. It is a boolean or the file is not a role set.
+    await writeFile(yamlPath, JSON.stringify({
+      version: 1,
+      defaultRole: 'analyst',
+      roles: [{ role: 'analyst', systemPrompt: 'a', allowedTools: ['fs.read'], expectsToolCalls: 'yes' }],
+    }), 'utf8');
+    await assert.rejects(
+      RoleRegistry.fromYamlOrDefault(yamlPath, dir, createDefaultRegistry()),
+      (err: unknown) => err instanceof RoleConfigError && /does not match the role-set shape/.test(err.message),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('resolveRole refuses an unknown name and lists the roles that exist', () => {
   // This replaces "getRole falls back to default on unknown name", which locked the behaviour
   // D-07 reports: `getRole('nonexistent')` answered with the set's default — `coder`, a writer —
@@ -128,6 +245,27 @@ test('catalog returns role + description pairs', () => {
     assert.equal(typeof entry.role, 'string');
     assert.equal(typeof entry.description, 'string');
   }
+});
+
+// D-43: the catalog entry carries what the planner needs to route a task — whether the role holds
+// a write tool and whether it owes a change — read from the role's tools, never its name.
+test('the catalog entry carries writes and expectsChange, from the role not its name', () => {
+  const reg = RoleRegistry.fromSet(DEFAULT_ROLE_SET, '/tmp');
+  const flags = reg.catalog().map((e) => [String(e.role), e.writes, e.expectsChange]);
+  assert.deepEqual(flags, [
+    ['coder',    true,  true],
+    ['tester',   true,  false],
+    ['security', false, false],
+    ['reviewer', false, false],
+    ['analyst',  false, false],
+  ]);
+  // `writes` follows the tools, not the name: a role named `tester` that holds `fs.write` is a writer.
+  const custom = RoleRegistry.fromSet({
+    version: 1, defaultRole: defineRoleName('tester'),
+    roles: [{ role: defineRoleName('tester'), systemPrompt: 'x', allowedTools: [makeToolId('fs.write')] }],
+  }, '/tmp');
+  assert.equal(custom.catalog()[0]?.writes, true);
+  assert.equal(custom.catalog()[0]?.expectsChange, false);
 });
 
 test('loadPrompt returns inline systemPrompt without filesystem read', async () => {

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { TransportError } from '@maf/types';
 import type { AdapterInvokeOptions, TurnMessage } from '@maf/types';
 import type { SpawnResult, spawnAndCollect } from '@maf/adapter-base';
@@ -26,6 +27,9 @@ function stubSpawn(result: SpawnResult): { spawn: typeof spawnAndCollect; calls:
   };
   return { spawn, calls };
 }
+
+/** The digest the surface records, computed here rather than through the code under test (WP-3.0c). */
+const sha256Hex = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 
 /** What the spawner resolves with when the process is killed on its timeout. */
 function timedOut(): SpawnResult {
@@ -127,4 +131,32 @@ test('invoke and sendTurn pass codex no MCP flag: there is no verified one to pa
 
   assert.deepEqual(calls[0]?.args, ['--full-auto', '--model', 'o4']);
   assert.deepEqual(calls[1]?.args, ['--model', 'o4']);
+});
+
+// ORACLE (WP-3.0c, D-45). invoke on the cli tier is a model call MAF made, so it belongs in the
+// record. Codex takes the prompt on stdin, so its argv carries no payload to elide — the digest of
+// the composed prompt is what records the text, and the argv is kept verbatim.
+
+test('invoke records the cli-tier model surface; codex\'s prompt is on stdin, not in argv (WP-3.0c)', async () => {
+  const { spawn } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  const out = await new CodexAdapter({ spawn }).invoke({ ...CALL, systemPrompt: 'be brief', model: 'o4' });
+
+  const surface = out.modelSurface;
+  assert.ok(surface, 'a cli-tier call carries a surface');
+  assert.equal(surface.systemPromptSha256, sha256Hex('be brief'));
+  assert.equal(surface.promptSha256, sha256Hex('say hi'));
+  assert.equal(surface.outputSha256, sha256Hex('hi'));
+  assert.equal(surface.toolCatalog, '');
+  assert.deepEqual(
+    surface.argv, ['--full-auto', '--model', 'o4'],
+    'no payload positional: the prompt travels on stdin, so the argv is verbatim',
+  );
+  // F7: codex writes one blob to stdin joining the system block and the prompt, and digests the two
+  // parts separately — so neither part digest alone says what codex was actually written. This is
+  // that blob's digest, and it is the only field that ties `argv` (which carries no prompt at all)
+  // to the text that reached the child.
+  assert.equal(surface.stdinSha256, sha256Hex('be brief\n\nsay hi'),
+    'the stdin digest is of the joined blob, not of either part');
+  assert.notEqual(surface.stdinSha256, surface.promptSha256,
+    'and it is distinct from the prompt digest, so it is not a second copy of it');
 });

@@ -58,6 +58,11 @@ function roleConfigFromHarness(r: HarnessRoleConfig): RoleConfig {
       `role "${r.role}": expectsChange must be a boolean, got ${JSON.stringify(r.expectsChange)}`,
     );
   }
+  if (r.expectsToolCalls !== undefined && typeof r.expectsToolCalls !== 'boolean') {
+    throw new HarnessConfigError(
+      `role "${r.role}": expectsToolCalls must be a boolean, got ${JSON.stringify(r.expectsToolCalls)}`,
+    );
+  }
   if (r.timeoutMs !== undefined && r.timeoutMs <= 0)
     throw new HarnessConfigError(`role "${r.role}": timeoutMs must be positive`);
   if (r.maxToolIterations !== undefined && r.maxToolIterations <= 0)
@@ -72,6 +77,7 @@ function roleConfigFromHarness(r: HarnessRoleConfig): RoleConfig {
     ...(r.model !== undefined ? { model: r.model } : {}),
     ...(r.execution !== undefined ? { execution: r.execution } : {}),
     ...(r.expectsChange !== undefined ? { expectsChange: r.expectsChange } : {}),
+    ...(r.expectsToolCalls !== undefined ? { expectsToolCalls: r.expectsToolCalls } : {}),
     ...(r.timeoutMs !== undefined ? { timeoutMs: r.timeoutMs } : {}),
     ...(r.maxToolIterations !== undefined ? { maxToolIterations: r.maxToolIterations } : {}),
     ...(r.tokenBudget !== undefined ? { tokenBudget: r.tokenBudget } : {}),

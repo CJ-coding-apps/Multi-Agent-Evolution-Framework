@@ -9,7 +9,99 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
+The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b, WP-3.0c and WP-3.1) land together
+here: the repository builds on pnpm 10 with a regenerated v9 lockfile; a fifth built-in role joins a reader set
+moved onto the governed in-process tier, with a `no_change` failure that names the policy rules which refused
+the node's own calls; a `cli`-tier role call is now recorded — its model surface is in the bundle — while a
+writer running concurrently with a reader is attributed to that writer rather than charged to the reader; and a
+role that does not expect a change and answers without ever calling a tool now fails `no_work`, the governed turn's prompt says the host's
+own tools are off, and a failed node's failure is a value in the run outcome.
+
+### Added
+
+- **A fifth built-in role, `analyst`** ([D-43](docs/DECISIONS.md)). A read-only role whose job is to answer a
+  question about the code, investigate and report — it holds the seven read tools and no write tool. A plan
+  that asks a question ("list every TODO in `src/` and say which look stale") now has somewhere to route it;
+  before this it had to choose between the writer `coder` and a reader (`security`, `reviewer`) whose prompt
+  audits or reviews a diff rather than answering a question. The planner's role block now tags every role by
+  what it does to the tree, from the role's own tools and never its name — `- analyst (read-only): …`,
+  `- coder (default, must change the tree): …` — so a question routes to a read-only role because the block
+  says read-only. The planner guidance states the rule: *A task that asks a question, an investigation or a
+  report — no change to the code — goes to a read-only role. A node whose role must change the tree fails if
+  it does not.*
+- **A `no_change` failure now names the rules that refused the node's own tool calls** (F10). A writer that
+  finishes having changed nothing reads the same whether it lost its nerve or every write it attempted was
+  refused by policy; naming the rule tells a backend to retry apart from a policy that is misconfigured. When
+  a writer fails `no_change` and its own attested tool calls include a policy `Deny`, an `Escalate` the
+  approval gate did not approve, or an `Indeterminate` the engine reached because it could not evaluate one of
+  its own rules — but not a `builtin:*` one, which is the tool's schema refusing a malformed call rather than
+  policy — the message appends
+  `; N tool call(s) were denied or refused by policy: <ruleId> (<toolId>)…` — at most three rules named, the
+  count carrying the rest. Read per node, from the attestor's records for that task rather than the run-wide
+  counts; the tool message the model saw carries no rule id, so the attestor is the only source.
+- **A model surface for `cli`-tier role calls** ([D-45](docs/DECISIONS.md), WP-3.0c). A `cli`-tier role call
+  is a model call MAF made, but the bundle recorded a surface — digests, the tool catalogue, the argv — only
+  for a governed in-process turn (F4), because that is where MAF composes the prompt. `AdapterInvokeResult`
+  now carries an optional `modelSurface`, which each of the three process-spawning adapters fills from the
+  argv it actually spawned with (`claude` elides the `--system-prompt` value and the prompt after `--`;
+  `gemini` elides the `--system-instruction` value and the value half of the joined `--prompt=`; `codex` takes
+  the prompt on stdin, so its argv is verbatim and only the digests record the text). `RoleDispatcher` records
+  it through the attestor and the transcript. Every surface now carries a `tier` of `in-process` or `cli`; the
+  `cli`-tier one also carries `promptSha256`, `outputSha256` and `nativeTools` (`full`, `read-only` or `none`
+  — the posture MAF **asked** of the backend's own tools, not what the backend then did). A role call routed
+  to `ollama` or `openrouter` spawns no process and fills no surface, so it stays unrecorded; only `claude`,
+  `codex` and `gemini` do. The planner's call and the security reviewer's call stay outside the record — MAF
+  spawns them itself, not through a role node.
+- **A role that does not expect a change, and answers without calling a tool, fails `no_work`**
+  ([D-46](docs/DECISIONS.md), WP-3.1). A read-only role on the in-process tier can finish with an answer the
+  model produced without running anything — "the feature is there" after reading nothing — and the node
+  counted as a success. A node of a role that does not expect a change (`expectsChange !== true`), on the
+  in-process tier, that finishes with an answer after **zero executed tool calls** now fails `no_work`. "Executed" is a
+  call that **ran**: one the policy engine allowed, or an `Escalate` the approval gate then approved. A `Deny`,
+  an `Escalate` that was not approved, and an `Indeterminate` — an engine rule it could not evaluate, or the
+  `builtin:input-schema` refusal of a malformed call — never ran and are not work. The message names the role,
+  the number of turns and the answer's first 200 characters — **credentials masked first**, then whitespace
+  collapsed, since the message reaches the signed bundle and the memory graph — and carries the F10 deny clause
+  when the node's own calls were refused. The check runs only where a per-call record exists — the in-process
+  tier — because the `cli` tier attests no per-call record for a role call, and it counts the **current
+  attempt's** calls, so a retried node that read only on an earlier attempt does not excuse this one. A role
+  whose job is not to call a tool sets `expectsToolCalls: false` (default `true` for a role that does not
+  expect a change and lists a tool, `false` for one that lists none); no built-in sets it, so the three
+  built-in readers keep `true`, and the built-in `tester` — a writer by its tools, since it holds `test.run`,
+  but expected by no rule to change the tree — is judged by this rule too. The set is refused at load if
+  `expectsToolCalls: true` is declared on a role with no tool (it could never be satisfied), or if
+  `expectsToolCalls` is declared at all on a role that expects a change (which is judged by `no_change`, never
+  by its call count, so either value is meaningless there). `RoleCatalogEntry` does not change. **What it does
+  not catch:** the count is of the calls a node *made*, not of the call the task needed — a `tester` that reads
+  one file and never runs `test.run` still Succeeds, and two of the three live-row attempts did exactly that.
+  The root is upstream: the planner is told nothing about the executor's tools, so a node's description may
+  speak shell, and a role cannot say which tool its task requires. Naming MAF tool ids to the planner and
+  letting a role declare a required tool (`requiresTool: test.run`) is 0.5.0 work — the narrow form of F12,
+  BUILD_PLAN Phase 3b.
+- **A failed node's failure is a value in the run outcome** ([D-46](docs/DECISIONS.md), WP-3.1; live-row
+  finding L3). `RunOutcome.nodes[].failure` is now `{ kind, ruleId?, toolId? }` — the kind the dispatcher
+  decided, and the rule id and tool id a policy refusal named — where the node previously carried only a
+  message. `kind` covers every verdict, not only a dispatcher failure: a `NodeFailureReason`, and also
+  `'gate_refused'` (a security or review gate's `GateRefused`), `'review_refused'` (a `ReviewRefused`) and
+  `'policy_violation'` (a `PolicyViolationError`), which are `VerdictError`s rather than `NodeFailure`s and
+  previously got no `failure` at all. Only a plain `Error` leaves `failure` absent rather than inventing a kind:
+  **absent means MAF did not classify the failure — a transport failure or a programming error; it was never a
+  verdict.** `NodeFailure` carries the two ids and `DagRunner` fills `failure` from it; a `no_work` with no
+  refusal reads as exactly `{ kind: 'no_work' }`.
+
 ### Changed
+
+- **The in-process tool protocol now states that the host's own tools are off** ([D-46](docs/DECISIONS.md),
+  WP-3.1; live-row finding L2). The loop spawns the backend with its native tools off — `claude` with
+  `--tools ""` ([D-33](docs/DECISIONS.md)) — but the prompt's `TOOL_PROTOCOL` block described how to request a
+  MAF tool and never said the backend's own tools were gone, so a model could answer by asking for `Read`,
+  `Bash`, or a tool it believed it had, a request the loop had no way to honour. The block now opens by telling
+  the model the host's own tools (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, any other) are not
+  available in this turn and a request for one is refused, and that the only tools it has are the ones listed
+  below. No committed harness moves: `TOOL_PROTOCOL` is not part of `HarnessConfig`, the value
+  `computeHarnessSha` hashes.
 
 - **Toolchain floor** ([D-21](docs/DECISIONS.md), WP-2.11). The root `package.json` now declares `engines`
   (Node ≥ 22, pnpm ≥ 10) and pins `packageManager: pnpm@10.34.7`, and names the two native modules whose
@@ -18,6 +110,108 @@ is entitled to know which of their own code stops compiling.
   build. `pnpm-lock.yaml` is regenerated to the v9 lockfile format; regenerating it re-resolved dependencies
   that a caret range allowed to move. Developing maf now needs pnpm 10 and Node 22 or newer; CI installs and
   caches pnpm 10 from the `packageManager` field.
+- **The built-in readers — `security`, `reviewer`, `analyst` — run in-process by default** ([D-44](docs/DECISIONS.md)).
+  On the `cli` tier a read-only role is handed the backend's own file tools, and MAF's policy engine, secret
+  redaction and attested tool calls exist only in-process, so an audit or a review that only reads is now
+  governed rather than merely observed. A reader's turn is still diffed (F7) and still
+  fails `unexpected_change` if it changed the tree. A **custom** read-only role is unchanged: it still runs on
+  the `cli` tier unless it sets `execution: 'in-process'` ([D-01](docs/DECISIONS.md)). Where the adapter cannot
+  run the loop (`codex`, `gemini`, `ollama`, `openrouter`) the built-in readers fall back to `cli` with the
+  D-06 transcript note and a `fellBackFrom: 'in-process'` entry in the bundle's `executionTiers`.
+- **A writer running concurrently with a reader is attributed to the writer, not charged to the reader**
+  ([D-45](docs/DECISIONS.md), WP-3.0c). A reader's turn is bracketed by two working-tree snapshots (D-42);
+  the one change that bracket cannot separate on its own is a writer editing the tree *during* the reader's
+  turn. The scheduler already serializes writers (A3); it now stamps a `WriterLockLedger` of hold intervals
+  where it takes and releases the writer lock, and `RoleDispatcher` asks it — for a reader whose bracket
+  shows a change — which writer to attribute that change to. A writer answers only on evidence, never on
+  overlap alone. Two conditions qualify one, tried in this order: the writer is a node the dispatcher started
+  as a **writer**, it **still holds the lock**, and its post-coder gate has **neither begun nor run** this
+  attempt, so the gate it is about to run will read the change; or the writer is **gated** — its gate has run —
+  its reviewed diff holds **every path** the bracket showed, and those paths are **unchanged** between the tree
+  its gate read and the reader's end tree. When a writer qualifies, the
+  node no longer fails: `{nodeId, attributedTo, diffSha256, fromTree, toTree, writerGateTree?}` is recorded in
+  the bundle's new `attributedChanges` field and in the transcript, the bracket diff is kept as a subject under
+  `<node>.attributed.diff`, and the change is judged where every writer's change is judged, against that
+  writer's own start commit by the security gate that reviews it. `diffSha256` is `sha256` of
+  `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff --text --no-ext-diff --no-textconv --no-renames
+  <fromTree> <toTree>` in the run's repository (the flags the digest was taken with: plain `git diff` differs
+  for binary content, and the host's own git config must be off), so a verifier can recompute it from the
+  recorded ids — soon after the run, since the two trees are unreachable and `git gc` may prune them after
+  `gc.pruneExpire`. A change no writer qualifies for is the
+  reader's own: `unexpected_change`, the diff recorded under the reader's node, failing as before. The ledger
+  is not consulted at all for a `cli`-tier reader: it holds the writer lock itself, so no other writer can
+  have been running and any change the bracket shows is its own. `run` is the only command that wires the
+  shared ledger; `wiring.ts` — behind the single-node dispatchers `goldens` and `evolve` — builds no ledger,
+  so `attributableWriter` returns nothing there and those readers fail closed, the pre-3.0c behaviour.
+- The committed default harness re-mints and the offline goldens baseline moves once more, because the role
+  set changed — a fifth role (`analyst`), and `security` and `reviewer` now carry `execution: 'in-process'`
+  (this repository's `.maf/roles.yaml` follows the built-in set, except that its `tester` also holds
+  `fs.write`, which the built-in `tester` does not). `60f0bb81…` → `d81facc5…`: the corpus sha, the task list,
+  every task's outcomes and the solved set (`4/10`) are unchanged, so the harness identity is the only field
+  that moved.
+- **A built-in reader's tool-call cap is raised to the in-process loop default** (F2). A reader capped below
+  the loop's own default could run out of turns mid-investigation: the chain a review or an audit actually
+  runs — `git.diff → fs.read → grep → git.log → answer` — is five calls, and `reviewer` was capped at four,
+  so it could fail `budget_exhausted` on a task it would otherwise have finished. `security`, `reviewer` and
+  `analyst` now carry no cap below the loop default (10), and `defaults.test.ts` pins every built-in reader to
+  it — and this repository's own `.maf/roles.yaml` to the same floor. The cap is part of the minted role set, so
+  the committed default harness re-mints again,
+  `d81facc5…` → `7e0a5503…`; as before the corpus sha, the task list and every task's outcomes are unchanged.
+
+### Upgrading
+
+- **A `.maf/roles.yaml` written before 0.4.0 keeps loading — but two settings are worth copying into it.**
+  The built-in readers (`security`, `reviewer`, `analyst`) now run `in-process` by default ([D-44](docs/DECISIONS.md)),
+  so a repo that re-declares them by hand should add `execution: 'in-process'` to each, or leave them on the
+  `cli` tier on purpose; a role that holds no write tool otherwise defaults to `cli` ([D-01](docs/DECISIONS.md)).
+  A reader's `maxToolIterations` should also be at least the in-process loop's default (10) — one capped below
+  it can fail `budget_exhausted` mid-investigation (F2). Both are optional, and a role that holds a write tool
+  already defaults to `in-process` without either.
+- **`no_work` now reaches a custom in-process role that holds a write tool but does not declare
+  `expectsChange`.** The check keys on `expectsChange`, not on the role's tools: any in-process role whose
+  `expectsChange` is not `true` that finishes with an answer and no executed tool call fails. A role whose job
+  is not to call a tool sets `expectsToolCalls: false` to opt out.
+
+Breaking for code that calls the packages directly:
+
+- `@maf/roles`: `RoleCatalogEntry` gains two required fields, `writes` and `expectsChange` (D-43), so a
+  hand-built catalog stops compiling until they are set; `RoleRegistry.catalog()` fills both from the
+  role's own tools. `DEFAULT_MAX_TOOL_ITERATIONS` is exported as the in-process loop's default turn cap.
+- `@maf/planning-agent`: `PlannerConfig.roleCatalog` entries carry the same two required fields, which
+  the role block renders as `read-only` / `may change the tree` / `must change the tree`.
+- `@maf/types`: `AttestorHandle` gains an additive optional `toolCallsForTask?(taskId)`, so a hand-written
+  handle still compiles; `Attestor` implements it, and `@maf/roles` reads it to name the policy rules that
+  refused a node's own calls (F10).
+- `@maf/types` (WP-3.0c): the record's new fields, all optional, so nothing hand-written stops compiling —
+  `AdapterInvokeResult.modelSurface?`, `ModelSurface.promptSha256?`/`stdinSha256?`/`outputSha256?`,
+  `ModelSurfaceRecord.tier?`/`nativeTools?`, `AttestationBundle.attributedChanges?`,
+  `AttestorHandle.recordAttribution?`, and the
+  `WriterLockLedger`/`WriterLockInterval`/`AttributedChange` types. `@maf/dag-runner` exports
+  `createWriterLockLedger` and takes an optional `DagRunnerOptions.writerLockLedger`; `@maf/roles` takes an
+  optional `RoleDispatcherConfig.writerLockLedger`. A 0.3.1 bundle, whose model-surface records carry no
+  `tier`, still parses and verifies.
+- `@maf/adapter-base`: three helpers the `cli`-tier surface work needed are exported, so an adapter outside
+  the package builds the same bytes rather than a second copy of the format — `sha256Hex(text)`,
+  `elided(name, value)` (the `<name: N bytes, sha256 H>` argv marker), and
+  `cliModelSurface(systemPrompt, prompt, argv, output, stdin?)`, the builder each process-spawning adapter
+  fills `AdapterInvokeResult.modelSurface` from.
+- `@maf/types` (WP-3.1): `NodeFailureReason` gains `'no_work'`; `NodeFailure` gains a read-only `ruleId` and
+  `toolId` and an optional fourth constructor argument; new `OutcomeFailureKind = NodeFailureReason |
+  'gate_refused' | 'review_refused' | 'policy_violation'`, `OutcomeFailureDetail { kind: OutcomeFailureKind;
+  ruleId?; toolId? }`, and the classifier `outcomeFailureKind(err): OutcomeFailureKind | undefined`;
+  `DagNodeExecution` gains an optional `failure?: OutcomeFailureDetail`. `@maf/dag-runner`'s
+  `NodeStateMachine.transition` takes an optional fifth `failure` argument. All additive except the enum
+  member, which an exhaustive `switch` over `NodeFailureReason` must now handle.
+- `@maf/types` (0.4.0 audit): `outcomeFailureDetail(err)` is exported beside `outcomeFailureKind`, returning
+  the `OutcomeFailureDetail` an error maps to (`undefined` for a plain `Error`) — it is what `@maf/dag-runner`
+  fills `DagNodeExecution.failure` from. And the credential scrubber moved: `redactCredentials`,
+  `redactSecrets`, `redactText`, `redactRecord` and `redactCredentialsRecord` now live in `@maf/types` (they
+  were in `@maf/processors`), so the adapters' failure tail can share the one scrubber rather than keep its
+  own shorter list. `@maf/processors` re-exports all five, so an existing import from there still resolves
+  and nothing that compiled before stops compiling.
+- `@maf/roles` and `@maf/harness-config` (WP-3.1): `RoleConfig` and the harness's role entry gain an optional
+  `expectsToolCalls?: boolean`, which the bridge validates and copies both ways. Optional, and copied only
+  when set, so a hand-written role set still compiles and a minted harness does not move.
 
 ## [0.3.2] - 2026-10-14
 

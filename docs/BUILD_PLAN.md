@@ -28,8 +28,8 @@ Status legend for work packages: `todo` · `in-progress` · `in-review` · `merg
 |---|---|---|
 | **0.2.1** | Correctness fixes (P0) and the documentation truth pass. No behaviour the README describes changes; the README changes to match the code. | Fresh-clone proof; README Status table honest as of the commit. |
 | **0.3.0** | The governed-by-default execution model and the wirings: in-process default, approval, review gate, worktrees, YAML/config, planner recall, offline goldens, in-toto attestation, harness import. Toolchain floor. | e2e CI job green; every 0.3.0 Status row shipped with a regression check. |
-| **0.4.0** | LCM built properly, patch-test strategy, run persistence with pause/resume, provider failover, DAG-from-spec, evolver as claimed, Kùzu 0.11.3, hardening, consolidation. | Exit criteria 1–3 of §1, and a whole-branch audit (§3.7). |
-| **0.5.0** | Port from maf-v1: `mcp-tools` bridge (with its known fixes), `resolveHarnessForRun`, encryption at rest (E1), prompt-injector test script. Scoped after 0.4.0 from the v1 checklist. | — |
+| **0.4.0** | Readers and the record ([D-47](DECISIONS.md)): the `analyst` role and in-process built-in readers (D-43, D-44), the model surface and each node's tier (D-45), the governed turn and the reader that did no work (D-46), and the toolchain floor carried from Phase 2 (WP-2.11). The LCM, failover, persistence, patch-test, DAG-from-spec, evolver, Kùzu and consolidation items are re-dated to 0.5.0. | Exit criteria 1–3 of §1, and a whole-branch audit (§3.7). |
+| **0.5.0** | LCM built properly, patch-test strategy, run persistence with pause/resume, provider failover, DAG-from-spec, evolver as claimed, Kùzu 0.11.3, hardening and consolidation — the items moved off 0.4.0 by [D-47](DECISIONS.md), as the renumbered WP-3.2 … WP-3.13 in §7 — then the port from maf-v1: `mcp-tools` bridge (with its known fixes), `resolveHarnessForRun`, encryption at rest (E1), prompt-injector test script. | — |
 
 Semantics: pre-1.0 SemVer. Behaviour changes bump the minor. A patch adds no behaviour the docs do not already describe: 0.2.1 changed none; 0.3.1 restored guarantees the docs already made — a read-only role cannot change the tree unnoticed, and the bundle's subjects are the run's diffs. **A fix that makes an existing guarantee true ships in the patch, with its README row.**
 
@@ -79,7 +79,7 @@ End of every WP: merge SHA, CI run id, verifier verdict, the acceptance test's n
 
 A lane verifier sees one package. That is what lets it run at all, and it is also the bound on what it can find. In Phase 2 the lane verifiers produced 65 findings between them; the single whole-branch audit that followed produced 2 HIGH that every one of them missed, because each could only see the package in front of it. Those two are the ones that would have cost a release.
 
-So the audit is a standing gate rather than a one-off: **before a phase's release PR is opened, one reviewer with no prior context on the branch audits the whole branch — the diff from the phase's branch point, not the last integration WP — to the same evidence bar a lane verifier meets.** It runs after the integration WP (WP-3.10) and before the release WP (WP-3.12); a release PR without an attached whole-branch audit is not mergeable. Its findings are triaged into the phase's exit criteria or into the next phase's carried list; none are fixed “while in there” without a work package (§3.3).
+So the audit is a standing gate rather than a one-off: **before a phase's release PR is opened, one reviewer with no prior context on the branch audits the whole branch — the diff from the phase's branch point, not the last integration WP — to the same evidence bar a lane verifier meets.** It runs after the integration WP (WP-3.11) and before the release WP (WP-3.13); a release PR without an attached whole-branch audit is not mergeable. Its findings are triaged into the phase's exit criteria or into the next phase's carried list; none are fixed “while in there” without a work package (§3.3).
 
 ---
 
@@ -105,16 +105,19 @@ Phase 2 (0.3.0)
   Lane G  toolchain                                  WP-2.11
   Serial  WP-2.10 (run.ts/wiring.ts integration) → WP-2.12 (CI e2e) → WP-2.14, WP-2.15 → WP-2.13 (docs) → release
 
-Phase 3 (0.4.0)
-  Lane A  lcm · lcm-adapter                          WP-3.1
-  Lane B  blackboard · dag-runner (persistence)      WP-3.2
-  Lane C  adapters (failover)                        WP-3.3
-  Lane D  tool-loop · git-ops (patch-test)           WP-3.4
-  Lane E  planning-agent (DAG-from-spec)             WP-3.5
-  Lane F  evolver                                    WP-3.6
-  Lane G  memory-graph (Kùzu 0.11.3, consolidation)  WP-3.7  WP-3.9
-  Lane H  hardening across tools/adapters            WP-3.8
-  Serial  WP-3.10 (pause/resume + failover into run) → WP-3.11 (tests/CI/nightly) → WP-3.12 (docs, exit audit) → release
+Phase 3a (0.4.0, shipped — D-47)
+  WP-3.0b roles · WP-3.0c evidence · WP-3.1 no-work · WP-2.11 toolchain floor
+
+Phase 3b (0.5.0 — moved off 0.4.0 by D-47)
+  Lane A  lcm · lcm-adapter                          WP-3.2
+  Lane B  blackboard · dag-runner (persistence)      WP-3.3
+  Lane C  adapters (failover)                        WP-3.4
+  Lane D  tool-loop · git-ops (patch-test)           WP-3.5
+  Lane E  planning-agent (DAG-from-spec)             WP-3.6
+  Lane F  evolver                                    WP-3.7
+  Lane G  memory-graph (Kùzu 0.11.3, consolidation)  WP-3.8  WP-3.10
+  Lane H  hardening across tools/adapters            WP-3.9
+  Serial  WP-3.11 (pause/resume + failover into run) → WP-3.12 (tests/CI/nightly) → WP-3.13 (docs, exit audit) → release
 ```
 
 ---
@@ -182,7 +185,7 @@ Proof on `wp/phase-1` (2026-10-08, macOS, Node 25, pnpm 8.15.1): install/build c
 
 ## 6. Phase 2 — release 0.3.0
 
-> **Deviation recorded 2026-10-09:** Phase 2 was merged into an integration branch, `wp/phase-2`, rather than into `main`: each lane WP was a package PR (#9–#18; WP-2.7 split into #15, the eval-harness core, and #18, the CLI) verified by an independent verifier, whose findings fixers closed on the same PR, before it was merged; WP-2.10 (#19) then wired the lanes into `run.ts`/`wiring.ts`, and WP-2.12 (#20) added the CI `e2e` job. Two work packages the plan did not have were added: WP-2.14 (the agent's git tools ran repository hooks — WP-2.10 verifier F12) and WP-2.15 (an intermittent native crash in CI, found while landing WP-2.12). Integration recorded D-33 to D-40 in `docs/DECISIONS.md`; D-34 replaced WP-2.3's "required: false records the review" (the gate exists only when asked for), and D-36 made WP-2.8's "canonical JSON" RFC 8785. WP-2.2, 2.4, 2.5 and 2.7 went over the ~400-line guide and were accepted as single PRs. WP-2.10's `inprocess-demo` acceptance was narrowed to what the demo carries (no worktree, no review); `run-acceptance.test.ts` carries the full chain. `RollbackManager` was made worktree-confined (WP-2.4) but is not wired into `run`; that is WP-3.4. Not landed, and still *planned* in the README: WP-2.11 (the toolchain floor, which needs registry access to regenerate the lockfile, so it lands from the maintainer's machine) and `allowPartial` set from a DAG spec or by the planner (carried from Phase 1, F9; no WP yet). The `wp/phase-2` → `main` PR, the lockfile and the Release are the maintainer's.
+> **Deviation recorded 2026-10-09:** Phase 2 was merged into an integration branch, `wp/phase-2`, rather than into `main`: each lane WP was a package PR (#9–#18; WP-2.7 split into #15, the eval-harness core, and #18, the CLI) verified by an independent verifier, whose findings fixers closed on the same PR, before it was merged; WP-2.10 (#19) then wired the lanes into `run.ts`/`wiring.ts`, and WP-2.12 (#20) added the CI `e2e` job. Two work packages the plan did not have were added: WP-2.14 (the agent's git tools ran repository hooks — WP-2.10 verifier F12) and WP-2.15 (an intermittent native crash in CI, found while landing WP-2.12). Integration recorded D-33 to D-40 in `docs/DECISIONS.md`; D-34 replaced WP-2.3's "required: false records the review" (the gate exists only when asked for), and D-36 made WP-2.8's "canonical JSON" RFC 8785. WP-2.2, 2.4, 2.5 and 2.7 went over the ~400-line guide and were accepted as single PRs. WP-2.10's `inprocess-demo` acceptance was narrowed to what the demo carries (no worktree, no review); `run-acceptance.test.ts` carries the full chain. `RollbackManager` was made worktree-confined (WP-2.4) but is not wired into `run`; that is WP-3.5. Not landed, and still *planned* in the README: WP-2.11 (the toolchain floor, which needs registry access to regenerate the lockfile, so it lands from the maintainer's machine) and `allowPartial` set from a DAG spec or by the planner (carried from Phase 1, F9; no WP yet). The `wp/phase-2` → `main` PR, the lockfile and the Release are the maintainer's.
 
 ### WP-2.1 In-process by default for writer roles — `in-review` [core] · D-01 · audit §scheduler 10, 11
 **Carried from WP-1.12, decided 2026-10-08 (D-32):** a writer-role node on the `cli` tier whose tree diff is empty after a non-empty, exit-0 answer fails with `NodeFailure('no_change')` when its role sets `expectsChange`; `coder` is the only built-in role that does. Add to this WP's acceptance: a `coder` node whose backend exits 0 with an answer and no diff fails `no_change`; the same for `tester` succeeds; a custom role with `expectsChange: true` behaves as `coder`; the diff is the one the security gate already takes (D-29), so the start commit is captured once (D-06). Update `docs/ROLES.md`'s field table and the README Status row planned for 0.3.0.
@@ -249,9 +252,22 @@ Status table rows flipped to *shipped* only for behaviour landed in this phase, 
 
 ---
 
-## 7. Phase 3 — release 0.4.0
+## 7. Phase 3 — 3a released as 0.4.0; 3b planned for 0.5.0
 
 > **Deviation recorded 2026-10-14:** PR #31 was merged to `main` by the coder, under the maintainer's `gh` credential, rather than by the maintainer (D-26). The runbook the architect wrote put the merge commands beside the coder's conflict-resolution steps without re-labelling them as the maintainer's, and the maintainer handed the runbook over whole. The merge was reviewed, verifier-passed and CI-green and is not reverted; the §3.3 clause is the consequence.
+
+### Phase 3a — released as 0.4.0 (2026-10-20)
+
+**D-47 re-scoped this release after the whole-branch audit (2026-10-15).** The WPs below — WP-3.2 … WP-3.13 as renumbered — were written for the LCM/failover/evolver phase D-22 assigned to 0.4.0. The branch shipped **none** of them. What it shipped is the reader path made true and every role call made a value in the record, so 0.4.0 is *readers and the record* and the unstarted items move to 0.5.0 ([D-47](DECISIONS.md); §2). Four work packages actually landed, each with its own PR, verifier and CI:
+
+| WP | What it is | PR |
+|---|---|---|
+| **WP-3.0b** — the roles half | `analyst`, a fifth built-in role holding the read tools; the built-in readers run in-process by default, so an audit or a review that only reads is governed rather than merely observed (D-43, D-44) | #37 |
+| **WP-3.0c** — the evidence half | every role call records a model surface and the tier it ran on; a reader's bracket attributes a concurrent writer's change to that writer instead of failing the reader (D-45) | #42 |
+| **WP-3.1** — the no-work work | the governed turn states what it has; a role that does not expect a change, and made no executed tool call, fails `no_work`; each node's failure is a value in the outcome (D-46) | #43 |
+| **WP-2.11** — the toolchain floor | `engines`, `packageManager: pnpm@10.x`, the v9 lockfile and pnpm 10 in CI, carried from Phase 2 (D-21) | #36 |
+
+**The shipped WP-3.1 keeps its name.** The renumbered LCM item is WP-3.2, and the shipped no-work work is WP-3.1 — they do not collide, because the one that moved has no PR, no citation and no commit behind it, while the one that stayed is what commits, PR titles and [DECISIONS.md](DECISIONS.md) cite. Renaming shipped work to match a plan that did not exist when it was built would break every reference to it (D-47).
 
 ### WP-3.0 Carried into Phase 3 — not a lane
 
@@ -260,66 +276,70 @@ Phase 2 closed at 0.3.0 and carried these six out with it. Each is cheap now and
 | Carried item | State | Whose |
 |---|---|---|
 | **WP-2.11 — the toolchain floor:** `engines`, `packageManager: pnpm@10.x` and `pnpm.onlyBuiltDependencies` in the root `package.json`, `pnpm-lock.yaml` at v9, pnpm 10 in `ci.yml`, the README prerequisites, and the `packages/cli/src/main.ts` shebang | **done** (PR #36, from the maintainer's machine): `pnpm-lock.yaml` at v9, `packageManager: pnpm@10.34.7` with `engines` and `pnpm.onlyBuiltDependencies`, `ci.yml` on pnpm 10; the shebang landed in 0.3.1 (PR #34). Regenerating re-resolved dependencies a caret range permitted — the list is in the PR body | maintainer |
-| **F3 — the reader path made true (WP-3.0b roles · WP-3.0c evidence):** Phase 3's first two lanes, split so each verifier holds one scope in view — the Phase 2 whole-branch-audit lesson, applied before the fact. **WP-3.0b — the roles half** (`roles`, `planning-agent`): adds `analyst`, a fifth built-in role holding `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.status`, `git.diff`, `git.log` — no `test.run` (a writer tool: it runs the project's own code) and no `expectsChange`; without it a read-only task is handed to `coder` and scored `Failed` on `no_change` — 4 of the 9 v0.3.0 sweep runs, every one of them the correct answer. It makes the built-in readers run **in-process by default** (candidate **D-44**, a D-01 adjustment for the built-ins only): a `cli`-tier `claude` reader is spawned with only the reading tools, so it reads files but cannot run git, and its prompt's tool vocabulary (`fs.read`, `grep`, `git.diff`, `git.log`) is in-process vocabulary that was never true on that tier — so `execution: 'in-process'` stops being a field each role author has to remember. It has the tool catalogue tell the planner which roles are read-only, from the config rather than from prose a role author has to remember; and a policy-Denied write names the rule instead of failing with the generic `no_change` text. **WP-3.0c — the evidence half** (`RoleDispatcher`, `adapters`, `attestation`, `dag-runner`): records a model surface for cli-tier role calls — today the cli tier is both ungoverned and unrecorded, since `modelSurfaces` is populated by the in-process loop alone — and closes the one window the F7 bracket cannot attribute (see the row below): when a writer held the lock during the reader's turn, the hit is **recorded** in the transcript and the bundle, naming the writer, instead of failing the reader. | not done — 0.3.1 documents the `.maf/roles.yaml` workaround and ships no new role | coder |
+| **F3 — the reader path made true (WP-3.0b roles · WP-3.0c evidence):** Phase 3's first two lanes, split so each verifier holds one scope in view — the Phase 2 whole-branch-audit lesson, applied before the fact. **WP-3.0b — the roles half** (`roles`, `planning-agent`): adds `analyst`, a fifth built-in role holding `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.status`, `git.diff`, `git.log` — no `test.run` (a writer tool: it runs the project's own code) and no `expectsChange`; without it a read-only task is handed to `coder` and scored `Failed` on `no_change` — 4 of the 9 v0.3.0 sweep runs, every one of them the correct answer. It makes the built-in readers run **in-process by default** (candidate **D-44**, a D-01 adjustment for the built-ins only): a `cli`-tier `claude` reader is spawned with only the reading tools, so it reads files but cannot run git, and its prompt's tool vocabulary (`fs.read`, `grep`, `git.diff`, `git.log`) is in-process vocabulary that was never true on that tier — so `execution: 'in-process'` stops being a field each role author has to remember. It has the tool catalogue tell the planner which roles are read-only, from the config rather than from prose a role author has to remember; and a policy-Denied write names the rule instead of failing with the generic `no_change` text. **WP-3.0c — the evidence half** (`RoleDispatcher`, `adapters`, `attestation`, `dag-runner`): records a model surface for cli-tier role calls — today the cli tier is both ungoverned and unrecorded, since `modelSurfaces` is populated by the in-process loop alone — and closes the one window the F7 bracket cannot attribute (see the row below): when a writer held the lock during the reader's turn, the hit is **recorded** in the transcript and the bundle, naming the writer, instead of failing the reader. | **shipped in 0.4.0** — WP-3.0b (roles, #37) and WP-3.0c (evidence, #42); see *Phase 3a* above. 0.3.1 documented the `.maf/roles.yaml` workaround and shipped no new role | coder |
 | **F7 — the reader-tree guard:** bracket a reader's own turn (a role holding no write tool) between two working-tree snapshots and fail it when that turn left a diff, with `unexpected_change` — the mirror of `no_change`; a writer is still diffed against its start commit. On the `cli` tier a backend keeps its own tools, so a reader role there can write ungoverned wherever the operator's `permissions.allow` lets it; the README's cli-tier paragraph already says so, which is why this is a gap to close and not a false claim. Claude-only extra: a read-only `--tools` list on cli-tier reader turns, flag syntax verified against `claude --help` and implemented; codex and gemini have no equivalent, so there the diff is the only guard. | **fixed in 0.3.1** (PR #31): detection on both tiers, the claude read-only toolset, the prompt wording, and each node's tier in the bundle; the live row is a cli-tier `reviewer` editing a tracked file — node `Failed`, reason `unexpected_change`, the diff recorded as a subject — with a fresh-context verifier pass. The one case the bracket cannot separate — a writer editing concurrently with the reader's turn — is carried to **WP-3.0c**, which records the hit naming the writer rather than failing the reader. | coder |
 | Dependabot PRs on docugraph (#12) and cognitive-fabric (#4) | open | coder reviews, maintainer merges |
 | ghcr packages set to Public visibility | a settings change (D-27) | maintainer |
 | The maintainer's local tooling: the dead GitHub MCP token, the misconfigured custom connector, Serena's dashboard auto-opening on spawn | | maintainer |
 
-WP-2.11 gets no lane of its own — its files are D-26 maintainer-reserved and two of them *are* the CI configuration — and its own note records that the fleet cannot do the lockfile half, which is why it landed from the maintainer's machine (PR #36). With it in, the README Status row is *shipped* for 0.4.0. F3 gets two lanes and is Phase 3's first: **WP-3.0b**, the roles half, lands before **WP-3.0c**, the evidence half, both before WP-3.1, because a read-only task is one the planner already routes today and it routes it wrong. Two PRs and two verifiers, not one: a single PR would cross five packages, and no lane verifier could hold that in view — the lesson of Phase 2's two audit HIGHs, applied before the fact.
+WP-2.11 gets no lane of its own — its files are D-26 maintainer-reserved and two of them *are* the CI configuration — and its own note records that the fleet cannot do the lockfile half, which is why it landed from the maintainer's machine (PR #36). With it in, the README Status row is *shipped* for 0.4.0. F3 gets two lanes and is Phase 3's first: **WP-3.0b**, the roles half, lands before **WP-3.0c**, the evidence half, both before WP-3.2, because a read-only task is one the planner already routes today and it routes it wrong. Two PRs and two verifiers, not one: a single PR would cross five packages, and no lane verifier could hold that in view — the lesson of Phase 2's two audit HIGHs, applied before the fact.
 
-### WP-3.1 LCM built properly — `todo` [core] · D-17 · audit §eval 27
+### WP-3.2 LCM built properly — `todo` [core] · D-17 · audit §eval 27
 **Files:** `packages/lcm/src/{LcmEngine.ts,LcmStore.ts,operators/*,GhostCueBuilder.ts,SessionMerger.ts}`, `packages/lcm-adapter/src/*`, `packages/transcript/src/{TranscriptLogger.ts,CompressionAgent.ts}`, `packages/prompt-injector/src/GraphAwareInjector.ts`, first tests for all four packages.
 **Acceptance:** summaries are produced by the run's adapter with a configurable model and counted against the node budget; both modes are selectable from config and tested; the fresh tail returns the newest N messages; compaction summarizes exactly the entries it drops (ids match) and a test proves no entry is lost; ghost cues reach the injector and change the prompt; `LlmMap`/`AgenticMap`/`SessionMerger`/`CompressionAgent` are reachable from `run` and tested; one nightly live test exercises a real summarization. Until merged, the README row stays *experimental*.
 
-### WP-3.2 Run persistence and checkpoint — `todo` [core] · D-05, D-18 · audit §eval 28; §scheduler 15
+### WP-3.3 Run persistence and checkpoint — `todo` [core] · D-05, D-18 · audit §eval 28; §scheduler 15
 **Files:** `packages/blackboard/src/{BlackboardSqlitePersistence.ts,BlackboardValidator.ts}`, `packages/lcm-adapter/src/FlushOnSnapshot.ts`, `packages/dag-runner/src/DagRunner.ts` (state snapshot/restore; per-run instance state), `packages/cli/src/commands/resume.ts` (new).
 **Acceptance:** a run's DAG state, blackboard and worktree branch are persisted under `.maf/runs/<runId>/` at every node boundary; `maf resume <runId>` continues from the last completed node with the same harness sha; a runner instance cannot be reused across runs (state is per run); validator rejects malformed blackboard writes.
 
-### WP-3.3 Provider failover and pause — `todo` [core] · D-05
-**Files:** `packages/adapters/base/src/{errors.ts,AdapterChain.ts}` (new), each adapter's error mapping, `packages/roles/src/RoleDispatcher.ts` (chain per role), harness schema (`adapters: [...]`), attestation (`modelUsed`), `run.ts`/`resume.ts` (pause state — integration in WP-3.10).
+### WP-3.4 Provider failover and pause — `todo` [core] · D-05
+**Files:** `packages/adapters/base/src/{errors.ts,AdapterChain.ts}` (new), each adapter's error mapping, `packages/roles/src/RoleDispatcher.ts` (chain per role), harness schema (`adapters: [...]`), attestation (`modelUsed`), `run.ts`/`resume.ts` (pause state — integration in WP-3.11).
 **Acceptance:** a 429/quota error on the primary moves the call to the next adapter and the attestation records which one ran; an auth error fails the node immediately; with the chain exhausted the run enters `paused`, writes the checkpoint, prints the resume command and the provider's retry-after when known; `maf resume` picks up after the window.
 
-### WP-3.4 Patch-test coder strategy — `todo` [core] · D-18
+### WP-3.5 Patch-test coder strategy — `todo` [core] · D-18
 **Files:** `packages/tool-loop/src/{ToolLoop.ts,PatchTestCycle.ts,CircuitBreaker.ts}` (fix the swallowed-error path at `ToolLoop.ts:104`), `packages/git-ops/src/RollbackManager.ts`, `packages/roles/src/RoleDispatcher.ts` (strategy selection), `run.ts` flag `--strategy patch-test`.
 **Acceptance:** with the strategy on, each coder patch is applied, tests run, and a failing result rolls the worktree branch back to the pre-patch commit; after N consecutive failures the breaker trips and the node fails with the history attached; rollback never touches a path outside the run's worktree.
 
-### WP-3.5 DAG from spec — `todo` [mech] · D-18
+### WP-3.6 DAG from spec — `todo` [mech] · D-18
 **Files:** `packages/planning-agent/src/DagSynthesizer.ts`, `run.ts` flag `--plan-from <spec>`, `packages/dag-runner/src/DagParser.ts` (`edges` honoured; duplicate node ids rejected).
 **Acceptance:** a spec file yields a deterministic DAG without a model call; the CI e2e job uses it for a two-node run; a spec with a duplicate id or an unknown role is refused at parse time.
 
-### WP-3.6 Evolver as claimed — `todo` [core] · D-15 · audit §eval 14–22; §scheduler 11
+### WP-3.7 Evolver as claimed — `todo` [core] · D-15 · audit §eval 14–22; §scheduler 11
 **Files:** `packages/evolver/src/{loop.ts,gate.ts,edits.ts,screening.ts,digester.ts}`, `packages/cli/src/commands/evolve.ts`.
 **Acceptance:** an edit that cannot affect the target role's effective tier is rejected at proposal with the reason; `gateEvaluate` runs before any goldens spend (test: a screened-out prompt never reaches the runner); `runSmoke` runs the target task; sensitive candidates are stored and `maf evolve approve <id>` ships one; `applyEdit` on an unknown role and graph errors in `digestEvidence` are caught and logged, never fatal; the `system-prompt-leak` regex matches phrases, not the words "print"/"repeat"/"reveal"; `add_processor` on an empty bundle starts from the default bundle and a harness lacking `security-gate` or `secret-redact` for a writer role is rejected; `PolicyEvent` nodes are written by the policy engine and `EvolutionRound` nodes are read by the digester; candidate ids do not grow unboundedly; a wall-clock and token budget bound the loop.
 
-### WP-3.7 Kùzu 0.11.3 — `todo` [core] · D-20 · audit §eval 23–25
+### WP-3.8 Kùzu 0.11.3 — `todo` [core] · D-20 · audit §eval 23–25
 **Files:** `packages/memory-graph/package.json` (`kuzu: 0.11.3` exact), `packages/memory-graph/src/{KuzuDriver.ts,MemoryGraph.ts}` (schema errors surfaced; close path re-tested), `packages/cli/src/commands/graph.ts` (new: `export`, `import`), `pnpm-lock.yaml`.
 **Pre-condition:** on the maintainer's machine, `pnpm add kuzu@0.11.3` in a scratch project installs a prebuilt binary (no compile) for the platform — reported before the PR is opened. If it compiles from source, stop.
 **Acceptance:** `maf graph export` writes nodes and edges as JSON; `import` restores them into a fresh database and a query returns the same rows; opening a 0.7-format database prints the export/upgrade instructions and exits non-zero; the four real-Kùzu tests pass on 0.11.3; `db.close()` is called and does not crash (or the reason it still can't be is documented with a test that pins it).
 
-### WP-3.8 Hardening — `todo` [core] · D-10, D-11 · audit §security 2, 8, 9, 10, 24, 32, 37, 39, 41
+### WP-3.9 Hardening — `todo` [core] · D-10, D-11 · audit §security 2, 8, 9, 10, 24, 32, 37, 39, 41
 **Files:** `packages/adapters/base/src/ProcessSpawner.ts` (env filter), `packages/tools/src/plugins/{patch.ts,test-runner.ts,grep.ts}`, config loaders (`JSON.parse` reviver rejecting `__proto__`/`constructor` keys), `packages/evolver/src/gate.ts`, `docs/SECURITY.md`.
 **Acceptance:** tools spawn with the allowlisted env and a test proves `MAF_SIGNING_KEY` is absent in a child; backend CLIs receive the env minus `MAF_*`; `patch.apply` declares the files the chosen `strip` actually touches plus `.orig`/`.rej`, and the temp diff is created `0600`; `test.run` enforces the runner allowlist, `--` before arguments, a timeout ceiling, and kills the process group; a config file with a `__proto__` key is rejected; the evolver gate refuses to widen a role's tool allowlist with a write tool unless the edit is marked sensitive; SECURITY.md states each of these as implemented.
 
-### WP-3.9 Consolidation — `todo` [mech] · D-18
+### WP-3.10 Consolidation — `todo` [mech] · D-18
 **Files:** `packages/memory-graph/src/{SubgraphQuery.ts,RunMerger.ts,MemoryGraph.ts}`.
 **Acceptance:** one implementation of subgraph query and run merge, used by every caller; `mergeRuns` preserves edges; tests moved, not deleted.
 
-### WP-3.10 Integration: pause/resume, failover, strategies into `run.ts` — `todo` [core, maintainer merges]
-Wires WP-3.2, 3.3, 3.4, 3.5 into the entry points. **Acceptance:** a scripted run that is interrupted after node 1 resumes and completes; a scripted provider failure fails over and the attestation shows both models.
+### WP-3.11 Integration: pause/resume, failover, strategies into `run.ts` — `todo` [core, maintainer merges]
+Wires WP-3.3, 3.4, 3.5, 3.6 into the entry points. **Acceptance:** a scripted run that is interrupted after node 1 resumes and completes; a scripted provider failure fails over and the attestation shows both models.
 
-### WP-3.11 Tests, CI and nightly — `todo` [mech] · D-24, D-25
+### WP-3.12 Tests, CI and nightly — `todo` [mech] · D-24, D-25
 **Files:** `packages/cli/src/__tests__/` (every command, `wiring.ts`), `packages/adapters/*/src/__tests__/` (fake `claude`/`gemini`/`codex` binaries on `PATH`; verify the real `claude` flag set once on the maintainer's machine and pin it in a test fixture), `.github/workflows/nightly.yml` (live goldens with the Anthropic key, `$50` cap via run limits; evolve weekly, `$150`), `scripts/check-test-scripts.mjs` (every package with `src/` must have tests).
 **Acceptance:** no package the CLI depends on is untested; the nightly job runs the live goldens and posts the result as a workflow summary; CI total time under 10 minutes.
 
-### WP-3.12 Documentation pass, exit audit, release 0.4.0 — `todo` [maintainer merges]
-Status table: every row *shipped* names its check; LCM, evolver, failover, patch-test, DAG-from-spec, Kùzu rows flipped; CHANGELOG `[0.4.0]`; `DECISIONS.md` statuses. Then the exit audit: a verifier with no prior context runs the three criteria of §1 and reports. Release only on a clean report.
+### WP-3.13 Documentation pass, exit audit, release 0.5.0 — `todo` [maintainer merges]
+Status table: every row *shipped* names its check; LCM, evolver, failover, patch-test, DAG-from-spec, Kùzu rows flipped; CHANGELOG `[0.5.0]`; `DECISIONS.md` statuses. Then the exit audit: a verifier with no prior context runs the three criteria of §1 and reports. Release only on a clean report.
 
 ---
 
-## 8. Phase 4 — release 0.5.0 (scoped later)
+## 8. Phase 3b + Phase 4 — release 0.5.0 (scoped later)
 
-Port from `maf-v1` into the public trunk (owner decision 7): `@maf/mcp-tools` with the known fixes — injected parameters override model input (`{...input, ...injected}`), filtered env for stdio servers, the Cognitive Fabric preset's `analyze`/`detect` rated destructive per CF 0.1.0's published annotations — then `resolveHarnessForRun`, encryption at rest (E1, AgentVenture key design: OS-keychain master key behind a provider interface, HKDF subkeys, per-record AES-256-GCM, fail closed), and the prompt-injector test script. The architect writes the WPs from the v1 checklist after 0.4.0 ships.
+**Phase 3b — the items 0.4.0 did not take.** [D-47](DECISIONS.md) re-dated the LCM/failover/evolver phase to 0.5.0, and §7's WP-3.2 … WP-3.13 are its work packages unchanged — LCM built properly (D-17), run persistence and checkpoint (D-05, D-18), provider failover and pause (D-05), the patch-test coder strategy (D-18), DAG-from-spec (D-18), the evolver as claimed (D-15), Kùzu 0.11.3 (D-20), hardening (D-10, D-11) and consolidation (D-18). Their files, acceptance and lane layout stay as §7 writes them; only the release number moved.
+
+**Phase 3b — a WP the readers work leaves behind.** A `no_work` node counts the calls it *made*, not the call its task *needed*: a `tester` can read one file, never run `test.run`, and Succeed — and two of the three live-row attempts did exactly that (the WP-3.1 `no_work` entry in [CHANGELOG.md](../CHANGELOG.md)). The root is upstream — the planner is told nothing about the executor's tools, so a node's description speaks shell — and no role can say which tool its task requires. One WP closes both halves: the planner names **MAF tool ids** and is told there is no shell, and `RoleConfig` gains an optional `requiresTool?: ToolId`, so a role can declare the one call its task needs (`requiresTool: test.run`) and a node that executes none of it fails `no_work`. This is the **narrow form of F12** — it checks the call that was *required*, not every call the model narrated.
+
+**Phase 4 — the port.** Port from `maf-v1` into the public trunk (owner decision 7): `@maf/mcp-tools` with the known fixes — injected parameters override model input (`{...input, ...injected}`), filtered env for stdio servers, the Cognitive Fabric preset's `analyze`/`detect` rated destructive per CF 0.1.0's published annotations — then `resolveHarnessForRun`, encryption at rest (E1, AgentVenture key design: OS-keychain master key behind a provider interface, HKDF subkeys, per-record AES-256-GCM, fail closed), and the prompt-injector test script. The architect writes the WPs from the v1 checklist after 0.4.0 ships.
 
 ---
 
@@ -327,11 +347,11 @@ Port from `maf-v1` into the public trunk (owner decision 7): `@maf/mcp-tools` wi
 
 | Risk | Mitigation |
 |---|---|
-| Kùzu 0.11.3 prebuilt missing for a needed platform | WP-3.7 pre-condition; stop before any source build; alternatives discussed with the maintainer |
+| Kùzu 0.11.3 prebuilt missing for a needed platform | WP-3.8 pre-condition; stop before any source build; alternatives discussed with the maintainer |
 | In-process default breaks non-Claude users | `--allow-ungoverned` with a clear message; README Status row says which adapters are governed |
 | Worktrees on repositories with submodules or LFS | WP-2.4 tests include a submodule fixture; document unsupported cases |
 | Live validation flakiness masks regressions | nightly results compared as trends; a single flaky night does not fail `main` |
-| A defect only a real model can reach (the model-facing surface) | §3.1's live-model row in the verifier brief for any PR touching that surface; the nightly live goldens as the backstop (WP-3.11) |
+| A defect only a real model can reach (the model-facing surface) | §3.1's live-model row in the verifier brief for any PR touching that surface; the nightly live goldens as the backstop (WP-3.12) |
 | Review bandwidth | PR size cap; lanes sized to 3–5 PRs/day; integration serialized |
 | Agents "fixing" beyond scope | stop-and-ask list (§3.3); verifier checks the diff against the WP's file list |
 | Budget overrun | per-PR caps with stop-at-cap; workspace spend limits as the hard stop |

@@ -5,3 +5,4 @@ export type { NodeExecutionState } from './NodeStateMachine.js';
 export { withRetry, DEFAULT_RETRY_POLICY } from './RetryOrchestrator.js';
 export { DagParser } from './DagParser.js';
 export { validateDag, DagValidationError } from './validateDag.js';
+export { createWriterLockLedger } from './WriterLockLedger.js';

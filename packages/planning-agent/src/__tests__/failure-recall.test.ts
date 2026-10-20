@@ -128,3 +128,25 @@ test('planning-agent holds no copy of the recall query', async () => {
     assert.doesNotMatch(text, /CAUSED_FAILURE/, `${file} names the failure relation itself`);
   }
 });
+
+test('the planner recalls a no_work failure like any other kind (D-46)', async () => {
+  // A reader that answered with nothing attested is now a failure the next plan sees, and there is no
+  // special handling for it: `no_work` is a `reason` beside `GateRefused`, and the recall line names it
+  // as it names any other. Recorded last, on its own task, so the detector assertions above are unmoved.
+  await graph.recordFailure({
+    runId:   makeRunId('run-earlier-reader'),
+    nodeId:  makeNodeId('n2'),
+    label:   'audit rate limits',
+    task:    'Audit the auth module for absent rate limits',
+    role:    'analyst' as RoleName,
+    reason:  'no_work',
+    message: 'role "analyst" made no tool call across 1 turn; its answer: "I could not read the files."',
+  });
+
+  const prompt = await systemPromptFor('Audit the auth module for absent rate limits');
+
+  assert.match(
+    prompt,
+    /Task "Audit the auth module for absent rate limits" \(analyst\) → no_work: role "analyst" made no tool call across 1 turn/,
+  );
+});

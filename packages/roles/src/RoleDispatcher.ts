@@ -1,6 +1,8 @@
+import crypto from 'node:crypto';
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
-  AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle,
+  AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle, TaskId,
+  PolicyDecision, ModelSurfaceRecord, AttributedChange, WriterLockLedger, NodeId,
 } from '@maf/types';
 import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
@@ -19,9 +21,10 @@ import type { ProcessorDeps } from '@maf/processors';
 import { InProcessAgentLoop } from '@maf/tool-loop';
 import type { InProcessLoopResult } from '@maf/tool-loop';
 import type { RoleConfig } from './RoleConfig.js';
+import { DEFAULT_MAX_TOOL_ITERATIONS } from './RoleConfig.js';
 import type { RoleRegistry } from './RoleRegistry.js';
 import { RoleToolRegistry } from './RoleToolRegistry.js';
-import { isWriterRole, effectiveTier, requestedTier } from './isWriterRole.js';
+import { isWriterRole, effectiveTier, requestedTier, expectsToolCalls } from './isWriterRole.js';
 
 export interface RoleDispatcherConfig {
   adapter:        CliAdapter;
@@ -52,6 +55,16 @@ export interface RoleDispatcherConfig {
   stderr?:        { write(text: string): unknown };
   /** Asked when the policy escalates an in-process tool call (D-02); absent, Escalate is refused. */
   approvalGate?:  ApprovalGateHandle | undefined;
+  /**
+   * The scheduler's writer-lock ledger (WP-3.0c, the F7 window), handed to the dispatcher so an
+   * in-process reader whose bracket shows a change can ask which writers overlapped its turn, and
+   * attribute the change to one whose own gate holds it (F2) instead of failing. Absent — a
+   * dispatcher with no scheduler behind it, as `wiring.ts` builds for the goldens and evolve paths,
+   * which construct no ledger at all — there is no concurrent writer to attribute to, and the reader
+   * change guard keeps its pre-WP-3.0c behaviour: it fails the node and records the diff as a
+   * subject. That is fail-closed, not fail-open.
+   */
+  writerLockLedger?: WriterLockLedger;
 }
 
 export interface RoleNodeOutput {
@@ -120,10 +133,106 @@ function cliShortfall(
   return undefined;
 }
 
-/** A node that finished with an answer: what D-32 judges, on the tier it ran on. */
+/**
+ * A node that finished with an answer: what D-32 judges, on the tier it ran on. The in-process arm
+ * carries the loop's turn count, because `no_work` (D-46) says how many turns the reader had to make
+ * a call across — a reader that answered on its first turn never tried, and one that was refused on
+ * turn one and answered on turn two did.
+ */
 type Answer =
   | { readonly tier: 'cli'; readonly result: AdapterInvokeResult }
-  | { readonly tier: 'in-process'; readonly finalText: string };
+  | { readonly tier: 'in-process'; readonly finalText: string; readonly turns: number };
+
+/** One policy-denied call the attestor recorded for a task (F10): the tool and the rule that stopped it. */
+interface DeniedCall {
+  readonly toolId: string;
+  readonly ruleId?: string | undefined;
+}
+
+/**
+ * The rule a refused call names, read from its decision (F8). A `Deny` and an `Indeterminate` carry
+ * the id on the decision itself; an `Escalate` carries it on the request the gate was shown. Mirrors
+ * the rule id `executeToolGated` records on the refusal, so the message and the bundle agree.
+ * `undefined` where the decision names no rule at all — the note renders that as "a rule that
+ * recorded no id" rather than dropping the call from the count.
+ */
+function refusingRuleId(decision: PolicyDecision): string | undefined {
+  switch (decision.verdict) {
+    case 'Deny':
+    case 'Indeterminate': return decision.ruleId;
+    case 'Escalate':      return decision.approvalRequest?.policyRuleId;
+    default:              return undefined;
+  }
+}
+
+/**
+ * Whether a decision is a policy refusal the `no_change` clause names (F8/R2). A `Deny` and an
+ * unapproved `Escalate` are refusals outright; so is an `Indeterminate` the engine reached because
+ * it could not evaluate one of its own rules — a write it could not decide on is still a write
+ * policy refused, and carries the rule's own id. The one exception is a `builtin:*` id:
+ * `builtin:input-schema` is the tool's schema refusing a malformed call before policy was ever
+ * asked, so naming it "denied or refused by policy" would be untrue.
+ */
+function isPolicyRefusal(decision: PolicyDecision): boolean {
+  switch (decision.verdict) {
+    case 'Deny':
+    case 'Escalate':      return true;
+    case 'Indeterminate': return !(decision.ruleId?.startsWith('builtin:') ?? false);
+    default:              return false;
+  }
+}
+
+/**
+ * F10: the sentence a `no_change` message carries when the node's own attested calls were refused.
+ * A writer that fails having changed nothing reads the same whether it lost its nerve or every write
+ * it tried was refused; naming the rule tells the two apart, which is the difference between a
+ * backend to retry and a policy that is misconfigured. Empty when no call was refused, so the
+ * ordinary message is unchanged.
+ *
+ * At most three are named: a node that made twenty refused calls is saying one thing, and the count
+ * carries it. The tail keeps this a summary of the refusal, not a transcript of it.
+ *
+ * F8(b): the count spans every attempt the node made. A `ToolCallRecord` carries no attempt id
+ * (types `ToolCallRecord`), so a retried node's refusals are counted together rather than per
+ * attempt — the message describes the node, and the attempts are already told apart in the bundle.
+ */
+function denyNote(denied: readonly DeniedCall[]): string {
+  if (denied.length === 0) return '';
+  const shown = denied
+    .slice(0, 3)
+    .map((call) => `${call.ruleId ?? 'a rule that recorded no id'} (${call.toolId})`)
+    .join(', ');
+  const verb = denied.length === 1 ? 'tool call was' : 'tool calls were';
+  return `; ${denied.length} ${verb} denied or refused by policy: ${shown}${denied.length > 3 ? ', …' : ''}`;
+}
+
+/**
+ * The rule and tool a policy refusal named (L3), taken from the first refused call the F10 clause
+ * lists — the same call the message leads with, so the field and the prose agree. `undefined` when
+ * nothing was refused, or when the first refusal is one that named no rule: a machine reader then
+ * learns the failure was a refusal only from the clause, exactly as before. Omitted keys stay
+ * omitted, so a `no_work` with no refusal carries neither and a deep-equal against `{kind}` holds.
+ */
+function refusalDetail(denied: readonly DeniedCall[]): { ruleId?: string; toolId?: string } | undefined {
+  const first = denied[0];
+  if (first === undefined) return undefined;
+  return { ...(first.ruleId !== undefined ? { ruleId: first.ruleId } : {}), toolId: first.toolId };
+}
+
+/**
+ * The reader's answer, quoted for `no_work` (D-46): credentials masked first — the same
+ * `redactCredentials` the `no_change` tail gets, because this string reaches the signed bundle, the
+ * memory graph and the planner's failure recall, none of which the transcript scrubber sees — then
+ * its whitespace collapsed to single spaces so the message stays one line, trimmed, and cut to the
+ * first 200 characters so it stays a summary rather than a transcript. The mask is *before* the cut,
+ * and that order is load-bearing: a credential straddling character 200 would survive a
+ * slice-then-mask as a fragment no format pattern recognises. `JSON.stringify` gives the quotes and
+ * escapes any quote inside, so a machine parsing the field gets the same text a reader sees.
+ */
+function answerExcerpt(text: string): string {
+  const masked = redactCredentials(text);
+  return JSON.stringify(masked.replace(/\s+/g, ' ').trim().slice(0, 200));
+}
 
 /**
  * D-32: a role that expects to change the tree finished with an answer and left no diff against the
@@ -137,23 +246,71 @@ function noChangeShortfall(
   adapterName: string,
   answer: Answer,
   startCommit: string,
+  denied: readonly DeniedCall[],
 ): NodeFailure {
   const expected = `role "${role.role}" expects to change the tree, so`;
   const base = `leave a diff against the node's start commit ${startCommit.slice(0, 12)}`;
+  const note = denyNote(denied);
+  const detail = refusalDetail(denied);
   if (answer.tier === 'cli') {
     return new NodeFailure(
       'no_change',
       `${expected} adapter "${adapterName}" was expected to ${base}, but it answered ` +
       `(exit code ${answer.result.exitCode}) and changed nothing — a backend running under its own ` +
-      `permission settings may have refused the edit. Output tail: ${outputTail(answer.result.output)}`,
+      `permission settings may have refused the edit. Output tail: ${outputTail(answer.result.output)}${note}`,
       answer.result.exitCode,
+      detail,
     );
   }
   return new NodeFailure(
     'no_change',
     `${expected} its in-process loop on adapter "${adapterName}" was expected to ${base}, but the ` +
     `loop completed and changed nothing — every tool call it made, each failed one included, is in the ` +
-    `run's attestation. Output tail: ${outputTail(answer.finalText)}`,
+    `run's attestation. Output tail: ${outputTail(answer.finalText)}${note}`,
+    undefined,
+    detail,
+  );
+}
+
+/**
+ * D-46(ii): the governed turn says what it has, and a role that did no work has not succeeded.
+ *
+ * A role that was **not expected to change the tree** — `expectsChange` is not `true`, so `no_change`
+ * cannot be its reason — finished with a final answer having made **no executed tool call**: every
+ * attested call it made was refused, or it made none at all. The predicate is `expectsChange`, not
+ * "holds a write tool" (A2, the 0.4.0 audit): the built-in `tester` holds `test.run`, so the old
+ * `isWriterRole` test excused it, and a tester answering "All tests pass" with zero calls succeeded on
+ * the exact shape this check exists to catch. Live row 2b of the 3.0c pass is the reader case: an
+ * in-process `analyst` with the host's native tools disabled tried `Read`/`Glob`/`Grep` anyway, was
+ * refused ("No such tool available"), and gave up — and the run read `Succeeded` off the prose. The
+ * record said what happened: zero executed calls, one turn, a refusal. Judged from the record, not the
+ * narrative: a call that ran is work, and a refused call is not — it left the tree exactly as it found
+ * it. "Ran" is `metadata.refused !== true`, the mark `executeToolGated` sets on every call it did not
+ * execute (F4/A2): a `Deny`, an `Escalate` the gate did not approve, an `Indeterminate`, a malformed
+ * call. An approved `Escalate` ran, keeps its `Escalate` verdict, and carries no such mark, so it is
+ * work.
+ *
+ * Only a role that does not expect a change is judged this way. One that does (`expectsChange: true`,
+ * the built-in `coder`) owes a *change* and fails `no_change` (D-32), which is the only case the
+ * registry refuses `expectsToolCalls` for. A role that holds no tool, or opted out with
+ * `expectsToolCalls: false`, expects nothing and answers from the prompt by design. The message names
+ * the role, that no call was executed, the turns it had to make one across, and its own answer; the F10
+ * clause is appended when its calls were refused, so the role that was refused and the one that never
+ * tried read differently.
+ */
+function noWorkShortfall(
+  role: RoleConfig,
+  answer: Answer,
+  denied: readonly DeniedCall[],
+): NodeFailure {
+  const finalText = answer.tier === 'in-process' ? answer.finalText : answer.result.output;
+  const turns = answer.tier === 'in-process' ? answer.turns : 1;
+  return new NodeFailure(
+    'no_work',
+    `role "${role.role}" made no executed tool call across ${turns} turn${turns === 1 ? '' : 's'}; ` +
+    `its answer: ${answerExcerpt(finalText)}${denyNote(denied)}`,
+    undefined,
+    refusalDetail(denied),
   );
 }
 
@@ -175,13 +332,12 @@ function noChangeShortfall(
 function unexpectedChange(
   role: RoleConfig,
   adapterName: string,
-  diff: string,
+  files: string[],
   cwd: string,
 ): NodeFailure {
-  const files = changedFiles(diff);
   const named = files.length > 0
     ? `${files.length} file${files.length === 1 ? '' : 's'}: ${files.join(', ')}`
-    : 'at least one file (the diff names none)';
+    : 'at least one file (git named none)';
   return new NodeFailure(
     'unexpected_change',
     `role "${role.role}" holds no write tool, so adapter "${adapterName}" was not expected to ` +
@@ -192,29 +348,37 @@ function unexpectedChange(
 }
 
 /**
- * The paths a unified diff touches, read from its file headers — both sides of each, so a creation
- * (`--- /dev/null`) and a deletion (`+++ /dev/null`) are each named by the side that has a path, and
- * git's quotes come off a path with special characters in it.
+ * How many files a unified diff changes, counted from its `diff --git` section headers (N4).
  *
- * Only outside a hunk: a *content* line of the file is prefixed with its own `+`/`-`/space, so a
- * line the agent wrote that reads `-- x` or `++ y` reaches us as `--- x` / `+++ y` and would
- * otherwise be reported as a file that was never touched. Headers come before the first `@@` of a
- * file section and `diff --git` starts the next one.
+ * Counted rather than parsed for paths: git writes the paths into those headers C-quoted, so a
+ * non-ASCII name arrives as `"b/caf\303\251.txt"` and every consumer of the *text* would have to
+ * undo git's quoting to name the file at all — and a header is not even emitted per path in the
+ * ways that matter (a mode-only change has none, and a rename collapses two paths into one section
+ * unless rename detection is off). The count is what the rule needs: with `--no-renames` every
+ * changed path is exactly one `diff --git` section, so this is the number of paths a correct
+ * `--name-only` listing of the same two trees must have, and a disagreement between the two is the
+ * signal that the rule cannot name a change it knows exists — the case that must fail closed rather
+ * than be excused.
+ *
+ * Only at column zero of a section header: a *content* line of the file is prefixed with its own
+ * `+`/`-`/space, so a line an agent wrote that reads `diff --git …` reaches us as `+diff --git …`
+ * or ` diff --git …`, never as a header.
  */
-function changedFiles(diff: string): string[] {
-  const paths = new Set<string>();
-  let inHunk = false;
+function diffSectionCount(diff: string): number {
+  let count = 0;
   for (const line of diff.split('\n')) {
-    if (line.startsWith('diff --git ')) { inHunk = false; continue; }
-    if (line.startsWith('@@')) { inHunk = true; continue; }
-    if (inHunk) continue;
-    if (!line.startsWith('--- ') && !line.startsWith('+++ ')) continue;
-    let p = line.slice(4).trim();
-    if (p.startsWith('"') && p.endsWith('"') && p.length > 1) p = p.slice(1, -1);
-    if (p === '' || p === '/dev/null') continue;
-    paths.add(p.startsWith('a/') || p.startsWith('b/') ? p.slice(2) : p);
+    if (line.startsWith('diff --git ')) count += 1;
   }
-  return [...paths];
+  return count;
+}
+
+/**
+ * sha256, hex, of a diff's text (WP-3.0c). The attribution record carries the digest rather than the
+ * diff, matching the bundle's other evidence fields — a reader compares it against the writer's
+ * subject without the diff text crossing into a second copy.
+ */
+function sha256Hex(text: string): string {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
 /**
@@ -285,6 +449,56 @@ export class RoleDispatcher {
   private readonly baselines = new Map<string, string>();
 
   /**
+   * The set of paths each writer node's post-coder gates actually reviewed (WP-3.0c, F2), keyed by
+   * node id. A reader whose turn shows a change is excused only for a writer whose reviewed diff
+   * carries every path in the reader's bracket — otherwise the change is in no gate's diff, and
+   * excusing it is how D-42's "never let a change pass unattested" stops holding. A writer that ran
+   * and left an empty diff is recorded as the empty set, so it excuses nothing; a node that never
+   * reached the gates has no entry at all.
+   */
+  private readonly reviewedPaths = new Map<string, Set<string>>();
+
+  /**
+   * The tree id each writer node's post-coder gates read, keyed by node id (WP-3.0c, N2). Where
+   * `reviewedPaths` says *which paths* a gate judged, this says *what content* it judged, and both
+   * are needed because containment by path is not containment by content: a reviewed path can be
+   * rewritten after the gate ran, and the reader's bracket would then show a change no gate ever
+   * read. A writer answers for a bracket only when its reviewed diff holds every bracket path *and*
+   * those paths still carry, in the reader's end tree, the content this tree records — an empty
+   * `git diff <gateTree> <endTree> -- <paths>`.
+   *
+   * Absence is also meaningful: a node with no entry has not run its gate *this attempt* (cleared at
+   * each attempt start), which is what tells a writer still holding the lock apart from one whose gate
+   * already ran — the first still has a start-commit diff ahead of it that will carry the change, the
+   * second must show the change was already the content its gate read.
+   */
+  private readonly gateTrees = new Map<string, string>();
+
+  /**
+   * The node ids this dispatcher started as *writers* (WP-3.0c, N5). Rule (a) names a writer on the
+   * strength of the lock alone, so it must be a node that will actually run a gate: a cli-tier
+   * *reader* holds the writer lock (the scheduler serializes every cli-tier role, D-01/A3) but never
+   * gates, so naming it on the lock would excuse the reader's own change to a node that will never
+   * judge it. "Writer" is `isWriterRole`, decided by the tools the role holds (D-07), so a custom
+   * writer role is a candidate and a read-only role of any tier is not. Set once per node, where the
+   * node starts; a node's role does not change between attempts.
+   */
+  private readonly writerNodes = new Set<string>();
+
+  /**
+   * The writer nodes whose post-coder gate is *in flight* — set the instant the gate starts and
+   * before its first read, cleared at each attempt start (WP-3.0c, N5). Rule (a) is true only while
+   * the writer's gate has not yet read the tree; without this marker there is a window between the
+   * gate's `snapshotTree` and the recording of that tree id in `gateTrees` where a change that
+   * landed *after* the read would still be "not yet gated" and so named to the writer — a change
+   * its gate will never read. With the marker, rule (a) is false for that window, rule (b) fails
+   * closed (no gate tree is recorded yet), and the reader fails rather than passing a change no gate
+   * saw. A gate that throws before recording its tree leaves the marker set, so the writer is never
+   * named on the lock again this attempt — the fail-closed direction.
+   */
+  private readonly gating = new Set<string>();
+
+  /**
    * The node has ended, succeeded or failed, and will not be attempted again: forget its
    * baseline. Call it from the scheduler's `onNodeEnd`, which fires once per node after its
    * last attempt; a later run of the same node then starts from wherever the tree is.
@@ -306,8 +520,66 @@ export class RoleDispatcher {
     return commit;
   }
 
+  /**
+   * F10: this node's own policy-refused tool calls, read from the run's attestation by the taskId
+   * every record carries. Per-node, never the run-wide set — a sibling's refusal is not this node's
+   * failure. A test double without the getter answers with no refusals, which leaves the message
+   * exactly as it was before this existed.
+   *
+   * F8(a): a refusal is a `Deny`, an `Escalate` the gate did not approve, or an `Indeterminate` the
+   * engine reached because it could not evaluate one of its own rules — every verdict that means
+   * "policy refused this call", which the clause's "denied or refused by policy" names. The old
+   * `Deny`-only test missed the other two. An `Escalate` the gate *approved* did run and is recorded
+   * under its `Escalate` verdict like any other call, so `metadata.refused` — which `executeToolGated`
+   * sets on the calls that did not run — is what tells the two apart.
+   *
+   * R2: the one `Indeterminate` left out is a `builtin:*` one. `builtin:input-schema` is the tool's
+   * schema refusing a malformed call before policy was ever asked, so it is not a policy refusal; an
+   * engine `Indeterminate` (a `memoryPattern` rule whose graph query threw, or a template naming a
+   * parameter that cannot be bound) is policy refusing because it could not decide, and is counted.
+   */
+  private deniedCallsFor(taskId: TaskId): DeniedCall[] {
+    const denied: DeniedCall[] = [];
+    for (const call of this.config.attestor.toolCallsForTask?.(taskId) ?? []) {
+      const decision = call.policyDecision;
+      if (!isPolicyRefusal(decision)) continue;
+      if (call.result.metadata.refused !== true) continue;
+      const ruleId = refusingRuleId(decision);
+      denied.push({
+        toolId: String(call.toolId),
+        ...(ruleId !== undefined ? { ruleId } : {}),
+      });
+    }
+    return denied;
+  }
+
   /** The ungoverned banner goes out once per dispatcher; `maf run` builds one per run. */
   private bannerShown = false;
+
+  /**
+   * How many of this node's attested calls actually ran (D-46): the records whose result was not
+   * `refused` — the mark `executeToolGated` sets on every call it did not execute. A `Deny`, an
+   * `Escalate` the gate did not approve, an `Indeterminate` and a malformed call are all marked, so
+   * none is work; an approved `Escalate` ran and carries no mark, so it is (F4/A2). "Not refused" and
+   * not "`Allow`" is the right test: a refusal left the tree exactly as it found it, which is the whole
+   * of what the count is for.
+   *
+   * The count is over the whole node, because a `ToolCallRecord` carries no attempt id (types
+   * `ToolCallRecord`). A caller reading it across a retried node must therefore snapshot it when the
+   * attempt starts and use the delta (F3/A4), or an earlier attempt's reads would excuse a later
+   * attempt that read nothing.
+   *
+   * In-process by construction: the cli tier records a `modelSurface` per role call but no per-tool
+   * `ToolCallRecord`, so on that tier this is always zero — which is why the only check that reads it
+   * (`no_work`) is gated to the tier where the record is real.
+   */
+  private executedCallCount(taskId: TaskId): number {
+    let executed = 0;
+    for (const call of this.config.attestor.toolCallsForTask?.(taskId) ?? []) {
+      if (call.result.metadata.refused !== true) executed += 1;
+    }
+    return executed;
+  }
 
   /**
    * The tier this node runs on (D-01), decided before it captures anything, spends a model call,
@@ -363,7 +635,23 @@ export class RoleDispatcher {
   async runNode(node: DagNode): Promise<Record<string, BlackboardValue>> {
     const role = this.config.roles.getRole(node.agentRole);
     const taskId = makeTaskId(node.id);
+    // F3/A4: the D-46 guard reads a *count of executed calls*, and a `ToolCallRecord` carries no
+    // attempt id, so the number it must read is the delta since this attempt began. Snapshotting here
+    // — before the node does anything, and on every attempt — keeps a retry from being a way to
+    // succeed having done nothing: a reader that read on attempt 1, hit a transport failure, and then
+    // answered without reading on attempt 2 has done no work *this* attempt.
+    const executedAtAttemptStart = this.executedCallCount(taskId);
     const resolved = this.resolveTier(role);
+
+    // N2, rule (a): a fresh attempt clears this node's own gate evidence. The gate records what it
+    // judged when it runs; clearing here makes `gateTrees.has(id)` mean "gated *this* attempt", so a
+    // writer whose gate already ran — the coder's normal path, which holds the lock through transcript
+    // append and the LCM flush after its gate — is never mistaken for one whose gate is still ahead of
+    // it. A retry re-runs the gate and re-records both, so nothing from the failed attempt can excuse
+    // the next one's bracket.
+    this.reviewedPaths.delete(node.id);
+    this.gateTrees.delete(node.id);
+    this.gating.delete(node.id);
 
     // Captured BEFORE the node does anything, and before any model call is spent. A
     // writer that commits its own work would otherwise diff clean against HEAD, so the
@@ -377,13 +665,26 @@ export class RoleDispatcher {
     // (`snapshotTree` below).
     const startCommit = await this.baselineFor(node.id);
     const isWriter = isWriterRole(role);
+    // N5: rule (a) names a writer on the strength of the lock alone, so it must be a node this
+    // dispatcher started as a *writer*. A cli-tier reader holds the writer lock (A3 serializes every
+    // cli-tier role) but runs no gate, and naming it would excuse its own change to a node that never
+    // judges it. Recorded here, where the node starts; a node's role does not change between attempts.
+    if (isWriter) this.writerNodes.add(node.id);
     // F7: a reader is judged on the change *it* made, not on the tree it found. This brackets the
     // reader's turn with two working-tree snapshots and diffs those, so a sibling writer's
     // uncommitted work in the shared worktree — or the user's own dirty checkout under
     // `--no-worktree` — sits in both snapshots and cancels out. Diffing the whole tree against HEAD
     // instead would fail the reader for a change it never made, the false positive this replaces;
     // `snapshotTree` in @maf/git-ops carries the reasoning in full.
-    const readerStartTree = isWriter ? undefined : await snapshotTree(this.config.cwd);
+    // The bracket's two halves: the tree id the reader's turn starts from, and the instant its turn
+    // opens. `at` is read before the snapshot awaits, so the window the ledger is asked about covers
+    // the snapshot's own duration too — a writer overlapping *that* shows up here (it may or may not
+    // be in the start tree) rather than being charged to the reader. The reading is monotonic
+    // (`performance.now()`), like the ledger's own stamps: a wall clock can repeat a millisecond
+    // across the two ends of a turn, or step backwards, which is what F4 of the 3.0c review found.
+    const readerBracket = isWriter
+      ? undefined
+      : { at: performance.now(), tree: await snapshotTree(this.config.cwd) };
     const review = isWriter
       ? new AttemptReview((onDiff) => this.runPostCoderGates(node, startCommit, onDiff))
       : undefined;
@@ -462,9 +763,13 @@ export class RoleDispatcher {
         const loop = await this.runInProcess(role, invokeOpts, taskId, review);
         outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
         shortfall = loopShortfall(role, loop);
-        if (loop.outcome === 'completed') answer = { tier: 'in-process', finalText: loop.finalText };
+        if (loop.outcome === 'completed') answer = { tier: 'in-process', finalText: loop.finalText, turns: loop.steps };
       } else {
         const cliResult = await adapter.invoke(invokeOpts);
+        // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
+        // the same evidence shape as F4's governed turn, `tier: 'cli'`. What the dispatcher asked of
+        // the backend's own tools goes in with it (F3), because for codex and gemini no argv shows it.
+        await this.recordCliSurface(role, taskId, cliResult, invokeOpts.nativeTools);
         outputForMemory = cliResult.output.slice(0, MAX_STORED_OUTPUT_CHARS);
         shortfall = cliShortfall(role, adapter.name, cliResult);
         answer = { tier: 'cli', result: cliResult };
@@ -482,8 +787,8 @@ export class RoleDispatcher {
       if (review && !alreadyJudged) await review.run();
       // A reader can change the tree before it fails too, and a diff left behind is recorded
       // whatever the outcome. The verdict outranks the transport failure, as it does for a writer.
-      if (readerStartTree !== undefined && !alreadyJudged) {
-        await this.readerChangeGuard(node, role, readerStartTree);
+      if (readerBracket !== undefined && !alreadyJudged) {
+        await this.readerChangeGuard(node, role, readerBracket, resolved.tier);
       }
       throw err;
     }
@@ -497,7 +802,7 @@ export class RoleDispatcher {
     if (review) await review.run();
     // And every reader's diff is checked, for the mirror reason: a reader that changed the tree
     // fails here rather than returning the Succeeded that MAF used to report for it (F7).
-    if (readerStartTree !== undefined) await this.readerChangeGuard(node, role, readerStartTree);
+    if (readerBracket !== undefined) await this.readerChangeGuard(node, role, readerBracket, resolved.tier);
 
     // D-32, judged after the gate so that a refusal still wins, and only where nothing else
     // already failed the node: an answer, on either tier, from a role that expects a change, whose
@@ -506,9 +811,28 @@ export class RoleDispatcher {
     // every write failed, and that then said so, would otherwise succeed with nothing done.
     // Every node has a start commit (F7) and only a writer holds `review`; `expectsChange` itself
     // requires a write tool, so the diff below is always one the gate read.
+    const denied = this.deniedCallsFor(taskId);
     if (shortfall === undefined && answer !== undefined && role.expectsChange === true &&
         review?.diff?.trim() === '') {
-      shortfall = noChangeShortfall(role, adapter.name, answer, startCommit);
+      shortfall = noChangeShortfall(role, adapter.name, answer, startCommit, denied);
+    }
+    // D-46(ii): a role that was not expected to change the tree, and made no executed tool call, has
+    // not done its work, whatever its prose says. Judged from the record, not the narrative (live row
+    // 2b). The predicate is `expectsChange`, not "holds a write tool" (A2, the 0.4.0 audit): the
+    // built-in `tester` holds `test.run` — a write tool — so it is a writer, but its job is to run the
+    // tests, not to change the code, and it declares no `expectsChange`. Keying on `isWriterRole` left
+    // it judged by neither guard, so a tester answering "All tests pass" with zero calls succeeded on
+    // the exact shape this check exists to catch. Checked after the writer's `no_change` — the two are
+    // disjoint, `expectsChange === true` here and not-true there — and only on the in-process tier,
+    // where a per-call `ToolCallRecord` exists at all: the cli tier attests none, so an empty call set
+    // there means "unwatched", not "did no work", and a cli-tier node (live row 1) is left exactly as
+    // it was. `expectsToolCalls` is the role's own declaration, else its tools: a role with none to
+    // call, or one that opted out, expects nothing. The count is this attempt's delta (F3/A4), so a
+    // retried node that read only on an earlier attempt does not excuse this one.
+    const executedThisAttempt = this.executedCallCount(taskId) - executedAtAttemptStart;
+    if (shortfall === undefined && answer?.tier === 'in-process' && role.expectsChange !== true &&
+        expectsToolCalls(role) && executedThisAttempt === 0) {
+      shortfall = noWorkShortfall(role, answer, denied);
     }
 
     if (shortfall) {
@@ -577,7 +901,7 @@ export class RoleDispatcher {
         systemPrompt: invokeOpts.systemPrompt ?? '',
         userPrompt:   invokeOpts.prompt,
         tools:        toolList,
-        maxTurns:     role.maxToolIterations ?? 10,
+        maxTurns:     role.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS,
         timeoutMs:    invokeOpts.timeoutMs,
         workingDir:   invokeOpts.workingDir,
         projectRoot:  this.config.cwd,
@@ -631,6 +955,53 @@ export class RoleDispatcher {
   }
 
   /**
+   * Records a cli-tier role call's model-facing surface (WP-3.0c, D-45), the cli-tier twin of F4's
+   * in-process record: the same shape, `tier: 'cli'`, so "every role call is in the record" is one
+   * array rather than two. The adapter assembles it, each from its own argv; an adapter that
+   * assembles none — an HTTP backend, which has no argv of its own to report — records nothing
+   * rather than an invented surface, exactly as a governed turn with no surface records nothing. A
+   * node's cli-tier call is one turn.
+   */
+  private async recordCliSurface(
+    role: RoleConfig,
+    taskId: TaskId,
+    result: AdapterInvokeResult,
+    askedNativeTools: AdapterInvokeOptions['nativeTools'],
+  ): Promise<void> {
+    const surface = result.modelSurface;
+    if (!surface) return;
+    const record: ModelSurfaceRecord = {
+      role: role.role, taskId, turn: 1, ...surface, tier: 'cli',
+      // F3: what the dispatcher asked of the backend's own tools. `undefined` is the default —
+      // nothing was asked, and the backend keeps its native tools — and it is recorded as 'full'
+      // rather than left out, because codex and gemini pass no flag either way and their argv
+      // cannot tell the two apart. It is what was *asked for*: codex ignores `false` and keeps
+      // everything, which the reader can see from the adapter it names.
+      //
+      // N3 (3.0c review): the `'none'` arm is unreachable from a role call. A role call asks
+      // `'read-only'` (line above) or nothing at all; `false` is asked only by the planner's and the
+      // security reviewer's calls, and neither records a surface. The arm stays for the type's
+      // completeness, not because any entry this line writes is ever `'none'`.
+      nativeTools: askedNativeTools === false ? 'none' : askedNativeTools === 'read-only' ? 'read-only' : 'full',
+    };
+    this.config.attestor.recordModelSurface?.(record);
+    await this.config.transcript.append(
+      'system',
+      `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; ` +
+      `prompt sha256 ${record.promptSha256 ?? '(none)'}; output sha256 ${record.outputSha256 ?? '(none)'}; ` +
+      `native tools ${record.nativeTools ?? '(unrecorded)'}; argv ${JSON.stringify(record.argv)}`,
+      { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
+        systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
+        // F7: both digests, so the transcript alone ties the argv's elided markers to what was sent
+        // and ties the output to what came back, without the prompt or the output themselves.
+        ...(record.promptSha256 !== undefined ? { promptSha256: record.promptSha256 } : {}),
+        ...(record.outputSha256 !== undefined ? { outputSha256: record.outputSha256 } : {}),
+        ...(record.stdinSha256 !== undefined ? { stdinSha256: record.stdinSha256 } : {}),
+        nativeTools: record.nativeTools },
+    );
+  }
+
+  /**
    * F7: fail a node whose role holds no write tool and whose turn changed the tree. Recorded as a
    * subject of the run's statement before it throws, so the change joins the signed evidence even
    * though the node fails, and `no_change`'s counterpart in the bundle's own terms: the run says
@@ -643,17 +1014,224 @@ export class RoleDispatcher {
    * diff is the node's own change. A snapshot that cannot be read is an error, never an empty one:
    * "we could not look" and "nothing changed" must not be the same verdict (A4).
    *
-   * A writer running *concurrently* with this reader is the one case this cannot separate: its
-   * partial write lands in the end tree with no start-tree counterpart and is read as the reader's.
-   * The scheduler serializes writers (A3), so the sequential case a plan produces is exact; the
-   * concurrent window is documented in docs/SECURITY.md rather than papered over.
+   * A writer running *concurrently* with this reader is the one case the bracket cannot separate:
+   * its partial write lands in the end tree with no start-tree counterpart and reads as the
+   * reader's. An in-process reader asks the ledger which writers overlapped its turn, and a change
+   * is attributed only to one that demonstrably took it to a gate (F2, N2): a writer still holding
+   * the lock whose gate has **not yet run this attempt** — its own start-commit diff, the one the
+   * security gate is about to read, carries the change — or a writer whose gate **has** run and whose
+   * reviewed diff holds *every* path in this bracket **unchanged** since the tree that gate read.
+   * Both halves matter: containment by path is not containment by content, and a holder whose gate
+   * already ran is judged by the content check rather than named on the lock alone. Naming a writer
+   * for a change its gate did not read would excuse the change from every gate at once, which is
+   * exactly what D-42's "never let a change pass unattested" forbids; anything the rule cannot settle
+   * fails the reader. With no such writer the change is the reader's, and the node fails exactly as
+   * before, diff recorded as a subject.
+   *
+   * A *cli*-tier reader is never excused (F4). It holds the writer lock itself — the scheduler
+   * serializes every cli-tier role (D-01/A3) — so no other writer can have been running, and any
+   * change the bracket shows is its own. The ledger is therefore not consulted at all on that tier;
+   * the `exclude` an earlier draft needed, and the wall-clock comparison it rested on, are gone.
    */
-  private async readerChangeGuard(node: DagNode, role: RoleConfig, startTree: string): Promise<void> {
+  private async readerChangeGuard(
+    node: DagNode,
+    role: RoleConfig,
+    bracket: { at: number; tree: string },
+    tier: 'cli' | 'in-process',
+  ): Promise<void> {
     const endTree = await snapshotTree(this.config.cwd);
-    if (endTree === startTree) return;
-    const diff = await diffTrees(this.config.cwd, startTree, endTree);
+    if (endTree === bracket.tree) return;
+    const diff = await diffTrees(this.config.cwd, bracket.tree, endTree);
+    // The moment the reader's turn closed, taken the same way `bracket.at` was and after the end
+    // snapshot, so the window covers both snapshots' own durations.
+    const endedAt = performance.now();
+    // The paths, from git rather than from the diff text (N4): a non-ASCII name, a mode-only change
+    // and a pure rename each defeat a `---`/`+++` parse — git C-quotes the first, emits no file
+    // lines for the second, and collapses the third into one header — so a parsed set can silently
+    // omit a path the diff actually changed, and the omission is what excuses the change. `undefined`
+    // means the rule cannot name what changed (git failed, or the section count disagrees) and the
+    // reader fails closed below rather than being handed an empty set that matches nothing.
+    const { paths, listed } = await this.bracketPaths(bracket.tree, endTree, diff);
+    const writer = paths !== undefined && tier === 'in-process'
+      ? await this.attributableWriter(node, paths, bracket.at, endedAt, endTree)
+      : undefined;
+    if (writer !== undefined) {
+      // The three tree ids the rule used (N6): the digest below is reproducible from the first two
+      // with `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff --text --no-ext-diff
+      // --no-textconv --no-renames <fromTree> <toTree>` (the flags the digest was taken with, R1),
+      // and the third names the content the named writer's gate read — absent under rule (a),
+      // where the writer had not gated yet.
+      const attributed: AttributedChange = {
+        nodeId: node.id, attributedTo: writer, diffSha256: sha256Hex(diff),
+        fromTree: bracket.tree, toTree: endTree,
+        ...(this.gateTrees.get(writer) !== undefined ? { writerGateTree: this.gateTrees.get(writer)! } : {}),
+      };
+      this.config.attestor.recordAttribution?.(attributed);
+      // The bracket diff as a subject of the run's statement, under its own name: `diffSha256` above
+      // then names a diff the statement carries a digest for — in `diffHashes`, like every subject —
+      // rather than naming a change written down nowhere (F2).
+      this.config.attestor.recordDiffHash?.(`${node.id}.attributed.diff`, diff);
+      await this.config.transcript.append(
+        'system',
+        `[attributed] node "${node.id}" showed a change during its turn, and writer "${writer}" took ` +
+        `that change to a gate (F7 window): it had reviewed a diff holding every path this turn ` +
+        `showed and those paths are unchanged since, or it still held the lock with its gate not yet ` +
+        `run, so its own diff will carry them. The change is judged by that writer's own ` +
+        `reviewed diff, not charged to this reader.`,
+        { agentRole: role.role, nodeId: node.id, attributedTo: writer, diffSha256: attributed.diffSha256,
+          fromTree: attributed.fromTree, toTree: attributed.toTree,
+          ...(attributed.writerGateTree !== undefined ? { writerGateTree: attributed.writerGateTree } : {}) },
+      );
+      return;
+    }
     this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff);
-    throw unexpectedChange(role, this.config.adapter.name, diff, this.config.cwd);
+    // R5: `paths` is undefined both when git failed (no names to give) and when the section count
+    // disagreed — and on a disagreement git named files the rule simply could not reconcile. Pass
+    // the raw listing in that case so the message names them instead of saying "git named none".
+    throw unexpectedChange(role, this.config.adapter.name, paths ?? listed, this.config.cwd);
+  }
+
+  /**
+   * The paths the bracket diff changed, from git (N4), or `undefined` when the rule cannot settle
+   * them. Both halves come from the same invocation — `git diff --name-only -z --no-renames <from>
+   * <to>` — so a name git would C-quote on a `---`/`+++` line arrives raw and the set is complete
+   * for a mode-only change and a rename alike. `-z` is NUL separation, which is also what keeps a
+   * path with a newline or a quote in it intact.
+   *
+   * The count is checked against the diff's own `diff --git` sections: with `--no-renames` each
+   * changed path is exactly one section, so a disagreement means the diff shows a change the
+   * listing does not name — the change the rule cannot attribute and must not excuse. `undefined`
+   * there, and a git failure, both fail the reader closed, never open.
+   *
+   * The raw listing comes back alongside the settled set (R5): on a count disagreement git *did*
+   * name files, and the failure message below must name them rather than claim git named none.
+   */
+  private async bracketPaths(
+    from: string,
+    to: string,
+    diff: string,
+  ): Promise<{ paths: string[] | undefined; listed: string[] }> {
+    try {
+      const listed = await this.nameOnlyPaths(from, to);
+      return { paths: diffSectionCount(diff) === listed.length ? listed : undefined, listed };
+    } catch {
+      return { paths: undefined, listed: [] };
+    }
+  }
+
+  /**
+   * git's own list of the paths that differ between two trees (N4) — `--name-only -z --no-renames`,
+   * NUL-separated and unquoted, so a non-ASCII or otherwise special name is returned as the bytes it
+   * is on disk and can be handed straight to a `:(top,literal)` pathspec. `--no-renames` so a rename
+   * reads as a deletion plus an addition, matching the diff the rule digests. Throws on a git
+   * failure; callers decide whether that is a failure or a fail-closed `undefined`.
+   */
+  private async nameOnlyPaths(from: string, to: string): Promise<string[]> {
+    const { stdout } = await runIsolatedGit(
+      this.config.cwd,
+      ['diff', '--name-only', '-z', '--no-renames', from, to],
+      { env: { GIT_LITERAL_PATHSPECS: '0' } },
+    );
+    return stdout.split('\0').filter((p) => p.length > 0);
+  }
+
+  /**
+   * Which of the writers that overlapped `[from, to]` can answer for the reader's bracket diff, or
+   * none (F2, tightened by N2). Two conditions qualify, and both keep the change inside a gate:
+   *
+   *  - **(a) A writer this dispatcher started as a writer, still holding the lock, whose gate has
+   *    neither begun nor run this attempt.** Its post-coder gates have not read the tree, and its
+   *    start-commit diff will, because the change is already in the tree it is about to diff. The
+   *    reader cannot wait for it, so it is named on the strength of the lock alone. Three conditions
+   *    make that sound and each closes a window (N5). `writerNodes.has` excludes a cli-tier *reader*,
+   *    which holds the same lock (A3) but never gates, so naming it would excuse a change no gate
+   *    will ever judge. `!gating.has` excludes a writer whose gate has *started* — the marker is set
+   *    before the gate's first read, so a change landing between that read and the recording of the
+   *    gate tree is not named on the lock. `!gateTrees.has` excludes a writer whose gate has already
+   *    run: the coder holds the lock through transcript append and the LCM flush after its gate, so
+   *    it is still holding long after it gated, and it must fall through to (b) to show the change
+   *    is the content its gate read.
+   *  - **(b) A gating or gated writer**, whose reviewed diff holds every path in the bracket *and*
+   *    those paths are unchanged between the tree its gate read and the reader's end tree. The content
+   *    check is N2 — a reviewed path can be rewritten after the gate, and path containment alone would
+   *    excuse the rewrite as reviewed. Both conditions are needed: `reviewedPaths` is a set of names,
+   *    and a name later rewritten names a change the gate never judged. A writer that has begun
+   *    gating but whose gate tree is not yet recorded has no `gateTrees` entry, so (b) fails closed
+   *    until the gate records it — the window (a) no longer covers.
+   *
+   * (a) is tried first, so a still-holding writer whose gate is ahead of it is named on the lock
+   * alone; (b) covers the completed and the already-gated. With two coders overlapping one reader, the
+   * writer that names the change is the one whose own gate actually carries those paths — an earlier
+   * interval that reviewed nothing names nobody.
+   *
+   * Anything the rule cannot settle is `undefined`, and the reader fails. A writer that ran and left
+   * an empty diff reviewed no paths and answers for nothing; a writer whose gate ran but whose bracket
+   * paths changed afterwards carries an unreviewed change and answers for nothing; a change that
+   * appeared from outside the scheduler — an editor under `--no-worktree`, a tool that writes outside
+   * the gate — has no writer whose diff carries it, and is exactly the change that must not pass
+   * unattested. A `git` failure in the check is settled the same way, not treated as "unchanged":
+   * failing closed is the whole point of the rule.
+   */
+  private async attributableWriter(
+    node: DagNode,
+    paths: string[],
+    from: number,
+    to: number,
+    endTree: string,
+  ): Promise<NodeId | undefined> {
+    const ledger = this.config.writerLockLedger;
+    if (!ledger) return undefined;
+    const candidates = ledger.writersOverlapping(from, to).filter((id) => id !== node.id);
+    if (paths.length === 0) return undefined;
+    for (const id of candidates) {
+      if (this.writerNodes.has(id) && ledger.isHolding(id) && !this.gating.has(id) && !this.gateTrees.has(id)) return id;
+    }
+    for (const id of candidates) {
+      if (await this.reviewedHolds(id, paths, endTree)) return id;
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether `id`'s own gate already answers for `paths` (N2, rule (b)): it reviewed every one of them,
+   * and they still hold, in the reader's end tree, the content its gate tree recorded. Both halves are
+   * needed — `reviewedPaths` is a set of *names*, and a name that was later rewritten names a change
+   * the gate never judged.
+   */
+  private async reviewedHolds(id: NodeId, paths: string[], endTree: string): Promise<boolean> {
+    const reviewed = this.reviewedPaths.get(id);
+    if (reviewed === undefined || !paths.every((p) => reviewed.has(p))) return false;
+    const gateTree = this.gateTrees.get(id);
+    if (gateTree === undefined) return false;
+    return this.unchangedSince(gateTree, endTree, paths);
+  }
+
+  /**
+   * Whether `paths` carry the same content in `gateTree` and `endTree` — an empty
+   * `git diff <gateTree> <endTree> -- <paths>`. Both trees are `snapshotTree` ids taken through the
+   * same throwaway index, so they are content-ids of the whole working tree and a path unchanged in
+   * both contributes nothing. The pathspec is `:(top,literal)`-anchored because the paths are
+   * repository-top-relative (git's `--name-only` yields them so, N4) while `cwd` may be a
+   * subdirectory, and the paths came from the agent and may contain glob metacharacters. `--text
+   * --no-ext-diff --no-textconv` are there for the reason the other diffs carry them: an
+   * agent-written `.gitattributes` must not change how its own change reads. `--no-renames` matches
+   * the listing and the bracket diff, so a rename reads the same way on all three and this check's
+   * verdict does not depend on the repository's `diff.renames` config (N4). A `git` failure answers
+   * `false` — the rule cannot settle it, and settling it as "reviewed" would be the fail-open this
+   * closes.
+   */
+  private async unchangedSince(gateTree: string, endTree: string, paths: string[]): Promise<boolean> {
+    try {
+      const { stdout } = await runIsolatedGit(
+        this.config.cwd,
+        ['diff', '--text', '--no-ext-diff', '--no-textconv', '--no-renames', gateTree, endTree, '--',
+         ...paths.map((p) => `:(top,literal)${p}`)],
+        { env: { GIT_LITERAL_PATHSPECS: '0' } },
+      );
+      return stdout.trim() === '';
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -691,11 +1269,52 @@ export class RoleDispatcher {
     // is reviewed like any other change — see packages/git-ops/src/SnapshotDiff.ts.
     // A failure here is an error, never an empty diff: "we could not look" and "nothing
     // changed" must not be the same verdict.
+    // N5: this writer's gate has *started*, marked before its first read. Rule (a) names a still-
+    // holding writer on the lock alone, and it must stop the instant the gate begins reading — a
+    // change landing after the gate's first snapshot is one the gate will not read, so it must not be
+    // named on the lock; with the marker set, (a) is false and (b) fails closed until the gate tree is
+    // recorded below. The marker is never cleared within an attempt (only at the attempt start in
+    // `runNode`), so a gate that throws leaves the writer un-namable-on-the-lock rather than falsely
+    // attributable — the fail-closed direction.
+    // The line order is load-bearing and pinned by `N5/R3`: `gating.add` must precede the gate's
+    // *first read* below (`snapshotTree`) — a marker set after it leaves a window in which a writer
+    // that has begun gating is still namable on the lock alone (mutation N5c).
+    this.gating.add(node.id);
+    // N2: the tree id this gate is about to judge, taken *before* the diff so it is at-or-just-before
+    // the content the gate reads. A later change between the two git calls would then show as changed
+    // and fail the reader closed, never the reverse. Same `snapshotTree` the reader's end tree uses, so
+    // the two are comparable; kept per node beside the paths, for `attributableWriter` rule (b).
+    const gateTree = await snapshotTree(this.config.cwd);
     const diff = await snapshotDiff(this.config.cwd, startCommit);
     // Handed back before anything else: an empty diff is also D-32's evidence (no_change).
     onDiff(diff);
-    if (!diff.trim()) return;
-    this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff); // a subject of the run's statement (D-13)
+    const changed = diff.trim().length > 0;
+    // R4 (D-42): the diff becomes a subject of the run's statement *before* the path listing below.
+    // The listing is the one git call between here and the security review that can fail, and if it
+    // did the node would fail with the change left unrecorded — but D-42 says the change is recorded
+    // whether or not the node survives. An empty diff has nothing to record, exactly as before.
+    if (changed) this.config.attestor.recordDiffHash?.(`${node.id}.diff`, diff); // a subject of the run's statement (D-13)
+    // The paths this gate is about to judge, kept per node (F2), so a reader whose bracket shows a
+    // change can ask whether a gated writer already carried it here. Taken from git (N4) between the
+    // start commit and the gate tree — the same two trees the digest is reproducible from — rather
+    // than parsed out of the diff text, whose `---`/`+++` lines git does not emit for every change.
+    // Recorded even when the diff is empty — the empty set answers for nothing, which is what a
+    // writer that changed nothing should be able to say.
+    let gatePaths: string[];
+    try {
+      gatePaths = await this.nameOnlyPaths(startCommit, gateTree);
+    } catch (err: unknown) {
+      // R4: git cannot name what this gate judged. The subject above already carries the change, so
+      // record an *empty* reviewed set — an empty set answers for nothing, and rule (b) needs each of
+      // the reader's paths in `reviewed`, so every reader fails closed against this writer — then
+      // rethrow, so the writer still fails loudly rather than its change going unrecorded.
+      this.reviewedPaths.set(node.id, new Set());
+      this.gateTrees.set(node.id, gateTree);
+      throw err;
+    }
+    this.reviewedPaths.set(node.id, new Set(gatePaths));
+    this.gateTrees.set(node.id, gateTree);
+    if (!changed) return;
 
     const securityGate = this.config.securityGate;
     if (!securityGate) return this.runReviewGate(node, startCommit, diff);

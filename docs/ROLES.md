@@ -3,8 +3,8 @@
 Every DAG node in MAF runs as a *role*. A role bundles:
 
 1. A **system prompt** (inline or loaded from a file).
-2. An **allowed tool set** — the only tools the role is allowed to call on the `in-process` tier, where a [writer](#writer-roles) runs by default. On the `cli` tier — the default for a read-only role, and a writer's only with `--allow-ungoverned` — the allowlist is not passed to the backend CLI, which uses its own tools.
-3. Optional **execution** tier, **expectsChange**, and **model**, **timeout**, **token budget** and **policyTag** overrides.
+2. An **allowed tool set** — the only tools the role is allowed to call on the `in-process` tier, where a [writer](#writer-roles) runs by default. On the `cli` tier — the default for a *custom* read-only role, and a writer's only with `--allow-ungoverned` — the allowlist is not passed to the backend CLI, which uses its own tools.
+3. Optional **execution** tier, **expectsChange** / **expectsToolCalls**, and **model**, **timeout**, **token budget** and **policyTag** overrides.
 
 A run does not dispatch from the roles file directly. It resolves a *harness* first — by default `legacy-default`, minted from the roles file as it is when the run starts, each prompt file's text included — and dispatches from the role set that harness carries, so the sha its attestation names is the content that ran. See the README's "Which harness runs".
 
@@ -12,14 +12,17 @@ The planner emits `agentRole` on each node it produces. That name is checked aga
 
 ## Default roles
 
-The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships four roles. They apply only when there is no roles file — the target has no `.maf/roles.yaml`, or nothing exists at the `--roles` path. A roles file that exists but cannot be read (a directory, no permission, a symlink whose target has gone), is not valid YAML, does not match the role-set shape, or names a tool that does not exist stops the run with a `RoleConfigError` naming the file — and, for a YAML error, the line. It is never replaced by the built-in set, whose default role is a writer ([D-08](DECISIONS.md)).
+The built-in `DEFAULT_ROLE_SET` (`packages/roles/src/defaults.ts`) ships five roles. They apply only when there is no roles file — the target has no `.maf/roles.yaml`, or nothing exists at the `--roles` path. A roles file that exists but cannot be read (a directory, no permission, a symlink whose target has gone), is not valid YAML, does not match the role-set shape, or names a tool that does not exist stops the run with a `RoleConfigError` naming the file — and, for a YAML error, the line. It is never replaced by the built-in set, whose default role is a writer ([D-08](DECISIONS.md)).
 
-| Role       | Writer? | Allowed tools                                                                                                                  | Use for                              |
-|------------|---------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
-| `coder`    | yes     | `fs.read`, `fs.write`, `fs.delete`, `fs.stat`, `fs.list`, `grep`, `git.{status,diff,add,commit,log,reset}`, `patch.apply`, `test.run` | Writing & modifying production code  |
-| `tester`   | yes\*   | `fs.read`, `fs.list`, `fs.stat`, `grep`, `test.run`, `patch.apply`                                                            | Writing tests only                   |
-| `security` | no      | `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.diff`, `git.log`                                                                 | CWE/OWASP audit, JSON-only output    |
-| `reviewer` | no      | `fs.read`, `grep`, `git.diff`, `git.log`                                                                                       | Code review, approve/reject diffs    |
+| Role       | Writer? | Execution    | Allowed tools                                                                                                                  | Use for                              |
+|------------|---------|--------------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
+| `coder`    | yes     | `in-process` | `fs.read`, `fs.write`, `fs.delete`, `fs.stat`, `fs.list`, `grep`, `git.{status,diff,add,commit,log,reset}`, `patch.apply`, `test.run` | Writing & modifying production code  |
+| `tester`   | yes\*   | `in-process` | `fs.read`, `fs.list`, `fs.stat`, `grep`, `test.run`, `patch.apply`                                                            | Writing tests only                   |
+| `security` | no      | `in-process` | `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.diff`, `git.log`                                                                 | CWE/OWASP audit, JSON-only output    |
+| `reviewer` | no      | `in-process` | `fs.read`, `grep`, `git.diff`, `git.log`                                                                                       | Code review, approve/reject diffs    |
+| `analyst`  | no      | `in-process` | `fs.read`, `fs.list`, `fs.stat`, `grep`, `git.status`, `git.diff`, `git.log`                                                  | Answering a question, investigation, a report — no change to the tree |
+
+The three readers carry `execution: 'in-process'` ([D-44](DECISIONS.md)). On the `cli` tier a read-only role is handed the backend's own file tools, so a review or an audit that only reads the tree is still a change MAF did not gate at the moment it happened; keeping the readers in-process puts their calls through policy, redaction and the attestor instead. `analyst` is the fifth built-in ([D-43](DECISIONS.md)): a read-only role for work that changes nothing, so a plan that asks for an investigation has somewhere to route it that is neither a writer nor a diff-reviewer.
 
 \* **The two tester definitions in this repository differ.** The built-in tester above (`TESTER_TOOLS` in `defaults.ts`) holds `patch.apply` and no `fs.write`: it can apply a diff but cannot create or overwrite a file. The `.maf/roles.yaml` this repository ships grants the tester `fs.write` as well. `maf run` reads `.maf/roles.yaml` from the *target* directory, so which tester a run gets depends on that directory: one with no roles file gets the built-in tester, one with a copy of this repository's file gets `fs.write`. Either way the tester is a writer (see [Writer roles](#writer-roles)), so its changes are security-reviewed. On the in-process tier the shipped policy also limits *where* it may write — `tester-write-only-tests` and `tester-no-ci-config` in `.maf/policy.yaml` — because the tool allowlist and the policy work together, and neither alone is sufficient. On the `cli` tier neither the allowlist nor the policy reaches the backend's own tools.
 
@@ -68,6 +71,7 @@ Fields:
 | `maxToolIterations` | no       | Cap on tool-call iterations (turns) in the loop. |
 | `execution`         | no       | `'in-process'` or `'cli'`. Default: `'in-process'` for a [writer](#writer-roles), `'cli'` for any other role ([D-01](DECISIONS.md)). `in-process` routes the role through the gated `InProcessAgentLoop` (per-turn processor pipeline + policy gating + bounded malformed-tool-call repair) and needs a `TurnAdapter` with the `inProcessLoop` capability. Without one, a read-only role falls back to `cli` and notes the fallback in the run's transcript and in the bundle's `executionTiers` (`fellBackFrom: 'in-process'`), while a writer refuses to start unless the run allows ungoverned writers (`--allow-ungoverned`). A writer set to `'cli'` needs the same flag. Any other value is a `RoleConfigError`. See the README "In-process execution" section. |
 | `expectsChange`     | no       | `true` when the role's job is to change the tree ([D-32](DECISIONS.md)). A node of such a role that finishes with an answer — a `cli`-tier backend that exits 0, or an in-process loop that completes — but leaves no diff against its start commit fails with `no_change`, the output tail (in-process, the loop's last text) in the error. On the `cli` tier that is what a backend that refused the edit under its own permission settings looks like; in-process, a coder whose every tool call failed and that said so. An in-process loop that stops any other way keeps its own failure (`budget_exhausted`, `loop_failed`). Only a writer may set it; on any other role it is a `RoleConfigError`. The built-in `coder` and this repository's `.maf/roles.yaml` coder set it; the tester does not, because a tester that adds no test has often done its job. |
+| `expectsToolCalls`  | no       | `true` when a role that does not expect a change has the job of *calling* a tool ([D-46](DECISIONS.md)) — the built-in `tester` included, which holds the write tool `test.run` but expects no change. An `in-process` node of such a role that finishes with an answer after **zero executed tool calls** fails with `no_work` — an answer produced without looking at anything. The count is of the calls a node *made*, not of the call the task *needed* — a `tester` that reads one file and never runs `test.run` still passes, the limit the planner-tool-naming work leaves for 0.5.0 ([BUILD_PLAN](BUILD_PLAN.md) Phase 3b). "Executed" is a call that **ran** (`result.metadata.refused !== true`): an `Allow`, or an `Escalate` the approval gate approved. A `Deny`, an unapproved `Escalate`, and an `Indeterminate` (an engine rule that could not be evaluated, or a malformed call's `builtin:input-schema` refusal) never ran and do not count. The count is this attempt's, while the refusal clause and the named ids span the node's attempts, as on `no_change`. A set that sets it `true` on a role with no tool (it could never be satisfied), or sets it at all — `true` or `false` — on a role that expects a change, is refused at load: such a role is judged by the tree (`no_change`), never by its call count. Default: `true` for a role that does not expect a change and lists at least one tool, `false` for a role that lists none. Only meaningful for a role that does not expect a change, on the `in-process` tier — the `cli` tier attests no per-call record, so the check is not made there. |
 
 ### YAML or JSON?
 
@@ -96,9 +100,13 @@ RoleDispatcher.runNode(node):
      writer on the cli tier, allowUngoverned:        UNGOVERNED banner on stderr (once per run) and an
                                                      // [ungoverned] transcript note for the node
      reader that asked for in-process, fell back:    [warn] transcript note
-  2. if isWriterRole(role):
-       startCommit = git rev-parse HEAD              // captured before the node runs, once per node;
-                                                     // a retry reuses it (empty tree if no commits yet)
+  2. startCommit = git rev-parse HEAD                // captured before the node runs, once per node, for
+                                                     // *every* node and not only writers (F7), so a retry
+                                                     // reuses it (empty tree if no commits yet)
+     role holds no write tool:                       bracket = { at: performance.now(),
+                                                              tree: snapshotTree(cwd) }
+                                                     // taken before the turn, so the reader is diffed against
+                                                     // the tree it found and not against HEAD (F7)
   3. roleTools = new RoleToolRegistry(baseTools, role.allowedTools)
   4. rolePrompt = await roles.loadPrompt(role)       // the harness's text for the role
   5. systemPrompt = injector.assemble(node.label, sessionId, role.role) + '\n' + rolePrompt
@@ -123,13 +131,33 @@ RoleDispatcher.runNode(node):
        if the run has a review gate, or the harness requires review:
          decision = await reviewGate.review(…)       // the node waits; recorded in approvals
          if required and not approved: throw ReviewRefused
+ 7b. reader role (no write tool), once per attempt, after the turn (F7) — the change its *own* turn made,
+     from the bracket opened in step 2:
+       endTree = snapshotTree(cwd); if endTree == bracket.tree: the turn changed nothing, stop here
+       diff = diffTrees(cwd, bracket.tree, endTree)
+       in-process: a concurrent writer is named on either of two conditions (D-45) — (a) a writer still
+                    holding the lock whose own gate has not yet begun, so its coming diff will carry
+                    this change; or (b) a writer whose own gate read every path here and has not seen
+                    them change since. If one qualifies, record the attribution and the bracket diff
+                    as a subject — the node does not fail; the writer's own gate has judged the change,
+                    or is about to
+       otherwise:  throw NodeFailure('unexpected_change')   // the diff recorded as a subject
   8. fail the node: a cli result that carried a transport failure → TransportError (may be retried);
      one that reported failure, or a writer's empty output → NodeFailure;
      a loop that ended budget_exhausted without node.allowPartial → NodeFailure
   9. otherwise, either tier — a cli answer, or a loop that completed —, role.expectsChange and the
      step-7 diff is empty:
        throw NodeFailure('no_change')                // the output tail in the message (D-32)
+ 10. otherwise, an in-process role that does **not** expect a change (`expectsChange` is not true)
+     whose role expects tool calls and whose executed-call count is zero (D-46):
+       throw NodeFailure('no_work')                  // role, turn count, answer excerpt in the message
 ```
+
+The judged verdicts are reached in this order, each only if nothing above it has already failed the node:
+**`unexpected_change`** (step 7b, with attribution weighed inside it) → **`no_change`** (step 9) →
+**`no_work`** (step 10). A reader that failed step 7b never reaches steps 9 or 10; `no_change` and `no_work`
+are disjoint by `expectsChange` — the first requires `true`, the second is taken only when it is not — so
+the two can never both apply to one node.
 
 A node that fails, after its last attempt, is handed to the failure recorder: the memory graph gets a `Task` (the node's instruction, with the run's title in its properties) joined to a `Failure` by a `CAUSED_FAILURE` edge, which the planner recalls the next time a title with the same first three words is planned ([D-37](DECISIONS.md)).
 
@@ -153,7 +181,7 @@ A role is a writer when it holds any of `fs.write`, `fs.delete`, `patch.apply`, 
 - puts a diff the security gate passed to the human review gate, when the run has one or the harness requires review ([D-34](DECISIONS.md); see [SECURITY.md](SECURITY.md#the-human-review-gate));
 - fails the node on the `cli` tier if the backend returns empty output, and on either tier — for a role with `expectsChange` — if it answers and leaves the tree unchanged against the start commit (`no_change`, [D-32](DECISIONS.md)): in-process, when its loop completed.
 
-A role that holds **no** write tool gets two of those steps all the same, and this is deliberate (F7): MAF diffs a reader's turn too, by bracketing it with two working-tree snapshots and diffing those, so the change it answers for is the one its own turn made. A writer is diffed against its start commit, as the gate has always done. A reader whose turn changed the tree fails with `unexpected_change` — the mirror of `no_change` — and that change is recorded as a subject of the run's attestation. The bracket matters: a writer that ran before it and committed nothing (no node commits between DAG nodes), or the user's own dirty checkout under `--no-worktree`, sits in both snapshots and is not blamed on the reader. This guard sees what the review diff sees and no more — a path the repository's `.gitignore` already ignores, and this run's `.maf/` runtime state, are outside both. Nothing is reverted; the node names the files and prints the `git diff` / `git checkout --` lines. On the `claude` backend a `cli`-tier reader is also spawned with only the reading tools (`--tools Read,Glob,Grep`), so the built-in `reviewer` and `security` roles cannot write at all; `codex` and `gemini` have no such flag, and for them this diff guard is the only defence. The role's allowlist does not do this work on the `cli` tier — it is not passed to the backend — which is why the guard is a diff and not an allowlist.
+A role that holds **no** write tool gets two of those steps all the same, and this is deliberate (F7): MAF diffs a reader's turn too, by bracketing it with two working-tree snapshots and diffing those, so the change it answers for is the one its own turn made. A writer is diffed against its start commit, as the gate has always done. A reader whose turn changed the tree fails with `unexpected_change` — the mirror of `no_change` — and that change is recorded as a subject of the run's attestation. **One change is not the reader's and does not fail it** ([D-45](DECISIONS.md)): on the `in-process` tier the dispatcher asks a ledger of the run's writer locks, and a change is attributed to a *concurrent* writer instead on either of two conditions: the writer's own reviewed diff already held every path here and has not seen them change since, or the writer still holds the lock and its own gate has not yet begun, so its coming diff will carry the change — recorded with the three working-tree ids and the diff's digest, so the change is still judged by a gate (that writer's) rather than excused from every gate at once. A path the rule cannot settle fails the reader, and with no writer to name the change is the reader's and the node fails exactly as before. The ledger is consulted on the `in-process` tier only: a `cli`-tier reader holds the writer lock itself, so no other writer can have been running and any change it shows is its own. The bracket matters: a writer that ran before it and committed nothing (no node commits between DAG nodes), or the user's own dirty checkout under `--no-worktree`, sits in both snapshots and is not blamed on the reader. This guard sees what the review diff sees and no more — a path the repository's `.gitignore` already ignores, and this run's `.maf/` runtime state, are outside both. Nothing is reverted; the node names the files and prints the `git diff` / `git checkout --` lines. On the `claude` backend a `cli`-tier reader is spawned with only the reading tools (`--tools Read,Glob,Grep`), so it cannot write at all. That covers a *custom* read-only role, and a built-in reader that asked for `in-process` and fell back to `cli` on an adapter without the loop; the built-in `security`, `reviewer` and `analyst` run `in-process` by default ([D-44](DECISIONS.md)), where the role's allowlist governs them instead. `codex` and `gemini` have no such flag, and for them this diff guard is the only defence. The role's allowlist does not do this work on the `cli` tier — it is not passed to the backend — which is why the guard is a diff and not an allowlist.
 
 The scheduler's writer lock — which stops two nodes editing the tree at once — uses a broader test, `isWriterForLock(role, adapter, baseTools)`: every role that runs on the `cli` tier counts as a writer there, because its backend CLI has file tools of its own whatever the allowlist says — including a read-only role that asked for `in-process` on an adapter that cannot run it — and an `in-process` role counts as one if it holds any tool that is not read-only.
 
@@ -164,8 +192,12 @@ The scheduler's writer lock — which stops two nodes editing the tree at once �
 > After any coder node that introduces new behavior, emit a tester node that depends on it.
 >
 > When a task touches authentication, parsing of user input, secrets, or external network calls, emit an explicit security node. (A lightweight automatic security scan also runs on every writer role's diff.)
+>
+> A task that asks a question, an investigation or a report — no change to the code — goes to a read-only role. A node whose role must change the tree fails if it does not.
 
-If the LLM emits a node with `agentRole: "ghost"` and the role set does not define `ghost`, the plan is **rejected**: `plan()` throws `planner: node "n1" asks for unknown agentRole "ghost". Known roles: coder, tester, ...`. Substituting the default was the escalation — the default is `coder`, a writer — so a plan the model got wrong must not be quietly re-planned as a privileged one.
+The catalogue the planner is handed renders each role's writer flag and whether it must change the tree — `- analyst (read-only): …`, `- coder (default, must change the tree): …` — from the role's own tools, never from its name ([D-43](DECISIONS.md)). That is the same predicate the dispatcher uses ([D-07](DECISIONS.md)): a role called `coder` that holds only read tools renders as read-only, and the planner routes on that, not on the label.
+
+If the LLM emits a node with `agentRole: "ghost"` and the role set does not define `ghost`, the plan is **rejected**: `plan()` throws `planner: node "n1" asks for unknown agentRole "ghost". Known roles: coder, tester, ...`. Substituting the default was the escalation — the default is `coder`, a writer — so a plan the model got wrong must not be quietly re-planned as a privileged one. **Known limit:** the planner does not retry a rejected plan. The throw fails the run; recovering means re-running, not a second planning pass the harness performs on its own, so a model that once emits an unknown role name fails that run rather than being steered back.
 
 ## Read-only roles
 
@@ -173,10 +205,10 @@ The policy this repository ships (`.maf/policy.yaml`) includes:
 
 ```yaml
 - id: deny-readonly-roles
-  description: Reviewer and security roles are read-only
+  description: Reviewer, security and analyst roles are read-only
   priority: 85
   predicate:
-    agentRole: [reviewer, security]
+    agentRole: [reviewer, security, analyst]
     toolId: [fs.write, patch.apply, fs.delete, git.add, git.commit, git.reset]
   action:
     kind: Deny
@@ -185,7 +217,7 @@ The policy this repository ships (`.maf/policy.yaml`) includes:
 
 That is belt-and-suspenders with the tool allowlist: even if a future role config grants `fs.write` to `reviewer`, the policy will deny the call on the `in-process` tier.
 
-**On the `cli` tier this rule is in force and unreachable.** A reader runs there by default ([D-01](DECISIONS.md)), the policy engine only ever sees an in-process tool call, and on the `cli` tier the backend keeps its own tools — so this Deny never fires for the very roles it names, and a live audit found a `reviewer` edit a tracked file under it and be recorded as `Succeeded`. What catches that is not the policy but the diff guard above: the node fails with `unexpected_change` and the change becomes a subject of the attestation (F7). The rule is still worth keeping for a reader that sets `execution: in-process`; the bundle's `executionTiers` show which tier each node actually ran on, which is how a reader can tell the two cases apart.
+**On the `cli` tier this rule is in force and unreachable.** Before [D-44](DECISIONS.md), a reader ran there by default ([D-01](DECISIONS.md)): the policy engine only ever sees an in-process tool call, and on the `cli` tier the backend keeps its own tools — so this Deny never fired for the very roles it names, and a live audit found a `reviewer` edit a tracked file under it and be recorded as `Succeeded`. That is why the three built-in readers now ask for `in-process` ([D-44](DECISIONS.md)), where this rule and the tool allowlist are both in force. A **custom** read-only role still runs on the `cli` tier unless it sets `execution: 'in-process'` ([D-01](DECISIONS.md)), and for it this rule remains unreachable; what catches it is not the policy but the diff guard above — the node fails with `unexpected_change` and the change becomes a subject of the attestation (F7). The bundle's `executionTiers` show which tier each node actually ran on, which is how the two cases are told apart.
 
 ## Authoring a new role
 
@@ -195,5 +227,6 @@ That is belt-and-suspenders with the tool allowlist: even if a future role confi
 4. Add a policy rule with `predicate.agentRole: "<role>"` for any path/operation restrictions that aren't already implied by the tool list.
 5. (Optional) Set `model`, `timeoutMs`, or `maxToolIterations` if the role has special performance needs.
 6. (Optional) Set `expectsChange: true` if the role's job is to change the tree, so a `cli`-tier node that changes nothing fails rather than succeeds.
+7. (Optional) Set `expectsToolCalls: false` on a role that does not expect a change (a reader or the tester) whose job is not to call a tool, so an in-process node of it that answers after zero executed calls succeeds rather than fails ([D-46](DECISIONS.md)). The default for such a role that lists a tool is `true`.
 
 The planner picks up the new role automatically through `roles.catalog()`.

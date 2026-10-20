@@ -35,7 +35,8 @@
         "fs.read", "fs.list", "fs.stat", "grep", "git.diff", "git.log"
       ],
       "policyTag": "security",
-      "maxToolIterations": 6
+      "maxToolIterations": 10,
+      "execution": "in-process"
     },
     {
       "role": "reviewer",
@@ -45,7 +46,19 @@
         "fs.read", "grep", "git.diff", "git.log"
       ],
       "policyTag": "reviewer",
-      "maxToolIterations": 4
+      "maxToolIterations": 10,
+      "execution": "in-process"
+    },
+    {
+      "role": "analyst",
+      "description": "Read-only. Answers a question about the code, investigates, reports. Makes no change.",
+      "promptFile": "prompts/analyst.md",
+      "allowedTools": [
+        "fs.read", "fs.list", "fs.stat", "grep", "git.status", "git.diff", "git.log"
+      ],
+      "policyTag": "analyst",
+      "maxToolIterations": 10,
+      "execution": "in-process"
     }
   ]
 }

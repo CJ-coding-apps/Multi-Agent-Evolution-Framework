@@ -1,0 +1,210 @@
+{
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "subject": [
+    {
+      "name": "task-3e0652f4-11a7-461a-adf3-17cf3abb5520.diff",
+      "digest": {
+        "sha256": "34d6fe9c4f87b01b11b0e7da1e0e4b4183f7d6e2bcee6db88da66eb116f71d27"
+      }
+    }
+  ],
+  "predicateType": "https://maf.dev/attestation/run/v1",
+  "predicate": {
+    "runId": "b044e466-04d9-459f-8dac-333886c2dec9",
+    "keySource": "dev",
+    "provenance": {
+      "buildType": "https://maf.dev/build/v1",
+      "builder": {
+        "id": "@maf/inprocess-demo@0.3.1",
+        "modelVersion": "scripted"
+      },
+      "invocation": {
+        "configSource": {
+          "uri": "inprocess-demo",
+          "digest": {
+            "sha256": "95b3763afc0c87cc94783f81505f60ae497eff7c190d612d9bccfadf2a445291"
+          }
+        },
+        "parameters": {
+          "harnessId": "inprocess-demo"
+        },
+        "environment": {}
+      },
+      "materials": [],
+      "runEnv": {
+        "platform": "darwin",
+        "nodeVersion": "v25.6.0",
+        "timestamp": "2026-10-14T22:57:02.201Z"
+      }
+    },
+    "toolCalls": [
+      {
+        "id": "495c75c0-8932-40ae-94c2-90f218be3f91",
+        "toolId": "fs.read",
+        "agentId": "inprocess-coder-task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "runId": "b044e466-04d9-459f-8dac-333886c2dec9",
+        "taskId": "task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "input": {
+          "path": "config.txt"
+        },
+        "result": {
+          "stdout": "db_host=localhost\napi_key=[REDACTED:aws-access-key]\nport=5432\n",
+          "stderr": "",
+          "exitCode": 0,
+          "duration": 1.3396390000002611,
+          "metadata": {
+            "lines": 4
+          }
+        },
+        "invokedAt": "2026-10-14T22:57:00.907Z",
+        "durationMs": 2,
+        "policyDecision": {
+          "verdict": "Allow"
+        }
+      },
+      {
+        "id": "76de35f9-1135-4440-af44-025a97fffeca",
+        "toolId": "fs.delete",
+        "agentId": "inprocess-coder-task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "runId": "b044e466-04d9-459f-8dac-333886c2dec9",
+        "taskId": "task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "input": {
+          "path": "sum.js"
+        },
+        "result": {
+          "stdout": "",
+          "stderr": "policy Escalate: Policy requires approval — approval Rejected: MAF_HEADLESS=1 is set, so no one is asked; the request is recorded at /var/folders/2y/2cglng9n6mx5t0gfyf8tlk9w0000gp/T/maf-inproc-kn1neb/repo/.maf/approvals/pending/81b1879c-aadf-4860-bf89-cdaf5b53c46e.json",
+          "exitCode": 1,
+          "duration": 0,
+          "metadata": {
+            "refused": true,
+            "ruleId": "delete-needs-a-human",
+            "approval": "Rejected"
+          }
+        },
+        "invokedAt": "2026-10-14T22:57:00.951Z",
+        "durationMs": 9,
+        "policyDecision": {
+          "verdict": "Escalate",
+          "reason": "Policy requires approval",
+          "approvalRequest": {
+            "id": "81b1879c-aadf-4860-bf89-cdaf5b53c46e",
+            "runId": "b044e466-04d9-459f-8dac-333886c2dec9",
+            "taskId": "task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+            "requestedBy": "inprocess-coder-task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+            "toolId": "fs.delete",
+            "policyRuleId": "delete-needs-a-human",
+            "description": "Tool fs.delete requires approval. Path: sum.js",
+            "createdAt": "2026-10-14T22:57:00.951Z",
+            "expiresAt": "2026-10-15T22:57:00.951Z"
+          }
+        }
+      },
+      {
+        "id": "0c7e4780-d14a-4d30-80ff-5e90762145cf",
+        "toolId": "fs.write",
+        "agentId": "inprocess-coder-task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "runId": "b044e466-04d9-459f-8dac-333886c2dec9",
+        "taskId": "task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "input": {
+          "path": "sum.js",
+          "content": "module.exports = (a, b) => a + b;\n"
+        },
+        "result": {
+          "stdout": "Wrote 34 bytes to sum.js",
+          "stderr": "",
+          "exitCode": 0,
+          "duration": 1.3758669999997437,
+          "metadata": {}
+        },
+        "invokedAt": "2026-10-14T22:57:00.966Z",
+        "durationMs": 2,
+        "policyDecision": {
+          "verdict": "Allow"
+        }
+      },
+      {
+        "id": "68cc820c-8185-46b9-9487-9f61be768ec1",
+        "toolId": "test.run",
+        "agentId": "inprocess-coder-task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "runId": "b044e466-04d9-459f-8dac-333886c2dec9",
+        "taskId": "task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "input": {},
+        "result": {
+          "stdout": "\n> demo@1.0.0 test\n> node test.js\n\nPASS\n",
+          "stderr": "",
+          "exitCode": 0,
+          "duration": 1022.8831729999997,
+          "metadata": {
+            "runner": "npm"
+          }
+        },
+        "invokedAt": "2026-10-14T22:57:00.972Z",
+        "durationMs": 1023,
+        "policyDecision": {
+          "verdict": "Allow"
+        }
+      }
+    ],
+    "approvals": [
+      {
+        "requestId": "81b1879c-aadf-4860-bf89-cdaf5b53c46e",
+        "decision": {
+          "requestId": "81b1879c-aadf-4860-bf89-cdaf5b53c46e",
+          "status": "Rejected",
+          "reviewer": "headless",
+          "comment": "MAF_HEADLESS=1 is set, so no one is asked; the request is recorded at /var/folders/2y/2cglng9n6mx5t0gfyf8tlk9w0000gp/T/maf-inproc-kn1neb/repo/.maf/approvals/pending/81b1879c-aadf-4860-bf89-cdaf5b53c46e.json",
+          "decidedAt": "2026-10-14T22:57:00.959Z"
+        },
+        "commitHash": "0000000000000000000000000000000000000000",
+        "diffHash": "648590c6e06f1e25c810d17b2031741f053935e7afe19982ad6a6593ddf6c002",
+        "intotoStmt": "{\"_type\":\"https://in-toto.io/Statement/v0.1\",\"subject\":[{\"name\":\"tool-call:81b1879c-aadf-4860-bf89-cdaf5b53c46e\",\"digest\":{\"sha256\":\"648590c6e06f1e25c810d17b2031741f053935e7afe19982ad6a6593ddf6c002\"}}],\"predicateType\":\"https://slsa.dev/provenance/v0.2\",\"predicate\":{\"builder\":{\"id\":\"maf-approval-gate@0.3.1\",\"modelVersion\":\"headless\"},\"buildType\":\"https://maf.dev/build/v1\",\"invocation\":{\"configSource\":{\"uri\":\"policy-rule:delete-needs-a-human\",\"digest\":{\"sha256\":\"648590c6e06f1e25c810d17b2031741f053935e7afe19982ad6a6593ddf6c002\"}},\"parameters\":{\"toolId\":\"fs.delete\",\"declaredPaths\":[\"sum.js\"],\"status\":\"Rejected\"},\"environment\":{}}}}"
+      }
+    ],
+    "diffHashes": {
+      "task-3e0652f4-11a7-461a-adf3-17cf3abb5520.diff": "34d6fe9c4f87b01b11b0e7da1e0e4b4183f7d6e2bcee6db88da66eb116f71d27"
+    },
+    "securityFindings": [
+      {
+        "nodeId": "task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "result": {
+          "findings": [],
+          "summary": "The scripted adapter reports no findings.",
+          "passed": true
+        }
+      }
+    ],
+    "outcome": {
+      "status": "Succeeded",
+      "unscheduled": []
+    },
+    "policyInForce": {
+      "source": "/var/folders/2y/2cglng9n6mx5t0gfyf8tlk9w0000gp/T/maf-inproc-kn1neb/repo/.maf/policy.yaml",
+      "sha256": "9dc13631fdf2d279b716c98adf40479d959fac5b6b9baa75b81e328e47c29dd3",
+      "ruleCount": 1,
+      "rules": [
+        {
+          "id": "delete-needs-a-human",
+          "effect": "Escalate",
+          "matcher": "toolId=fs.delete"
+        }
+      ],
+      "counts": {
+        "allow": 3,
+        "deny": 0,
+        "escalate": 1,
+        "indeterminate": 0
+      }
+    },
+    "executionTiers": [
+      {
+        "nodeId": "task-3e0652f4-11a7-461a-adf3-17cf3abb5520",
+        "role": "coder",
+        "tier": "in-process",
+        "adapter": "scripted"
+      }
+    ],
+    "bundledAt": "2026-10-14T22:57:02.201Z"
+  },
+  "signature": "00601a00e8a266fb88c53dc88123eab1ec0cc0e8f1e8ae99fab51f5add69606a"
+}

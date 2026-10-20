@@ -168,3 +168,78 @@ test('parseSecurityOutput handles severity case-insensitively', () => {
   assert.equal(res.findings.length, 1);
   assert.equal(res.findings[0]?.severity, 'high');
 });
+
+// ── A5 (0.4.0 audit): the reviewer's raw output is quoted into `summary` on every fail-closed path
+// The summary is node state and reaches the record, and the reviewer is quoting a diff it may have
+// been handed a secret in. Masking runs over the whole output BEFORE the 600-character slice, so a
+// key that slice would split is still recognised — masking after it would keep the key's head.
+
+test('a fail-closed summary masks a credential the reviewer echoed (A5)', () => {
+  const raw =
+    'sure — here is the review for sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789, ' +
+    'but I am not going to emit JSON, sorry.';
+  const res = parseSecurityOutput(raw);
+  assert.equal(res.passed, false);
+  assert.match(res.summary, /Could not parse security review output/);
+  assert.doesNotMatch(res.summary, /sk-ant/);
+  assert.match(res.summary, /\[REDACTED:anthropic-key\]/);
+});
+
+test('a credential the 600-character slice would split is masked, not truncated (A5)', () => {
+  // 585 filler characters put the key across the 600-char boundary: the cut lands inside it. Masking
+  // before the slice replaces the whole key in place, so the cut can only fall inside the label —
+  // whereas slicing first would preserve the head of the key as evidence. The raw output has no `{`,
+  // so it takes the first fail-closed path and is quoted whole.
+  const key = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  // The space before the key is load-bearing: the pattern anchors on \b, so the key must be preceded
+  // by a non-word character to be recognised at all — at this offset a word character would defeat it.
+  const res = parseSecurityOutput('x'.repeat(584) + ' ' + key);
+  assert.equal(res.passed, false);
+  assert.doesNotMatch(res.summary, /sk-ant/, 'no part of the split key survives the slice');
+});
+
+// ── B2 (0.4.0 audit round 2): the review that DOES parse reaches the record too ──────────────────
+// `summary` and every string field of a finding become the `GateRefused` message, the outcome, the
+// bundle, the memory graph and `<past-failures>` — and the realistic case is a reviewer quoting the
+// key it just found. Masking is part of the parse, not of the fail-closed path alone.
+
+test("a parsed review's summary has its credentials masked before it is kept (B2)", () => {
+  const key = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const raw = JSON.stringify({
+    findings: [],
+    summary: `The diff is clean apart from a hard-coded key (${key}) in config.ts.`,
+    passed: true,
+  });
+  const res = parseSecurityOutput(raw);
+  assert.equal(res.findings.length, 0);
+  assert.doesNotMatch(res.summary, /sk-ant/, 'the key the reviewer quoted must not survive');
+  assert.match(res.summary, /\[REDACTED:anthropic-key\]/, 'and the position it occupied is marked');
+});
+
+test('a parsed finding is masked in every string field — rationale, remediation, file, category (B2)', () => {
+  const key = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const raw = JSON.stringify({
+    findings: [
+      {
+        severity:    'high',
+        category:    `secrets-${key}`,
+        file:        `src/${key}.ts`,
+        rationale:   `The value ${key} is committed in the clear.`,
+        remediation: `Rotate ${key} and read it from the environment.`,
+      },
+    ],
+    summary: '',
+    passed:  false,
+  });
+  const res = parseSecurityOutput(raw);
+  const f = res.findings[0];
+  assert.ok(f, 'the finding is kept — a high finding is not dropped for a masked field');
+  for (const [name, value] of Object.entries(f)) {
+    if (typeof value !== 'string') continue;
+    assert.doesNotMatch(value, /sk-ant/, `the key survived in finding.${name}: ${value}`);
+  }
+  assert.match(f.rationale,   /\[REDACTED:anthropic-key\]/);
+  assert.match(f.remediation, /\[REDACTED:anthropic-key\]/);
+  assert.match(f.file,        /\[REDACTED:anthropic-key\]/);
+  assert.match(f.category,    /\[REDACTED:anthropic-key\]/);
+});

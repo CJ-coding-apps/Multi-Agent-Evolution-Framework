@@ -140,3 +140,65 @@ test('the protocol says the input must use exactly the catalog\'s field names, a
   assert.match(out, /answered with an error and not run/);
   assert.match(out, /"diff": string \(required\)/);
 });
+
+// ── D-46(i): the governed turn says what it has, before it lists anything ─────────────────────
+// A governed turn runs `claude --tools ''` (CLAUDE_TURN_ISOLATION_ARGS), so the host's native tools
+// are gone — but Claude Code's own system prompt still advertises Read/Write/Bash/Glob/Grep. Live row
+// 2b of the 3.0c pass: the model tried the host's tools, was refused ("No such tool available", not
+// MAF's string), and gave up. The protocol now names the tools it has and the ones it does not, and
+// does so before the catalogue it points at.
+
+test('the protocol tells the model its host tools are off, and says it before the catalogue (D-46)', () => {
+  const out = buildTurnSystemPrompt('BASE', [fakeTool('fs.read', 'Read File', 'read a file')]);
+
+  assert.match(
+    out,
+    /The host's own tools — Read, Write, Edit, Bash, Glob, Grep, WebFetch, or any other tool you may believe you have — are not available in this turn, and a request for one is refused\./,
+  );
+  assert.match(
+    out,
+    /The only tools you have are the ones listed below; request one with a fenced block exactly as described, by its id\./,
+  );
+  assert.ok(
+    out.indexOf("The host's own tools") < out.indexOf('AVAILABLE TOOLS'),
+    'the sentence must precede the catalogue it names',
+  );
+});
+
+// ── A5 (0.4.0 audit): the quoted body of a malformed block is model text that becomes node state ──
+// `snippet` quotes a malformed tool_call block into the parse error. The loop keeps that error, and
+// once the repair budget is spent it becomes the node's failure, recorded. A key the model printed
+// inside the block must not survive into it, and because masking runs before the 80-character cut, a
+// key the cut would split is still recognised — masking after the cut would preserve its head.
+
+test('a malformed tool_call block is masked before it is quoted into the parse error (A5)', () => {
+  const key = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  // Unterminated object: not valid JSON, so it takes the parse-error path, and the key sits inside
+  // the quoted snippet.
+  const turn = parseTurn(`\`\`\`tool_call\n{"toolName":"fs.read","input":{"path":"${key}"}\n\`\`\``);
+  const err = turn.parseErrors?.[0] ?? '';
+  assert.equal(turn.toolCalls.length, 0);
+  assert.match(err, /not valid JSON/, 'the block is still reported as malformed');
+  assert.doesNotMatch(err, /sk-ant/, 'no part of the key survives the quote');
+  assert.match(err, /\[REDACTED:anthropic-key\]/, 'and the position it occupied is marked');
+});
+
+test('a malformed block with no credential is quoted verbatim (A5: masking is not a mangler)', () => {
+  const turn = parseTurn('```tool_call\n{"toolName":"fs.read","input":{"path":"a.txt"}\n```');
+  assert.match(turn.parseErrors?.[0] ?? '', /"fs\.read"/);
+  assert.match(turn.parseErrors?.[0] ?? '', /a\.txt/);
+});
+
+test('a credential straddling the 80-character cut is still masked, not truncated (N4)', () => {
+  // The snippet cuts at 77 characters. Put the key so the cut lands four characters into its body:
+  // 60 filler + `sk-ant-api03-` (13) + 4 = 77. Masking AFTER the cut would leave `sk-ant-api03-AAAA`,
+  // whose remaining body is under the pattern's 20 characters, so the head would survive as evidence.
+  // Masking before the cut replaces the whole key in place, so the cut can only fall inside the label.
+  // Dots, not letters: the pattern anchors on \b, so the key must be preceded by a non-word character.
+  const body = `${'.'.repeat(60)}sk-ant-api03-${'A'.repeat(40)}`;
+  const turn = parseTurn('```tool_call\n' + body + '\n```');
+  const err = turn.parseErrors?.[0] ?? '';
+  assert.match(err, /not valid JSON/, 'the block is still reported as malformed');
+  assert.doesNotMatch(err, /sk-ant/, 'a key the cut splits must not survive as evidence');
+  assert.match(err, /\[REDACTED/, 'and the position it occupied is marked');
+});

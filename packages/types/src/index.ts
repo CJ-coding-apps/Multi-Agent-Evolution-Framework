@@ -265,6 +265,48 @@ export interface RunOutcome {
   deferredWriters?: NodeId[];
 }
 
+/**
+ * A window during which a writer node held the scheduler's writer lock (WP-3.0c, the F7 window).
+ * The runner records one per writer turn; the dispatcher reads them to tell a reader's own change
+ * from a concurrent writer's — the one case the reader's two working-tree snapshots cannot separate
+ * on their own, because a sibling writer's uncommitted work in the shared tree lands inside the
+ * reader's turn.
+ */
+export interface WriterLockInterval {
+  nodeId: NodeId;
+  /** The monotonic reading (`performance.now()`) when the writer acquired the lock. */
+  from:   number;
+  /** The monotonic reading when it released it. */
+  to:     number;
+}
+
+/**
+ * The scheduler's writer lock, as the two things that need it see it: the runner records the
+ * intervals, and the dispatcher asks which writers overlapped a reader's turn, and whether one is
+ * still holding. An interface rather than the runner itself, so the dispatcher need not know the
+ * scheduler.
+ *
+ * Times are monotonic readings (`performance.now()`), never a wall clock. Only the order and the
+ * overlap of holds are ever asked about, and `Date.now()` answers both badly: it steps backwards on
+ * an NTP correction or a manual clock change, and its millisecond resolution returns the same value
+ * for a release and the very next reader's start, which would excuse that reader for its own change.
+ */
+export interface WriterLockLedger {
+  /** A writer acquired the lock. */
+  enter(nodeId: NodeId): void;
+  /** The writer released it. A no-op for a node that never entered. */
+  exit(nodeId: NodeId): void;
+  /**
+   * Every writer whose hold overlapped any part of `[from, to]`, in acquisition order: the writers
+   * that have released, oldest first — writers are serialized, so that order is the order they ran —
+   * followed by any writer still holding. Empty when no writer overlapped. The caller drops its own
+   * node, which on the cli tier holds the lock itself.
+   */
+  writersOverlapping(from: number, to: number): NodeId[];
+  /** Whether `nodeId` holds the lock right now — entered, not yet exited. */
+  isHolding(nodeId: NodeId): boolean;
+}
+
 export interface RetryPolicy {
   maxAttempts:   number;
   backoffMs:     number;
@@ -303,6 +345,11 @@ export class TransportError extends Error {
  * same question to the same judge, and a refusal that a retry can overturn was never a
  * refusal — so a VerdictError is terminal and never retried (D-06). Gate and policy errors
  * subclass it.
+ *
+ * R8: a new subclass here needs its own kind in `outcomeFailureKind` (below). The classifier keys the
+ * policy case on this base class — because the two `PolicyViolationError` classes both subclass it and
+ * this package cannot name either — so a subclass that is neither a `GateRefused` nor a `ReviewRefused`
+ * would otherwise be reported in a run's outcome as `'policy_violation'`.
  */
 export class VerdictError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -338,6 +385,14 @@ export interface DagNodeExecution {
   startedAt?:  Date;
   finishedAt?: Date;
   error?:      string;
+  /**
+   * The node's failure as a value (L3): the kind, and — for a refusal — the rule and tool. Present for
+   * a node that failed with any verdict — a `NodeFailure`, a `GateRefused`/`ReviewRefused` or a
+   * `PolicyViolationError` — so a machine check reads the verdict directly rather than grepping
+   * `error`. Absent means MAF did not classify the failure — a transport failure or a programming
+   * error, never a verdict. A `0.3.x` outcome carries none and still parses.
+   */
+  failure?:    OutcomeFailureDetail;
   agentId?:    AgentId;
 }
 
@@ -351,6 +406,18 @@ export interface DagNodeExecution {
  *                         either tier, but its diff against the node's start commit is empty —
  *                         what a backend that refused the edit under its own permission settings
  *                         looks like (D-32).
+ *  - `no_work`          — in-process: a role that does not expect a change (`expectsChange` is not
+ *                         `true`) — the built-in readers and the `tester` — that expects a tool
+ *                         call (`expectsToolCalls`) finished with a final answer having made
+ *                         **no executed tool call** — the attested calls whose result was not
+ *                         `refused`, which is to say the calls that actually ran, an approved
+ *                         `Escalate` among them (D-46, F4/A2). A role that called nothing has not
+ *                         done its job: live row 2b's analyst answered "I could not" after the host's
+ *                         native tools were refused, and the old reading called it `Succeeded` off
+ *                         the prose. The mirror of `no_change` for a role judged by its calls, where
+ *                         `no_change` is the one judged by the tree. The count is the node's *current
+ *                         attempt*, so a retry that read only on an earlier attempt does not excuse it
+ *                         (F3/A4).
  *  - `unexpected_change`— a role that holds **no** write tool changed the tree anyway (F7). On
  *                         the cli tier that is what a backend with file tools of its own does
  *                         whatever the role's allowlist says; MAF never sees those calls. The
@@ -363,9 +430,132 @@ export type NodeFailureReason =
   | 'adapter_failed'
   | 'empty_output'
   | 'no_change'
+  | 'no_work'
   | 'unexpected_change'
   | 'budget_exhausted'
   | 'loop_failed';
+
+/**
+ * Every kind of verdict a failed node can carry in the outcome (L3/A1): the `NodeFailureReason`s, plus
+ * the three refusals the tree raises as `VerdictError`s rather than `NodeFailure`s — a security gate
+ * (`GateRefused`), a human review (`ReviewRefused`) and a policy refusal (`PolicyViolationError`). The
+ * point of the field is a machine-readable verdict, and a gate refusal is the most important verdict
+ * there is, so it gets a kind of its own rather than being left unclassified.
+ */
+export type OutcomeFailureKind =
+  | NodeFailureReason
+  | 'gate_refused'
+  | 'review_refused'
+  | 'policy_violation';
+
+/**
+ * The machine-checkable half of a node failure (L3): the `kind`, and — when a policy refusal caused
+ * it — the rule and the tool that refused, taken from the first refused call the F10 clause named.
+ * Carried on the run outcome beside the failure's prose, so a machine check reads the verdict rather
+ * than grepping the message. A `no_change` caused by anything other than a refusal (a backend that
+ * simply changed nothing) names neither, as does a gate or a review refusal — those carry no rule or
+ * tool of their own.
+ */
+export interface OutcomeFailureDetail {
+  kind:    OutcomeFailureKind;
+  ruleId?: string;
+  toolId?:  string;
+}
+
+/**
+ * The kind for a node's error, or `undefined` when there is none (L3/A1). Present for any *verdict* —
+ * a `NodeFailure`, a gate or review refusal, a policy refusal — so the outcome says why a node failed
+ * for every failure that was a judgement. Absent for a transport failure (the backend timed out or
+ * never started) and for a programming error: neither is a verdict, and inventing a kind for one would
+ * have the outcome assert something the run does not know.
+ *
+ * Order matters. `ReviewRefused` extends `GateRefused`, so it is tested first; and the policy refusal
+ * is tested as its base `VerdictError`, because the two `PolicyViolationError` classes in the tree
+ * (policy-engine's `PolicyEngine` and `ViolationHandler`) both subclass it and `@maf/types` cannot
+ * depend on `@maf/policy-engine` to name either. `VerdictError` is documented as "a gate refused it,
+ * or policy forbade it", and the gate cases are already taken above, so what is left is a policy
+ * refusal.
+ */
+export function outcomeFailureKind(err: unknown): OutcomeFailureKind | undefined {
+  if (err instanceof NodeFailure) return err.reason;
+  if (err instanceof ReviewRefused) return 'review_refused';
+  if (err instanceof GateRefused) return 'gate_refused';
+  if (err instanceof VerdictError) return 'policy_violation';
+  return undefined;
+}
+
+/**
+ * The failure as a value for the run outcome (L3/A11): the kind the dispatcher decided, and — where a
+ * refusal named them — the rule and the tool. A plain `Error` is a transport or programming failure with
+ * no verdict to report, and inventing one would have `failure` assert something the run does not know;
+ * there the field is left absent. Keys with no value are left out, so a `no_work` with no refusal reads as
+ * exactly `{ kind: 'no_work' }` rather than a record salted with `undefined`.
+ *
+ * A `NodeFailure` names its rule and tool as its own fields; a policy refusal names them on its
+ * `decision`, read structurally for the reason `outcomeFailureKind` gives — the two
+ * `PolicyViolationError` classes both subclass `VerdictError` and neither is importable here. The read
+ * mirrors the F10 clause in the dispatcher (`refusingRuleId`): a `Deny` or `Indeterminate` names the rule
+ * on the decision, an `Escalate` on the request the gate was shown. A gate or review refusal names
+ * neither — those carry no rule or tool of their own.
+ */
+export function outcomeFailureDetail(err: unknown): OutcomeFailureDetail | undefined {
+  const kind = outcomeFailureKind(err);
+  if (kind === undefined) return undefined;
+  return { kind, ...namedRefusal(err) };
+}
+
+/** The shape a `PolicyViolationError.decision` is read by; a superset of every `PolicyDecision` member. */
+interface RefusalShape {
+  verdict:          string;
+  ruleId?:          unknown;
+  toolId?:          unknown;
+  approvalRequest?: { policyRuleId?: unknown };
+}
+
+/**
+ * The rule and tool an error names, read off it (A11). A `NodeFailure`'s own fields first; failing that,
+ * the `decision` a `PolicyViolationError` carries. `toolId` is read defensively — no `PolicyDecision`
+ * carries one today, so a bare refusal recovers only its rule; the tool reaches the outcome through the
+ * dispatcher's F10 `NodeFailure`, which knows the refused call.
+ */
+function namedRefusal(err: unknown): { ruleId?: string; toolId?: string } {
+  if (err instanceof NodeFailure) {
+    return {
+      ...(err.ruleId !== undefined ? { ruleId: err.ruleId } : {}),
+      ...(err.toolId !== undefined ? { toolId: err.toolId } : {}),
+    };
+  }
+  const decision = refusalDecision(err);
+  if (decision === undefined) return {};
+  const ruleId = ruleIdOf(decision);
+  const toolId = typeof decision.toolId === 'string' ? decision.toolId : undefined;
+  return {
+    ...(ruleId !== undefined ? { ruleId } : {}),
+    ...(toolId !== undefined ? { toolId } : {}),
+  };
+}
+
+/** The decision a policy refusal carries, duck-typed: a refusal is an object that names a verdict. */
+function refusalDecision(err: unknown): RefusalShape | undefined {
+  if (err === null || typeof err !== 'object') return undefined;
+  const decision = (err as { decision?: unknown }).decision;
+  if (decision === null || typeof decision !== 'object') return undefined;
+  return typeof (decision as { verdict?: unknown }).verdict === 'string'
+    ? (decision as RefusalShape)
+    : undefined;
+}
+
+/** The rule a refusal names — the same switch the engine and the dispatcher make (`refusingRuleId`). */
+function ruleIdOf(decision: RefusalShape): string | undefined {
+  switch (decision.verdict) {
+    case 'Deny':
+    case 'Indeterminate': return typeof decision.ruleId === 'string' ? decision.ruleId : undefined;
+    case 'Escalate':      return typeof decision.approvalRequest?.policyRuleId === 'string'
+      ? decision.approvalRequest.policyRuleId
+      : undefined;
+    default:              return undefined;
+  }
+}
 
 /**
  * A node that ran but did not finish (D-04). Before this existed, a failed adapter call and an
@@ -377,12 +567,23 @@ export class NodeFailure extends Error {
   readonly reason:   NodeFailureReason;
   /** The adapter's exit code, when the failure came from a CLI-tier invocation. */
   readonly exitCode: number | undefined;
+  /** The policy rule that refused the call this failure is about, when one did (L3). */
+  readonly ruleId:   string | undefined;
+  /** The tool the refused call named, when the failure is about a refusal (L3). */
+  readonly toolId:   string | undefined;
 
-  constructor(reason: NodeFailureReason, message: string, exitCode?: number) {
+  constructor(
+    reason: NodeFailureReason,
+    message: string,
+    exitCode?: number,
+    detail?: { ruleId?: string; toolId?: string },
+  ) {
     super(message);
     this.name = 'NodeFailure';
     this.reason = reason;
     this.exitCode = exitCode;
+    this.ruleId = detail?.ruleId;
+    this.toolId = detail?.toolId;
   }
 }
 
@@ -957,13 +1158,23 @@ export interface AttestationBundle {
    * earlier bundle still parses; a reader must treat its absence as "unrecorded", never as "none".
    */
   policyInForce?:    PolicyInForce;
-  /** What each governed turn showed the model (F4), in order. Absent when no turn reported one. */
+  /**
+   * What each role call showed the model (F4), in order. Absent when no call reported one. Both
+   * tiers since WP-3.0c (D-45) — a governed turn and a cli-tier `invoke` alike — so "absent" is
+   * "unrecorded", never "nothing ran on the cli tier".
+   */
   modelSurfaces?:    ModelSurfaceRecord[];
   /**
    * The tier each node ran on (F7), in dispatch order. Absent when no node reported one — a
    * reader must treat that as "unrecorded", never as "every node ran governed".
    */
   executionTiers?:   ExecutionTierRecord[];
+  /**
+   * Changes a reader's turn attributed to a concurrent writer (WP-3.0c, the F7 window), in the
+   * order they were seen. Absent when none were — a reader must treat that as "none attributed",
+   * which is the same as "none happened".
+   */
+  attributedChanges?: AttributedChange[];
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;
@@ -973,14 +1184,27 @@ export interface AttestationBundle {
 export interface AttestorHandle {
   record(call: Omit<ToolCallRecord, 'id'>): Promise<void>;
   /**
-   * Attach one governed turn's model-facing surface to the bundle (F4). Optional so a test double
-   * that records only tool calls still satisfies the handle.
+   * Attach one role call's model-facing surface to the bundle (F4; both tiers since WP-3.0c, D-45).
+   * Optional so a test double that records only tool calls still satisfies the handle.
    */
   recordModelSurface?(record: ModelSurfaceRecord): void;
   /** Attach the policy in force (F6); the last call wins, as it runs once per run. */
   recordPolicyInForce?(policy: PolicyInForce): void;
   /** Attach the tier a node ran on (F7); one per node, a retry replacing the node's own entry. */
   recordExecutionTier?(record: ExecutionTierRecord): void;
+  /**
+   * Attach one change a reader's turn attributed to a concurrent writer (WP-3.0c, the F7 window).
+   * Optional so a test double that records only tool calls still satisfies the handle.
+   */
+  recordAttribution?(record: AttributedChange): void;
+  /**
+   * The tool calls recorded for one task (F10). A node's `no_change` failure names the policy
+   * rules that denied that node's *own* calls, so the reader is told which rule stopped the write
+   * rather than only that nothing changed — the run-wide counts answer a different question.
+   * Optional so a test double that records only tool calls still satisfies the handle; absent,
+   * the message carries no deny note.
+   */
+  toolCallsForTask?(taskId: TaskId): ToolCallRecord[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1043,6 +1267,12 @@ export interface AdapterInvokeResult {
    * retried.
    */
   transportError?: TransportError;
+  /**
+   * The model-facing surface of this cli-tier call (WP-3.0c): what MAF showed the backend and what
+   * it answered, so a role call is in the record wherever it ran. Absent when the adapter assembles
+   * none — an HTTP backend has no argv of its own to report.
+   */
+  modelSurface?: ModelSurface;
 }
 
 export interface CliAdapter {
@@ -1147,18 +1377,44 @@ export interface AssistantTurn {
 }
 
 /**
- * What a governed (in-process) turn showed the model: the system block's digest, the tool catalogue
- * as sent, and the backend argv. It exists because a model's claim about its own tools — `fix-test`'s
- * "only one tool is actually registered: `LSP`" — cannot be adjudicated from a transcript that holds
- * neither the prompt nor the argv, and the two mechanisms that could produce the claim (the model
- * reasoning from an empty *native* tool list; something per-run exposing a plugin tool) are
- * indistinguishable without this.
+ * What one turn showed the model: the system block's digest, the tool catalogue as sent, and the
+ * backend argv. It exists because a model's claim about its own tools — `fix-test`'s "only one tool
+ * is actually registered: `LSP`" — cannot be adjudicated from a transcript that holds neither the
+ * prompt nor the argv, and the two mechanisms that could produce the claim (the model reasoning from
+ * an empty *native* tool list; something per-run exposing a plugin tool) are indistinguishable
+ * without this. Since WP-3.0c both tiers record one: a governed turn from the loop, a cli-tier call
+ * from the adapter.
  */
 export interface ModelSurface {
   /** sha256, hex, of the exact system-prompt bytes handed to the backend this turn. */
   systemPromptSha256: string;
-  /** The serialized tool catalogue exactly as the system block carried it ('' when the turn sent none). */
+  /**
+   * The serialized tool catalogue exactly as the system block carried it — MAF's own registry, the
+   * tools a governed turn runs through the policy gate. On a `tier: 'cli'` record this is always `''`,
+   * and `''` there means "MAF composed no catalogue", **not** "the model was offered no tools": MAF
+   * sends a cli-tier backend one opaque prompt and no catalogue at all, and what that backend then
+   * has is its own — see `argv` for the flags it was given and `ModelSurfaceRecord.nativeTools` for
+   * what the dispatcher asked of them.
+   */
   toolCatalog:        string;
+  /**
+   * sha256, hex, of the prompt this call sent (WP-3.0c). A cli-tier role call hands the backend one
+   * opaque prompt and there was no record of it; this is that digest. Absent on a governed turn,
+   * whose prompt is the serialized history the loop owns rather than a single string.
+   */
+  promptSha256?:      string;
+  /**
+   * sha256, hex, of what a backend that reads its prompt on stdin was actually written (WP-3.0c).
+   * Codex joins the system block and the prompt into one blob on the stream, so `systemPromptSha256`
+   * and `promptSha256` — the two parts — do not by themselves say what was sent; this is that blob.
+   * Absent when the backend takes its prompt on the command line, where `argv` shows it.
+   */
+  stdinSha256?:       string;
+  /**
+   * sha256, hex, of the output the backend returned (WP-3.0c). Absent on a governed turn, whose
+   * answer is a parsed `AssistantTurn`, not one stdout string.
+   */
+  outputSha256?:      string;
   /**
    * The backend argv. Payload positionals — the system-prompt value and the trailing prompt — are
    * replaced by `<name: N bytes, sha256 H>` markers, so the *flags* (including the empty string that
@@ -1177,6 +1433,55 @@ export interface ModelSurfaceRecord extends ModelSurface {
    * as a retry, not a duplicate.
    */
   turn:   number;
+  /**
+   * Which tier produced this surface (WP-3.0c, D-45): the governed loop's turn ('in-process') or a
+   * cli-tier `invoke` ('cli'). Optional so a 0.3.1 bundle — whose records carry no tier — still
+   * parses; a reader must treat its absence as "unrecorded", never as a tier.
+   */
+  tier?:  'cli' | 'in-process';
+  /**
+   * What the dispatcher asked of the backend's own tools on this cli-tier call: `'full'` (nothing was
+   * asked — the default, and the backend keeps its native tools), `'read-only'` (a role holding no
+   * write tool), or `'none'` (a call that needs only text). Recorded because for codex and gemini
+   * nothing in `argv` shows it: neither CLI has a flag that withholds its built-in tools, so both
+   * keep everything whatever was asked. It is what was *asked for*, not what the backend did with it.
+   */
+  nativeTools?: 'full' | 'read-only' | 'none';
+}
+
+/**
+ * A change a reader's turn saw that was a concurrent writer's (WP-3.0c, the F7 window). The reader's
+ * two working-tree snapshots cancel out uncommitted work already in the tree when it began, but a
+ * sibling writer that ran *during* the reader's turn lands inside its bracket. When the lock ledger
+ * shows a writer took the change to a gate, the change is recorded here instead of failing the node:
+ * either that writer still holds the lock, so its own start-commit diff will carry the change to its
+ * gate, or its gate has run and its reviewed diff already holds every path in this reader's bracket.
+ * The bracket diff is recorded beside it, as the subject `<node>.attributed.diff`, so `diffSha256`
+ * names a diff the statement carries a digest for — in `diffHashes`, like every subject — rather than
+ * naming a change written down nowhere.
+ *
+ * The three tree ids below are what make that digest checkable rather than merely present (N6): the
+ * recorded `diffSha256` is `sha256` of `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git diff
+ * --text --no-ext-diff --no-textconv --no-renames <fromTree> <toTree>` in the run's repository — the
+ * flags the digest was taken with, so a verifier recomputes it in the same shape rather than with a
+ * plain `git diff`, which differs for binary content and for a host git config. The two trees are
+ * unreachable objects, so recompute soon: `git gc` may prune them after `gc.pruneExpire` (two weeks
+ * by default). `writerGateTree` names the content the named writer's gate read, and is absent when
+ * the change was attributed on the lock alone (rule (a)) — a writer whose gate had not yet run has no
+ * gate tree to name.
+ */
+export interface AttributedChange {
+  nodeId:       string;
+  /** The writer whose reviewed diff carries the change, or that is still holding the lock over it. */
+  attributedTo: string;
+  /** sha256, hex, of the bracket diff the reader's turn showed; the content of `<node>.attributed.diff`. */
+  diffSha256:   string;
+  /** The reader's bracket start tree id; with `toTree`, the pair `diffSha256` is reproducible from (flags in the note above). */
+  fromTree:     string;
+  /** The reader's bracket end tree id. */
+  toTree:       string;
+  /** The tree the named writer's gate read; absent when the writer was named on the lock alone (rule (a)). */
+  writerGateTree?: string;
 }
 
 /**
@@ -1243,3 +1548,15 @@ export { canonicalJson } from './canonicalJson.js';
  */
 export { describeToolInput, toolInputProblem, toolFailureMessage } from './toolInput.js';
 export type { ToolInputCheckOptions } from './toolInput.js';
+
+// The secret scrubber lives here, in the package every other @maf package already depends on,
+// rather than in `@maf/processors` where it grew up. Two of its callers — the security gate
+// (`@maf/git-ops`, which the workspace-deps guard keeps a leaf on `@maf/types` alone) and the
+// tool protocol (`@maf/adapter-base`) — must mask model text before it reaches a record, and
+// neither may take a new edge to do it. One home, reached without a new dependency; the
+// processors package re-exports these names so no existing importer moves.
+export {
+  CREDENTIAL_PATTERNS, ASSIGNMENT_PATTERNS, DEFAULT_PATTERNS,
+  redactCredentials, redactSecrets, redactText,
+  redactCredentialsRecord, redactRecord,
+} from './redaction.js';
