@@ -9,6 +9,8 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
 The Phase 2 toolchain floor (WP-2.11) and the Phase 3 readers work (WP-3.0b, WP-3.0c and WP-3.1) land together
 here: the repository builds on pnpm 10 with a regenerated v9 lockfile; a fifth built-in role joins a reader set
 moved onto the governed in-process tier, with a `no_change` failure that names the policy rules which refused

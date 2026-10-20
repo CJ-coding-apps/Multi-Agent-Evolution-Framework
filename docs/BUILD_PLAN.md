@@ -256,7 +256,7 @@ Status table rows flipped to *shipped* only for behaviour landed in this phase, 
 
 > **Deviation recorded 2026-10-14:** PR #31 was merged to `main` by the coder, under the maintainer's `gh` credential, rather than by the maintainer (D-26). The runbook the architect wrote put the merge commands beside the coder's conflict-resolution steps without re-labelling them as the maintainer's, and the maintainer handed the runbook over whole. The merge was reviewed, verifier-passed and CI-green and is not reverted; the §3.3 clause is the consequence.
 
-### Phase 3a — shipped in 0.4.0
+### Phase 3a — released as 0.4.0 (2026-10-20)
 
 **D-47 re-scoped this release after the whole-branch audit (2026-10-15).** The WPs below — WP-3.2 … WP-3.13 as renumbered — were written for the LCM/failover/evolver phase D-22 assigned to 0.4.0. The branch shipped **none** of them. What it shipped is the reader path made true and every role call made a value in the record, so 0.4.0 is *readers and the record* and the unstarted items move to 0.5.0 ([D-47](DECISIONS.md); §2). Four work packages actually landed, each with its own PR, verifier and CI:
 

@@ -13,7 +13,7 @@ reproduction is worth more than a description.
 
 ## Supported versions
 
-MAF is pre-1.0 (currently 0.3.2). Only the most recent release is supported; fixes land there and are not
+MAF is pre-1.0 (currently 0.4.0). Only the most recent release is supported; fixes land there and are not
 backported. Please reproduce against the latest version, on Node 22 — the version CI builds and tests
 on — before reporting.
 
@@ -50,8 +50,9 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
   run outcome and the memory graph, are masked the same way — every text a failure quotes is scrubbed
   before it is quoted: a failed node's output tail, a backend's stderr or HTTP error-body tail, the `no_work`
   answer excerpt (the first 200 characters of the model's answer, masked and then whitespace-collapsed), the
-  malformed-`tool_call` snippet a parse error carries, and the security gate's `Raw:` tail — **all with the
-  same eight formats**, because all five call the one scrubber, `@maf/types`' `redactCredentials` (the
+  malformed-`tool_call` snippet a parse error carries, the security gate's `Raw:` tail, and the gate's parsed
+  review `summary` and every string field of each finding — **all with the same eight formats**, because
+  all six call the one scrubber, `@maf/types`' `redactCredentials` (the
   adapters' failure tail was brought onto that shared scrubber in 0.4.0, replacing a local list of five).
   Each is masked **before** the slice that shortens it, so a key the cut would split is recognised whole
   rather than preserved by its head. One mask here is deliberately not the same mask: the **model-view**
