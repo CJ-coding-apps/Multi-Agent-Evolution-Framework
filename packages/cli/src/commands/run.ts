@@ -229,25 +229,32 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   }
 
   // ── Worktree (D-03): one manager for the whole run — `finish` reads the base commit from it.
-  // A directory with no committed files is refused here, before any agent work.
+  // N3: a run that cannot have its worktree is refused before any store is opened, so it leaves
+  // `.maf/` as it found it. The policy below is then resolved before the worktree is created, so a
+  // mistyped --policy leaves no `maf/<runId>` branch and no worktree either.
   const worktrees = new WorktreeManager(dir);
-  if (cfg.worktree && await hasWorkOutsideHead(dir)) {
-    warn(`[maf] warning: ${dir} has uncommitted or untracked changes; the run starts from HEAD in its own worktree and will not see them.`);
+  if (cfg.worktree) {
+    if (await hasWorkOutsideHead(dir)) {
+      warn(`[maf] warning: ${dir} has uncommitted or untracked changes; the run starts from HEAD in its own worktree and will not see them.`);
+    }
+    await worktrees.checkForRun(runId);
   }
-  const run = cfg.worktree ? await worktrees.createForRun(runId) : undefined;
-  const { cwd, isolated, warning } = resolveWorkingDir({ dir, worktree: cfg.worktree, run, offBy: cfg.worktree ? undefined : inPlaceBy });
-  if (warning) warn(`[maf] warning: ${warning}`);
-  if (run) say(`[maf] worktree: ${run.path} (branch ${run.branch}, from ${run.baseCommit.slice(0, 12)})`);
-  // The registry the agent gets is bound to the run's working directory now that it exists: the
-  // git tools learn the repository root here, before any agent action, so a `.git` the agent later
-  // removes or rewrites cannot redirect them (WP-2.17). `baseTools` above only validated the roles.
-  const agentTools = createDefaultRegistry({ projectRoot: cwd });
-
   let succeeded = false;
   let refusal: string | undefined;
   let graph: MemoryGraph | undefined;
   let lcm: LcmEngine | undefined;
+  let run: RunWorktree | undefined;
+  let isolated = false;
   try {
+    // The stores live in .maf/, which is not the worktree; opening one is not creating a branch.
+    graph           = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
+    // D-49, F7, N3: the same resolution `goldens` and `evolve` take, and it happens *before* the
+    // worktree below. With no `--policy`, a missing .maf/policy.yaml falls back to the policy
+    // shipped in the package, so an installed `maf` governs a repository that has never run
+    // `maf init`; a typed path that names no file stops the run (F4), and only `--policy none` asks
+    // for no rules. Refusing here leaves nothing to clean up: no worktree, no `maf/<runId>` branch.
+    const policy    = await loadCommandPolicy(dir, { value: opts.policy, typed: ctx.given('policy') }, graph);
+
     // Wire all components
     const board     = new BlackboardStore();
     lcm             = new LcmEngine({
@@ -255,12 +262,19 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       ...cfg.lcm,
       summarize: async (messages) => messages.map((m) => m.content.slice(0, 200)).join('\n'),
     });
-    graph           = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
-    // D-49, F7: the same resolution `goldens` and `evolve` take. With no `--policy`, a missing
-    // .maf/policy.yaml falls back to the policy shipped in the package, so an installed `maf`
-    // governs a repository that has never run `maf init`; a typed path that names no file stops
-    // the run (F4), and only `--policy none` asks for no rules.
-    const policy    = await loadCommandPolicy(dir, { value: opts.policy, typed: ctx.given('policy') }, graph);
+
+    // ── Worktree, once the run's configuration is known to be usable.
+    run = cfg.worktree ? await worktrees.createForRun(runId) : undefined;
+    const working = resolveWorkingDir({ dir, worktree: cfg.worktree, run, offBy: cfg.worktree ? undefined : inPlaceBy });
+    const { cwd } = working;
+    isolated = working.isolated;
+    if (working.warning) warn(`[maf] warning: ${working.warning}`);
+    if (run) say(`[maf] worktree: ${run.path} (branch ${run.branch}, from ${run.baseCommit.slice(0, 12)})`);
+    // The registry the agent gets is bound to the run's working directory now that it exists: the
+    // git tools learn the repository root here, before any agent action, so a `.git` the agent later
+    // removes or rewrites cannot redirect them (WP-2.17). `baseTools` above only validated the roles.
+    const agentTools = createDefaultRegistry({ projectRoot: cwd });
+
     const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
       logDir: path.join(mafDir, 'transcripts'),
       softThreshold: 20_000,

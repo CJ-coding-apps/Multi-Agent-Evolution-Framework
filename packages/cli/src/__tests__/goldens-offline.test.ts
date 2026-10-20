@@ -297,3 +297,44 @@ test('on a fresh clone the committed default answers to its id, its short sha an
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// N2 (D-49, F7). `loadCommandPolicy`'s unit tests say what a typed flag means; this says the
+// command passes that meaning through, and that what it records is the bundle a user can open.
+// `--policy none` must be recorded as none — not as the built-in policy that an absent flag gets —
+// and a mistyped path must stop the command, in this clone, beside the real `.maf/policy.yaml`.
+
+test('maf goldens run --policy none records sourceKind none, and a mistyped path stops it (N2)', needsLcm, async () => {
+  const root = await freshClone();
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [MAIN, 'goldens', 'run', '--adapter', 'scripted', '--corpus', 'tests/goldens', '--policy', 'none'],
+      { cwd: root },
+    );
+    const named = /^\[maf\] bundle: (.+)$/m.exec(stdout)?.[1];
+    assert.ok(named, `the run names the bundle it wrote: ${stdout}`);
+    const bundlePath = path.isAbsolute(named) ? named : path.join(root, named);
+    // The file is the in-toto statement; the record a reader wants is its predicate.
+    const statement = JSON.parse(await readFile(bundlePath, 'utf8')) as {
+      predicate?: { policyInForce?: { source?: string; sourceKind?: string; sha256?: string } };
+    };
+    const bundle = statement.predicate;
+    assert.equal(bundle?.policyInForce?.sourceKind, 'none', 'a typed --policy none is recorded as none');
+    assert.equal(bundle?.policyInForce?.source, undefined, 'no path was read');
+    assert.equal(bundle?.policyInForce?.sha256, undefined, 'no bytes were read');
+
+    // `.maf/policy.yml` has no `a`. A silent fallback would find the real file beside it and exit 0.
+    const typo = await execFileAsync(
+      process.execPath,
+      [MAIN, 'goldens', 'run', '--adapter', 'scripted', '--corpus', 'tests/goldens', '--policy', '.maf/policy.yml'],
+      { cwd: root },
+    ).then(
+      ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
+      (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code ?? -1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }),
+    );
+    assert.notEqual(typo.code, 0, `a mistyped --policy exits non-zero: ${typo.stdout}${typo.stderr}`);
+    assert.match(typo.stderr, /not found; pass --policy none to run without rules/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

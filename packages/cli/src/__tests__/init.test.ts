@@ -217,6 +217,76 @@ test('a symlinked destination inside .maf is refused, with or without --force, a
   }
 });
 
+// N4. F6's refusal used to run inside the write loop, so a symlinked `prompts/` was found only
+// after policy.yaml, roles.yaml, config.yaml and .gitignore had been written. Every destination is
+// checked before the first write now, so the refusal leaves the repository exactly as it was.
+
+test('a symlinked prompts/ inside .maf is refused before any file is written', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-preflight-'));
+  try {
+    const repo = await createDemoFixture(root);
+    const outside = path.join(root, 'outside-prompts');
+    await mkdir(outside);
+    await mkdir(path.join(repo, '.maf'), { recursive: true });
+    await symlink(outside, path.join(repo, '.maf', 'prompts'));
+
+    for (const force of [false, true]) {
+      await assert.rejects(
+        runInit({ dir: repo, ...(force ? { force: true } : {}), out: collector() }),
+        /prompts is a symbolic link; refusing to write through it/,
+        `force=${force}`,
+      );
+      assert.deepEqual(
+        await readdir(path.join(repo, '.maf')),
+        ['prompts'],
+        `nothing was written before the refusal (force=${force})`,
+      );
+      assert.deepEqual(await readdir(outside), [], 'the link target gains no file');
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+// N2 (F6). The write path is a sibling temp file then `rename`, and nothing above would notice it
+// becoming a direct write: the symlink refusals happen before either. Injecting the failure at
+// `rename` (the compiled module reads the property at call time) pins both halves — the destination
+// keeps the bytes it had, and the temp file is removed.
+
+test('a failed rename leaves the destination it would have replaced intact and removes the temp file', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-rename-'));
+  // The compiled init.js resolves `rename` off this same module object at call time.
+  const fsp = require('node:fs/promises') as { rename: (from: string, to: string) => Promise<void> };
+  try {
+    const repo = await createDemoFixture(root);
+    await runInit({ dir: repo, out: collector() });
+    const destination = path.join(repo, '.maf', 'policy.yaml');
+    await writeFile(destination, '# mine now\n', 'utf8');
+
+    const realRename = fsp.rename;
+    let attempts = 0;
+    fsp.rename = async () => {
+      attempts += 1;
+      throw Object.assign(new Error('injected rename failure'), { code: 'EIO' });
+    };
+    try {
+      await assert.rejects(runInit({ dir: repo, force: true, out: collector() }), /injected rename failure/);
+    } finally {
+      fsp.rename = realRename;
+    }
+
+    assert.equal(attempts, 1, 'the write goes through rename, not directly to the destination');
+    assert.equal(await readFile(destination, 'utf8'), '# mine now\n', 'a failed write does not truncate what it replaces');
+    assert.deepEqual(
+      (await readdir(path.join(repo, '.maf'))).filter((name) => name.endsWith('.tmp')),
+      [],
+      'the temp file is removed when the rename fails',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 // ORACLE (F9b). `.maf/` belongs at the root of a work tree. Inside `.git`, `git rev-parse` succeeds
 // and answers `false`; a run there has no working tree to review and `init` would write into git's
 // own directory, so it is refused rather than attempted.

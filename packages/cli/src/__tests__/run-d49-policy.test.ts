@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
+import { runIsolatedGit } from '@maf/git-ops';
 import { readAsset } from '../assets.js';
 import { initFiles } from '../commands/init.js';
 import type { AttestationBundle, ToolCallRecord } from '@maf/types';
@@ -172,6 +173,30 @@ test('a typed --policy path that names no file stops the run, relative or absolu
       assert.match(run.error.message, /--policy none/, 'the message says how to run without rules');
       assert.ok(run.error.message.includes(typed), `the message names the path asked for: ${run.error.message}`);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+// N3. The policy used to be resolved after `createForRun`, so this refusal left a worktree and a
+// `maf/<runId>` branch behind — state the user never asked for, created by a run that never began.
+// The refusal now happens before either exists.
+
+test('a typed --policy path that names no file leaves no worktree and no maf/<runId> branch', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-d49-no-worktree-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const run = await drive(repo, new ScriptedAdapter([onePlannedNode(TASK)]), ['--policy', 'typo/policy.yaml']);
+    assert.ok(run.error instanceof Error, `the run stopped: ${run.out}`);
+    assert.match(run.error.message, /not found/);
+
+    assert.equal(
+      (await runIsolatedGit(repo, ['branch', '--list', 'maf/*'])).stdout.trim(),
+      '',
+      'no maf/<runId> branch was created for a run that never started',
+    );
+    const worktrees = await readdir(path.join(repo, '.maf', 'worktrees')).catch(() => [] as string[]);
+    assert.deepEqual(worktrees, [], 'no worktree directory was created for a run that never started');
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

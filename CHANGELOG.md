@@ -71,8 +71,8 @@ nothing. The LCM/failover/evolver work [D-47](docs/DECISIONS.md) put in 0.5.0 mo
   `assets/harnesses/default-<sha>.json`; with no `CURRENT` and no committed `default-<sha>.json`, `goldens`
   evaluates that one. An installed package can therefore run `maf init && maf goldens run --adapter
   scripted` with nothing copied in — the earlier pack check hid the failure by seeding a harness from the
-  checkout, and the error hint told the user to run `maf run`, which does not produce a harness `goldens`
-  looks at.
+  checkout. `goldens` no longer needs a prior run to have minted one, and the error hint now says to
+  reinstall `maf` or pass `--harness`.
 
 ### Changed
 

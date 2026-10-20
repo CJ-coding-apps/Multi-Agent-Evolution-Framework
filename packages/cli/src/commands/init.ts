@@ -62,19 +62,21 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
   await requireCommittedRepository(dir);
 
   const mafDirPath = path.join(dir, '.maf');
-  // F6: `--force` must not be a way to write outside the repository. `.maf` is checked before
-  // `ensureMafDir` because mkdir would follow the link and create its target instead.
+  // F6, N4: `--force` must not be a way to write outside the repository, and a destination it
+  // would refuse must be refused before anything is written. `.maf` is checked before `ensureMafDir`
+  // because mkdir would follow the link and create its target instead; every destination and each
+  // component under `.maf/` is then checked against the path it will occupy once `.maf/` exists, so
+  // a symlinked `prompts/` stops the whole run with zero files written rather than four.
   await refuseSymlink(mafDirPath);
+  const files = await initFiles();
+  for (const relative of ['.gitignore', ...files]) await refuseSymlinksUnder(mafDirPath, relative);
   const hadIgnore = (await lstat(path.join(mafDirPath, '.gitignore')).catch(() => undefined)) !== undefined;
   const mafDir = await ensureMafDir(mafDirPath);
   const result: InitResult = { written: [], skipped: [] };
   const force = options.force === true;
 
-  for (const relative of await initFiles()) {
+  for (const relative of files) {
     const destination = path.join(mafDir, relative);
-    // Every component on the way to the file, so a symlinked `harnesses/` or `prompts/` cannot
-    // carry a write out of the repository either.
-    await refuseSymlinksUnder(mafDir, relative);
     await mkdir(path.dirname(destination), { recursive: true });
     if (!force && (await lstat(destination).catch(() => undefined)) !== undefined) {
       result.skipped.push(relative);
