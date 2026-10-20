@@ -232,7 +232,13 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
     await copyFile(path.join(evalDir, 'attestations', `${o.runId}.bundle.json`), bundlePath);
     return { result, bundlePath };
   } finally {
-    await rm(evalDir, { recursive: true, force: true });
+    // M1: cleanup must never replace the error that brought us here. A live Kùzu handle — or a file
+    // appearing while the tree is walked — can make this fail, and the user needs the policy or
+    // validation error that caused the cleanup, not a filesystem one. The temp directory is the
+    // operating system's to reclaim.
+    await rm(evalDir, { recursive: true, force: true }).catch((err: unknown) => {
+      console.warn(`[maf] warning: could not remove ${evalDir}: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 }
 

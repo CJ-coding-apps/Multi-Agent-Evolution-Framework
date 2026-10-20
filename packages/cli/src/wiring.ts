@@ -101,81 +101,93 @@ export async function buildRunStack(cfg: {
   headless?: boolean;
 }): Promise<RunStack> {
   const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
-  const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
-  const policy = await loadCommandPolicy(cfg.cwd, cfg.policy, graph);
-  // One gate for every task of the stack, outside dispatchTask, so request ids are unique across them.
-  const approvalGate = createApprovalGate({
-    recorder: attestor, mafDir: cfg.mafDir,
-    env: cfg.headless === true ? { ...process.env, MAF_HEADLESS: '1' } : process.env,
-  });
-  const baseTools = createDefaultRegistry();
-  const board = new BlackboardStore();
-  const lcm = new LcmEngine({
-    dbPath: path.join(cfg.mafDir, 'lcm.db'),
-    contextThreshold: 0.75, freshTailCount: 64, mode: 'Upward',
-    summarize: async (msgs) => msgs.map((m) => m.content.slice(0, 200)).join('\n'),
-  });
-  const injector = new GraphAwareInjector({ graph, lcm, maxNodes: 40, tokenBudget: 4096 });
-  const lcmBridge = new BlackboardToLcmAdapter(board, lcm, cfg.runId, cfg.runId);
+  // M1: a setup that fails after this point must not leak the handle. Kùzu keeps files open under
+  // `mafDir`, and a caller that removes that directory on the way out — goldens' evaluation
+  // directory — then fails with ENOTEMPTY, which would replace the error that caused the removal
+  // (a mistyped `--policy`, in the reported case). Nothing here can use a half-built stack.
+  let lcm: LcmEngine | undefined;
+  try {
+    const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
+    const policy = await loadCommandPolicy(cfg.cwd, cfg.policy, graph);
+    // One gate for every task of the stack, outside dispatchTask, so request ids are unique across them.
+    const approvalGate = createApprovalGate({
+      recorder: attestor, mafDir: cfg.mafDir,
+      env: cfg.headless === true ? { ...process.env, MAF_HEADLESS: '1' } : process.env,
+    });
+    const baseTools = createDefaultRegistry();
+    const board = new BlackboardStore();
+    const engine = new LcmEngine({
+      dbPath: path.join(cfg.mafDir, 'lcm.db'),
+      contextThreshold: 0.75, freshTailCount: 64, mode: 'Upward',
+      summarize: async (msgs) => msgs.map((m) => m.content.slice(0, 200)).join('\n'),
+    });
+    lcm = engine;
+    const injector = new GraphAwareInjector({ graph, lcm: engine, maxNodes: 40, tokenBudget: 4096 });
+    const lcmBridge = new BlackboardToLcmAdapter(board, engine, cfg.runId, cfg.runId);
 
-  const stack: RunStack = {
-    adapter: cfg.adapter,
-    graph,
-    attestor,
-    lcm,
-    securityPrompt: SECURITY_REVIEW_FALLBACK_PROMPT,
-    rolesFor: (harness) => RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), cfg.mafDir, baseTools),
-    recordPolicyInForce: () => attestor.recordPolicyInForce(policy.inForce()),
-    async dispatchTask(harness, role, prompt, workDir, timeoutMs, temperature) {
-      const taskId = makeTaskId(crypto.randomUUID());
-      const roles = stack.rolesFor(harness);
-      // `role` arrives as a corpus string, and this is the only place it can be checked against
-      // the harness. A task naming a role the harness does not define is refused; it previously
-      // reached the dispatcher as a bare string and came back out as the *default* role — `coder`,
-      // a writer — so a corpus file and a harness that disagree produced a silently privileged run
-      // instead of an error. `TaskDispatcher` keeps its `role: string` signature because that is
-      // what the corpus carries; the conversion happens here, where the role set is in hand.
-      const resolvedRole = roles.resolveRole(role);
-      if (!resolvedRole.ok) {
-        throw new Error(
-          `goldens: task asks for unknown role "${role}". ` +
-          `Known roles: ${resolvedRole.error.known.join(', ')}.`,
-        );
-      }
-      const transcript = new TranscriptLogger(cfg.runId, makeAgentId(taskId), {
-        logDir: path.join(cfg.mafDir, 'transcripts'), softThreshold: 20_000, chunkSize: 20, lcm,
-      });
-      await transcript.init();
-      const gate = new SecurityReviewGate({
-        adapter: cfg.adapter, projectRoot: workDir, securityPrompt: stack.securityPrompt,
-        ...(cfg.model ? { model: cfg.model } : {}),
-      });
-      // Bound to this task's directory so the git tools learn its repository root before the agent
-      // acts (WP-2.17); the shared `baseTools` above only validates role allowlists.
-      const taskTools = createDefaultRegistry({ projectRoot: workDir });
-      const dispatcher = new RoleDispatcher({
-        adapter: cfg.adapter, baseTools: taskTools, roles, injector, policy,
-        attestor, approvalGate, graph, transcript, lcmBridge, securityGate: gate,
-        cwd: workDir, sessionId: cfg.runId, runId: cfg.runId, harness,
-        ...(cfg.allowUngoverned === true ? { allowUngoverned: true } : {}),
-        ...(cfg.model ? { modelOverride: cfg.model } : {}),
-        ...(temperature !== undefined ? { temperature } : {}),
-      });
-      const node: DagNode = {
-        id: makeNodeId(`task-${taskId}`), label: prompt, agentRole: resolvedRole.value,
-        dependencies: [], retryPolicy: { maxAttempts: 1, backoffMs: 0, backoffFactor: 1, jitterMs: 0 },
-        timeoutMs, inputs: {}, outputs: {}, metadata: { taskDescription: prompt },
-      };
-      const out = await dispatcher.runNode(node);
-      const value = out['output'];
-      return value && value.kind === 'string' ? value.value : '';
-    },
-    close() {
-      graph.close();
-      lcm.close();
-    },
-  };
-  return stack;
+    const stack: RunStack = {
+      adapter: cfg.adapter,
+      graph,
+      attestor,
+      lcm: engine,
+      securityPrompt: SECURITY_REVIEW_FALLBACK_PROMPT,
+      rolesFor: (harness) => RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), cfg.mafDir, baseTools),
+      recordPolicyInForce: () => attestor.recordPolicyInForce(policy.inForce()),
+      async dispatchTask(harness, role, prompt, workDir, timeoutMs, temperature) {
+        const taskId = makeTaskId(crypto.randomUUID());
+        const roles = stack.rolesFor(harness);
+        // `role` arrives as a corpus string, and this is the only place it can be checked against
+        // the harness. A task naming a role the harness does not define is refused; it previously
+        // reached the dispatcher as a bare string and came back out as the *default* role — `coder`,
+        // a writer — so a corpus file and a harness that disagree produced a silently privileged run
+        // instead of an error. `TaskDispatcher` keeps its `role: string` signature because that is
+        // what the corpus carries; the conversion happens here, where the role set is in hand.
+        const resolvedRole = roles.resolveRole(role);
+        if (!resolvedRole.ok) {
+          throw new Error(
+            `goldens: task asks for unknown role "${role}". ` +
+            `Known roles: ${resolvedRole.error.known.join(', ')}.`,
+          );
+        }
+        const transcript = new TranscriptLogger(cfg.runId, makeAgentId(taskId), {
+          logDir: path.join(cfg.mafDir, 'transcripts'), softThreshold: 20_000, chunkSize: 20, lcm: engine,
+        });
+        await transcript.init();
+        const gate = new SecurityReviewGate({
+          adapter: cfg.adapter, projectRoot: workDir, securityPrompt: stack.securityPrompt,
+          ...(cfg.model ? { model: cfg.model } : {}),
+        });
+        // Bound to this task's directory so the git tools learn its repository root before the agent
+        // acts (WP-2.17); the shared `baseTools` above only validates role allowlists.
+        const taskTools = createDefaultRegistry({ projectRoot: workDir });
+        const dispatcher = new RoleDispatcher({
+          adapter: cfg.adapter, baseTools: taskTools, roles, injector, policy,
+          attestor, approvalGate, graph, transcript, lcmBridge, securityGate: gate,
+          cwd: workDir, sessionId: cfg.runId, runId: cfg.runId, harness,
+          ...(cfg.allowUngoverned === true ? { allowUngoverned: true } : {}),
+          ...(cfg.model ? { modelOverride: cfg.model } : {}),
+          ...(temperature !== undefined ? { temperature } : {}),
+        });
+        const node: DagNode = {
+          id: makeNodeId(`task-${taskId}`), label: prompt, agentRole: resolvedRole.value,
+          dependencies: [], retryPolicy: { maxAttempts: 1, backoffMs: 0, backoffFactor: 1, jitterMs: 0 },
+          timeoutMs, inputs: {}, outputs: {}, metadata: { taskDescription: prompt },
+        };
+        const out = await dispatcher.runNode(node);
+        const value = out['output'];
+        return value && value.kind === 'string' ? value.value : '';
+      },
+      close() {
+        graph.close();
+        engine.close();
+      },
+    };
+    return stack;
+  } catch (err) {
+    lcm?.close();
+    graph.close();
+    throw err;
+  }
 }
 
 /** Refs `resolveHarnessRef` gives a meaning of its own: a plain run, and the roles file as it is now. */
