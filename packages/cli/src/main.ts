@@ -9,6 +9,11 @@ import { registerGoldensCommand } from './commands/goldens.js';
 import { registerEvolveCommand } from './commands/evolve.js';
 import { registerInProcessDemoCommand } from './commands/inprocessDemo.js';
 import { registerAttestCommand } from './commands/attest.js';
+import { requireSupportedNode } from './nodeVersion.js';
+
+// `engines` only warns; the code below genuinely needs Node 22. Stop here, before any command reads
+// a file or starts a graph, with one sentence saying so (F3).
+requireSupportedNode();
 
 const program = new Command();
 
