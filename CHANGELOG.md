@@ -24,30 +24,58 @@ nothing. The LCM/failover/evolver work [D-47](docs/DECISIONS.md) put in 0.5.0 mo
   `package · npm pack · install · run`, packs the artifact with npm, installs the tarball into an empty
   prefix and runs `maf --version`, `maf inprocess-demo` and `maf goldens run --adapter scripted` from a
   directory that is not this repository — the checks a checkout-based job cannot make.
-- **`maf init`** writes the shipped `.maf/` into a repository: `policy.yaml`, `roles.yaml`, `config.yaml`
-  and `prompts/`, byte-identical to the package's assets (which the drift test pins to this repository's
-  `.maf/` and `tests/goldens/`), plus the `.gitignore` that keeps runtime state out of the user's history.
-  It reports each file it wrote or kept, prints the next command, refuses a directory that is not a
-  committed git repository — a run has no HEAD to start from there — and keeps an edited file on a second
-  run; `--force` replaces it.
-- **A built-in policy default** ([D-49](docs/DECISIONS.md)). With no `--policy` typed and no
+- **`maf init`** writes the shipped `.maf/` into a repository: `policy.yaml`, `roles.yaml`, `config.yaml`,
+  `prompts/` and the default harness, byte-identical to the package's assets (which the drift test pins to
+  this repository's `.maf/` and `tests/goldens/`), plus the `.gitignore` that keeps runtime state out of
+  the user's history — and names that `.gitignore` in its report. It reports each file it wrote or kept,
+  prints the next command, refuses a directory that is not a committed work tree (including `.git` itself,
+  where `git rev-parse` succeeds but there is no tree to run in) — a run has no HEAD to start from there —
+  and keeps an edited file on a second run; `--force` replaces it. A symbolic link anywhere `init` would
+  write — `.maf` itself, or any file beneath it — is refused with or without `--force`, naming the path:
+  `--force` is consent to replace the files `init` owns, not to write through a link out of the repository
+  the user named.
+- **A built-in policy default** ([D-49](docs/DECISIONS.md)). With no `--policy` **flag** and no
   `.maf/policy.yaml` in the target, `run` now applies the policy shipped in the package — this repository's
   own `.maf/policy.yaml`, byte for byte — prints one line naming it and its rule count, and records
-  `policyInForce.source: "built-in"`. Before this, such a run applied no rules at all, and the bundle
-  could not tell that apart from a policy that was loaded and never fired. `--policy none` opts out
-  explicitly and records `source: "none"`; a file that exists but does not load still stops the run, so a
-  broken policy never falls back silently.
+  `policyInForce.sourceKind: "built-in"`, no `source` path and `sha256` (the shipped text's digest). Before
+  this, such a run applied no rules at all, and the bundle could not tell that apart from a policy that was
+  loaded and never fired. `--policy none` opts out explicitly and records `sourceKind: "none"` with no path
+  and no digest; a file that exists but does not load still stops the run, so a broken policy never falls
+  back silently.
+- **A typed `--policy <path>` that names no file stops the run** (F4, amending D-49(iii)). The message is
+  `policy file <path> not found; pass --policy none to run without rules`, and it names the path asked for.
+  A flag the user typed is a statement about which file they mean; a misspelt one used to run with no rules,
+  which is the same fail-open D-49 closes. Only an absent flag falls back to the built-in policy — including
+  when the typed string is `.maf/policy.yaml` itself.
+- **One policy resolution for every command** (F7). `run`, `goldens` and `evolve` now resolve `--policy`
+  through one function (`loadCommandPolicy`), so the three cannot disagree about what governs a run, an
+  evaluation or an evolution.
+- **`policyInForce` says how its rules were chosen, additively** (F5). The record gains
+  `sourceKind?: "file" | "built-in" | "none"`; `source` keeps its 0.4.0 meaning, the file's resolved path,
+  and is absent when no user file supplied the rules, exactly as before. `sha256` keeps its rule — present
+  exactly when bytes were read — so the built-in policy records the shipped text's digest and `none` records
+  neither a path nor a digest.
+- **`run` says when it used the built-in role set** (F2). With no `.maf/roles.yaml`, `run` uses the built-in
+  role set, which is **not** the one the package ships and `maf init` writes (the built-in `tester` holds no
+  `fs.write`, and the prompts differ). It now prints `[maf] roles: no .maf/roles.yaml — using the built-in
+  role set (maf init writes the shipped one)`, and says nothing when a roles file supplied the set. The
+  README and Quickstart no longer claim `init` writes what `run` falls back to.
+- **The CLI refuses to start below Node 22** (F3). `engines.node` is a request npm only warns about, so the
+  first thing `maf` does is check `process.versions.node` and exit 1 with
+  `maf requires Node 22 or newer (found vX)`; a version it cannot parse is refused rather than assumed new
+  enough.
 - **The goldens fall back to the packaged corpus.** `goldens run` in an installed package, where there is
   no `tests/goldens`, now uses the corpus shipped beside `dist/` and says so, instead of failing on a path
   that only exists in a checkout.
+- **The goldens fall back to the packaged harness.** The default harness now ships in
+  `assets/harnesses/default-<sha>.json`; with no `CURRENT` and no committed `default-<sha>.json`, `goldens`
+  evaluates that one. An installed package can therefore run `maf init && maf goldens run --adapter
+  scripted` with nothing copied in — the earlier pack check hid the failure by seeding a harness from the
+  checkout, and the error hint told the user to run `maf run`, which does not produce a harness `goldens`
+  looks at.
 
 ### Changed
 
-- **`policyInForce.source` is a source kind, not a path** — breaking for anything that reads a bundle's
-  policy record. `source` is now `"file"`, `"built-in"` or `"none"`; a file's resolved path moved to the new
-  `path` field, present exactly when `source` is `"file"`. `sha256` keeps its rule — absent exactly when no
-  file was read — so `source: "file"` with no digest still means a requested file that was not found. A
-  bundle written by an earlier release parses unchanged; only code reading `source` as a path is affected.
 - **Phase 3b is 0.6.0.** [D-48](docs/DECISIONS.md) amends [D-47](docs/DECISIONS.md): packaging takes
   0.5.0 and the LCM/failover/evolver phase moves to the next minor. `docs/BUILD_PLAN.md` §2, §7 and §8 carry the
   new numbers.
