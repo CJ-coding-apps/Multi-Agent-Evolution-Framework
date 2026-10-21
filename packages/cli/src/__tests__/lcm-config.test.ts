@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, resolveConfig } from '../config/ConfigLoader.js';
-import { summarizerModelFor } from '../commands/run.js';
+import { summarizerModelFor } from '../wiring.js';
 
 // ORACLE: D-17 (WP-3.2) — the `lcm` section of config.yaml is read, and the summarization model is
 // configurable. `lcm.model` is the model a summarization call uses; absent, the run's `--model`

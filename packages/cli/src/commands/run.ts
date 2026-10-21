@@ -7,7 +7,7 @@ import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
 import type { AdapterName, CliAdapter, DagNode, RetryPolicy } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
-import { LcmEngine, createAdapterSummarizer, createAdapterSubAgent } from '@maf/lcm';
+import type { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor, componentId } from '@maf/attestation';
@@ -24,7 +24,7 @@ import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterR
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { loadCommandPolicy, resolveRunHarness } from '../wiring.js';
+import { createRunLcm, loadCommandPolicy, resolveRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
 import type { ResolvedMafConfig } from '../config/ConfigLoader.js';
@@ -100,15 +100,6 @@ export function registerRunCommand(program: Command, deps: RunDeps = {}): void {
     .action(async (taskDescription: string, opts: RunOptions, cmd: Command) => {
       await runTask(taskDescription, opts, { ...deps, given: (flag) => cmd.getOptionValueSource(flag) === 'cli' });
     });
-}
-
-/**
- * The model summarization calls use (D-17): `lcm.model` when the config names one, else the model
- * the run was given, else the adapter's own. Summarization has its own setting so an operator can
- * buy a cheaper model for compaction without changing the model that does the work.
- */
-export function summarizerModelFor(cfg: Pick<ResolvedMafConfig, 'lcm' | 'model'>): string | undefined {
-  return cfg.lcm.model ?? cfg.model;
 }
 
 /**
@@ -267,61 +258,22 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     // Wire all components
     const board     = new BlackboardStore();
-    // D-17: summaries come from the run's own adapter, with the model the run chose. `lcm.model`
-    // overrides `--model` for summarization alone; with neither set, the adapter's own model
-    // applies. The calls ask for text only (`nativeTools: false`) and their token counts are the
-    // backend's, so compaction is charged against the context budget rather than invented locally.
-    //
-    // The attestor is built first (WP-3.2 F1): a summary is a model call, so the engine records it
-    // where every other call goes, and the engine cannot do that before its recorder exists.
+    // D-17, F1, R1: summaries come from the run's own adapter, with the model the run chose, and
+    // the whole LCM construction is the one factory goldens and evolve use. It records the settings
+    // in force once (R4a), attributes every summary call to the node whose assembly triggered it,
+    // records what that call cost (R5), and logs/records a degraded compaction (F5). The attestor
+    // is built first because the factory records into it.
     const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
-    const summarizerModel = summarizerModelFor(cfg);
-    const summarizerOptions = {
+    const runLcm = createRunLcm({
+      mafDir,
+      cwd:     dir,
       adapter,
-      workingDir: dir,
-      timeoutMs: cfg.lcm.summaryTimeoutMs,
-      ...(summarizerModel !== undefined ? { model: summarizerModel } : {}),
-    };
-    const lcmSettings = {
-      mode:             cfg.lcm.mode,
-      contextThreshold: cfg.lcm.contextThreshold,
-      freshTailCount:   cfg.lcm.freshTailCount,
-      operator:         cfg.lcm.operator === 'agentic-map' ? ('Agentic-Map' as const) : ('LLM-Map' as const),
-    };
-    const engine = new LcmEngine({
-      dbPath:    path.join(mafDir, 'lcm.db'),
-      ...lcmSettings,
-      summarize:     createAdapterSummarizer(summarizerOptions),
-      runSubAgent:   createAdapterSubAgent(summarizerOptions),
-      // F1: the same attribution the stack makes — the node whose assembly triggered the call, or
-      // the session when no node did. The surface carries the model and the prompt/output digests.
-      recordSummaryCall: (call) => {
-        if (!call.surface) return;
-        attestor.recordModelSurface({
-          role: 'lcm',
-          taskId: call.trigger?.taskId ?? makeTaskId(`lcm-${call.sessionId}`),
-          turn: 1,
-          tier: 'cli',
-          nativeTools: 'none',
-          kind: 'lcm-summary',
-          ...call.surface,
-          ...(call.model !== undefined ? { model: call.model } : {}),
-          lcmSummary: {
-            summaryId: call.summaryId,
-            level: call.level,
-            messages: call.messageIds.length,
-            chars: call.content.length,
-            contentTokens: call.contentTokens,
-            ...(call.reportedTokens !== undefined ? { reportedTokens: call.reportedTokens } : {}),
-          },
-        });
-      },
-      // F5: a compaction that fails after its retry leaves the node running uncompacted, and says so.
-      onDegraded: (record) => {
-        console.error(`[lcm] compaction failed: ${record.reason}; continuing uncompacted`);
-        attestor.recordLcmDegraded(record);
-      },
+      ...(cfg.model !== undefined ? { model: cfg.model } : {}),
+      lcm:       cfg.lcm,
+      sessionId,
+      attestor,
     });
+    const engine = runLcm.engine;
     lcm = engine;
 
     // ── Worktree, once the run's configuration is known to be usable.
@@ -338,7 +290,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // expander here, beside the engine that owns it.
     const agentTools = createDefaultRegistry({
       projectRoot: cwd,
-      lcmExpand: (summaryId: string) => engine.expandSummary(summaryId),
+      lcmExpand: (summaryId: string) => runLcm.expand(summaryId),
     });
 
     const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {

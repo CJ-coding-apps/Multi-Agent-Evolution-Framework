@@ -20,10 +20,12 @@ import { needsLcm } from './runFixture.js';
 // the configured model and no backend tools, and the summary it stores must be what the *next*
 // node's system prompt carries. Each assertion kills a concrete way the wiring could regress:
 //
-//   M6  — the summary call does not use `lcm.model`
-//   M7  — the summary call lets the backend use its own tools (`nativeTools` not false)
-//   M12 — the summary is made but never reaches the prompt
-//   M21 — the summary is made and charged to no record / no node budget
+//   W1 — the summary call does not use `lcm.model`
+//   W2 — the summary call lets the backend use its own tools (`nativeTools` not false)
+//   W3 — the summary is made but never reaches the prompt
+//   W4 — the summary is made and charged to no record / no node budget
+//
+// W-labels are this file's own; they are deliberately not the verifier's mutant ids (round 2, R1).
 
 const SUMMARY_TEXT = 'Node one read the sum module and chose the blue option.';
 const REPORTED_TOKENS = 42;
@@ -125,7 +127,10 @@ async function withWiringStack(
 }
 
 function settings(): ResolvedMafConfig['lcm'] {
-  return { ...DEFAULT_MAF_CONFIG.lcm, mode: 'Upward' as const, contextThreshold: 0.001, freshTailCount: 1, model: 'summary-model' };
+  return {
+    ...DEFAULT_MAF_CONFIG.lcm, mode: 'Upward' as const, contextThreshold: 0.001, freshTailCount: 1,
+    model: 'summary-model', summaryTimeoutMs: 4_321,
+  };
 }
 
 test('run wiring: a summary made with the configured model reaches the next node (F3)', needsLcm, async () => {
@@ -156,7 +161,7 @@ test('run wiring: a summary made with the configured model reaches the next node
       harnessSha: harness.sha,
       // The threshold is crossed by the first node's transcript lines, not by a model's output.
       // `freshTailCount: 1` keeps the current node's own user line raw.
-      lcm: { ...DEFAULT_MAF_CONFIG.lcm, mode: 'Upward', contextThreshold: 0.001, freshTailCount: 1, model: 'summary-model' },
+      lcm: { ...settings() },
     });
     try {
       await stack.dispatchTask(harness, 'analyst', 'node one', repo, 60_000, 0);
@@ -171,15 +176,18 @@ test('run wiring: a summary made with the configured model reaches the next node
       const summaryCalls = adapter.calls.filter((call) => call.kind === 'summary');
       assert.equal(taskCalls.length, 2, 'both nodes reached the backend');
 
-      // M6/M7: the summary is a model call like any other, with the operator's model and no tools.
+      // W1/W2: the summary is a model call like any other, with the operator's model and no tools.
       assert.equal(summaryCalls.length, 1, 'one compaction was needed, and made');
       const summaryCall = summaryCalls[0]!.options;
       assert.equal(summaryCall.model, 'summary-model', 'lcm.model is the summary call\'s model');
       assert.equal(summaryCall.nativeTools, false, 'a summary call asks for text only');
+      // R8: every `lcm` setting reaches the engine. The timeout is the one a slow backend depends
+      // on, and a default here would silently outrank the run's config.
+      assert.equal(summaryCall.timeoutMs, 4_321, 'lcm.summaryTimeoutMs reaches the call');
       assert.match(summaryCall.prompt, /\[USER\] \[analyst\] node one/, 'it summarizes node one\'s history');
       assert.ok(summaryCall.prompt.length <= 64 * 1024, 'the prompt is under the single-argument cap');
 
-      // M12: the summary is in the prompt of the node after it, and not in the one before.
+      // W3: the summary is in the prompt of the node after it, and not in the one before.
       assert.doesNotMatch(taskCalls[0]!.options.systemPrompt ?? '', new RegExp(SUMMARY_TEXT));
       assert.match(
         taskCalls[1]!.options.systemPrompt ?? '',
@@ -187,7 +195,7 @@ test('run wiring: a summary made with the configured model reaches the next node
         'the second node is handed the summary node one produced',
       );
 
-      // M21: the call is in the run's record, attributed to the node whose assembly made it.
+      // W4: the call is in the run's record, attributed to the node whose assembly made it.
       const lcmRecords = (bundle.modelSurfaces ?? []).filter((record) => record.kind === 'lcm-summary');
       assert.equal(lcmRecords.length, 1, 'the summary call is in the same array as every role call');
       const record = lcmRecords[0]!;
