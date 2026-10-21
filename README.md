@@ -92,7 +92,9 @@ maf --version
   toolchain.
 - **For `--adapter claude`:** a Claude Code CLI on your `PATH` whose `claude --help` lists
   `--tools`, `--strict-mcp-config` and `--mcp-config`. MAF passes all three; see
-  [Before `maf run`](#before-maf-run).
+  [Before `maf run`](#before-maf-run). MAF runs the first `claude` on `PATH`, so a Node version
+  manager's bin directory can put an older CLI ahead of the current one; if a run stops at planning
+  with `unknown option '--tools'`, check `which -a claude`.
 - No browser and no `playwright` install is needed.
 
 ### Use it in your repository
