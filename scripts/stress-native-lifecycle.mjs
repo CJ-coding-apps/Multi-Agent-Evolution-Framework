@@ -82,7 +82,7 @@ try {
     const agent = await resolveGoldensAdapter('scripted', corpusRoot);
     const { result } = await runGoldenSuite({
       cwd: root, corpusRoot, harness, harnessSource: source, agent, judge: { adapter: agent },
-      attempts: 2, policyPath: path.join(mafDir, 'policy.yaml'), runId,
+      attempts: 2, policy: { value: path.join(mafDir, 'policy.yaml'), typed: true }, runId,
     });
     await collect(); // the evaluation's stack is garbage now, as it is when `goldens run` records the score
     const graph = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));

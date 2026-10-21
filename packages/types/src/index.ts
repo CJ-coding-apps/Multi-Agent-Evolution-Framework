@@ -926,16 +926,30 @@ export interface PolicyVerdictCounts {
   indeterminate: number;
 }
 
+/** How the rules in force were chosen (D-49). */
+export type PolicySourceKind = 'file' | 'built-in' | 'none';
+
 /**
- * The policy in force for a run (F6): the file it came from and its digest, the rules, and the
- * counts. `sha256` is absent exactly when no file was read — which is how `source` names a file that
- * was asked for but not found, distinct from a file that was read and held zero rules.
+ * The policy in force for a run (F6, D-49): the file when there was one, which of the three sources
+ * chose the rules, the digest of the bytes in force, the rules, and the counts.
+ *
+ * `source` keeps the meaning it had in 0.4.0 — the policy file's resolved path, absent when no user
+ * file supplied the rules — and `sourceKind` is the additive field that says which of the three
+ * sources chose them (F5). A 0.4.0 reader therefore sees the path it has always seen, or no path
+ * when there was none; it never reads a kind where it expects a path.
+ *
+ * `sha256` is absent exactly when there were no bytes to digest. A `file` source therefore keeps its
+ * 0.4.0 reading — absent means a path was named but no file was read — distinct from a file that was
+ * read and held zero rules. The built-in source carries the shipped asset's digest (F9(d)), so a
+ * reader can tell which text actually applied.
  */
 export interface PolicyInForce {
-  /** The path the rules were loaded from; the run's resolved `--policy`, whether or not it exists. */
-  source?:  string;
-  /** sha256 of the policy file's bytes. Absent when there was no file to read. */
-  sha256?:  string;
+  /** The run's resolved policy file path. Absent for the built-in policy and for `none`. */
+  source?: string;
+  /** How the rules were chosen: a policy file, the shipped built-in policy, or no policy at all. */
+  sourceKind?: PolicySourceKind;
+  /** sha256 of the bytes in force: the file's, or the shipped asset's for the built-in policy. */
+  sha256?: string;
   ruleCount: number;
   rules:    PolicyRuleSummary[];
   counts:   PolicyVerdictCounts;

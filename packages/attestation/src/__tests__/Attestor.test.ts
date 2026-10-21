@@ -73,7 +73,7 @@ test('recordPolicyInForce and recordModelSurface flow into the signed bundle, un
   try {
     const attestor = new Attestor(makeRunId('r-f46'), stubGraph, dir, { secret: 'test-secret' });
     attestor.recordPolicyInForce({
-      source: '.maf/policy.yaml', sha256: 'abc123', ruleCount: 1,
+      source: '.maf/policy.yaml', sourceKind: 'file', sha256: 'abc123', ruleCount: 1,
       rules: [{ id: 'protect-secrets', effect: 'Deny', matcher: 'toolId=fs.write pathGlob=.env' }],
       counts: { allow: 3, deny: 1, escalate: 0, indeterminate: 0 },
     });

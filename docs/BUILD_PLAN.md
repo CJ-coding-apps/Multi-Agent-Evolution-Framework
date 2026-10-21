@@ -28,8 +28,9 @@ Status legend for work packages: `todo` · `in-progress` · `in-review` · `merg
 |---|---|---|
 | **0.2.1** | Correctness fixes (P0) and the documentation truth pass. No behaviour the README describes changes; the README changes to match the code. | Fresh-clone proof; README Status table honest as of the commit. |
 | **0.3.0** | The governed-by-default execution model and the wirings: in-process default, approval, review gate, worktrees, YAML/config, planner recall, offline goldens, in-toto attestation, harness import. Toolchain floor. | e2e CI job green; every 0.3.0 Status row shipped with a regression check. |
-| **0.4.0** | Readers and the record ([D-47](DECISIONS.md)): the `analyst` role and in-process built-in readers (D-43, D-44), the model surface and each node's tier (D-45), the governed turn and the reader that did no work (D-46), and the toolchain floor carried from Phase 2 (WP-2.11). The LCM, failover, persistence, patch-test, DAG-from-spec, evolver, Kùzu and consolidation items are re-dated to 0.5.0. | Exit criteria 1–3 of §1, and a whole-branch audit (§3.7). |
-| **0.5.0** | LCM built properly, patch-test strategy, run persistence with pause/resume, provider failover, DAG-from-spec, evolver as claimed, Kùzu 0.11.3, hardening and consolidation — the items moved off 0.4.0 by [D-47](DECISIONS.md), as the renumbered WP-3.2 … WP-3.13 in §7 — then the port from maf-v1: `mcp-tools` bridge (with its known fixes), `resolveHarnessForRun`, encryption at rest (E1), prompt-injector test script. | — |
+| **0.4.0** | Readers and the record ([D-47](DECISIONS.md)): the `analyst` role and in-process built-in readers (D-43, D-44), the model surface and each node's tier (D-45), the governed turn and the reader that did no work (D-46), and the toolchain floor carried from Phase 2 (WP-2.11). The LCM, failover, persistence, patch-test, DAG-from-spec, evolver, Kùzu and consolidation items are re-dated to 0.5.0, and then to 0.6.0 by [D-48](DECISIONS.md) when packaging took 0.5.0. | Exit criteria 1–3 of §1, and a whole-branch audit (§3.7). |
+| **0.5.0** | Install it, point it at your repository ([D-48](DECISIONS.md)): the published package `@cj-coding-apps/maf` — the internal packages bundled into one `dist/main.js`, six pinned runtime dependencies, the assets a run reads (including the default harness) — `maf init` writing the shipped `.maf/`, the built-in policy default ([D-49](DECISIONS.md)), and the packaged-corpus and packaged-harness fallbacks for `goldens`. | Pack-check in CI: the tarball's file list, an install into an empty prefix, `--version`, `inprocess-demo`, and `maf init && maf goldens run --adapter scripted` from a directory that is not this repository, with nothing copied or imported first. |
+| **0.6.0** | LCM built properly, patch-test strategy, run persistence with pause/resume, provider failover, DAG-from-spec, evolver as claimed, Kùzu 0.11.3, hardening and consolidation — the items moved off 0.4.0 by [D-47](DECISIONS.md) and off 0.5.0 by [D-48](DECISIONS.md), as the renumbered WP-3.2 … WP-3.13 in §7 — then the port from maf-v1: `mcp-tools` bridge (with its known fixes), `resolveHarnessForRun`, encryption at rest (E1), prompt-injector test script. **Carried from 0.5.0 (F2):** two default role sets — the built-in `DEFAULT_ROLE_SET` a plain run uses when `.maf/roles.yaml` is absent, and the shipped `roles.yaml` that `maf init` writes — differ in prompts and in the tester's tools (`fs.write`). Reconcile them into one source, so the file and the built-in set cannot drift apart. | — |
 
 Semantics: pre-1.0 SemVer. Behaviour changes bump the minor. A patch adds no behaviour the docs do not already describe: 0.2.1 changed none; 0.3.1 restored guarantees the docs already made — a read-only role cannot change the tree unnoticed, and the bundle's subjects are the run's diffs. **A fix that makes an existing guarantee true ships in the patch, with its README row.**
 
@@ -108,7 +109,7 @@ Phase 2 (0.3.0)
 Phase 3a (0.4.0, shipped — D-47)
   WP-3.0b roles · WP-3.0c evidence · WP-3.1 no-work · WP-2.11 toolchain floor
 
-Phase 3b (0.5.0 — moved off 0.4.0 by D-47)
+Phase 3b (0.6.0 — moved off 0.4.0 by D-47, off 0.5.0 by D-48)
   Lane A  lcm · lcm-adapter                          WP-3.2
   Lane B  blackboard · dag-runner (persistence)      WP-3.3
   Lane C  adapters (failover)                        WP-3.4
@@ -252,13 +253,13 @@ Status table rows flipped to *shipped* only for behaviour landed in this phase, 
 
 ---
 
-## 7. Phase 3 — 3a released as 0.4.0; 3b planned for 0.5.0
+## 7. Phase 3 — 3a released as 0.4.0; 3b planned for 0.6.0
 
 > **Deviation recorded 2026-10-14:** PR #31 was merged to `main` by the coder, under the maintainer's `gh` credential, rather than by the maintainer (D-26). The runbook the architect wrote put the merge commands beside the coder's conflict-resolution steps without re-labelling them as the maintainer's, and the maintainer handed the runbook over whole. The merge was reviewed, verifier-passed and CI-green and is not reverted; the §3.3 clause is the consequence.
 
 ### Phase 3a — released as 0.4.0 (2026-10-20)
 
-**D-47 re-scoped this release after the whole-branch audit (2026-10-15).** The WPs below — WP-3.2 … WP-3.13 as renumbered — were written for the LCM/failover/evolver phase D-22 assigned to 0.4.0. The branch shipped **none** of them. What it shipped is the reader path made true and every role call made a value in the record, so 0.4.0 is *readers and the record* and the unstarted items move to 0.5.0 ([D-47](DECISIONS.md); §2). Four work packages actually landed, each with its own PR, verifier and CI:
+**D-47 re-scoped this release after the whole-branch audit (2026-10-15).** The WPs below — WP-3.2 … WP-3.13 as renumbered — were written for the LCM/failover/evolver phase D-22 assigned to 0.4.0. The branch shipped **none** of them. What it shipped is the reader path made true and every role call made a value in the record, so 0.4.0 is *readers and the record* and the unstarted items move to 0.5.0 ([D-47](DECISIONS.md); §2), and then to 0.6.0 when packaging takes 0.5.0 ([D-48](DECISIONS.md)). Four work packages actually landed, each with its own PR, verifier and CI:
 
 | WP | What it is | PR |
 |---|---|---|
@@ -328,14 +329,14 @@ Wires WP-3.3, 3.4, 3.5, 3.6 into the entry points. **Acceptance:** a scripted ru
 **Files:** `packages/cli/src/__tests__/` (every command, `wiring.ts`), `packages/adapters/*/src/__tests__/` (fake `claude`/`gemini`/`codex` binaries on `PATH`; verify the real `claude` flag set once on the maintainer's machine and pin it in a test fixture), `.github/workflows/nightly.yml` (live goldens with the Anthropic key, `$50` cap via run limits; evolve weekly, `$150`), `scripts/check-test-scripts.mjs` (every package with `src/` must have tests).
 **Acceptance:** no package the CLI depends on is untested; the nightly job runs the live goldens and posts the result as a workflow summary; CI total time under 10 minutes.
 
-### WP-3.13 Documentation pass, exit audit, release 0.5.0 — `todo` [maintainer merges]
-Status table: every row *shipped* names its check; LCM, evolver, failover, patch-test, DAG-from-spec, Kùzu rows flipped; CHANGELOG `[0.5.0]`; `DECISIONS.md` statuses. Then the exit audit: a verifier with no prior context runs the three criteria of §1 and reports. Release only on a clean report.
+### WP-3.13 Documentation pass, exit audit, release 0.6.0 — `todo` [maintainer merges]
+Status table: every row *shipped* names its check; LCM, evolver, failover, patch-test, DAG-from-spec, Kùzu rows flipped; CHANGELOG `[0.6.0]`; `DECISIONS.md` statuses. Then the exit audit: a verifier with no prior context runs the three criteria of §1 and reports. Release only on a clean report.
 
 ---
 
-## 8. Phase 3b + Phase 4 — release 0.5.0 (scoped later)
+## 8. Phase 3b + Phase 4 — release 0.6.0 (scoped later)
 
-**Phase 3b — the items 0.4.0 did not take.** [D-47](DECISIONS.md) re-dated the LCM/failover/evolver phase to 0.5.0, and §7's WP-3.2 … WP-3.13 are its work packages unchanged — LCM built properly (D-17), run persistence and checkpoint (D-05, D-18), provider failover and pause (D-05), the patch-test coder strategy (D-18), DAG-from-spec (D-18), the evolver as claimed (D-15), Kùzu 0.11.3 (D-20), hardening (D-10, D-11) and consolidation (D-18). Their files, acceptance and lane layout stay as §7 writes them; only the release number moved.
+**Phase 3b — the items 0.4.0 did not take.** [D-47](DECISIONS.md) re-dated the LCM/failover/evolver phase to 0.5.0 and [D-48](DECISIONS.md) moved it again to 0.6.0, when packaging took 0.5.0; §7's WP-3.2 … WP-3.13 are its work packages unchanged — LCM built properly (D-17), run persistence and checkpoint (D-05, D-18), provider failover and pause (D-05), the patch-test coder strategy (D-18), DAG-from-spec (D-18), the evolver as claimed (D-15), Kùzu 0.11.3 (D-20), hardening (D-10, D-11) and consolidation (D-18). Their files, acceptance and lane layout stay as §7 writes them; only the release number moved.
 
 **Phase 3b — a WP the readers work leaves behind.** A `no_work` node counts the calls it *made*, not the call its task *needed*: a `tester` can read one file, never run `test.run`, and Succeed — and two of the three live-row attempts did exactly that (the WP-3.1 `no_work` entry in [CHANGELOG.md](../CHANGELOG.md)). The root is upstream — the planner is told nothing about the executor's tools, so a node's description speaks shell — and no role can say which tool its task requires. One WP closes both halves: the planner names **MAF tool ids** and is told there is no shell, and `RoleConfig` gains an optional `requiresTool?: ToolId`, so a role can declare the one call its task needs (`requiresTool: test.run`) and a node that executes none of it fails `no_work`. This is the **narrow form of F12** — it checks the call that was *required*, not every call the model narrated.
 

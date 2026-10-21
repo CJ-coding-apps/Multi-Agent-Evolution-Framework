@@ -42,6 +42,8 @@ Also found and fixed along the way, outside any verdict: a "flaky" CI job that f
 
 ## 0.4.0 (Phase 3a, 2026-10-14 … 10-20)
 
+> **Note on release numbers in this section.** "0.5.0" below means the next release *as planned when this section was written*: D-48 later renumbered that work 0.6.0 and gave 0.5.0 to packaging. The rows themselves are historical and are left as they were written.
+
 Three work packages, each verified until a pass found nothing above LOW, then a whole-branch audit, then live rows on a real `claude`. Findings are counted once, in the pass that first reported them.
 
 | Pass | Scope | PR | Passes | HIGH / MED / LOW | What the HIGH findings were | Resolution |

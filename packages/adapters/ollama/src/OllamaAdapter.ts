@@ -127,7 +127,7 @@ export class OllamaAdapter extends BaseAdapter {
       if (res.status >= 500) throw serverFailure(url, res.status, text);
       if (!res.ok) {
         // A 4xx is the server judging the request (an unknown model is a 404). Classifying those
-        // is D-05's (0.5.0); until then it is a failed result, not a retry.
+        // is D-05's (0.6.0); until then it is a failed result, not a retry.
         return { success: false, output: text, toolCallLog: [], exitCode: res.status, duration: Date.now() - start };
       }
       const data = JSON.parse(text) as OllamaResponse;

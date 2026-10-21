@@ -12,7 +12,6 @@ import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor, componentId } from '@maf/attestation';
 import { createApprovalGate } from '@maf/approval-gate';
-import { PolicyLoader } from '@maf/policy-engine';
 import { GIT_EMPTY_TREE, ReviewGate, SecurityReviewGate, WorktreeManager, resolveWorkingDir, runIsolatedGit, snapshotDiff } from '@maf/git-ops';
 import type { FinishResult, Reviewer, RunWorktree } from '@maf/git-ops';
 import { DagRunner, createWriterLockLedger, withRetry } from '@maf/dag-runner';
@@ -25,7 +24,7 @@ import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterR
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { resolveRunHarness } from '../wiring.js';
+import { loadCommandPolicy, resolveRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
 import type { MafConfig } from '../config/ConfigLoader.js';
@@ -56,7 +55,7 @@ export interface RunOptions {
 }
 
 /** The flags whose commander default must be told apart from the same value typed. */
-export type GivenFlag = 'adapter' | 'worktree' | 'roles';
+export type GivenFlag = 'adapter' | 'worktree' | 'roles' | 'policy';
 
 /** What `run` takes from the process. A test replaces any of it. */
 export interface RunIo {
@@ -92,7 +91,7 @@ export function registerRunCommand(program: Command, deps: RunDeps = {}): void {
     .option('-m, --model <model>', 'Model name (adapter-specific)')
     .option('-d, --dir <path>', 'Working directory', process.cwd())
     .option('--no-worktree', 'Disable git worktree isolation')
-    .option('--policy <path>', 'Path to policy YAML file', '.maf/policy.yaml')
+    .option('--policy <path>', 'Path to policy YAML file (default: .maf/policy.yaml, else the built-in policy); "none" runs without rules', '.maf/policy.yaml')
     .option('--roles <path>', 'Path to roles YAML file', '.maf/roles.yaml')
     .option('--harness <ref>', 'Harness id, sha, or "current" (default: CURRENT if set, else legacy-default from --roles (overrides --roles when given))')
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
@@ -171,6 +170,16 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   // Dispatched FROM the harness, so the sha the attestation names is the content that ran.
   const roles = RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), mafDir, baseTools);
   say(`[maf] harness: ${harness.id} (${shortSha(harness.sha)}) [${harnessSource}]`);
+  // F2: the built-in role set is not the shipped `.maf/roles.yaml` — their prompts differ, and so do
+  // the tester's tools. A run without the file therefore uses roles `maf init` would not have
+  // written. The docs used to call the two identical; say which one is in force at the point it
+  // happens, before any agent acts.
+  if (harnessSource === 'legacy') {
+    const rolesPath = path.resolve(dir, opts.roles);
+    if (!(await nameExists(rolesPath))) {
+      say(`[maf] roles: no ${path.relative(dir, rolesPath)} — using the built-in role set (maf init writes the shipped one)`);
+    }
+  }
 
   // ── Tiers (D-01): the dispatcher refuses an ungoverned writer when its node comes up; refusing
   // here, before planning, saves the planner's tokens and the worktree.
@@ -220,25 +229,32 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   }
 
   // ── Worktree (D-03): one manager for the whole run — `finish` reads the base commit from it.
-  // A directory with no committed files is refused here, before any agent work.
+  // N3: a run that cannot have its worktree is refused before any store is opened, so it leaves
+  // `.maf/` as it found it. The policy below is then resolved before the worktree is created, so a
+  // mistyped --policy leaves no `maf/<runId>` branch and no worktree either.
   const worktrees = new WorktreeManager(dir);
-  if (cfg.worktree && await hasWorkOutsideHead(dir)) {
-    warn(`[maf] warning: ${dir} has uncommitted or untracked changes; the run starts from HEAD in its own worktree and will not see them.`);
+  if (cfg.worktree) {
+    if (await hasWorkOutsideHead(dir)) {
+      warn(`[maf] warning: ${dir} has uncommitted or untracked changes; the run starts from HEAD in its own worktree and will not see them.`);
+    }
+    await worktrees.checkForRun(runId);
   }
-  const run = cfg.worktree ? await worktrees.createForRun(runId) : undefined;
-  const { cwd, isolated, warning } = resolveWorkingDir({ dir, worktree: cfg.worktree, run, offBy: cfg.worktree ? undefined : inPlaceBy });
-  if (warning) warn(`[maf] warning: ${warning}`);
-  if (run) say(`[maf] worktree: ${run.path} (branch ${run.branch}, from ${run.baseCommit.slice(0, 12)})`);
-  // The registry the agent gets is bound to the run's working directory now that it exists: the
-  // git tools learn the repository root here, before any agent action, so a `.git` the agent later
-  // removes or rewrites cannot redirect them (WP-2.17). `baseTools` above only validated the roles.
-  const agentTools = createDefaultRegistry({ projectRoot: cwd });
-
   let succeeded = false;
   let refusal: string | undefined;
   let graph: MemoryGraph | undefined;
   let lcm: LcmEngine | undefined;
+  let run: RunWorktree | undefined;
+  let isolated = false;
   try {
+    // The stores live in .maf/, which is not the worktree; opening one is not creating a branch.
+    graph           = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
+    // D-49, F7, N3: the same resolution `goldens` and `evolve` take, and it happens *before* the
+    // worktree below. With no `--policy`, a missing .maf/policy.yaml falls back to the policy
+    // shipped in the package, so an installed `maf` governs a repository that has never run
+    // `maf init`; a typed path that names no file stops the run (F4), and only `--policy none` asks
+    // for no rules. Refusing here leaves nothing to clean up: no worktree, no `maf/<runId>` branch.
+    const policy    = await loadCommandPolicy(dir, { value: opts.policy, typed: ctx.given('policy') }, graph);
+
     // Wire all components
     const board     = new BlackboardStore();
     lcm             = new LcmEngine({
@@ -246,8 +262,19 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       ...cfg.lcm,
       summarize: async (messages) => messages.map((m) => m.content.slice(0, 200)).join('\n'),
     });
-    graph           = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
-    const policy    = await PolicyLoader.loadEngine(path.resolve(dir, opts.policy), graph);
+
+    // ── Worktree, once the run's configuration is known to be usable.
+    run = cfg.worktree ? await worktrees.createForRun(runId) : undefined;
+    const working = resolveWorkingDir({ dir, worktree: cfg.worktree, run, offBy: cfg.worktree ? undefined : inPlaceBy });
+    const { cwd } = working;
+    isolated = working.isolated;
+    if (working.warning) warn(`[maf] warning: ${working.warning}`);
+    if (run) say(`[maf] worktree: ${run.path} (branch ${run.branch}, from ${run.baseCommit.slice(0, 12)})`);
+    // The registry the agent gets is bound to the run's working directory now that it exists: the
+    // git tools learn the repository root here, before any agent action, so a `.git` the agent later
+    // removes or rewrites cannot redirect them (WP-2.17). `baseTools` above only validated the roles.
+    const agentTools = createDefaultRegistry({ projectRoot: cwd });
+
     const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
       logDir: path.join(mafDir, 'transcripts'),
       softThreshold: 20_000,
@@ -433,6 +460,20 @@ export function planGenerator(
  */
 export function writerLock(roles: RoleRegistry, adapter: CliAdapter, baseTools: ToolRegistry): (node: DagNode) => boolean {
   return (node) => roles.hasRole(node.agentRole) ? isWriterForLock(roles.getRole(node.agentRole), adapter, baseTools) : true;
+}
+
+/**
+ * Whether a path exists by name. `lstat`, not `stat`: a dangling symlink exists, and the role
+ * registry refuses it rather than treating it as "no roles file" — the text it pointed at is gone,
+ * which is not the same as there having been none.
+ */
+async function nameExists(p: string): Promise<boolean> {
+  try {
+    await lstat(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

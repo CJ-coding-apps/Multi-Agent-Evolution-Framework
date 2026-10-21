@@ -178,7 +178,12 @@ export function registerInProcessDemoCommand(program: Command): void {
       console.log(`[demo] run:      ${runId}`);
 
       // Headless whatever the terminal, so the demo runs the same offline, unattended and in CI (D-02).
-      const stack = await buildRunStack({ cwd: fixture, mafDir, policyPath, adapter, runId, harnessSha: harness.sha, headless: true });
+      // The file was just written above, so it is the explicit source: a typo here would stop the
+      // demo rather than quietly run it with no rules (D-49, F4).
+      const stack = await buildRunStack({
+        cwd: fixture, mafDir, policy: { value: policyPath, typed: true }, adapter, runId,
+        harnessSha: harness.sha, headless: true,
+      });
 
       let output = '';
       let dispatchError: unknown;

@@ -126,7 +126,15 @@ export class WorktreeManager {
   /** @param projectRoot the directory maf was pointed at — the one holding `.maf/`. */
   constructor(private readonly projectRoot: string) {}
 
-  async createForRun(runId: RunId): Promise<RunWorktree> {
+  /**
+   * Refuses a run whose worktree could not be created; creates nothing. Same conditions and
+   * messages as {@link createForRun}, asked before any worktree or branch exists (N3).
+   *
+   * `run` calls this before it opens the run's stores, so a directory that cannot host a run leaves
+   * `.maf/` as it found it, and it resolves the policy in between — a mistyped `--policy` therefore
+   * leaves neither a worktree nor a `maf/<runId>` branch behind.
+   */
+  async checkForRun(runId: RunId): Promise<void> {
     const { wtPath, branch } = this.names(runId);
     const fail = (why: string) => new Error(`cannot create a worktree for run ${runId}: ${why}`);
     // `--show-prefix` is where the project sits in its repository; the run works at the same place in its worktree.
@@ -145,6 +153,20 @@ export class WorktreeManager {
     if (await lstat(wtPath).then(() => true, () => false)) {
       throw fail(`${wtPath} already exists; remove it or use a new run id.`);
     }
+    // A worktree holds only committed content: an untracked or ignored directory has no counterpart
+    // there. Asked of git rather than of the checkout, so the refusal can come before the worktree
+    // is created; at the repository top the worktree's own root is that directory, so there is
+    // nothing to ask. `.` is relative to this directory, which is where the pathspecs apply.
+    if (prefix !== '' && (await git(this.projectRoot, ['ls-tree', '-r', '--name-only', 'HEAD', '--', '.'])) === '') {
+      throw fail(`${this.projectRoot} has no committed files; commit it or run with --no-worktree.`);
+    }
+  }
+
+  async createForRun(runId: RunId): Promise<RunWorktree> {
+    const { wtPath, branch } = this.names(runId);
+    const fail = (why: string) => new Error(`cannot create a worktree for run ${runId}: ${why}`);
+    await this.checkForRun(runId);
+    const prefix = await git(this.projectRoot, ['rev-parse', '--show-prefix']);
     const baseCommit = await git(this.projectRoot, ['rev-parse', '--verify', 'HEAD^{commit}']);
     const dir = path.dirname(wtPath);
     await mkdir(dir, { recursive: true });

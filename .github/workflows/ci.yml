@@ -157,3 +157,33 @@ jobs:
             exit 1
           fi
           node scripts/compare-goldens.mjs tests/goldens/baseline.json "${results[0]}"
+
+  # Everything above tests the checkout. This job tests the published artifact: it packs the package
+  # with npm, installs the tarball into an empty prefix, and runs the two commands the README leads
+  # with — from a directory that is not this repository. The e2e job would pass with a tarball that
+  # lacked the assets, the manifest dependencies or the shebang, because it runs `dist/main.js` in
+  # place; this one cannot.
+  package:
+    name: package · npm pack · install · run
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (tsc, leaf-first)
+        run: pnpm build
+
+      - name: Pack, install from the tarball, and run it
+        run: pnpm check:package

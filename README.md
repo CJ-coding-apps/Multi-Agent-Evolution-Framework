@@ -6,7 +6,7 @@ The backends sit behind one adapter interface: the Claude Code, Gemini and Codex
 
 ## Status
 
-What is true of the code as of 0.4.0. Prose elsewhere in this README describes only the *shipped* rows. **Proof** names the tests that check a shipped row; each lives under `packages/<package>/src/__tests__/` and runs in the CI job `build · typecheck · test`. **e2e** marks a row the CI job `e2e · demo · attestation · offline goldens` also exercises, by running the built CLI. **Since/Planned** is the release a shipped row first appeared in, or the release planned to ship (or, for an experimental row, to finish) it.
+What is true of the code as of 0.5.0. Prose elsewhere in this README describes only the *shipped* rows. **Proof** names the tests that check a shipped row; each lives under `packages/<package>/src/__tests__/` and runs in the CI job `build · typecheck · test`, unless it is a script named here, which the CI job `package · npm pack · install · run` runs. **e2e** marks a row the CI job `e2e · demo · attestation · offline goldens` also exercises, by running the built CLI. **Since/Planned** is the release a shipped row first appeared in, or the release planned to ship (or, for an experimental row, to finish) it.
 
 | Feature | Status | Since/Planned | Proof |
 |---|---|---|---|
@@ -39,20 +39,22 @@ What is true of the code as of 0.4.0. Prose elsewhere in this README describes o
 | `.maf/config.yaml` read and validated: flag > file > built-in default, per key; an unknown key or a bad value stops the run | shipped | 0.3.0 | `cli/ConfigLoader.test.ts`, `cli/resolveConfig.test.ts`, `cli/run-config.test.ts`, `cli/run-settings.test.ts`, `cli/run-inplace.test.ts` |
 | `.maf/roles.yaml` read as YAML (the JSON form still loads); a file that exists but does not load stops the run | shipped | 0.3.0 | `roles/roles-file-loading.test.ts`, `policy-engine/parseYamlDocument.test.ts` |
 | `maf run` on a repository with no `.maf/` | shipped | 0.2.1 | `cli/ensureMafDir.test.ts`, `cli/run-acceptance.test.ts` (whose repository has no `.maf/`) |
+| `maf init` sets a repository up for a run: it writes the package's own `.maf/` — policy, roles, config, prompts and the default harness — plus the `.gitignore` that keeps runtime state out of the user's history; only the policy is also what `run` falls back to when the file is absent (with no `roles.yaml`, `run` uses the built-in role set, which is not the shipped one, and says so); a second run keeps every file the user has edited and names it, `--force` replaces them, a symlink where `init` would write is refused with or without `--force`, and a directory that is not a committed work tree (including `.git` itself) is refused before anything is written | shipped | 0.5.0 | `cli/init.test.ts`, `cli/assets.test.ts` |
+| A run with no policy file is governed by the built-in policy ([D-49](docs/DECISIONS.md)): with no `--policy` flag and no `.maf/policy.yaml`, `run` applies the policy shipped in the package (the repository's own `.maf/policy.yaml`, byte for byte), prints one line naming it, and records `policyInForce.sourceKind: "built-in"` with no `source` path and the shipped text's `sha256`; `--policy none` opts out and records `sourceKind: "none"`; a typed `--policy <path>` that names no file stops the run instead of running ungoverned, and a named or default file that exists but does not load still stops it, so a broken policy never falls back silently; `run`, `goldens` and `evolve` resolve `--policy` by this one rule | shipped | 0.5.0 | `cli/run-d49-policy.test.ts`, `cli/assets.test.ts` |
 | Memory graph (Kùzu): writes with bound parameters; each query result is closed as it is read | shipped | 0.1.0 (result lifetime 0.3.0) | `memory-graph/graph-parameters.test.ts`, `memory-graph/native-lifetime.test.ts`, `cli/native-lifecycle.test.ts` |
 | Planner recall of past failures ([D-16](docs/DECISIONS.md), [D-37](docs/DECISIONS.md)): a failed node is recorded as a Task joined to its Failure, the Task carrying the title of the run it was planned for; the planner recalls up to five, most recent first, whose Task text contains the first three words of the new title, ignoring case | shipped | 0.3.0 | `memory-graph/failure-recall.test.ts`, `dag-runner/failure-recorder.test.ts`, `planning-agent/failure-recall.test.ts`, `cli/failure-recall.test.ts`, `cli/run-failure.test.ts` |
 | Harness configs: content-addressed, with a tamper-checking store; the attestation's `configSource` names the stored harness file and its sha | shipped | 0.1.0 | `harness-config/harness-config.test.ts`, `harness-config/resolveHarnessRef.test.ts`, `cli/run-acceptance.test.ts`; the sha MAF also stamps on the Run and tool-invocation nodes has no test |
 | A run's recorded harness is the content it dispatched: without `--harness`, `legacy-default` is minted again from `roles.yaml` and each prompt file's text on every run, unless the operator pointed CURRENT elsewhere | shipped | 0.3.0 | `harness-config/resolveHarnessRef.test.ts`, `harness-config/harness-config.test.ts`, `harness-config/store-concurrency.test.ts`, `roles/harness-identity.test.ts`, `cli/run-harness.test.ts`, `cli/harness-set-current.test.ts` |
-| LCM context engine | experimental | 0.5.0 | — no tests; summaries are a placeholder |
+| LCM context engine | experimental | 0.6.0 | — no tests; summaries are a placeholder |
 | Evaluation harness (`maf goldens run\|compare`) with a live adapter | shipped | 0.1.0 | `eval-harness/eval-harness.test.ts`, `cli/goldens-outcome.test.ts` |
 | Offline evaluation ([D-14](docs/DECISIONS.md), [D-38](docs/DECISIONS.md)): `goldens run --adapter scripted` needs no model, no key and no earlier run; a default harness and its baseline result are committed; every evaluation uses its own empty graph; `goldens compare` refuses results measured differently; `maf harness import`. A golden run scores a harness and never reads a bundle back, so the offline corpus is blind to every bundle field — `modelSurfaces` (F4), `policyInForce`, `executionTiers` — and a live run is the standing check for all three | shipped | 0.3.0 | `eval-harness/scripted-adapter.test.ts`, `eval-harness/offline-baseline.test.ts`, `eval-harness/corpus-integrity.test.ts`, `eval-harness/judge.test.ts`, `cli/goldens-offline.test.ts`, `cli/harness-import.test.ts`, `cli/eval-commands.test.ts`; e2e |
-| Evolver (`maf evolve`) | experimental | 0.5.0 | `evolver/evolver.test.ts`, `cli/evolve-smoke.test.ts` |
+| Evolver (`maf evolve`) | experimental | 0.6.0 | `evolver/evolver.test.ts`, `cli/evolve-smoke.test.ts` |
 | `maf inprocess-demo` (offline by default) | shipped | 0.1.0 | `cli/demo-fixture.test.ts`, `cli/inprocess-demo.test.ts`; e2e |
 | The agent's `git.*` tools run with hooks, `core.fsmonitor` and commit signing off, ignore the host's git configuration, and act only on the run's own working tree; `fs.write`, `fs.delete` and `patch.apply` refuse any path into `.git` | shipped | 0.3.0 | `tools/git-isolation.test.ts`, `tools/git-args.test.ts`, `tools/worktree-confinement.test.ts` |
 | Backends: Claude Code, Gemini, Codex (CLI); Ollama, OpenRouter (HTTP) | shipped | 0.1.0 | `adapters/claude/ClaudeAdapter.test.ts`, `adapters/codex/CodexAdapter.test.ts`, `adapters/gemini/GeminiAdapter.test.ts`, `adapters/openrouter/OpenRouterAdapter.test.ts`, `adapters/openrouter/transport.test.ts`, `adapters/ollama/OllamaAdapter.test.ts`, `adapters/ollama/transport.test.ts`, `adapters/base/ProcessSpawner.test.ts`; the CLI adapters are tested with a stand-in spawner, not the real binaries |
-| Toolchain floor ([D-21](docs/DECISIONS.md)): `engines` declares Node ≥ 22, pnpm 10, a `maf` bin that runs from `PATH` on Linux and macOS | shipped | 0.4.0 | the root `package.json` pins `packageManager: pnpm@10.34.7` with `engines` and `pnpm.onlyBuiltDependencies`; `pnpm-lock.yaml` is v9; `cli/shebang.test.ts` runs the built bin through its shebang |
+| Toolchain floor ([D-21](docs/DECISIONS.md)): `engines` declares Node ≥ 22, pnpm 10, a `maf` bin that runs from `PATH` on Linux and macOS; the CLI itself refuses to start below Node 22, with `maf requires Node 22 or newer (found vX)` and exit status 1, because npm only warns about `engines` | shipped | 0.4.0 (the runtime check 0.5.0) | the root `package.json` pins `packageManager: pnpm@10.34.7` with `engines` and `pnpm.onlyBuiltDependencies`; `pnpm-lock.yaml` is v9; `cli/shebang.test.ts` runs the built bin through its shebang; `cli/nodeVersion.test.ts` |
 | Docker image | planned | not scheduled | — |
-| npm packages (nothing is published) | planned | not scheduled | — |
+| Published package `@cj-coding-apps/maf` (bin `maf`): the workspace's internal packages are bundled into one `dist/main.js` and the six runtime dependencies stay pinned in the manifest; the tarball ships the bundle, the assets it reads, the README and the licence, and nothing named `workspace:` or `@maf/*`; the installed command runs `inprocess-demo` and the offline goldens from a repository with no checkout, using the corpus the package ships | shipped | 0.5.0 | `scripts/pack-check.mjs` |
 
 ## What it does
 
@@ -71,17 +73,57 @@ What is true of the code as of 0.4.0. Prose elsewhere in this README describes o
 
 ## Quickstart
 
-### Prerequisites
+### Install
 
-- **Node 22.** It is the version CI builds and tests on.
-- **pnpm 10**, through corepack: `corepack enable` provides the version named in `package.json`'s `packageManager` field (currently `pnpm@10.34.7`).
-- **git.** The target directory of `maf run` must be in a git repository, with at least one commit unless you pass `--no-worktree`: a run's worktree starts from HEAD, and a writer role's change is reviewed as a diff against the commit its node started from.
-- **npm.** `test.run`, and so the demo, runs `npm test` in a project where it recognises no other test runner.
-- **Native modules.** `kuzu` (0.7.1) and `better-sqlite3` (11.x) need a prebuilt binary for your platform and Node version; where none exists, installing them means compiling from source, which needs a C++ toolchain.
-- **For `--adapter claude`:** a Claude Code CLI whose `claude --help` lists `--tools`, `--strict-mcp-config` and `--mcp-config`. MAF passes all three; see [Before `maf run`](#before-maf-run).
+```bash
+npm install -g @cj-coding-apps/maf
+maf --version
+```
+
+- **Node 22.** It is the version CI builds and tests on, and the package refuses anything older.
+- **git.** The target directory of `maf run` must be in a git repository with at least one commit
+  (unless you pass `--no-worktree`): a run's worktree starts from HEAD, and a writer role's change
+  is reviewed as a diff against the commit its node started from.
+- **npm.** `test.run`, and so the demo, runs `npm test` in a project where it recognises no other
+  test runner.
+- **Native modules.** The package depends on six libraries, two of which carry native code: `kuzu`
+  (0.7.1) and `better-sqlite3` (11.x). npm needs a prebuilt binary for your platform and Node
+  version; where none exists, installing them means compiling from source, which needs a C++
+  toolchain.
+- **For `--adapter claude`:** a Claude Code CLI on your `PATH` whose `claude --help` lists
+  `--tools`, `--strict-mcp-config` and `--mcp-config`. MAF passes all three; see
+  [Before `maf run`](#before-maf-run).
 - No browser and no `playwright` install is needed.
 
-### Build and run
+### Use it in your repository
+
+```bash
+cd /path/to/your/repo             # a git repository with at least one commit
+maf init                          # writes .maf/: policy, roles, config, prompts and the default harness
+
+export MAF_SIGNING_KEY="$(openssl rand -hex 32)"
+maf run "add a hello function"    # works in .maf/worktrees/<runId> on branch maf/<runId>
+# [maf] worktree: /path/to/your/repo/.maf/worktrees/<runId> (branch maf/<runId>, from <commit>)
+# …
+# [maf] the run's work is on maf/<runId> (worktree …). To take it: git merge maf/<runId>
+
+maf attest verify .maf/attestations/<runId>.bundle.json
+```
+
+`maf init` writes the shipped `.maf/` — policy, roles, config, prompts and the default harness — and
+prints the next command. Only the policy is also what `run` falls back to when the file is absent;
+with no `.maf/roles.yaml`, `run` uses its built-in role set, which is **not** the shipped one, and
+prints one line saying so (the shipped `roles.yaml` gives `tester` `fs.write`, the built-in set does
+not, and the prompts differ). It refuses a directory that is not a committed git repository, because
+a run has no HEAD to start from there, and it refuses a symlink anywhere it would write rather than
+writing through it; running it again keeps every file you have edited, and `--force` replaces them.
+Nothing else is required: with no `.maf/policy.yaml` and no `--policy`,
+`run` applies the built-in policy and says so once
+([D-49](docs/DECISIONS.md)); `--policy none` runs without rules. The adapter defaults to `claude`.
+
+### Work on maf from a checkout
+
+A fresh clone has no `dist/`, which is not committed, so build before running anything:
 
 ```bash
 # 1. clone
@@ -122,10 +164,12 @@ node packages/cli/dist/main.js run "add a hello function" -d /path/to/repo --ada
 #    To run in /path/to/repo itself, on its checked-out branch, add --no-worktree.
 ```
 
-> The CLI runs from compiled `dist/`, which is not committed, so steps 2–3 are required after a
-> fresh clone. This README writes `maf <command>` for `node packages/cli/dist/main.js <command>`:
-> nothing is published to npm, and nothing in this repository puts `packages/cli`'s `maf` bin on
-> your `PATH`.
+> This section runs the checkout. Elsewhere the README writes `maf <command>`; in a checkout that is
+> `node packages/cli/dist/main.js <command>`, because nothing puts `packages/cli`'s bin on your
+> `PATH`. The published package is `@cj-coding-apps/maf`: `npm install -g` takes the last release,
+> which lags this branch. `pnpm pack:package` builds the publishable tarball's staging directory,
+> and `pnpm check:package` packs it, installs it into an empty prefix and runs the commands above
+> from the installed package — that check is the CI job `package · npm pack · install · run`.
 
 ### Before `maf run`
 
@@ -137,15 +181,15 @@ node packages/cli/dist/main.js run "add a hello function" -d /path/to/repo --ada
 - **Your working tree is left alone.** The run starts from HEAD in its own worktree and does not see uncommitted or untracked work; when there is some, it says so. The agent's file and git tools cannot reach your checkout from there; `test.run`, which runs your project's own test command, is not confined (see [docs/SECURITY.md](docs/SECURITY.md)). Commit first what the run should build on. `--no-worktree`, or `worktree: false` in `.maf/config.yaml`, runs in the target directory instead, on its checked-out branch: the run warns, the security gate and any reviewer see your uncommitted changes as the run's own, `--review` on such a tree is refused, and the coder's `git.commit` and `git.reset` (which can be `--hard`) act on your branch.
 - **Someone may be asked.** When stdin is a terminal, an `Escalate` verdict prompts there for that one call, and `--review` prompts for each writer change; both write to stderr. With stdin not a terminal, or `MAF_HEADLESS=1`, nobody is asked: an escalated call is refused and recorded under `.maf/approvals/pending/`, `--review` prints one line and runs without a review, and a harness that requires review has every writer change refused.
 
-`run` reads `.maf/config.yaml`, `.maf/policy.yaml` and `.maf/roles.yaml` from the target directory — not from the run's worktree, so uncommitted edits to them count — and creates `.maf/` if it is missing. `--policy` and `--roles` take other paths, resolved against the target directory.
+`run` reads `.maf/config.yaml`, `.maf/policy.yaml` and `.maf/roles.yaml` from the target directory — not from the run's worktree, so uncommitted edits to them count — and creates `.maf/` if it is missing. `--policy` and `--roles` take other paths, resolved against the target directory. `run`, `goldens` and `evolve` resolve `--policy` through one function, so the three cannot disagree about what governs them ([D-49](docs/DECISIONS.md)).
 
 - **Settings come from the command line, then `.maf/config.yaml`, then the built-in defaults**, decided key by key. The flags are `-a/--adapter`, `-m/--model` and `--no-worktree`; `lcm`, `dag` (concurrency and retry) and `timeouts` (the planner's call, the security review) come from the file only. The [shipped `.maf/config.yaml`](.maf/config.yaml) states every key at its default. A missing file prints one line and the defaults apply; a file that is not YAML, holds a key the schema does not know, or a value out of range stops the run, naming each problem and its line.
 - **Upgrading from 0.2.1:** that release did not read `.maf/config.yaml`, and the file it shipped is refused now, with `unknown key "version"` and `unknown key "defaults"`. Delete `version`; move every key out of `defaults` to the top level and delete `defaults`; delete `circuit`, which nothing on the run path reads; then check the values you keep, which take effect for the first time. Or delete the file and run on the defaults.
-- A missing policy file prints one warning and the run proceeds with no rules; path confinement still applies. A policy file that exists but is not valid YAML, or fails validation, stops the run with the error.
+- With no `--policy` **flag** and no `.maf/policy.yaml` in the target, `run` applies the policy shipped in the package — the repository's own `.maf/policy.yaml`, byte for byte ([D-49](docs/DECISIONS.md)) — and prints one line naming the built-in policy and its rule count. The bundle records `policyInForce.sourceKind: "built-in"`, no `source` path, and the digest of the shipped text. `--policy none` is the explicit opt-out: no rules apply, and the bundle records `policyInForce.sourceKind: "none"` with no path and no digest. Path confinement applies either way. **A typed path is a statement about which file you mean.** `--policy <path>` that names no file stops the run with `policy file <path> not found; pass --policy none to run without rules` — spelling out `.maf/policy.yaml` by hand is such a path, so its absence stops the run too; only a flag that was never typed falls back to the built-in policy. A policy file the run was pointed at — the default path when it exists, or any typed `--policy <path>` — that is not valid YAML, or fails validation, stops the run with the error: a broken file never falls back either. A file that loads records `policyInForce.source` (its absolute path), `sourceKind: "file"` and `sha256` (the bytes read); `source` stays the path it was in 0.4.0, and `sourceKind` is the additive field.
 - Policy files are YAML, and JSON parses too. Quote every glob: YAML reads a bare value starting with `*` as an alias and one starting with `{` as a mapping.
-- `roles.yaml` is YAML; the JSON form, `#` comment lines included, loads unchanged. If no file exists at the path, the built-in roles apply; one that exists but does not load stops the run, naming the file and, for a YAML error, the line. A `<<` merge key is refused ([D-40](docs/DECISIONS.md)), and so is an empty `systemPrompt`.
+- `roles.yaml` is YAML; the JSON form, `#` comment lines included, loads unchanged. If no file exists at the path, the built-in role set applies — **not** the `roles.yaml` the package ships, which `maf init` writes; the built-in `tester` holds no `fs.write` and the prompts differ, so a run without the file prints `[maf] roles: no .maf/roles.yaml — using the built-in role set (maf init writes the shipped one)`. One that exists but does not load stops the run, naming the file and, for a YAML error, the line. A `<<` merge key is refused ([D-40](docs/DECISIONS.md)), and so is an empty `systemPrompt`.
 
-**Which harness runs.** `run` prints `[maf] harness: <id> (<sha>) [<source>]`. The source is `legacy` for a harness minted from the roles file as it is now (`legacy-default`, re-minted whenever `roles.yaml` or a prompt file it names changes), `current` for the harness CURRENT names when an operator pointed it there, and `flag` for `--harness <id|sha|prefix>`. A typed `--roles` without `--harness` means that file, even when CURRENT is set. `maf harness set-current <ref>` points CURRENT at a stored harness, and the next plain run uses it; it refuses an older `legacy-default` snapshot, which `--harness <sha>` runs instead, and `set-current legacy-default` hands plain runs back to the roles file. **Upgrading from 0.2.x:** a CURRENT that names a `legacy-default` snapshot simply tracks the roles file again; a CURRENT an operator pointed at another harness from before 0.3.0 — one that names prompt files without carrying their text — stops every plain run, with an error naming `maf harness set-current legacy-default` as the remedy. The committed default harness in `.maf/harnesses/` is what `goldens` evaluates on a fresh clone; `run` uses it only when named (`--harness default`), importing it into the store first.
+**Which harness runs.** `run` prints `[maf] harness: <id> (<sha>) [<source>]`. The source is `legacy` for a harness minted from the roles file as it is now (`legacy-default`, re-minted whenever `roles.yaml` or a prompt file it names changes), `current` for the harness CURRENT names when an operator pointed it there, and `flag` for `--harness <id|sha|prefix>`. A typed `--roles` without `--harness` means that file, even when CURRENT is set. `maf harness set-current <ref>` points CURRENT at a stored harness, and the next plain run uses it; it refuses an older `legacy-default` snapshot, which `--harness <sha>` runs instead, and `set-current legacy-default` hands plain runs back to the roles file. **Upgrading from 0.2.x:** a CURRENT that names a `legacy-default` snapshot simply tracks the roles file again; a CURRENT an operator pointed at another harness from before 0.3.0 — one that names prompt files without carrying their text — stops every plain run, with an error naming `maf harness set-current legacy-default` as the remedy. The committed default harness in `.maf/harnesses/` is what `goldens` evaluates on a fresh clone; an installed package that has no committed default falls back to the `default-<sha>.json` it ships in `assets/harnesses`, so `maf init && maf goldens run --adapter scripted` works with nothing copied in. `run` uses the committed default only when named (`--harness default`), importing it into the store first.
 
 Other commands: `maf harness list|show|set-current|import`, `maf goldens run|compare` (score harnesses against the golden corpus, with a live adapter or offline with `--adapter scripted`; `compare` exits 1 on a regression and 2 when the results cannot be compared), `maf attest verify <bundle>`, `maf evolve` (experimental, see Status), `maf adapters` (availability), `maf merge-runs`.
 
@@ -288,7 +332,7 @@ A run produces:
 Three fields are a run's evidence for what the model was shown and what governed it. All sit inside the signed predicate, so none can be stripped without breaking the signature, and each is **omitted**, not written empty, when its evidence was not recorded: a reader can tell "not recorded" from "recorded as nothing", and a bundle written by an earlier release that carries none of them still parses and verifies. The rest of a run's evidence sits beside them in the same predicate: the `outcome`, which names each failed node's failure as `{kind, ruleId?, toolId?}` ([D-46](docs/DECISIONS.md)), and `attributedChanges`, one entry per change a reader's turn showed that the rule charged to a concurrent writer rather than to the reader ([D-45](docs/DECISIONS.md)).
 
 - **`modelSurfaces`** (F4, D-45) — one entry per role call MAF made, in call order: `systemPromptSha256`, the digest of the exact system-prompt bytes the backend was handed; `promptSha256` and `outputSha256`, the digests of the prompt and of what came back; `toolCatalog`, the tool list serialized as the model was shown it; and `argv`, the backend's command line with each payload positional — the `claude` `--system-prompt` value and the prompt after the `--`, `gemini`'s `--system-instruction` value and its joined `--prompt=`, and a `cli`-tier call's prompt — replaced by its byte length and its own sha256. The flags stay verbatim, including the empty `--tools ''`; eliding the payloads keeps a turn-sized prompt out of every bundle while the digests still answer *what text*. Each entry carries a `tier` of `in-process` or `cli` (D-45, WP-3.0c), so a `cli`-tier *role* call through `claude`, `codex` or `gemini` is recorded too — before 0.4.0 only a governed in-process step had a surface. A `cli`-tier entry also carries `nativeTools` (`full`, `read-only` or `none`), the posture MAF **asked** of the backend's own tools rather than what those tools then did. A `cli`-tier turn hands the backend one opaque prompt for which MAF composes no `toolCatalog`, so that field is the empty string: `''` on a `cli`-tier entry means **MAF composed no catalogue**, not that the backend had no tools — `nativeTools` says what the backend had. Two `cli`-tier calls are still outside this record — the planner's and the security reviewer's, which MAF spawns itself rather than through a role node. The entry is whatever the adapter reports, so a role routed to `ollama` or `openrouter`, which spawn no process, records nothing, and a step whose first call was malformed and retried contributes one entry per attempt, sharing that step's number.
-- **`policyInForce`** (F6) — the policy the run ran under: `source` (the resolved `--policy` path, named whether or not a file exists there), `sha256` of the file's bytes, absent exactly when no file was read; `ruleCount` and each rule as `(id, effect, matcher)`; and the counts of every verdict the engine reached — Allow, Deny, Escalate, Indeterminate. The counts are read after the last call and before the bundle is written, so a refusal is counted: it is a decision, though it never reaches a tool. This is what separates "no policy was loaded" from "a Deny rule was loaded and never fired" — with `toolCalls` and `securityFindings` alone the two runs produce identical evidence.
+- **`policyInForce`** (F6, D-49) — the policy the run ran under: `source`, which is `"file"` for a policy file, `"built-in"` for the shipped default a run falls back to when no file was asked for and none exists, and `"none"` for `--policy none`; `path`, present exactly when `source` is `"file"` — the resolved `--policy` path, named whether or not a file exists there — and `sha256` of the file's bytes, absent exactly when no file was read (so a file that was asked for but is missing is `"file"` with a path and no digest, distinct from a file that was read and held zero rules); `ruleCount` and each rule as `(id, effect, matcher)`; and the counts of every verdict the engine reached — Allow, Deny, Escalate, Indeterminate. The counts are read after the last call and before the bundle is written, so a refusal is counted: it is a decision, though it never reaches a tool. This is what separates "no policy was loaded" from "a Deny rule was loaded and never fired" — with `toolCalls` and `securityFindings` alone the two runs produce identical evidence.
 - **`executionTiers`** (F7) — one entry per node, in dispatch order, last-wins for a node that ran more than once: `{nodeId, role, tier, adapter, fellBackFrom?}`. `tier` is the one the node actually ran on, `cli` or `in-process`, and `fellBackFrom: "in-process"` is present exactly when the role asked for the governed loop and the adapter could not run it, so the D-06 fallback is visible per role rather than noted once in the transcript. This is the half `policyInForce` cannot show: on the `cli` tier MAF sees no individual tool call, so a rule scoped to a `cli`-tier role is in force and unreachable, and only the tier tells you which node that was. Optional, so a bundle written before 0.3.1 still parses.
 
 **`securityFindings: []` is not "the policy was exercised".** `securityFindings` is a field of the signed predicate, written by the security gate: one entry for each time the gate reviewed a writer node's *non-empty* diff, naming the node and the review's result — and an entry can carry an empty `findings` list when the review passed clean, so a *present* entry does not mean a finding. An empty `securityFindings` therefore means the gate reviewed no diff at all: no writer node ran, every writer left the tree unchanged, every write was refused before it could reach the gate, or no security gate was wired. It is not policy evidence — a policy that denied every write leaves `securityFindings` empty, and so does a run that wrote nothing. Read `policyInForce` for the policy, and the run's `outcome` and `diffHashes` for what it changed — not the verdict alone.

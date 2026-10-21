@@ -3,14 +3,18 @@ import crypto from 'node:crypto';
 import type {
   PolicyEngineHandle, PolicyRule, PolicyDecision, PolicyAction,
   ToolId, ToolInput, ToolContext, ApprovalRequest, GraphQueryRunner,
-  PolicyInForce, PolicyRuleSummary, PolicyVerdictCounts,
+  PolicyInForce, PolicyRuleSummary, PolicyVerdictCounts, PolicySourceKind,
 } from '@maf/types';
 import { resolveInside, PathEscapeError, VerdictError } from '@maf/types';
 import { bindPolicyTemplate } from './policyTemplate.js';
 
-/** Where a rule set came from, and the digest of those bytes when there were bytes to digest. */
+/**
+ * Where a rule set came from, and the digest of those bytes when there were bytes to digest.
+ * `path` is present exactly for `kind: 'file'`, the same rule the record follows.
+ */
 export interface PolicySource {
-  path:    string;
+  kind:    PolicySourceKind;
+  path?:   string;
   sha256?: string;
 }
 
@@ -65,14 +69,19 @@ export class PolicyEngine implements PolicyEngineHandle {
   }
 
   /**
-   * The rules that governed this engine and how its calls fell so far (F6). Read after the run, when
-   * the counts are final. `source.sha256` is absent exactly when no file was read, so a reader can
-   * tell "no policy file" from "a file with no rules" — the two runs F6 says are indistinguishable
-   * from the `toolCalls` and `securityFindings` alone.
+   * The rules that governed this engine and how its calls fell so far (F6, D-49). Read after the
+   * run, when the counts are final.
+   *
+   * `source` keeps the meaning it had in 0.4.0 — the file's resolved path, absent when no user file
+   * supplied the rules — and `sourceKind` is the additive field that says which of the three
+   * sources chose them (F5). `sha256` is the digest of the bytes in force: the file's, or the
+   * shipped asset's for the built-in policy (F9(d)). A 0.4.0 reader therefore sees the path it has
+   * always seen, or no path when there was none; it never reads a kind where it expects a path.
    */
   inForce(): PolicyInForce {
     return {
-      ...(this.source ? { source: this.source.path } : {}),
+      ...(this.source?.kind === 'file' && this.source.path !== undefined ? { source: this.source.path } : {}),
+      ...(this.source ? { sourceKind: this.source.kind } : {}),
       ...(this.source?.sha256 !== undefined ? { sha256: this.source.sha256 } : {}),
       ruleCount: this.rules.length,
       rules: this.rules.map(summarizeRule),

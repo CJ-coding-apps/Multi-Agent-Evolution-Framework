@@ -13,6 +13,7 @@ import { MemoryGraph } from '@maf/memory-graph';
 import { GraphAwareInjector } from '@maf/prompt-injector';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
+import { harnessesAssetRoot } from '../assets.js';
 import { incomparable, resolveGoldensHarness, runGoldenSuite } from '../commands/goldens.js';
 import { loadHarnessFile, loadStoredHarness } from '../commands/harness.js';
 
@@ -112,7 +113,7 @@ test('a poisoned project graph and an earlier attempt\'s memory never reach the 
     }]);
     const { result } = await runGoldenSuite({
       cwd: root, corpusRoot: corpus, harness, harnessSource: 'test', agent: scripted, judge: { adapter: scripted },
-      attempts: 2, policyPath: path.join(root, '.maf/policy.yaml'), runId: makeRunId('isolation-run'),
+      attempts: 2, policy: { value: path.join(root, '.maf/policy.yaml'), typed: true }, runId: makeRunId('isolation-run'),
     });
 
     assert.deepEqual(result.solvedTaskIds, ['coder-sum'], JSON.stringify(result.tasks));
@@ -197,6 +198,25 @@ test('goldens picks --harness, else CURRENT, else the committed default — and 
   }
 });
 
+// ORACLE (F1). The installed package has no repository to read a harness from. `goldens run` must
+// still evaluate something that exists: the default harness shipped in `assets/harnesses`, the one
+// `maf init` writes, rather than telling the user to run `maf run` first (which no longer produces a
+// harness goldens would look at).
+
+test('with no CURRENT and no committed default, goldens falls back to the harness the package ships', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-goldens-packaged-'));
+  try {
+    const mafDir = path.join(root, '.maf');
+    await mkdir(mafDir, { recursive: true });
+    const found = await resolveGoldensHarness(mafDir);
+    assert.equal(path.dirname(found.source), harnessesAssetRoot(), 'read from the packaged asset');
+    assert.equal(path.basename(found.source), `default-${found.harness.sha}.json`);
+    assert.equal(new HarnessStore(mafDir).mint(found.harness.roleSet, found.harness.id).sha, found.harness.sha);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('goldens compare refuses results from another adapter, model or attempt count, and malformed or missing files (D-38)', async () => {
   const one = 'c'.repeat(64);
   const base = result({ corpusSha: one });
@@ -273,6 +293,47 @@ test('on a fresh clone the committed default answers to its id, its short sha an
     await execFileAsync(process.execPath, [MAIN, 'harness', 'set-current', sha.slice(0, 8), '-d', root]);
     assert.equal((await store.current())?.sha, sha, 'set-current by short sha points CURRENT at the committed default');
 
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// N2 (D-49, F7). `loadCommandPolicy`'s unit tests say what a typed flag means; this says the
+// command passes that meaning through, and that what it records is the bundle a user can open.
+// `--policy none` must be recorded as none — not as the built-in policy that an absent flag gets —
+// and a mistyped path must stop the command, in this clone, beside the real `.maf/policy.yaml`.
+
+test('maf goldens run --policy none records sourceKind none, and a mistyped path stops it (N2)', needsLcm, async () => {
+  const root = await freshClone();
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [MAIN, 'goldens', 'run', '--adapter', 'scripted', '--corpus', 'tests/goldens', '--policy', 'none'],
+      { cwd: root },
+    );
+    const named = /^\[maf\] bundle: (.+)$/m.exec(stdout)?.[1];
+    assert.ok(named, `the run names the bundle it wrote: ${stdout}`);
+    const bundlePath = path.isAbsolute(named) ? named : path.join(root, named);
+    // The file is the in-toto statement; the record a reader wants is its predicate.
+    const statement = JSON.parse(await readFile(bundlePath, 'utf8')) as {
+      predicate?: { policyInForce?: { source?: string; sourceKind?: string; sha256?: string } };
+    };
+    const bundle = statement.predicate;
+    assert.equal(bundle?.policyInForce?.sourceKind, 'none', 'a typed --policy none is recorded as none');
+    assert.equal(bundle?.policyInForce?.source, undefined, 'no path was read');
+    assert.equal(bundle?.policyInForce?.sha256, undefined, 'no bytes were read');
+
+    // `.maf/policy.yml` has no `a`. A silent fallback would find the real file beside it and exit 0.
+    const typo = await execFileAsync(
+      process.execPath,
+      [MAIN, 'goldens', 'run', '--adapter', 'scripted', '--corpus', 'tests/goldens', '--policy', '.maf/policy.yml'],
+      { cwd: root },
+    ).then(
+      ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
+      (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code ?? -1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }),
+    );
+    assert.notEqual(typo.code, 0, `a mistyped --policy exits non-zero: ${typo.stdout}${typo.stderr}`);
+    assert.match(typo.stderr, /not found; pass --policy none to run without rules/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

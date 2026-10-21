@@ -294,7 +294,10 @@ test('loadEngine() returns an engine that enforces the file\'s rules', async () 
   });
 });
 
-test('loadEngine() with a missing file warns once and allows (no rules)', async () => {
+// D-49 replaces this as the *run* default: `run` now supplies `builtInText`, so a missing
+// .maf/policy.yaml is governed by the shipped policy (see the tests below). The raw loader keeps
+// "no file, no rules" for callers that deliberately pass nothing — goldens and evolve do.
+test('loadEngine() without built-in text still warns once and allows when the file is missing', async () => {
   let verdict: string | undefined;
   const lines = await capturingWarnings(async () => {
     const engine = await PolicyLoader.loadEngine('/no/such/policy.yaml', stubGraph);
@@ -367,7 +370,8 @@ test('loadEngine wires the source and its digest onto the engine that inForce() 
   const text = 'rules:\n  - id: protect-secrets\n    priority: 100\n    predicate: { pathGlob: ".env" }\n    action: { kind: Deny, reason: "no secrets" }\n';
   await withTempFile(text, async (file) => {
     const force = (await PolicyLoader.loadEngine(file, stubGraph)).inForce();
-    assert.equal(force.source, file, 'the file the rules came from');
+    assert.equal(force.source, file, 'the rules came from this file');
+    assert.equal(force.sourceKind, 'file', 'and it was a file that chose them');
     assert.equal(force.sha256, createHash('sha256').update(text, 'utf8').digest('hex'), 'digested from the bytes it read');
     assert.equal(force.ruleCount, 1);
   });
@@ -377,8 +381,62 @@ test('loadEngine names a missing policy file on the record but no digest, so a r
   const warnings = await capturingWarnings(async () => {
     const force = (await PolicyLoader.loadEngine('/tmp/maf-does-not-exist-policy.yaml', stubGraph)).inForce();
     assert.equal(force.source, '/tmp/maf-does-not-exist-policy.yaml', 'the path asked for is named');
+    assert.equal(force.sourceKind, 'file', 'a file was asked for');
     assert.equal('sha256' in force, false, 'no bytes were read, so there is no digest');
     assert.equal(force.ruleCount, 0);
   });
   assert.equal(warnings.length, 1, 'and the absence is said once');
+});
+
+// ORACLE (D-49). An installed `maf` must govern a repository that has never run `maf init`: with no
+// policy named and no file at the default path, the shipped policy applies. The record has to say so,
+// because a run under the built-in policy and a run with no policy at all are different postures.
+
+const BUILT_IN = 'rules:\n  - id: built-in-deny\n    priority: 100\n    predicate: { pathGlob: ".env" }\n    action: { kind: Deny, reason: "no secrets" }\n';
+
+test('a missing file runs under the built-in policy when one is supplied, and says so in one line', async () => {
+  const warnings = await capturingWarnings(async () => {
+    const force = (await PolicyLoader.loadEngine('/tmp/maf-does-not-exist-policy.yaml', stubGraph, {
+      builtInText: BUILT_IN,
+    })).inForce();
+    assert.equal(force.sourceKind, 'built-in');
+    assert.equal('source' in force, false, 'no user file was named');
+    // F9(d): the record carries the shipped asset's digest, so a reader can tell which text applied.
+    assert.equal(force.sha256, createHash('sha256').update(BUILT_IN, 'utf8').digest('hex'));
+    assert.equal(force.ruleCount, 1);
+    assert.deepEqual(force.rules.map((r) => r.id), ['built-in-deny']);
+  });
+  assert.equal(warnings.length, 1, 'one line, not the old absence line plus a second');
+  assert.match(warnings[0]!, /using the built-in policy \(1 rule\)/);
+  assert.match(warnings[0]!, /--policy none/);
+});
+
+test('a policy file that exists wins over the built-in default', async () => {
+  await withTempFile('rules: []\n', async (file) => {
+    const force = (await PolicyLoader.loadEngine(file, stubGraph, { builtInText: BUILT_IN })).inForce();
+    assert.equal(force.source, file);
+    assert.equal(force.sourceKind, 'file');
+    assert.equal(force.sha256, createHash('sha256').update('rules: []\n', 'utf8').digest('hex'));
+    assert.equal(force.ruleCount, 0, 'the user file was read, not the built-in one');
+  });
+});
+
+test('a file that exists but does not load still stops the run, built-in text or not', async () => {
+  await withTempFile('rules: [ { bogus: true } ]\n', async (file) => {
+    await rejectsWith(PolicyLoader.loadEngine(file, stubGraph, { builtInText: BUILT_IN }), /failed validation/);
+  });
+});
+
+test('--policy none runs with no rules and records that choice, even when a file exists', async () => {
+  await withTempFile(BUILT_IN, async (file) => {
+    const warnings = await capturingWarnings(async () => {
+      const force = (await PolicyLoader.loadEngine(file, stubGraph, { none: true })).inForce();
+      assert.equal(force.sourceKind, 'none');
+      assert.equal('source' in force, false);
+      assert.equal('sha256' in force, false);
+      assert.equal(force.ruleCount, 0);
+    });
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /--policy none/);
+  });
 });
