@@ -4,6 +4,7 @@ import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord,
   TurnAdapter, TurnMessage, AssistantTurn, ModelSurface, ToolPlugin,
 } from '@maf/types';
+import { backendEnv } from '@maf/types';
 import { BaseAdapter } from '@maf/adapter-base';
 import {
   spawnAndCollect, spawnStreaming, turnStdout,
@@ -116,7 +117,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     const result = await this.spawn('claude', args, {
       cwd: opts.workingDir,
       timeoutMs: opts.timeoutMs,
-      env: { ...process.env },
+      env: backendEnv(),
       ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
     });
     const turn = parseTurn(turnStdout(this.name, result));
@@ -129,7 +130,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
 
   async isAvailable(): Promise<boolean> {
     try {
-      await execFileAsync('claude', ['--version']);
+      await execFileAsync('claude', ['--version'], { env: backendEnv() });
       return true;
     } catch { return false; }
   }
@@ -141,7 +142,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     const result = await this.spawn('claude', args, {
       cwd: options.workingDir,
       timeoutMs: options.timeoutMs,
-      env: { ...process.env },
+      env: backendEnv(),
       ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
     });
 

@@ -1574,3 +1574,10 @@ export {
   redactCredentials, redactSecrets, redactText,
   redactCredentialsRecord, redactRecord,
 } from './redaction.js';
+
+/**
+ * The environment a child process may inherit. Two policies, one home: backend CLIs get the
+ * user's environment minus maf's own `MAF_*` variables; tools that run project code get an
+ * allowlist. `@maf/adapter-base` and `@maf/tools` both already depend on this package.
+ */
+export { TOOL_ENV_ALLOWLIST, toolEnv, backendEnv, isMafVariable } from './childEnv.js';

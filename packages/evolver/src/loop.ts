@@ -1,4 +1,4 @@
-import type { RunId } from '@maf/types';
+import type { PermissionLevel, RunId } from '@maf/types';
 import type { HarnessConfig } from '@maf/harness-config';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
@@ -38,6 +38,8 @@ export interface EvolveOptions {
   onShip: (candidate: HarnessConfig, improvements: string[]) => Promise<void>;
   roleCatalog: RoleCatalogEntry[];
   knownToolIds: ReadonlySet<string>;
+  /** Permission level per known tool; enables the gate's write-tool widening rule. */
+  toolPermissions?: ReadonlyMap<string, PermissionLevel>;
   knownProcessorNames: ReadonlySet<string>;
   knownModels?: ReadonlySet<string>;
   safetyAdjacentRoles?: ReadonlySet<string>;
@@ -224,6 +226,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       manifest, candidate: finalCandidate, current: base,
       currentScores: baseline, candidateScores,
       knownToolIds: opts.knownToolIds,
+      ...(opts.toolPermissions ? { toolPermissions: opts.toolPermissions } : {}),
       knownProcessorNames: opts.knownProcessorNames,
       safetyAdjacentRoles: safetyAdjacent,
       ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),

@@ -68,3 +68,50 @@ test('spawnStreaming rejects with a TransportError for a binary that cannot be s
   );
   assert.deepEqual(chunks, []);
 });
+
+// ─── WP-3.9: a backend is spawned without MAF's own variables ────────────────
+//
+// The child is a real process reading its own environment. A unit test of the policy would not
+// prove the adapter path uses it, which is the thing a backend can actually observe.
+
+const REPORT_ENV =
+  'process.stdout.write(JSON.stringify({' +
+  'signing: process.env.MAF_SIGNING_KEY ?? null, ' +
+  'state: process.env.MAF_RUNTIME_STATE ?? null, ' +
+  'path: typeof process.env.PATH, ' +
+  'anthropic: process.env.ANTHROPIC_API_KEY ?? null}))';
+
+function withEnv(vars: Record<string, string>, body: () => Promise<void>): Promise<void> {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(vars)) process.env[k] = v;
+  return body().finally(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+}
+
+test('spawnAndCollect gives a backend the environment minus MAF_*, keeping provider keys', async () => {
+  await withEnv({ MAF_SIGNING_KEY: 'test-key-must-not-reach-the-backend', MAF_RUNTIME_STATE: '/tmp/state', ANTHROPIC_API_KEY: 'test-provider-key' }, async () => {
+    const result = await spawnAndCollect(NODE, ['-e', REPORT_ENV]);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      signing: null, state: null, path: 'string', anthropic: 'test-provider-key',
+    });
+  });
+});
+
+test('spawnStreaming gives a backend the same environment policy', async () => {
+  await withEnv({ MAF_SIGNING_KEY: 'test-key-must-not-reach-the-backend' }, async () => {
+    const chunks: string[] = [];
+    for await (const chunk of spawnStreaming(NODE, ['-e', REPORT_ENV])) chunks.push(chunk);
+    const seen = JSON.parse(chunks.join('')) as { signing: unknown };
+    assert.equal(seen.signing, null);
+  });
+});
+
+test('an explicit env is the caller\'s, not augmented with the backend policy', async () => {
+  const result = await spawnAndCollect(NODE, ['-e', 'process.stdout.write(String(process.env.PATH ?? "ABSENT"))'], { env: {} });
+  assert.equal(result.stdout, 'ABSENT');
+});

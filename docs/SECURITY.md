@@ -104,13 +104,18 @@ How a bundle is signed, and what a signature does **not** establish today, state
   bundle's `keySource` is held to the rule above. A 0.2.0 bundle carries no `keySource`, so it verifies
   on its signature alone, and verifying one with the development key proves only that it was signed
   with the development key.
-- **The key is not hidden from the agent.** The backend CLIs and every tool that starts a process —
-  `test.run`, the `git.*` tools, `grep` (rg or grep) and `patch.apply` — inherit MAF's whole environment,
-  `MAF_SIGNING_KEY` included. `test.run` runs project code with it. The `git.*` tools never run a hook,
-  even one the agent wrote (see *The agent's git tools* below). So an agent that can run a command —
-  directly, or through a test it wrote — can read the key and sign a bundle of its own. A signature
-  shows that whoever made the bundle held the key; on a run whose agent could run commands, that
-  includes the agent.
+- **The key is in no child process's environment.** Every process maf starts for an agent is given a
+  policy rather than `process.env` (`packages/types/src/childEnv.ts`). The backend CLIs — `claude`,
+  `codex`, `gemini` — get the environment minus every `MAF_*` variable, so `MAF_SIGNING_KEY` is absent
+  and each provider's own key still reaches the backend that needs it. The tools that start a process —
+  `test.run`, `patch.apply`, `grep` (rg or grep) and the `git.*` tools — get a short allowlist (PATH,
+  HOME, the locale, `TMPDIR`, `TERM`, the Windows path variables) that carries no `MAF_*` variable and
+  no provider token. `test.run` runs project code and the tester role can write that code; it still
+  cannot read the key from its environment. A test proves the absence in a real child
+  (`packages/types/src/__tests__/childEnv.test.ts`). This closes the environment channel, not every
+  channel: a role the policy lets read a file that holds the key can still read it, as can code running
+  in maf's own process. The `git.*` tools never run a hook, even one the agent wrote (see *The agent's
+  git tools* below).
 - **It is signed, not sealed.** Anyone who can write to the bundle's directory can replace it with one
   they signed with the same key.
 
@@ -576,6 +581,17 @@ resolved form of what they declare, and the tool then hands its own input to git
 pathspecs) or to `patch`. That is the same input, but not one resolved value, and a direct call that
 skips the policy engine gets no confinement from MAF.
 
+`patch.apply` declares what the command it is about to run will open, not what a git diff happens to
+look like. It parses the diff's `+++`/`---` and `diff --git` headers and strips exactly the `strip`
+components the call passes to `patch -p` (default 1), so `strip: 0` on an `a/foo` header declares
+`a/foo` — the file `patch -p0` touches — rather than `foo`. Beside each target it declares that
+target's `.orig` and `.rej` siblings, because `patch` leaves them there on a partial or rejected apply,
+and an editor's `.env.orig` is a copy of the same secret. The diff itself is written to a fresh file
+under the system temp directory with mode `0600` and `O_EXCL` (so it neither is readable by other users
+nor follows a symlink planted at the path), passed to `patch` with `-i`, and removed when the call
+returns. The diff can contain a credential an agent is moving between files; it does not outlive the
+call.
+
 Three things this does **not** cover, so none is mistaken for it:
 
 - **The check and the open are two steps.** `resolveInside` returns a name it has shown to be inside the
@@ -591,15 +607,64 @@ Three things this does **not** cover, so none is mistaken for it:
 - It applies to the paths a tool **declares** — `ToolPlugin.declaredPaths(input)`, a pure function of the
   input. For a `cli`-tier role, whose tool calls maf never sees, no path is declared and none is checked.
 
+### Configuration is a closed schema
+
+`.maf/config.yaml` accepts only the keys a run reads, and an unknown key stops the run with its line
+number instead of being ignored (`packages/cli/src/config/ConfigLoader.ts`). Each section is checked
+against its own known set, and `__proto__` and `constructor` are unknown keys in every one of them:
+a file that names either is refused before any of it is used, so a key cannot reach a prototype, and
+a `constructor.prototype` entry is refused the same way. Every key is read with `Object.hasOwn`, so a
+value inherited from `Object.prototype` cannot stand in for one the file did not set. A file that
+exists and cannot be read in full is refused for the same reason — a typo must not silently take a
+default.
+
 ### `test.run` executes project code
 
 `test.run` runs the target project's own test command in the project directory: `npm test`, `npx vitest`,
 `npx jest`, `bun test`, `python -m pytest` or `cargo test`, detected from the project or chosen by the
 caller (`packages/tools/src/plugins/test-runner.ts`). That executes whatever the project's tests and
-scripts contain — including tests the tester role wrote earlier in the same run. It runs with MAF's
-environment, `MAF_SIGNING_KEY` included, and for as long as the caller's `timeout` asks (120 seconds by
-default); on timeout the process it started gets `SIGTERM`, and its children are not signalled.
+scripts contain — including tests the tester role wrote earlier in the same run.
+
+Four limits bound it, all enforced in the tool rather than left to the runner:
+
+- **The runner is a member of a fixed list.** The schema's enum names it, and `execute` refuses any
+  value outside that list at the point the argv is built — so a caller that bypasses schema validation
+  cannot fall through to a runner it did not ask for.
+- **The filter cannot be an option.** A filter beginning with `-` is refused before any argv exists;
+  where a runner takes a positional filter (`bun`, `cargo`) it follows `--`.
+- **The run has a ceiling.** `timeout` defaults to 120 seconds and is clamped to
+  `MAX_TEST_TIMEOUT_MS` — fifteen minutes — however large the caller's value. A test command is a tool
+  call inside a node's budget, not a background job.
+- **The whole process group is killed.** On timeout the runner is spawned `detached` on POSIX, so it
+  leads its own group, and `SIGKILL` goes to `-pid`, which reaches the runner's children too (vitest
+  workers, `npm`'s script shell). A test proves a grandchild does not survive. On Windows there are no
+  POSIX process groups and only the runner itself is signalled.
+
+It runs with the tool allowlist, not MAF's environment: `MAF_SIGNING_KEY` and every other `MAF_*`
+variable are absent, as are provider tokens (see the key bullet above). It does not hide the key from
+code that reads it from a file.
 
 `test.run` declares no path, so no path rule applies to it; a policy can deny the tool to a role, but it
 cannot see what the tests do. Granting a role `test.run` grants it code execution as the user running
 MAF.
+
+### The evolution loop cannot make a reader a writer
+
+`maf evolve` proposes a change, evaluates it, and ships it only if a deterministic gate accepts it
+(`packages/evolver/src/gate.ts`): the model proposes, the gate decides. One edit kind,
+`adjust_tool_allowlist`, adds tools to a role's allowlist. The gate judges every added tool by the
+permission level the tool itself declares, never by its name, and an addition of a `write`, `execute`
+or `dangerous` tool to an ordinary role is rejected at stage `b4-write-tool-widening` with the tools
+and the role named. Adding only `read` tools is not a widening and is considered on its merits. The
+evolver may tune a prompt, a budget or a model; it cannot turn a reader into a writer.
+
+The only route to a write tool is the operator. An edit whose target role is safety-adjacent
+(`security`, `reviewer`) is routed to the operator at stage `b3`, before any evaluation spend, and the
+gate returns `needs-approval` for one that reaches it; the loop records that outcome and does not ship
+the candidate. `--approve-sensitive` decides only whether such an edit is evaluated at all — it is not
+a shipping approval, and `maf evolve` has no interactive prompt. An unknown tool id never reaches the
+widening rule: the earlier invariant stage refuses a candidate that names one.
+
+The permission levels are the registry's — the same `ToolPlugin.permissionLevel` the run builds its
+tool surface from — and `maf evolve` passes the map in from `createDefaultRegistry()`, so the gate
+cannot disagree with the tools it is judging.

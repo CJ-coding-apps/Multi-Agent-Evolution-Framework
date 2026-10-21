@@ -1,5 +1,5 @@
 import { spawn, type SpawnOptions } from 'node:child_process';
-import { TransportError } from '@maf/types';
+import { TransportError, backendEnv } from '@maf/types';
 import { failureTail } from './failure.js';
 
 export interface SpawnResult {
@@ -59,7 +59,9 @@ export async function spawnAndCollect(
     let stdoutBytes = 0;
     let truncated = false;
 
-    const proc = spawn(cmd, args, { ...opts, shell: false });
+    // An adapter that passes no env gets the backend policy, not the whole parent environment:
+    // `MAF_SIGNING_KEY` is not something a backend can have a reason to read (WP-3.9).
+    const proc = spawn(cmd, args, { ...opts, shell: false, env: opts.env ?? backendEnv() });
 
     if (opts.input) {
       proc.stdin?.write(opts.input);
@@ -114,7 +116,7 @@ export async function* spawnStreaming(
   args: string[],
   opts: SpawnOptions & { timeoutMs?: number } = {},
 ): AsyncGenerator<string> {
-  const proc = spawn(cmd, args, { ...opts, shell: false });
+  const proc = spawn(cmd, args, { ...opts, shell: false, env: opts.env ?? backendEnv() });
 
   const queue: string[] = [];
   let done = false;

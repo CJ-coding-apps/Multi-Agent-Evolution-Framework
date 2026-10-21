@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { GraphQuery } from '@maf/types';
+import type { GraphQuery, PermissionLevel } from '@maf/types';
 import { makeRunId } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -27,6 +27,9 @@ const CURRENT: HarnessConfig = mintHarnessConfig({
 });
 
 const KNOWN_TOOLS = new Set(['fs.read', 'fs.write', 'grep']);
+const TOOL_LEVELS = new Map<string, PermissionLevel>([
+  ['fs.read', 'read'], ['fs.write', 'write'], ['grep', 'read'],
+]);
 const KNOWN_PROCESSORS = new Set(['policy-audit', 'secret-redact', 'transcript', 'security-gate']);
 
 /** Graph stub: run returns canned golden history; addNode records. */
@@ -168,6 +171,38 @@ test('gate: safety-adjacent role edits need approval', () => {
     currentScores: suite(['t1']), candidateScores: suite(['t1', 't2']),
   });
   assert.equal(d.verdict, 'needs-approval');
+});
+
+test('gate: a write tool added to an ordinary role is rejected at b4', () => {
+  const manifest = { edit: { kind: 'adjust_tool_allowlist' as const, role: 'coder', add: ['fs.write'], remove: [] }, expectedImprovement: 'x', targetTasks: ['t2'] };
+  const cand = applyEdit(CURRENT, manifest.edit, 'c');
+  const d = gateEvaluate({
+    ...gateBase, toolPermissions: TOOL_LEVELS, manifest, candidate: cand, current: CURRENT,
+    currentScores: suite(['t1']), candidateScores: suite(['t1', 't2']),
+  });
+  assert.equal(d.verdict, 'reject');
+  assert.equal((d as { stage: string }).stage, 'b4-write-tool-widening');
+  assert.match((d as { reason: string }).reason, /"fs\.write"/);
+});
+
+test('gate: the same widening of a safety-adjacent role is routed to the operator at b3', () => {
+  const manifest = { edit: { kind: 'adjust_tool_allowlist' as const, role: 'security', add: ['fs.write'], remove: [] }, expectedImprovement: 'x', targetTasks: ['t2'] };
+  const cand = applyEdit(CURRENT, manifest.edit, 'c');
+  const d = gateEvaluate({
+    ...gateBase, toolPermissions: TOOL_LEVELS, manifest, candidate: cand, current: CURRENT,
+    currentScores: suite(['t1']), candidateScores: suite(['t1', 't2']),
+  });
+  assert.equal(d.verdict, 'needs-approval');
+});
+
+test('gate: adding a read tool is not a widening and still ships', () => {
+  const manifest = { edit: { kind: 'adjust_tool_allowlist' as const, role: 'coder', add: ['grep'], remove: [] }, expectedImprovement: 'x', targetTasks: ['t2'] };
+  const cand = applyEdit(CURRENT, manifest.edit, 'c');
+  const d = gateEvaluate({
+    ...gateBase, toolPermissions: TOOL_LEVELS, manifest, candidate: cand, current: CURRENT,
+    currentScores: suite(['t1']), candidateScores: suite(['t1', 't2']),
+  });
+  assert.deepEqual(d, { verdict: 'ship', improvements: ['t2'] });
 });
 
 test('gate: llm-judge-only improvement needs human sign-off, never auto-ships', () => {

@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
 import { BaseTool, closedInput } from '../ToolPlugin.js';
-import { makeToolId, resolveInside } from '@maf/types';
+import { makeToolId, resolveInside, toolEnv } from '@maf/types';
 import { gitDirRefusal, namesGitDir, refuseGitDirPaths } from './fs.js';
 
 const execFileAsync = promisify(execFile);
@@ -20,18 +20,28 @@ interface PatchInput {
 }
 
 /**
- * The files a unified diff touches, from its own headers.
+ * The files a unified diff touches, from its own headers, after `strip` leading path components
+ * — the same number `patch` is given with `-p`.
  *
  * Both header forms are read. `+++`/`---` is the authoritative pair, but a path visible only
  * in `diff --git` is still a path `patch` will touch, and a path the policy layer cannot see
  * is a path no rule can refuse — so this over-declares rather than miss one.
+ *
+ * `strip` is applied here rather than assuming git's `a/`: `patch -p0` on a `a/foo` header
+ * touches `a/foo`, and declaring `foo` would hand the policy a file the command never opens.
+ * A path with no component left after stripping is one `patch` itself refuses, so it is not
+ * declared. `strip` defaults to 1, the `patch.apply` default.
  */
-export function extractDiffPaths(diff: string): string[] {
+export function extractDiffPaths(diff: string, strip = 1): string[] {
   const paths = new Set<string>();
+  const components = Number.isInteger(strip) && strip >= 0 ? strip : 1;
   const add = (raw: string): void => {
     const bare = raw.startsWith('"') && raw.endsWith('"') && raw.length > 1 ? raw.slice(1, -1) : raw;
-    const stripped = bare.replace(/^[ab]\//, '');
-    if (stripped && stripped !== '/dev/null') paths.add(stripped);
+    if (!bare || bare === '/dev/null') return;
+    const parts = bare.split('/');
+    if (components >= parts.length) return;
+    const stripped = parts.slice(components).join('/') || undefined;
+    if (stripped !== undefined && stripped !== '/dev/null') paths.add(stripped);
   };
   for (const line of diff.split('\n')) {
     if (line.startsWith('+++ ') || line.startsWith('--- ')) {
@@ -39,6 +49,22 @@ export function extractDiffPaths(diff: string): string[] {
     } else if (line.startsWith('diff --git ')) {
       for (const token of line.slice('diff --git '.length).match(/"[^"]*"|\S+/g) ?? []) add(token);
     }
+  }
+  return [...paths];
+}
+
+/**
+ * The files `patch` may write: the targets, and the reject/backup siblings it leaves beside a
+ * target that does not apply cleanly (`<path>.rej`, and `<path>.orig` when it makes a backup).
+ * Declaring them is what lets a path rule cover them — an editor's `.env.orig` is a copy of the
+ * same secret.
+ */
+export function patchWritePaths(targets: readonly string[]): string[] {
+  const paths = new Set<string>();
+  for (const target of targets) {
+    paths.add(target);
+    paths.add(`${target}.orig`);
+    paths.add(`${target}.rej`);
   }
   return [...paths];
 }
@@ -55,6 +81,11 @@ async function refuseGitDirTargets(tool: string, ctx: ToolContext, paths: readon
       throw gitDirRefusal(tool, p, `it resolves to ${JSON.stringify(relative)}, which is git's own data (.git)`);
     }
   }
+}
+
+/** The strip the command will be given, one value for both the declaration and the argv. */
+function stripOf(input: PatchInput): number {
+  return typeof input.strip === 'number' && Number.isInteger(input.strip) && input.strip >= 0 ? input.strip : 1;
 }
 
 export class PatchApplyTool extends BaseTool<PatchInput> {
@@ -75,10 +106,12 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
    * patch writing the same file.
    */
   declaredPaths(input: PatchInput): string[] {
-    const paths = typeof input.diff === 'string' ? extractDiffPaths(input.diff) : [];
+    const strip = stripOf(input);
+    const targets = typeof input.diff === 'string' ? extractDiffPaths(input.diff, strip) : [];
+    const written = patchWritePaths(targets);
     // Before policy, as fs.write does: a diff that touches .git is refused whatever the rules say.
-    refuseGitDirPaths(this.name, paths);
-    return paths;
+    refuseGitDirPaths(this.name, written);
+    return written;
   }
 
   async execute(input: PatchInput, ctx: ToolContext): Promise<ToolResult> {
@@ -89,14 +122,17 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
     const tmpFile = path.join(tmpdir(), `maf-patch-${crypto.randomUUID()}.diff`);
 
     try {
-      await writeFile(tmpFile, input.diff, 'utf8');
+      // `wx` fails rather than following a symlink planted at the path, and 0600 means the diff —
+      // which can contain a secret the agent is moving — is not readable by other users while
+      // `patch` works on it.
+      await writeFile(tmpFile, input.diff, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
 
-      const args = ['-p', String(input.strip ?? 1)];
+      const args = ['-p', String(stripOf(input))];
       if (input.dryRun) args.push('--dry-run');
       args.push('-i', tmpFile);
 
       try {
-        const r = await execFileAsync('patch', args, { cwd: ctx.cwd });
+        const r = await execFileAsync('patch', args, { cwd: ctx.cwd, env: toolEnv() });
         return {
           stdout: r.stdout,
           stderr: r.stderr,

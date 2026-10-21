@@ -1,3 +1,4 @@
+import type { PermissionLevel } from '@maf/types';
 import type { HarnessConfig } from '@maf/harness-config';
 import { seesawDecision } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
@@ -22,6 +23,12 @@ export interface GateContext {
   candidateScores: GoldenSuiteResult;
   /** Known ids in the base tool registry (for allowlist ⊆ check). */
   knownToolIds: ReadonlySet<string>;
+  /**
+   * What each known tool may do. A widening is judged by the tool's own permission level, not by
+   * its name: the same edit that adds `fs.read` is harmless and the one that adds `fs.write`
+   * hands a role the tree. Omitted only by callers that predate the widening rule.
+   */
+  toolPermissions?: ReadonlyMap<string, PermissionLevel>;
   /** Processor names resolvable by the static registry. */
   knownProcessorNames: ReadonlySet<string>;
   /** Installed adapter models for retarget bounds (empty = unconstrained). */
@@ -80,6 +87,27 @@ export function gateEvaluate(ctx: GateContext): GateDecision {
       verdict: 'needs-approval',
       reason: `edit targets safety-adjacent role "${manifest.edit.role}" (§6.3: prompt/config edits here require operator approval)`,
     };
+  }
+
+  // ── stage b4: a write tool cannot be added to an ordinary role ──
+  // b3 has already routed every edit that targets a safety-adjacent role to the operator, so an
+  // edit still here targets an ordinary role. Widening that role's surface with a tool that can
+  // change the tree or run code is the mutation the gate exists to refuse: the evolver may tune a
+  // prompt, a budget or a model, but it may not make a reader a writer. A write tool reaches a
+  // safety-adjacent role only through the operator, at b3 — never by a candidate that ships itself.
+  if (manifest.edit.kind === 'adjust_tool_allowlist' && ctx.toolPermissions !== undefined) {
+    const widened = manifest.edit.add.filter((tool) => {
+      const level = ctx.toolPermissions?.get(tool);
+      return level === 'write' || level === 'execute' || level === 'dangerous';
+    });
+    if (widened.length > 0) {
+      return {
+        verdict: 'reject', stage: 'b4-write-tool-widening',
+        reason: `edit grants ${widened.map((t) => JSON.stringify(t)).join(', ')} to role ` +
+          `"${manifest.edit.role}"; a write or execute tool may be granted only to a role marked ` +
+          `sensitive, and then only by operator approval (§6.3)`,
+      };
+    }
   }
 
   // ── stage d: seesaw (regression check) — evaluation artifacts were produced by the caller ──

@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { makeRunId } from '@maf/types';
+import type { PermissionLevel } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { GoldenRunner, describeJudge, makeLlmJudge } from '@maf/eval-harness';
@@ -132,6 +133,11 @@ export function registerEvolveCommand(program: Command): void {
           ...(r.model ? { model: r.model } : {}),
         })),
         knownToolIds: new Set(createDefaultRegistry().getAll().map((t) => String(t.id))),
+        // What each known tool may do, so the gate can tell a widening that hands a role the tree
+        // (`fs.write`, `test.run`) from one that hands it another way to read.
+        toolPermissions: new Map<string, PermissionLevel>(
+          createDefaultRegistry().getAll().map((t): [string, PermissionLevel] => [String(t.id), t.permissionLevel]),
+        ),
         knownProcessorNames: processorNames,
         judgeOnlyTaskIds: new Set(corpus
           .filter((t) => t.verifiers.every((v) => v.kind === 'llm-judge'))
