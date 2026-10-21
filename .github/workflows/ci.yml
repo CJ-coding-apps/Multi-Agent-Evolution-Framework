@@ -163,10 +163,28 @@ jobs:
   # with — from a directory that is not this repository. The e2e job would pass with a tarball that
   # lacked the assets, the manifest dependencies or the shebang, because it runs `dist/main.js` in
   # place; this one cannot.
+  #
+  # WP-3.0p: the artifact is tested on every platform 0.6.0 claims, not only on the one that was
+  # convenient. `fail-fast: false` matters more than it looks: if the tarball cannot install on one
+  # platform, the other three still have to report, or the failure reads like a matrix that never ran.
   package:
-    name: package · npm pack · install · run
-    runs-on: ubuntu-latest
+    name: package · npm pack · install · run (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-15 is Apple Silicon; macos-15-intel is x86_64. GitHub's macos-14 arm64 image is
+          # deprecated, so both macOS legs use the 15 image family.
+          - os: macos-15
+            platform: macOS arm64
+          - os: macos-15-intel
+            platform: macOS x64
+          - os: ubuntu-24.04
+            platform: Linux x64
+          - os: ubuntu-24.04-arm
+            platform: Linux arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -187,3 +205,86 @@ jobs:
 
       - name: Pack, install from the tarball, and run it
         run: pnpm check:package
+
+  # WP-3.0p, second question (D-51). The job above installs the version this package pins today
+  # (Kùzu 0.7.1) as part of its own dependencies. This job asks the same question of the version
+  # 0.6.0 intends to pin, 0.11.3, and asks it alone — no pnpm workspace, no build, nothing that could
+  # supply a compiler by accident. If any platform has no prebuilt binary, it compiles from source or
+  # fails, and the upgrade does not proceed: Kùzu is archived, so a platform that must build its own
+  # copy of 0.11.3 has no upstream to repair the build when it breaks.
+  kuzu-probe:
+    name: kuzu 0.11.3 prebuilt (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macOS arm64
+          - os: macos-15-intel
+            platform: macOS x64
+          - os: ubuntu-24.04
+            platform: Linux x64
+          - os: ubuntu-24.04-arm
+            platform: Linux arm64
+    # Explicit bash so `set -o pipefail` is real: without it the `| tee` in the install step would
+    # hide npm's exit status.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install kuzu@0.11.3, prove it is prebuilt, and run one query
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/kuzu-probe"
+          log="$RUNNER_TEMP/kuzu-install.log"
+          mkdir -p "$work"
+          cd "$work"
+          npm init -y >/dev/null
+          npm install kuzu@0.11.3 --foreground-scripts 2>&1 | tee "$log"
+
+          echo '--- platform ---'
+          node -e 'const os=require("os"); console.log(process.platform, process.arch, process.version, os.release())'
+          echo '--- resolved ---'
+          npm ls kuzu
+          echo '--- native binary ---'
+          find node_modules/kuzu -name '*.node' -print -exec ls -l {} \;
+          # A prebuilt install must leave a loadable binary; a build-from-source also leaves one, so
+          # the log below carries the verdict, and this check catches the case where neither happened.
+          if ! find node_modules/kuzu -name '*.node' -print -quit | grep -q .; then
+            echo "::error::kuzu@0.11.3 installed no native binary on ${{ matrix.platform }}."
+            exit 1
+          fi
+
+          # Compilation signatures. `prebuild-install warn install No prebuilt binaries found` is the
+          # decision to build; the rest are the build itself. The plain string `prebuild-install info`
+          # is the normal prebuilt path and is not matched.
+          if grep -Eqi 'no prebuilt binaries found|prebuild-install (warn|error)|node-gyp|gyp info|gyp ERR|CMake Error|^cmake |\.cpp\.o|\.cc\.o' "$log"; then
+            echo "::error::kuzu@0.11.3 compiled from source (or tried to) on ${{ matrix.platform }}:"
+            grep -Ein 'no prebuilt binaries found|prebuild-install (warn|error)|node-gyp|gyp info|gyp ERR|CMake Error|^cmake |\.cpp\.o|\.cc\.o' "$log" || true
+            exit 1
+          fi
+
+          # A prebuilt that cannot load is not a prebuilt. Execute one query through the real API.
+          node - <<'NODE'
+          const kuzu = require('kuzu');
+          (async () => {
+            const db = new kuzu.Database(':memory:');
+            const conn = new kuzu.Connection(db);
+            const res = await conn.query('RETURN 1 AS n');
+            const rows = typeof res.getAll === 'function' ? await res.getAll() : [await res.getNext()];
+            console.log('query result:', JSON.stringify(rows));
+            if (rows.length !== 1 || Number(rows[0].n) !== 1) {
+              throw new Error(`expected one row with n = 1, got ${JSON.stringify(rows)}`);
+            }
+            if (typeof conn.close === 'function') await conn.close();
+            if (typeof db.close === 'function') await db.close();
+            console.log('kuzu 0.11.3: prebuilt binary loaded and executed a query');
+          })().catch((err) => { console.error(err); process.exit(1); });
+          NODE
