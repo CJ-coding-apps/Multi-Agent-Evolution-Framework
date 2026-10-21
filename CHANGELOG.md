@@ -11,13 +11,17 @@ is entitled to know which of their own code stops compiling.
 
 ## [0.5.0] - 2026-10-20
 
-0.5.0 is the packaging release ([D-48](docs/DECISIONS.md)): `maf` installs from npm, `maf init`
-prepares a repository, and a run with no policy file is governed by the built-in policy instead of by
-nothing. The LCM/failover/evolver work [D-47](docs/DECISIONS.md) put in 0.5.0 moves to 0.6.0.
+Tagged `v0.5.0`; **not published to npm**, by the maintainer's decision ([D-50](docs/DECISIONS.md)).
+The first npm release is 0.6.0.
+
+0.5.0 is the packaging release ([D-48](docs/DECISIONS.md)): the package is built, packed and tested,
+`maf init` prepares a repository, and a run with no policy file is governed by the built-in policy
+instead of by nothing. The LCM/failover/evolver work [D-47](docs/DECISIONS.md) put in 0.5.0 moves to
+0.6.0.
 
 ### Added
 
-- **A published package, `@cj-coding-apps/maf`** ([D-48](docs/DECISIONS.md)). The 26 internal `@maf/*`
+- **A publishable package, `@cj-coding-apps/maf`** ([D-48](docs/DECISIONS.md)). The 26 internal `@maf/*`
   packages are bundled into one `dist/main.js` with esbuild; the six third-party runtime dependencies stay
   real dependencies, pinned to the versions this workspace resolved, because `better-sqlite3` and `kuzu`
   carry native code that must be installed against the user's Node. The manifest carries no `workspace:`

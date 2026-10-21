@@ -54,7 +54,7 @@ What is true of the code as of 0.5.0. Prose elsewhere in this README describes o
 | Backends: Claude Code, Gemini, Codex (CLI); Ollama, OpenRouter (HTTP) | shipped | 0.1.0 | `adapters/claude/ClaudeAdapter.test.ts`, `adapters/codex/CodexAdapter.test.ts`, `adapters/gemini/GeminiAdapter.test.ts`, `adapters/openrouter/OpenRouterAdapter.test.ts`, `adapters/openrouter/transport.test.ts`, `adapters/ollama/OllamaAdapter.test.ts`, `adapters/ollama/transport.test.ts`, `adapters/base/ProcessSpawner.test.ts`; the CLI adapters are tested with a stand-in spawner, not the real binaries |
 | Toolchain floor ([D-21](docs/DECISIONS.md)): `engines` declares Node ≥ 22, pnpm 10, a `maf` bin that runs from `PATH` on Linux and macOS; the CLI itself refuses to start below Node 22, with `maf requires Node 22 or newer (found vX)` and exit status 1, because npm only warns about `engines` | shipped | 0.4.0 (the runtime check 0.5.0) | the root `package.json` pins `packageManager: pnpm@10.34.7` with `engines` and `pnpm.onlyBuiltDependencies`; `pnpm-lock.yaml` is v9; `cli/shebang.test.ts` runs the built bin through its shebang; `cli/nodeVersion.test.ts` |
 | Docker image | planned | not scheduled | — |
-| Published package `@cj-coding-apps/maf` (bin `maf`): the workspace's internal packages are bundled into one `dist/main.js` and the six runtime dependencies stay pinned in the manifest; the tarball ships the bundle, the assets it reads, the README and the licence, and nothing named `workspace:` or `@maf/*`; the installed command runs `inprocess-demo` and the offline goldens from a repository with no checkout, using the corpus the package ships | shipped | 0.5.0 | `scripts/pack-check.mjs` |
+| Published package `@cj-coding-apps/maf` (bin `maf`), from the 0.6.0 release ([D-50](docs/DECISIONS.md)): the workspace's internal packages are bundled into one `dist/main.js` and the six runtime dependencies stay pinned in the manifest; the tarball ships the bundle, the assets it reads, the README and the licence, and nothing named `workspace:` or `@maf/*`; the installed command runs `inprocess-demo` and the offline goldens from a repository with no checkout, using the corpus the package ships | planned | 0.6.0 | `scripts/pack-check.mjs` and the CI job `package · npm pack · install · run` (the artifact is built, packed and tested on every PR; it is not published) |
 
 ## What it does
 
@@ -73,11 +73,24 @@ What is true of the code as of 0.5.0. Prose elsewhere in this README describes o
 
 ## Quickstart
 
-### Install
+### Build from source
+
+A fresh clone has no `dist/`, which is not committed, so build before running anything:
 
 ```bash
-npm install -g @cj-coding-apps/maf
-maf --version
+# 1. clone
+git clone https://github.com/CJ-coding-apps/Multi-Agent-Evolution-Framework.git
+cd Multi-Agent-Evolution-Framework
+
+# 2. install workspace dependencies with the pinned pnpm
+corepack enable
+pnpm install --frozen-lockfile
+
+# 3. build: each package runs its own tsc, in dependency order
+pnpm build
+
+# 4. (optional) run the test suites
+pnpm -r test
 ```
 
 - **Node 22.** It is the version CI builds and tests on, and the package refuses anything older.
@@ -87,7 +100,7 @@ maf --version
 - **npm.** `test.run`, and so the demo, runs `npm test` in a project where it recognises no other
   test runner.
 - **Native modules.** The package depends on six libraries, two of which carry native code: `kuzu`
-  (0.7.1) and `better-sqlite3` (11.x). npm needs a prebuilt binary for your platform and Node
+  (0.7.1) and `better-sqlite3` (11.x). The install needs a prebuilt binary for your platform and Node
   version; where none exists, installing them means compiling from source, which needs a C++
   toolchain.
 - **For `--adapter claude`:** a Claude Code CLI on your `PATH` whose `claude --help` lists
@@ -96,6 +109,44 @@ maf --version
   manager's bin directory can put an older CLI ahead of the current one; if a run stops at planning
   with `unknown option '--tools'`, check `which -a claude`.
 - No browser and no `playwright` install is needed.
+
+In a checkout, every `maf <command>` elsewhere in this README is `node packages/cli/dist/main.js <command>`, because nothing puts `packages/cli`'s bin on your `PATH`:
+
+```bash
+# watch the in-process gated loop run end-to-end against a throwaway fixture.
+# Deterministic and offline by default; --live drives the real `claude` binary.
+node packages/cli/dist/main.js inprocess-demo
+node packages/cli/dist/main.js inprocess-demo --live
+#    The demo prints the path of the bundle it signed ("attn signed bundle: …"); check it:
+node packages/cli/dist/main.js attest verify <that path>
+
+#    Score the committed default harness on the golden corpus offline (no model, no key),
+#    then compare the result with the committed baseline. The second argument is the result to
+#    compare (a harness sha under .maf/goldens/results, or a result file); `baseline.json`'s own
+#    `harnessSha` is a no-regression check, and any other harness sha is a candidate.
+node packages/cli/dist/main.js goldens run --adapter scripted --corpus tests/goldens
+node packages/cli/dist/main.js goldens compare tests/goldens/baseline.json <harness-sha>
+
+#    Run an agent against a target git repository (needs the chosen backend).
+#    The run works in its own worktree and branch, and on success prints the merge command.
+export MAF_SIGNING_KEY='<a secret you keep>'   # see "Before maf run" below
+node packages/cli/dist/main.js run "add a hello function" -d /path/to/repo --adapter claude
+#    [maf] worktree: /path/to/repo/.maf/worktrees/<runId> (branch maf/<runId>, from <commit>)
+#    …
+#    [maf] the run's work is on maf/<runId> (worktree …). To take it: git merge maf/<runId>
+#    To run in /path/to/repo itself, on its checked-out branch, add --no-worktree.
+```
+
+`pnpm pack:package` builds the publishable tarball's staging directory, and `pnpm check:package` packs it, installs it into an empty prefix and runs the commands above from the installed package — that check is the CI job `package · npm pack · install · run`.
+
+### Install from npm (from 0.6.0)
+
+The package is built and tested on every PR, but not yet published; the first npm release is 0.6.0, when the LCM context engine and the evolver ship ([D-50](docs/DECISIONS.md)).
+
+```bash
+npm install -g @cj-coding-apps/maf
+maf --version
+```
 
 ### Use it in your repository
 
@@ -122,56 +173,6 @@ writing through it; running it again keeps every file you have edited, and `--fo
 Nothing else is required: with no `.maf/policy.yaml` and no `--policy`,
 `run` applies the built-in policy and says so once
 ([D-49](docs/DECISIONS.md)); `--policy none` runs without rules. The adapter defaults to `claude`.
-
-### Work on maf from a checkout
-
-A fresh clone has no `dist/`, which is not committed, so build before running anything:
-
-```bash
-# 1. clone
-git clone https://github.com/CJ-coding-apps/Multi-Agent-Evolution-Framework.git
-cd Multi-Agent-Evolution-Framework
-
-# 2. install workspace dependencies with the pinned pnpm
-corepack enable
-pnpm install --frozen-lockfile
-
-# 3. build: each package runs its own tsc, in dependency order
-pnpm build
-
-# 4. (optional) run the test suites
-pnpm -r test
-
-# 5. watch the in-process gated loop run end-to-end against a throwaway fixture.
-#    Deterministic and offline by default; --live drives the real `claude` binary.
-node packages/cli/dist/main.js inprocess-demo
-node packages/cli/dist/main.js inprocess-demo --live
-#    The demo prints the path of the bundle it signed ("attn signed bundle: …"); check it:
-node packages/cli/dist/main.js attest verify <that path>
-
-#    Score the committed default harness on the golden corpus offline (no model, no key),
-#    then compare the result with the committed baseline. The second argument is the result to
-#    compare (a harness sha under .maf/goldens/results, or a result file); `baseline.json`'s own
-#    `harnessSha` is a no-regression check, and any other harness sha is a candidate.
-node packages/cli/dist/main.js goldens run --adapter scripted --corpus tests/goldens
-node packages/cli/dist/main.js goldens compare tests/goldens/baseline.json <harness-sha>
-
-# 6. run an agent against a target git repository (needs the chosen backend).
-#    The run works in its own worktree and branch, and on success prints the merge command.
-export MAF_SIGNING_KEY='<a secret you keep>'   # see "Before maf run" below
-node packages/cli/dist/main.js run "add a hello function" -d /path/to/repo --adapter claude
-#    [maf] worktree: /path/to/repo/.maf/worktrees/<runId> (branch maf/<runId>, from <commit>)
-#    …
-#    [maf] the run's work is on maf/<runId> (worktree …). To take it: git merge maf/<runId>
-#    To run in /path/to/repo itself, on its checked-out branch, add --no-worktree.
-```
-
-> This section runs the checkout. Elsewhere the README writes `maf <command>`; in a checkout that is
-> `node packages/cli/dist/main.js <command>`, because nothing puts `packages/cli`'s bin on your
-> `PATH`. The published package is `@cj-coding-apps/maf`: `npm install -g` takes the last release,
-> which lags this branch. `pnpm pack:package` builds the publishable tarball's staging directory,
-> and `pnpm check:package` packs it, installs it into an empty prefix and runs the commands above
-> from the installed package — that check is the CI job `package · npm pack · install · run`.
 
 ### Before `maf run`
 
