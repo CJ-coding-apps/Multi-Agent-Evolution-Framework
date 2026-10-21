@@ -50,10 +50,13 @@ were swallowed.
   flight.
 - **`packages/lcm/src/LcmEngine.ts`** — `summarizeChunk` refuses an empty chunk and refuses ids
   the store does not hold (naming up to three), rather than summarizing fewer messages than it
-  will drop. `assembleContext` keeps the newest `freshTailCount` raw, summarizes exactly the
-  uncompacted messages older than the tail, and counts fresh messages, summaries and ghost cues
-  against `tokenBudget`, so the budget is a ceiling. `Dolt` mode returns ghost cues; `Upward`
-  mode returns the summaries themselves (`LcmContext.summaries`).
+  will drop. `assembleContext` fits the archive, renders the newest messages that fit after it,
+  and compacts — at that same assembly — every uncompacted message the budget did not render,
+  re-fitting until nothing is uncovered. The tail that stays raw is what was rendered rather than
+  a fixed count; `freshTailCount` only bounds the raw candidates while compaction is warranted.
+  Fresh messages, summaries and ghost cues are counted against `tokenBudget`, so the budget is a
+  ceiling. `Dolt` mode returns ghost cues; `Upward` mode returns the summaries themselves
+  (`LcmContext.summaries`).
 - **`packages/lcm/src/LcmStore.ts`** — `getMessagesByIds` reads a segment chronologically
   (`created_at ASC, rowid ASC`); `getFreshTail` returns the newest N, oldest first;
   `getUncompactedMessages` applies the fresh-tail exclusion to uncompacted rows;
@@ -84,8 +87,8 @@ under the `check:test-scripts` guard.
 ## The verifier round (D-52)
 
 The first PR for this WP was not mergeable: the tests passed and LCM still did not work in a real
-run. **D-52 is recorded here, in full, and `docs/DECISIONS.md` carries the id and a pointer to this
-section; WP-3.13's documentation pass moves it back.** The findings are the verifier's F1–F14;
+run. **D-52 is recorded here, in full; `docs/DECISIONS.md` is untouched until WP-3.13's
+documentation pass moves this entry there.** The findings are the verifier's F1–F14;
 `F15` belonged to WP-3.8 (#51). A second verifier pass found R1–R14, which the last subsection of
 this round records; D-52 below states the corrected position, not the first round's.
 
@@ -105,13 +108,20 @@ after MAF spent part of it overstates what the node could do; attributing the ca
 always, because then no node owns a cost it caused; and reporting only `contentTokens` where the
 backend reported nothing, which would omit the prompt the call actually paid for.
 
-**The injector's budget covers what the injector renders.** Summaries (or cues) are fitted first;
-the session's newest messages are then rendered as `<recent>`, newest first, inside the same
-remaining budget. A message that does not fit is neither rendered nor dropped from the store: it is
-summarized at the next compaction. Room is rendered size; a summary call's cost is about the call
-and never shrinks the room (R2). *Rejected:* the round-1 premise that the raw tail was the node
-loop's own history and needed no rendering — it is earlier nodes' messages and reaches no prompt
-otherwise; and subtracting `tokensUsed` from the archive's room, which emptied the archive on
+**The injector's budget covers what the injector renders, and nothing is left uncovered.** Summaries
+(or cues) are fitted first; the session's newest messages are then rendered as `<recent>`, newest
+first, inside the same remaining budget. **The covered invariant (V1):** at every assembly, every
+message of the session is either rendered in `<recent>`, covered by a summary (directly or through an
+ancestor), or newer than that assembly. The tail that stays raw is *what was rendered*, not a fixed
+count: a message that does not fit is compacted at that same assembly, whatever its age, and the
+assembly re-fits until nothing is uncovered. A bound on the passes is a backstop; reaching it
+compacts what is left and returns the archive, because the guarantee outranks the rendering. Room is
+rendered size; a summary call's cost is about the call and never shrinks the room (R2).
+*Rejected:* the round-1 premise that the raw tail was the node loop's own history and needed no
+rendering — it is earlier nodes' messages and reaches no prompt otherwise; the round-2 rule that a
+message that did not fit was "summarized at the next compaction" — compaction never touched the
+newest `freshTailCount`, so with defaults 33 messages sat in neither the prompt nor any summary and
+the band grew; and subtracting `tokensUsed` from the archive's room, which emptied the archive on
 backends that report usage.
 
 **One wiring, proven through the path the user runs.** `createRunLcm` is the only construction of
@@ -206,16 +216,20 @@ silent.
   round-1 text said the fresh tail "is not rendered and is not charged" on the premise that those
   messages were the node loop's own history and already in the prompt; that premise was false.
   They are earlier nodes' messages, the adapter sees only the prompt the injector builds, and on a
-  session whose loop had not carried them they reached no prompt at all. A message that does not
-  fit in the remainder is neither rendered nor removed: it stays in the store and is summarized at
-  the next compaction.
+  session whose loop had not carried them they reached no prompt at all. **V1:** a message that does
+  not fit in the remainder is neither rendered nor left in the store unsummarized — it is compacted
+  at that same assembly, and the assembly re-fits until every message is rendered, covered by a
+  summary, or newer. The round-2 sentence ("summarized at the next compaction") was false for every
+  message inside the newest `freshTailCount`: compaction never touched that tail, so the message
+  waited for 64 newer ones and, with defaults, a band of 33 sat in neither the prompt nor a summary.
 - **Room is rendered size; cost is the call** (R2). `assembleContext` returns what it rendered and
   the budget it charged, and the injector subtracts nothing on account of what a summarization call
   *cost*. On a backend that reports `tokensUsed`, the round-1 code subtracted that cost from the
   archive's room, so a 9,000-token summary call removed the `<summaries>` block it had just paid
   to make. `tokensUsed` goes only to the budget record (`tokenBudgetCharged`), never to rendering.
 - **`packages/lcm/src/LcmEngine.ts`** — a message is kept raw or summarized then dropped, never
-  dropped unsummarized. A failed compaction (F5) returns every uncompacted message.
+  dropped unsummarized, and the decision is made in the same assembly rather than a later one (V1).
+  A failed compaction (F5) returns every uncompacted message and records the failure.
 
 ### F3 — one LCM wiring, proven through the path the user runs
 
@@ -353,6 +367,20 @@ D-52 above carries the corrected position; this list is the disposition.
 | R13 | `REVIEWER_PROMPT` omitted `lcm.expand` | Added; a test now compares every "Tools available" line with its role's `allowedTools` |
 | R14 | A cli-tier role cannot call `lcm.expand`, but a Dolt cue told it to | The injector renders summaries instead of cues when the role has no MAF tool registry (`render: 'summaries'`) |
 
+### Round 3 — V1–V5, against D-52
+
+The third pass found that round 2's own ruling was wrong, and that three mutants still survived.
+
+| | Finding | Disposition |
+|---|---|---|
+| V1 | "Summarized at the next compaction" was false for every message inside the newest `freshTailCount`; with defaults a band of 33 messages reached neither the prompt nor a summary, and the band grew | The tail that stays raw is **what the assembly rendered**, not a fixed count. A candidate that does not fit is compacted in that same assembly and the assembly re-fits; `MAX_ASSEMBLY_PASSES` is a backstop, and reaching it compacts what is left and returns the archive. The invariant — at every assembly each message is rendered, covered by a summary or an ancestor, or newer — is stated in D-52, `LcmEngine`, `GraphAwareInjector`, `LcmContext.messages` and here. The test runs ten assemblies at the defaults and at a small budget and checks every session message against it. |
+| V2 | Dropping `sessionId` from `createRunLcm` (CS3) survived the whole suite | A `runTask` test runs twice in one `.maf/`; run B's own in-process role calls the run's `lcm.expand` with run A's id and is refused. The mutant is killed. |
+| V3 | A D-52 pointer stub remained in `docs/DECISIONS.md`, which this WP must not touch | Removed; `git diff origin/wp/phase-3b...HEAD -- docs/DECISIONS.md` is empty. |
+| R8 | N12b (output masking) and N12d (input masking) survived | One test per layer, each with the other layer's input clean, so removing either alone turns its test red. |
+| R14 | Forcing `mafToolsAvailable: true` for a cli-tier role survived | A dispatcher-level test pins the flag `false` for a cli-tier role and `true` for an in-process one. |
+| V5 | The headroom arithmetic said "~22 KiB" | 150,000 − 131,072 = 18.5 KiB, and the 64 KiB prompt cap is the limit that matters because the prompt is one argument. |
+| — | V2's real-wiring test found a live defect: a reader that wrote nothing failed with `unexpected_change` on `.maf/memory.kuzu.wal` | A Kùzu database is the file **and** its sibling write-ahead log (D2), so `memory.kuzu.wal` joins `MAF_RUNTIME_STATE` and the root `.gitignore`. MAF's own graph appends to it while open; keeping it in a snapshot reports MAF's state as the node's change. |
+
 ## Files outside the spec's list, and why
 
 Every file this branch changes that the WP-3.2 spec did not list, with the reason and the line
@@ -373,6 +401,8 @@ range (R7). "Line range" means the hunks this branch writes, not the whole file.
 | `packages/cli/src/main.ts` | `merge-runs`' summarizer throws instead of fabricating text. `merge-runs` never assembles a context, so it never summarizes; the placeholder was dead code that could have become a false summary if that changed. | the `merge-runs` summarizer |
 | Tests in `roles`, `tools` and `cli` | The proofs the round-2 rulings ask for, each in the package it exercises: `run-lcm-run-task.test.ts` (K1–K7, through `runTask`), `run-lcm-wiring.test.ts` (W1–W4), `lcm-config.test.ts`, `RoleDispatcher.test.ts` (the summary transcript line, R8), `defaults.test.ts` (the prompt/catalogue and budget pins, R13), `lcm-expand.test.ts` (masking, R8), `lcm-live.test.ts`, and `lcm/src/__tests__/*` for the engine and the summarizer. | — |
 | `packages/cli/src/__tests__/approval-gate-stack.test.ts` | The test now creates `mafDir` explicitly. `buildRunStack`'s contract is that the caller creates it (`run` and `goldens` call `ensureMafDir`); the test passed only because Kùzu **0.7.1** creates a missing parent directory as a side effect of a schema query. Measured: `new Database(<missing parent>)` then a query creates it on 0.7.1 and fails on 0.11.3. Creating it makes the test prove the stack, not a library's side effect. This file is not WP-3.2's, and WP-3.8 (0.11.3) needs the same change; it is declared here because the WP-3.2 lane measured the behaviour. | setup |
+| `packages/git-ops/src/SnapshotDiff.ts` and `.gitignore` | `memory.kuzu.wal` joins `MAF_RUNTIME_STATE` and the mirrored block in the root `.gitignore`. V2's real-wiring test exposed the consequence of D2 here: maf's `MemoryGraph` keeps a write-ahead log beside the database while it is open, and a snapshot that kept it reported MAF's own state as the reader's change, failing the node with `unexpected_change`. `ensureMafDir` derives `.maf/.gitignore` from this list, so new repositories get the entry too. | `MAF_RUNTIME_STATE`; `.gitignore`'s "MAF runtime state" block |
+| `packages/cli/src/__tests__/wiring-stack-cleanup.test.ts` | The M1 test's removability check now retries the documented transient `ENOTEMPTY` (`maxRetries`, `retryDelay`), matching the pattern this repository's `init.test.ts` already uses. It failed once in a full-suite run and 8/8 in isolation; a graph that was *not* closed keeps the directory and still fails after the retries, so the assertion remains the one the mutant turns red. Not this WP's file; declared because this round measured the flake. | the two `rm` calls |
 
 ### Note for WP-3.15
 

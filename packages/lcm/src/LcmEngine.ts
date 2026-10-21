@@ -45,7 +45,13 @@ export interface LcmEngineConfig {
    */
   sessionId?:        string;
   contextThreshold:  number;   // 0.0–1.0, default 0.75 — triggers compaction
-  freshTailCount:    number;   // recent messages protected from compaction, default 64
+  /**
+   * The most messages `<recent>` offers raw when compaction is active (V1). It is not a fixed
+   * count protected from compaction: the protected tail is what the budget actually rendered, so a
+   * message inside this count that did not fit is summarized at the same assembly, not 64 messages
+   * later. With room to spare the prompt may show every message, whatever this count says.
+   */
+  freshTailCount:    number;   // raw recent messages offered when compacting; default 64
   mode:              LcmMode;
   /**
    * The run's summarizer (WP-3.2). In the CLI this is the run's adapter, with the model the run
@@ -107,6 +113,13 @@ const SUMMARY_UNIT_OVERHEAD = 32; // `[ASSISTANT] ` + the joining newline, gener
 const RECENT_WRAPPER_TOKENS = 8;
 const RECENT_MESSAGE_OVERHEAD_TOKENS = 12;
 
+/**
+ * How many fit/compact/re-fit rounds an assembly may take before it compacts everything that is
+ * still uncovered (V1). Each round summarizes at least one message, so the loop converges; this is
+ * a backstop against a summarizer that produces summaries larger than the messages they replace.
+ */
+const MAX_ASSEMBLY_PASSES = 8;
+
 export class LcmEngine implements LcmApi {
   private readonly store: LcmStore;
   private readonly config: LcmEngineConfig;
@@ -166,14 +179,20 @@ export class LcmEngine implements LcmApi {
   }
 
   /**
-   * The context a node is given (WP-3.2, D-17; budget semantics D-52, R2/R4c).
+   * The context a node is given (WP-3.2, D-17; budget semantics D-52, R2/R4c; coverage V1).
    *
    * `messages` are the newest messages of the session, newest first. They are rendered as
-   * `<recent>` after the archive and inside the same budget: a message that does not fit is neither
-   * rendered nor removed from the store — it stays for the next compaction to summarize. Compaction
-   * summarizes exactly the uncompacted messages outside the fresh tail. If it fails, every
-   * uncompacted message is a recent candidate and the failure is recorded (F5): nothing is dropped
-   * unsummarized.
+   * `<recent>` after the archive and inside the same budget.
+   *
+   * **The invariant (V1):** at every assembly, every message of the session is either rendered in
+   * `<recent>`, covered by a summary (directly or through an ancestor), or newer than the assembly.
+   * The tail that stays raw is *what was rendered*, not a fixed count, so a message that did not fit
+   * is eligible for compaction at this very assembly, whatever its age. Compaction shrinks the room
+   * left for `<recent>`, so the rendered set only shrinks and the loop converges; anything still
+   * uncovered at the bound is compacted before returning.
+   *
+   * If compaction fails, every uncompacted message is a recent candidate again and the failure is
+   * recorded (F5): nothing is dropped unsummarized, and the operator is told the archive is behind.
    *
    * `totalTokens` is the size of what the injector renders — summaries/cues plus the recent
    * messages. A summary call's cost is `compactionTokens`, a budget record and never a reservation
@@ -192,93 +211,150 @@ export class LcmEngine implements LcmApi {
   ): Promise<LcmContext> {
     if (mode === 'off' || tokenBudget <= 0) return emptyContext(mode);
 
-    const uncompacted = this.store.getUncompactedMessages(sessionId, 0);
-    const rawTokens   = uncompacted.reduce((s, m) => s + m.tokens, 0);
     const summaryCalls: LcmSummarySurface[] = [];
     const degradedRecords: LcmDegradedRecord[] = [];
     let compactionTokens = 0;
     let degraded = false;
-    const overThreshold = rawTokens > tokenBudget * this.config.contextThreshold;
+    const operator = this.config.operator ?? 'LLM-Map';
 
-    if (overThreshold) {
-      const droppable = this.store.getUncompactedMessages(sessionId, this.config.freshTailCount);
-      if (droppable.length > 0) {
-        try {
-          const operator = this.config.operator ?? 'LLM-Map';
-          const result = await this.serialize(sessionId, () =>
-            this.compactLocked(sessionId, droppable.map((m) => m.id), operator, trigger));
-          compactionTokens = result.reportedTokens.reduce((s, n) => s + n, 0);
-          summaryCalls.push(...result.calls);
-        } catch (err: unknown) {
-          // F5: a failed compaction degrades. The node continues uncompacted and the failure is
-          // recorded; throwing here would turn a background optimization into a node failure.
-          degraded = true;
-          const record = {
-            sessionId, reason: err instanceof Error ? err.message : String(err),
-            ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
-            ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
-          };
-          degradedRecords.push(record);
-          await this.config.onDegraded?.(record);
+    /** The archive half of one assembly: what the mode offers and what it costs. */
+    const fitArchive = async (): Promise<{
+      summaries: LcmSummary[]; ghosts: GhostCue[]; used: number; offerSummaries: boolean;
+    }> => {
+      // R2: room is measured on rendered size. The call's reported tokens were subtracted here and
+      // on a backend that reports them (openrouter) that emptied the archive's own room.
+      const ghosts: GhostCue[] = [];
+      let included: LcmSummary[] = [];
+      let used = 0;
+      let offerSummaries = mode === 'Upward';
+
+      if (mode === 'Upward') {
+        const archive = await this.fitUpward(sessionId, tokenBudget, trigger);
+        included = archive.summaries;
+        summaryCalls.push(...archive.calls);
+        used = included.reduce((s, summary) => s + summary.tokens, 0);
+        if (included.length === 0 && archive.roots.length > 0) {
+          // R12: one root larger than the whole archive used to render nothing and say nothing.
+          // A cue is a sentence, so it fits where the summary did not; the model can expand it.
+          used = this.fitCues(archive.roots, Math.max(0, tokenBudget - used), ghosts);
         }
+      } else if (render === 'summaries') {
+        // R14: no cues the backend cannot act on. The roots are fitted newest-first, exactly as the
+        // cues would be, without the extra compaction Upward's fit performs.
+        const fitted = fitRootsNewestFirst(this.rootSummaries(sessionId), tokenBudget);
+        included = fitted.summaries;
+        used = fitted.used;
+        offerSummaries = true;
+      } else {
+        // Cues are sentences, newest first: the most recent archive is the most relevant, and a cue
+        // the budget cannot hold is skipped rather than crowding out the rest.
+        used = this.fitCues(this.rootSummaries(sessionId), tokenBudget, ghosts);
       }
-    }
+      return { summaries: included, ghosts, used, offerSummaries };
+    };
 
-    // What may stay raw. On success, the fresh tail: everything older is covered by a summary. On
-    // failure — or when no compaction was needed or possible — every uncompacted message, so no
-    // message is dropped without a summary that covers it (E10). This is the candidate set; the
-    // budget below decides which of them are actually rendered.
-    const remaining = this.store.getUncompactedMessages(sessionId, 0);
-    const candidates = degraded
-      ? remaining
-      : overThreshold
-        ? this.store.getFreshTail(sessionId, this.config.freshTailCount)
-            .filter((m) => m.summaryId === undefined)
-        : remaining;
+    /**
+     * One assembly of what is currently stored. `cap` bounds the raw tail only when compaction is
+     * warranted; a roomy prompt shows every message that fits. A message outside what `fitRecent`
+     * renders is left uncovered, and the caller compacts it before returning (V1).
+     */
+    const assembleNow = async (uncompacted: LcmMessage[], cap: number | undefined) => {
+      const archive = await fitArchive();
+      const candidates = cap === undefined
+        ? uncompacted
+        : uncompacted.slice(Math.max(0, uncompacted.length - cap));
+      const recent = fitRecent(candidates, Math.max(0, tokenBudget - archive.used));
+      return { archive, recent };
+    };
 
-    // R2: room is measured on rendered size. The call's reported tokens were subtracted here and
-    // on a backend that reports them (openrouter) that emptied the archive's own room.
-    const archiveBudget = tokenBudget;
-    const ghosts: GhostCue[] = [];
-    let included: LcmSummary[] = [];
-    let used = 0;
-    let offerSummaries = mode === 'Upward';
-
-    if (mode === 'Upward') {
-      const archive = await this.fitUpward(sessionId, archiveBudget, trigger);
-      included = archive.summaries;
-      summaryCalls.push(...archive.calls);
-      used = included.reduce((s, summary) => s + summary.tokens, 0);
-      if (included.length === 0 && archive.roots.length > 0) {
-        // R12: one root larger than the whole archive used to render nothing and say nothing.
-        // A cue is a sentence, so it fits where the summary did not; the model can expand it.
-        used = this.fitCues(archive.roots, Math.max(0, archiveBudget - used), ghosts);
-      }
-    } else if (render === 'summaries') {
-      // R14: no cues the backend cannot act on. The roots are fitted newest-first, exactly as the
-      // cues would be, without the extra compaction Upward's fit performs.
-      const fitted = fitRootsNewestFirst(this.rootSummaries(sessionId), archiveBudget);
-      included = fitted.summaries;
-      used = fitted.used;
-      offerSummaries = true;
-    } else {
-      // Cues are sentences, newest first: the most recent archive is the most relevant, and a cue
-      // the budget cannot hold is skipped rather than crowding out the rest.
-      used = this.fitCues(this.rootSummaries(sessionId), archiveBudget, ghosts);
-    }
-
-    // R4c: the newest messages, newest first, after the archive and within the same budget.
-    const recent = fitRecent(candidates, Math.max(0, tokenBudget - used));
-
-    return {
+    const build = (
+      archive: Awaited<ReturnType<typeof fitArchive>>,
+      recent: ReturnType<typeof fitRecent>,
+    ): LcmContext => ({
       messages: recent.messages,
-      ghosts,
-      totalTokens: used + recent.tokens,
+      ghosts: archive.ghosts,
+      totalTokens: archive.used + recent.tokens,
       ...(compactionTokens > 0 ? { compactionTokens } : {}),
-      ...(offerSummaries ? { summaries: included } : {}),
+      ...(archive.offerSummaries ? { summaries: archive.summaries } : {}),
       ...(summaryCalls.length > 0 ? { summaryCalls } : {}),
       ...(degradedRecords.length > 0 ? { degraded: degradedRecords } : {}),
+    });
+
+    const recordDegradation = async (err: unknown): Promise<void> => {
+      // F5: a failed compaction degrades. The node continues and the failure is recorded; throwing
+      // here would turn a background optimization into a node failure.
+      degraded = true;
+      const record = {
+        sessionId, reason: err instanceof Error ? err.message : String(err),
+        ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
+        ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
+      };
+      degradedRecords.push(record);
+      await this.config.onDegraded?.(record);
     };
+
+    const compactUncovered = async (messageIds: LcmMessageId[]): Promise<void> => {
+      const result = await this.serialize(sessionId, () =>
+        this.compactLocked(sessionId, messageIds, operator, trigger));
+      compactionTokens += result.reportedTokens.reduce((s, n) => s + n, 0);
+      summaryCalls.push(...result.calls);
+    };
+
+    let uncompacted = this.store.getUncompactedMessages(sessionId, 0);
+    let context: LcmContext | undefined;
+    let converged = false;
+
+    // V1: the protected tail is what was rendered. New summaries leave less room for `<recent>`,
+    // so the rendered set only shrinks and this converges; `MAX_ASSEMBLY_PASSES` is a backstop.
+    for (let pass = 0; pass < MAX_ASSEMBLY_PASSES; pass++) {
+      const rawTokens = uncompacted.reduce((s, m) => s + m.tokens, 0);
+      const overThreshold = rawTokens > tokenBudget * this.config.contextThreshold;
+      const { archive, recent } = await assembleNow(
+        uncompacted, overThreshold ? this.config.freshTailCount : undefined,
+      );
+      context = build(archive, recent);
+
+      const rendered = new Set(recent.messages.map((message) => message.id));
+      const uncovered = uncompacted.filter((message) => !rendered.has(message.id));
+      if (uncovered.length === 0) {
+        converged = true;
+        break;
+      }
+
+      try {
+        await compactUncovered(uncovered.map((message) => message.id));
+      } catch (err: unknown) {
+        await recordDegradation(err);
+        break;
+      }
+      uncompacted = this.store.getUncompactedMessages(sessionId, 0);
+    }
+
+    // The bound is a backstop, not a rule. If it is reached with messages still uncovered, the
+    // guarantee outranks the rendering: compact everything that is left and return the archive
+    // alone (the converged case never takes this branch — its messages were rendered).
+    if (!converged && !degraded && context !== undefined) {
+      const stillUncompacted = this.store.getUncompactedMessages(sessionId, 0);
+      if (stillUncompacted.length > 0) {
+        try {
+          await compactUncovered(stillUncompacted.map((message) => message.id));
+        } catch (err: unknown) {
+          await recordDegradation(err);
+        }
+        const { archive, recent } = await assembleNow([], undefined);
+        context = build(archive, recent);
+      }
+    }
+
+    // F5: in the degraded state the guarantee cannot hold — no summary was written — so the node
+    // sees as much raw history as the budget holds, and the recording says the archive is behind.
+    if (degraded && context !== undefined) {
+      const remaining = this.store.getUncompactedMessages(sessionId, 0);
+      const { archive, recent } = await assembleNow(remaining, undefined);
+      context = build(archive, recent);
+    }
+
+    return context ?? emptyContext(mode);
   }
 
   async lcm_grep(query: string, sessionId: string): Promise<LcmMessage[]> {
@@ -734,9 +810,10 @@ function fitRootsNewestFirst(
 
 /**
  * The newest messages fitted into the room the archive left (R4c). `candidates` is oldest-first, so
- * iterating backwards renders newest-first; a message that does not fit is skipped and stays in the
- * store for the next compaction. The wrapper and per-message overheads are the injector's own
- * rendering costs, so the returned size is the rendered size, not an estimate of the content alone.
+ * iterating backwards renders newest-first; a message that does not fit is skipped here and is
+ * compacted by `assembleContext` at this same assembly (V1), not left for a later one. The wrapper
+ * and per-message overheads are the injector's own rendering costs, so the returned size is the
+ * rendered size, not an estimate of the content alone.
  */
 function fitRecent(
   candidates: LcmMessage[],

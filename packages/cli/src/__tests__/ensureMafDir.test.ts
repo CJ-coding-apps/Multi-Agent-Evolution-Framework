@@ -93,7 +93,7 @@ test('run creates .maf/ before it constructs any store that opens a file inside 
 async function leaveRunState(mafDir: string): Promise<void> {
   for (const entry of MAF_RUNTIME_STATE) {
     const at = path.join(mafDir, entry);
-    if (/\.(db|kuzu)|-wal$|-shm$/.test(entry)) {
+    if (/\.(db|kuzu)$|\.wal$|\.db-wal$|\.db-shm$|-wal$|-shm$/.test(entry)) {
       await writeFile(at, 'state', 'utf8');
     } else {
       await mkdir(at, { recursive: true });

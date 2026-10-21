@@ -781,8 +781,10 @@ export interface GhostCue {
 export interface LcmContext {
   /**
    * The newest messages of the session, newest first, which the injector renders as `<recent>`
-   * after the summaries and within the same budget (WP-3.2 R4c). A message that does not fit is
-   * neither rendered nor dropped from the store: it stays for the next compaction to summarize.
+   * after the summaries and within the same budget (WP-3.2 R4c). The tail that stays raw is what
+   * the budget rendered, not a fixed count: at every assembly every message of the session is
+   * rendered here, covered by a summary, or newer than the assembly (V1), and a message that did
+   * not fit was compacted at that same assembly.
    */
   messages:    LcmMessage[];
   ghosts:      GhostCue[];

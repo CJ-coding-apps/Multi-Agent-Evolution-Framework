@@ -1656,3 +1656,56 @@ test('an LCM summary call is written to the transcript with the surface it was m
     await f.cleanup();
   }
 });
+
+// R14, at the dispatcher: the tier a node will actually run on decides what the archive renders.
+// A Dolt cue says `call lcm.expand(id)`, and only an in-process turn is handed MAF's tool registry
+// to call it with, so a cli-tier role must be assembled with `mafToolsAvailable: false` — the
+// injector then renders `<summaries>` rather than a cue it cannot follow. `true` for every tier is
+// the mutant this test kills; the in-process half pins the other direction.
+test('the dispatcher tells the injector whether the node can call MAF tools (R14)', async () => {
+  const seen: Array<{ role?: string; mafToolsAvailable?: boolean }> = [];
+  const injector = {
+    assemble: async (
+      _taskContext: string,
+      _sessionId?: string,
+      agentRole?: string,
+      _trigger?: unknown,
+      options?: { mafToolsAvailable?: boolean },
+    ) => {
+      seen.push({
+        ...(agentRole !== undefined ? { role: agentRole } : {}),
+        ...(options?.mafToolsAvailable !== undefined
+          ? { mafToolsAvailable: options.mafToolsAvailable }
+          : {}),
+      });
+      return { systemPromptPrefix: '', estimatedTokens: 0 };
+    },
+  } as unknown as GraphAwareInjector;
+
+  const cli = await makeFixture({
+    roleExecution: 'cli', adapter: new CliOnlyAdapter(), policyHandler: ALLOW, injector,
+  });
+  try {
+    await cli.dispatcher.runNode(makeNode(ANALYST));
+  } finally {
+    await cli.cleanup();
+  }
+  assert.deepEqual(seen, [{ role: 'analyst', mafToolsAvailable: false }],
+    'a cli-tier role has no MAF tools, so it gets summaries, not a cue it cannot call');
+
+  const adapter = new StubTurnAdapter();
+  adapter.turnsToServe = [
+    { text: 'reading', toolCalls: [{ toolUseId: 'u1', toolName: 'fs.read', input: { path: 'hello.txt' } }] },
+    { text: 'done reading', toolCalls: [] },
+  ];
+  const inProcess = await makeFixture({
+    roleExecution: 'in-process', adapter, policyHandler: ALLOW, injector,
+  });
+  try {
+    await inProcess.dispatcher.runNode(makeNode(ANALYST));
+  } finally {
+    await inProcess.cleanup();
+  }
+  assert.deepEqual(seen[1], { role: 'analyst', mafToolsAvailable: true },
+    'an in-process role can call lcm.expand, so a cue is an instruction it can follow');
+});

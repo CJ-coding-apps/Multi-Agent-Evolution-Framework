@@ -17,7 +17,9 @@ import {
 // ORACLE: D-17 mechanism / D-52 choices (WP-3.2, round 2). The LCM is judged on what it hands a
 // model:
 //   - the fresh tail is the NEWEST messages; they are rendered as `<recent>`, newest first, after
-//     the archive and inside the same budget (R4c), and a message that does not fit stays stored;
+//     the archive and inside the same budget (R4c). The tail that stays raw is WHAT WAS RENDERED,
+//     not a fixed count: a message that does not fit is compacted at that same assembly, so every
+//     message is rendered, covered by a summary, or newer (V1);
 //   - compaction summarizes exactly the messages it stops returning raw, no more and no fewer;
 //   - the budget covers what the injector RENDERS (summaries or cues, plus `<recent>`). A summary
 //     call's cost is a budget record (`compactionTokens`) and never a reservation out of that room
@@ -427,30 +429,116 @@ test('a compaction that fails degrades: nothing leaves the store, and the failur
   assert.equal(degraded[0]!.taskId, 't');
   assert.equal(degraded[0]!.nodeId, 'n');
   assert.equal(ctx.degraded?.[0]?.reason, 'backend down', 'the context carries the same record');
-  // R4c: the renderer takes the newest messages that fit, and a message that does not fit stays in
-  // the store rather than being dropped — the next compaction still has it.
+  // F5: compaction failed, so nothing was summarized and nothing is covered. The node gets the
+  // newest messages that fit, and the rest stay raw in the store rather than being dropped; they
+  // are shown on a later assembly, when a compaction succeeds.
   assert.deepEqual(
     ctx.messages.map((m) => m.content),
     ['m5', 'm4', 'm3', 'm2'],
-    'the newest messages that fit, newest first; the fifth waits for the next compaction',
+    'the newest messages that fit, newest first; the fifth is still stored, not dropped',
   );
   assert.deepEqual(ctx.summaries, []);
   assert.ok(ctx.totalTokens <= 60);
 });
 
-test('a message the budget cannot hold is neither rendered nor dropped (R4c)', async (t) => {
-  const { engine } = engineWith({ mode: 'Upward' });
+test('a message the budget cannot hold is compacted now, not left in a gap (V1)', async (t) => {
+  const { engine, summarized } = engineWith({ mode: 'Upward' });
   t.after(() => engine.close());
   await addMessages(engine, ['older message', 'newest message']);
 
-  // Room for the wrapper and one message only: the newest is rendered, the older stays stored.
+  // Room for the wrapper and one message only. The newest is tried first; the older does not fit,
+  // so it is summarized at this same assembly. The rule this replaces left it in neither the
+  // prompt nor any summary until `freshTailCount` newer messages arrived (V1).
   const ctx = await engine.assembleContext('s', 25, 'Upward');
-  assert.deepEqual(ctx.messages.map((m) => m.content), ['newest message']);
-  assert.equal(
-    (await engine.lcm_grep('older', 's')).length,
-    1,
-    'the message that did not fit is still in the store for the next compaction',
+  assert.deepEqual(
+    summarized[0]?.map((m) => m.content),
+    ['older message'],
+    'the message that did not fit was compacted at this assembly',
   );
+  assert.ok(summarized.length >= 1);
+
+  const stored = await engine.lcm_grep('message', 's');
+  const older = stored.find((m) => m.content === 'older message');
+  assert.ok(older, 'the message stays in the store');
+  assert.ok(older.summaryId, 'and is behind a summary, not in the gap');
+  const expanded = await engine.lcm_expand(older.summaryId);
+  assert.deepEqual(expanded.map((m) => m.content), ['older message'], 'nothing was lost');
+
+  // The other message may be rendered or, if the new summary left no room, compacted as well.
+  // The guarantee is coverage, not a fixed tail.
+  const newest = stored.find((m) => m.content === 'newest message');
+  const rendered = new Set(ctx.messages.map((m) => m.id));
+  assert.ok(newest && (rendered.has(newest.id) || newest.summaryId !== undefined),
+    'the second message is rendered or summarized too');
+});
+
+test('every message is rendered, summarized, or newer — at every assembly (V1)', async () => {
+  // The verifier's guarantee, enforced mechanically: at every point where a prompt is assembled,
+  // every message in the session is either shown in `<recent>`, covered by a summary (directly or
+  // through an ancestor), or newer than that moment. The rule this replaces said a message that
+  // did not fit was "summarized at the next compaction" — but compaction never touched the newest
+  // 64, so with defaults 33 messages sat in the gap, and it grew with every message.
+  //
+  // Two configurations run over ten assemblies each: the CLI's defaults (tail 64, threshold 0.75),
+  // whose band the verifier measured, and the small-budget config that made the gap obvious
+  // (tail 2, threshold 0.1). The gap was not a first-assembly artifact, so neither is the test.
+  const scenarios = [
+    { name: 'defaults', budget: 4089, contextThreshold: 0.75, freshTailCount: 64 },
+    { name: 'small budget', budget: 4089, contextThreshold: 0.1, freshTailCount: 2 },
+  ];
+
+  for (const scenario of scenarios) {
+    const dir = await mkdtemp(path.join(tmpdir(), 'maf-lcm-v1-'));
+    const dbPath = path.join(dir, 'lcm.db');
+    let calls = 0;
+    const engine = new LcmEngine({
+      dbPath,
+      contextThreshold: scenario.contextThreshold,
+      freshTailCount: scenario.freshTailCount,
+      mode: 'Upward',
+      summarize: async () => {
+        calls += 1;
+        // A summary much smaller than the messages it covers, as a real one is: each pass frees
+        // more room than the summary takes, so the loop converges rather than spiralling.
+        return `summary-${calls} ${'x'.repeat(160)}`;
+      },
+    });
+    // A second connection reads what the engine committed, so "covered" is measured in the store
+    // the next run would read, not in the context the engine chose to return.
+    const store = new LcmStore(dbPath);
+    try {
+      for (let batch = 1; batch <= 10; batch++) {
+        for (let i = 1; i <= 10; i++) {
+          const content = `message-${(batch - 1) * 10 + i} ${'y'.repeat(400)}`;
+          await engine.addMessage({ sessionId: 's', runId: RUN, role: 'user', content, tokens: 100 });
+        }
+        const ctx = await engine.assembleContext('s', scenario.budget, 'Upward');
+        const rendered = new Set(ctx.messages.map((m) => m.id));
+        const messages = store.getMessagesBySession('s');
+
+        const hidden = messages.filter((m) => !rendered.has(m.id) && m.summaryId === undefined);
+        assert.deepEqual(
+          hidden.map((m) => m.content.slice(0, 12)), [],
+          `${scenario.name}: after ${messages.length} messages, nothing is in neither the prompt nor a summary`,
+        );
+
+        // "Covered" is not just a non-null id: the summary it names must actually hold the text.
+        for (const message of messages) {
+          if (message.summaryId === undefined) continue;
+          const summary = store.getSummary(message.summaryId);
+          assert.ok(
+            summary?.messageIds.includes(message.id),
+            `${scenario.name}: ${message.summaryId} covers ${message.content.slice(0, 12)}`,
+          );
+        }
+      }
+      assert.ok(calls > 0, `${scenario.name}: the scenario compacted something`);
+    } finally {
+      engine.close();
+      store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 test('four concurrent assemblies make one call and cover each message exactly once (F6)', async (t) => {

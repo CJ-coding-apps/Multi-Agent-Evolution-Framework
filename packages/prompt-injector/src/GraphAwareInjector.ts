@@ -63,8 +63,10 @@ export class GraphAwareInjector {
     //    (R4c). They used to be neither rendered nor charged on the premise that they were already
     //    in the prompt; they are the session's messages, and the adapter sees the prompt this
     //    injector builds, so on any session whose loop had not carried them they reached no prompt
-    //    at all. The engine fits them newest-first into whatever the archive left; a message that
-    //    does not fit stays in the store for the next compaction.
+    //    at all. The engine fits them newest-first into whatever the archive left. The tail that
+    //    stays raw is what was rendered, not a fixed count: a message that does not fit is
+    //    summarized by that same assembly (V1), so every message is rendered, covered by a
+    //    summary, or newer than the assembly.
     if (this.config.lcm && sessionId && tokens < this.config.tokenBudget) {
       const ctx = await this.config.lcm.assembleContext(
         sessionId, this.config.tokenBudget - tokens, undefined, trigger,

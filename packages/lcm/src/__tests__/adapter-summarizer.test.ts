@@ -45,6 +45,9 @@ const message = (content: string): LcmMessage => ({
   createdAt: new Date(0),
 });
 
+/** A credential format `redactCredentials` recognises; the tests below must not find it in the clear. */
+const SECRET = 'sk-ant-api03-SECRETSECRETSECRETSECRETSECRET';
+
 test('a summarization call asks for text only and carries the configured model', async () => {
   const adapter = new ScriptedAdapter({ tokensUsed: 42 });
   const summarize = createAdapterSummarizer({
@@ -160,6 +163,32 @@ test('the summarizer refuses an empty message list instead of asking the model t
     /no messages/,
   );
   assert.equal(adapter.calls.length, 0);
+});
+
+// R8 / N12d, tested alone: the credential a tool wrote into the conversation never reaches the
+// backend's prompt. Removing this masking leaves the assertion below red even when the output
+// masking still works, which is why the two layers get one test each.
+test('a credential in the messages is masked before the prompt is sent (F7 input, N12d)', async () => {
+  const adapter = new ScriptedAdapter({});
+  await createAdapterSummarizer({ adapter, workingDir: '/tmp' })(
+    [message(`the deployment key is ${SECRET}`)], 0,
+  );
+
+  const call = adapter.calls[0]!;
+  assert.doesNotMatch(call.prompt, new RegExp(SECRET), 'the backend never sees the credential');
+  assert.match(call.prompt, /\[REDACTED:anthropic-key\]/, 'and the redaction is visible in its place');
+  assert.match(call.prompt, /the deployment key is/, 'the rest of the message is preserved');
+});
+
+// R8 / N12b, tested alone: a model that repeats the credential it was shown cannot put it into the
+// store. The input here is clean, so only the output masking can turn this red.
+test('a credential the model repeats is masked out of the returned summary (F7 output, N12b)', async () => {
+  const adapter = new ScriptedAdapter({ output: `the deployment key is ${SECRET}` });
+  const output = await createAdapterSummarizer({ adapter, workingDir: '/tmp' })([message('what key?')], 0);
+
+  assert.ok(typeof output !== 'string', 'the summarizer answers with a recorded summary');
+  assert.doesNotMatch(output.content, new RegExp(SECRET), 'the store never receives the credential');
+  assert.match(output.content, /\[REDACTED:anthropic-key\]/, 'and the redaction is visible in its place');
 });
 
 test('the sub-agent call is tool-less too, and keeps the caller prompt', async () => {

@@ -36,6 +36,7 @@ pnpm-debug.log*
 .maf/runs/
 .maf/cache/
 .maf/memory.kuzu
+.maf/memory.kuzu.wal
 .maf/lcm.db
 .maf/lcm.db-wal
 .maf/lcm.db-shm

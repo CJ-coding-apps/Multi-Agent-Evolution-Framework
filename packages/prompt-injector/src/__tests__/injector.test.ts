@@ -82,14 +82,20 @@ test('a cue is escaped too, for the same reason', async () => {
   assert.match(systemPromptPrefix, /&lt;b&gt;x&lt;\/b&gt;/);
 });
 
-test('a realistic run keeps the summary and renders the newest messages in the same budget (F2, R4c)', async (t) => {
+test('a realistic run keeps the summary and renders the newest messages in the same budget (F2, R4c, V1)', async (t) => {
   // run.ts defaults: Upward, 0.75 threshold, 64-message fresh tail, injector budget 1000 here.
+  //
+  // V1: the tail that stays raw is what this budget rendered, not a fixed count. The first
+  // assembly fits eight of the newest messages and compacts the other 92 — including 56 that were
+  // inside the 64-message count but did not fit — so nothing is left in a gap between the prompt
+  // and the archive. The summary here is much smaller than the messages it covers, as a real one
+  // is; that leaves room for the newest eight to be rendered after it on the next pass.
   const summarized: number[] = [];
   const engine = new LcmEngine({
     dbPath: ':memory:', mode: 'Upward', contextThreshold: 0.75, freshTailCount: 64,
     summarize: async (messages) => {
       summarized.push(messages.length);
-      return `SUMMARY-OF-EARLIER-WORK ${'z'.repeat(2_000 - 'SUMMARY-OF-EARLIER-WORK '.length)}`;
+      return `SUMMARY-OF-EARLIER-WORK ${'z'.repeat(76)}`;
     },
   });
   t.after(() => engine.close());
@@ -103,9 +109,10 @@ test('a realistic run keeps the summary and renders the newest messages in the s
 
   const assembled = await injector(engine).assemble('a task', 'real');
 
-  assert.deepEqual(summarized, [36], 'the 36 messages outside the 64-message tail were summarized');
+  assert.deepEqual(summarized, [92],
+    'the 92 messages this prompt could not render were summarized at that same assembly');
   assert.equal(assembled.lcmSummaryCalls?.length, 1, 'the call is reported to the dispatcher');
-  assert.equal(assembled.lcmSummaryCalls?.[0]?.contentTokens, 500, 'a 2,000-char summary is 500 tokens');
+  assert.equal(assembled.lcmSummaryCalls?.[0]?.contentTokens, 25, 'a 100-char summary is 25 tokens');
 
   // R4c: the summaries come first, and the session's newest messages follow them as `<recent>`,
   // inside the same budget. Before this ruling the tail was not rendered at all on the premise that
@@ -113,7 +120,8 @@ test('a realistic run keeps the summary and renders the newest messages in the s
   assert.match(assembled.systemPromptPrefix, /SUMMARY-OF-EARLIER-WORK/, 'the summary is in the prompt');
   assert.match(assembled.systemPromptPrefix, /<recent>/, 'the newest messages are rendered too');
   assert.match(assembled.systemPromptPrefix, /message 99 /, 'the newest message is the one kept');
-  assert.doesNotMatch(assembled.systemPromptPrefix, /message 0 /, 'the oldest messages stay in the store');
+  assert.doesNotMatch(assembled.systemPromptPrefix, /message 0 /,
+    'the oldest messages are covered by the summary, not rendered raw');
   assert.ok(
     assembled.systemPromptPrefix.indexOf('SUMMARY-OF-EARLIER-WORK') <
       assembled.systemPromptPrefix.indexOf('<recent>'),
@@ -123,7 +131,7 @@ test('a realistic run keeps the summary and renders the newest messages in the s
   // The charge is what the prompt renders: the summary plus the recent messages that fitted, and
   // never more than the budget it was given.
   assert.ok(
-    assembled.estimatedTokens > 500,
+    assembled.estimatedTokens > 25,
     `the recent messages are charged too (measured ${assembled.estimatedTokens})`,
   );
   assert.ok(

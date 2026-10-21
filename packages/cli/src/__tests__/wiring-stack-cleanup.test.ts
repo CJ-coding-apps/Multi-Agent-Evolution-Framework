@@ -39,10 +39,13 @@ test('a stack whose policy cannot be resolved closes the graph it opened (M1)', 
       /Policy file ".*typo[/\\]policy\.yaml" not found/,
     );
     assert.equal(closes, 1, 'the graph the failed stack opened was closed before the error was rethrown');
-    // And the directory it lived in is removable afterwards, as goldens' cleanup needs.
-    await rm(mafDir, { recursive: true, force: true });
+    // And the directory it lived in is removable afterwards, as goldens' cleanup needs. Node reports
+    // ENOTEMPTY transiently while the closed graph's directory entries are still settling (this is
+    // the one-in-three the comment above names), so the removal retries the way `fs.rm` documents;
+    // a graph that was *not* closed keeps the directory and still fails once the retries are spent.
+    await rm(mafDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   } finally {
     MemoryGraph.prototype.close = realClose;
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

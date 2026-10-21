@@ -10,18 +10,20 @@ import type { ModelSurface } from '@maf/types';
 /**
  * The most bytes one summarization call's prompt may carry (WP-3.2 F4, R3).
  *
- * The binding limit is not the model's context but the operating system's: Linux refuses a process
- * whose single argv argument exceeds `MAX_ARG_STRLEN` (128 KiB), and a backend that takes its prompt
- * on the command line puts this string in exactly one argument. The verifier measured E2BIG at
- * about 150,000 bytes. The measure is bytes, not UTF-16 code units: one `'中'` is three bytes and
- * one code unit, so a character count let a 64 KiB prompt become ~192 KiB on the wire.
+ * The binding limit is not the model's context but the operating system's: Linux refuses a single
+ * argv argument over `MAX_ARG_STRLEN` (131,072 bytes), and a backend that takes its prompt on the
+ * command line puts this string in exactly one argument. The verifier measured E2BIG at about
+ * 150,000 bytes for the whole command line. The measure is bytes, not UTF-16 code units: one
+ * `'中'` is three bytes and one code unit, so a character count let a 64 KiB prompt become
+ * ~192 KiB on the wire.
  *
- * 64 KiB for the prompt leaves half of that ceiling for the system prompt, the argv's own flags and
- * the shell's bookkeeping; {@link MAX_SUMMARY_ARGV_BYTES} states the whole-command-line budget and
+ * The 64 KiB prompt cap is the limit that matters, because the prompt is one argument; it leaves
+ * the other half of that argument for the system prompt and the summarizer's own flags.
+ * {@link MAX_SUMMARY_ARGV_BYTES} states the whole-command-line budget and
  * {@link SUMMARY_ARGV_ALLOWANCE_BYTES} the part reserved for what the summarizer does not compose.
  */
 export const MAX_SUMMARY_PROMPT_BYTES = 64 * 1024;
-/** Everything the backend's command line carries, with ~22 KiB headroom under the measured E2BIG. */
+/** Everything the backend's command line carries, with ~18.5 KiB headroom under the measured E2BIG. */
 export const MAX_SUMMARY_ARGV_BYTES = 128 * 1024;
 /** Flags, the model name and the working directory: not the prompt, and not counted above. */
 export const SUMMARY_ARGV_ALLOWANCE_BYTES = 8 * 1024;
