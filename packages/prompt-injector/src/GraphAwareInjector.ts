@@ -1,4 +1,7 @@
-import type { MemorySubgraph, MemoryNode, MemoryEdge, GhostCue, LcmSummary } from '@maf/types';
+import type {
+  MemorySubgraph, MemoryNode, MemoryEdge, GhostCue, LcmSummary, LcmTrigger,
+  LcmSummarySurface, LcmDegradedRecord,
+} from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import type { LcmEngine } from '@maf/lcm';
 
@@ -12,14 +15,29 @@ export interface InjectorConfig {
 export interface AssembledContext {
   systemPromptPrefix: string;   // prepend to adapter's systemPrompt
   estimatedTokens:    number;
+  /**
+   * Summary calls this assembly paid for (WP-3.2 F1). The dispatcher writes each into the
+   * transcript, because a model call made on a node's behalf belongs in the node's record even
+   * when MAF, not the model, decided to make it.
+   */
+  lcmSummaryCalls?: LcmSummarySurface[];
+  /** Compactions that could not complete during this assembly (WP-3.2 F5). */
+  lcmDegraded?:    LcmDegradedRecord[];
 }
 
 export class GraphAwareInjector {
   constructor(private readonly config: InjectorConfig) {}
 
-  async assemble(taskContext: string, sessionId?: string, agentRole?: string): Promise<AssembledContext> {
+  async assemble(
+    taskContext: string,
+    sessionId?: string,
+    agentRole?: string,
+    trigger?: LcmTrigger,
+  ): Promise<AssembledContext> {
     const parts: string[] = [];
     let tokens = 0;
+    let lcmSummaryCalls: LcmSummarySurface[] | undefined;
+    let lcmDegraded: LcmDegradedRecord[] | undefined;
 
     if (agentRole) {
       const roleBlock = `<agent-role>${agentRole}</agent-role>`;
@@ -27,19 +45,22 @@ export class GraphAwareInjector {
       tokens += estimate(roleBlock);
     }
 
-    // 1. Query relevant memory subgraph
-    const subgraph = await this.config.graph.querySubgraph(taskContext, this.config.maxNodes);
-    if (subgraph.nodes.length > 0) {
-      const xml = formatSubgraph(subgraph, this.config.tokenBudget * 0.6);
-      parts.push(xml);
-      tokens += estimate(xml);
-    }
-
-    // 2. Add LCM context if available. The two modes deliver the archive differently (D-17):
-    //    Dolt hands over ghost cues, Upward hands over the summaries themselves. The injector
-    //    renders whichever it is given, so a mode that returns neither adds nothing.
-    if (this.config.lcm && sessionId) {
-      const ctx = await this.config.lcm.assembleContext(sessionId, this.config.tokenBudget - tokens);
+    // 1. The LCM archive comes first and gets the budget it needs, because it is what this
+    //    injector renders on the archive's behalf (WP-3.2 F2). The two modes deliver it
+    //    differently (D-17): Dolt hands over ghost cues, Upward the summaries themselves.
+    //
+    //    The raw fresh tail is NOT rendered here and is not charged: it is the loop's own
+    //    history, already in the prompt the adapter sees. Charging it made the default mode pay
+    //    for a summary and then omit it — the summary was fitted against messages the injector
+    //    never wrote.
+    if (this.config.lcm && sessionId && tokens < this.config.tokenBudget) {
+      const ctx = await this.config.lcm.assembleContext(
+        sessionId, this.config.tokenBudget - tokens, undefined, trigger,
+      );
+      // Passed straight through rather than re-derived here: the assembly is the only place that
+      // knows which calls it made and which compactions it could not finish.
+      if (ctx.summaryCalls && ctx.summaryCalls.length > 0) lcmSummaryCalls = ctx.summaryCalls;
+      if (ctx.degraded && ctx.degraded.length > 0) lcmDegraded = ctx.degraded;
       if (ctx.summaries && ctx.summaries.length > 0) {
         const summaryXml = formatSummaries(ctx.summaries);
         parts.push(summaryXml);
@@ -52,11 +73,31 @@ export class GraphAwareInjector {
       }
     }
 
+    // 2. The graph gets what the archive left, never more than its share of the total. A graph
+    //    error must not cost the node its archive, and an archive is the more specific context.
+    const graphBudget = Math.min(
+      Math.max(0, this.config.tokenBudget - tokens),
+      this.config.tokenBudget * 0.6,
+    );
+    if (graphBudget > 0) {
+      const subgraph = await this.config.graph.querySubgraph(taskContext, this.config.maxNodes);
+      if (subgraph.nodes.length > 0) {
+        const xml = formatSubgraph(subgraph, graphBudget);
+        parts.push(xml);
+        tokens += estimate(xml);
+      }
+    }
+
     const systemPromptPrefix = parts.length > 0
       ? `<memory-context>\n${parts.join('\n')}\n</memory-context>\n`
       : '';
 
-    return { systemPromptPrefix, estimatedTokens: tokens };
+    return {
+      systemPromptPrefix,
+      estimatedTokens: tokens,
+      ...(lcmSummaryCalls !== undefined ? { lcmSummaryCalls } : {}),
+      ...(lcmDegraded !== undefined ? { lcmDegraded } : {}),
+    };
   }
 }
 
