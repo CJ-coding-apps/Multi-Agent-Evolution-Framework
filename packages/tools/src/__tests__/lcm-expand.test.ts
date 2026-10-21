@@ -13,8 +13,10 @@ import type { LcmExpansion } from '../plugins/lcm.js';
 
 const ctx = {} as ToolContext;
 
+// Both halves carry a credential, and it is the same one, so a masking layer that forgot either
+// half is visible in the output rather than inferred from the fixture.
 const expansion: LcmExpansion = {
-  summary: { content: 'the decision was to retry twice', level: 1 },
+  summary: { content: 'the decision was to retry twice; the key was AKIAIOSFODNN7EXAMPLE', level: 1 },
   messages: [
     { role: 'user', content: 'we saw AKIAIOSFODNN7EXAMPLE in the log' },
     { role: 'assistant', content: 'noted' },
@@ -38,6 +40,9 @@ test('it returns the summary and every source message it covers, both masked (F7
   assert.equal(out.exitCode, 0);
   assert.match(out.stdout, /<summary id="s1" level="1">/);
   assert.match(out.stdout, /the decision was to retry twice/);
+  // R8: the summary text is its own masking layer. A summary is model text from an earlier turn,
+  // and the credential that was in it then is still in it now.
+  assert.match(out.stdout, /the key was \[REDACTED:aws-access-key\]/, 'the summary text is masked');
   assert.match(out.stdout, /<source-messages count="2">/);
   assert.match(out.stdout, /\[USER\] we saw \[REDACTED:aws-access-key\] in the log/);
   assert.match(out.stdout, /\[ASSISTANT\] noted/);
