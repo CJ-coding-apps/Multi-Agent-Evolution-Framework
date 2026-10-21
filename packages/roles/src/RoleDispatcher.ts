@@ -726,6 +726,10 @@ export class RoleDispatcher {
     // background compaction with no node passes no trigger and is attributed to the session.
     const assembled = await this.config.injector.assemble(
       node.label, this.config.sessionId, role.role, { taskId, nodeId: node.id },
+      // R14: a Dolt cue says "call lcm.expand", and only an in-process turn has MAF's tool registry
+      // to call it with. A cli-tier role gets the archive as summaries instead of an instruction it
+      // cannot follow.
+      { mafToolsAvailable: resolved.tier === 'in-process' },
     );
     const systemPrompt = [assembled.systemPromptPrefix, rolePrompt].filter(Boolean).join('\n');
     // The archive's own transcript lines: the calls it made, and any compaction that could not
@@ -770,12 +774,12 @@ export class RoleDispatcher {
     const modelChoice = role.model ?? this.config.modelOverride;
     if (modelChoice) invokeOpts.model = modelChoice;
     if (role.tokenBudget) {
-      // F1: the summary call was made for this node, so it spends this node's budget. Passing what
-      // is left makes the loop's own budget check (`tokensUsed > tokenBudget`) include it, rather
-      // than the node getting a full budget after MAF already spent part of it. When the backend
-      // reports no token count the content estimate is the lower bound, and it is the one charged.
+      // F1/R5: the summary call was made for this node, so it spends this node's budget. The engine
+      // records `tokenBudgetCharged` on every call — the backend's reported count when it gave one,
+      // else input plus output — and that is what is subtracted. Recorded always, enforced here,
+      // where a budget exists; no built-in role sets one, and D-52 says so.
       const summarySpend = (assembled.lcmSummaryCalls ?? [])
-        .reduce((sum, call) => sum + (call.reportedTokens ?? call.contentTokens), 0);
+        .reduce((sum, call) => sum + (call.tokenBudgetCharged ?? call.reportedTokens ?? call.contentTokens), 0);
       invokeOpts.tokenBudget = Math.max(0, role.tokenBudget - summarySpend);
     }
     if (this.config.temperature !== undefined) invokeOpts.temperature = this.config.temperature;

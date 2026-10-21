@@ -82,8 +82,8 @@ test('a cue is escaped too, for the same reason', async () => {
   assert.match(systemPromptPrefix, /&lt;b&gt;x&lt;\/b&gt;/);
 });
 
-test('a realistic run keeps the summary and charges only what it renders (F2)', async (t) => {
-  // run.ts defaults: Upward, 0.75 threshold, 64-message fresh tail, injector budget 4096.
+test('a realistic run keeps the summary and renders the newest messages in the same budget (F2, R4c)', async (t) => {
+  // run.ts defaults: Upward, 0.75 threshold, 64-message fresh tail, injector budget 1000 here.
   const summarized: number[] = [];
   const engine = new LcmEngine({
     dbPath: ':memory:', mode: 'Upward', contextThreshold: 0.75, freshTailCount: 64,
@@ -106,11 +106,29 @@ test('a realistic run keeps the summary and charges only what it renders (F2)', 
   assert.deepEqual(summarized, [36], 'the 36 messages outside the 64-message tail were summarized');
   assert.equal(assembled.lcmSummaryCalls?.length, 1, 'the call is reported to the dispatcher');
   assert.equal(assembled.lcmSummaryCalls?.[0]?.contentTokens, 500, 'a 2,000-char summary is 500 tokens');
+
+  // R4c: the summaries come first, and the session's newest messages follow them as `<recent>`,
+  // inside the same budget. Before this ruling the tail was not rendered at all on the premise that
+  // the loop already carried it; it is the session's history, and the adapter only sees this prompt.
   assert.match(assembled.systemPromptPrefix, /SUMMARY-OF-EARLIER-WORK/, 'the summary is in the prompt');
+  assert.match(assembled.systemPromptPrefix, /<recent>/, 'the newest messages are rendered too');
+  assert.match(assembled.systemPromptPrefix, /message 99 /, 'the newest message is the one kept');
+  assert.doesNotMatch(assembled.systemPromptPrefix, /message 0 /, 'the oldest messages stay in the store');
   assert.ok(
-    assembled.estimatedTokens >= 500 && assembled.estimatedTokens <= 600,
-    `only the rendered summary and its markup are charged (measured ${assembled.estimatedTokens}); ` +
-    'the 64 raw tail messages are the loop\'s own history and are not',
+    assembled.systemPromptPrefix.indexOf('SUMMARY-OF-EARLIER-WORK') <
+      assembled.systemPromptPrefix.indexOf('<recent>'),
+    'the archive is rendered before the recent messages',
+  );
+
+  // The charge is what the prompt renders: the summary plus the recent messages that fitted, and
+  // never more than the budget it was given.
+  assert.ok(
+    assembled.estimatedTokens > 500,
+    `the recent messages are charged too (measured ${assembled.estimatedTokens})`,
+  );
+  assert.ok(
+    assembled.estimatedTokens <= 1_000,
+    `the archive and the recent tail together stay inside the budget (measured ${assembled.estimatedTokens})`,
   );
 });
 

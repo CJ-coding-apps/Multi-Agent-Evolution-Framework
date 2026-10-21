@@ -6,7 +6,7 @@ import type {
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
   RunOutcome, KeySource, ModelSurfaceRecord, PolicyInForce, ExecutionTierRecord, TaskId,
-  AttributedChange, LcmDegradedRecord,
+  AttributedChange, LcmDegradedRecord, LcmSettingsRecord,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { jcs } from './jcs.js';
@@ -257,6 +257,7 @@ export class Attestor implements AttestorHandle {
   private executionTiers: ExecutionTierRecord[] = [];
   private attributedChanges: AttributedChange[] = [];
   private lcmDegraded: LcmDegradedRecord[] = [];
+  private lcmSettings: LcmSettingsRecord | undefined;
   private policyInForce: PolicyInForce | undefined;
   private readonly signingSecret: string;
   private readonly keySource: KeySource;
@@ -378,6 +379,14 @@ export class Attestor implements AttestorHandle {
   }
 
   /**
+   * The LCM settings this run ran with (WP-3.2 R4a), recorded once when the engine is built. A
+   * second call replaces the first: there is one engine and one set of settings per run.
+   */
+  recordLcmSettings(settings: LcmSettingsRecord): void {
+    this.lcmSettings = settings;
+  }
+
+  /**
    * Signs the run and writes it to `<attestationsDir>/<runId>.bundle.json`: an in-toto Statement
    * (subjects: the recorded diffs; predicate: the run) with its signature beside it.
    */
@@ -416,6 +425,7 @@ export class Attestor implements AttestorHandle {
       ...(this.executionTiers.length > 0 ? { executionTiers: this.executionTiers } : {}),
       ...(this.attributedChanges.length > 0 ? { attributedChanges: this.attributedChanges } : {}),
       ...(this.lcmDegraded.length > 0 ? { lcmDegraded: this.lcmDegraded } : {}),
+      ...(this.lcmSettings ? { lcmSettings: this.lcmSettings } : {}),
       ...(goldens ? { goldens } : {}),
       bundledAt:        new Date(),
     };

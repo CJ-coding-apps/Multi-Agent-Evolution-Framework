@@ -1,5 +1,5 @@
 import type {
-  MemorySubgraph, MemoryNode, MemoryEdge, GhostCue, LcmSummary, LcmTrigger,
+  MemorySubgraph, MemoryNode, MemoryEdge, GhostCue, LcmSummary, LcmMessage, LcmTrigger,
   LcmSummarySurface, LcmDegradedRecord,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
@@ -33,6 +33,16 @@ export class GraphAwareInjector {
     sessionId?: string,
     agentRole?: string,
     trigger?: LcmTrigger,
+    options?: {
+      /**
+       * Whether the role that will read this prompt can call MAF tools (R14). A cli-tier role
+       * cannot: MAF's registry is not exposed on its tier, so a Dolt cue telling it to call
+       * `lcm.expand` is an instruction it cannot follow. In that case the archive is rendered as
+       * summaries instead of cues. Absent reads as available, which is the in-process tier's
+       * situation and the only tier a Dolt cue was ever true for.
+       */
+      mafToolsAvailable?: boolean;
+    },
   ): Promise<AssembledContext> {
     const parts: string[] = [];
     let tokens = 0;
@@ -49,13 +59,16 @@ export class GraphAwareInjector {
     //    injector renders on the archive's behalf (WP-3.2 F2). The two modes deliver it
     //    differently (D-17): Dolt hands over ghost cues, Upward the summaries themselves.
     //
-    //    The raw fresh tail is NOT rendered here and is not charged: it is the loop's own
-    //    history, already in the prompt the adapter sees. Charging it made the default mode pay
-    //    for a summary and then omit it — the summary was fitted against messages the injector
-    //    never wrote.
+    //    The newest messages are rendered after the archive as `<recent>`, inside the same budget
+    //    (R4c). They used to be neither rendered nor charged on the premise that they were already
+    //    in the prompt; they are the session's messages, and the adapter sees the prompt this
+    //    injector builds, so on any session whose loop had not carried them they reached no prompt
+    //    at all. The engine fits them newest-first into whatever the archive left; a message that
+    //    does not fit stays in the store for the next compaction.
     if (this.config.lcm && sessionId && tokens < this.config.tokenBudget) {
       const ctx = await this.config.lcm.assembleContext(
         sessionId, this.config.tokenBudget - tokens, undefined, trigger,
+        options?.mafToolsAvailable === false ? 'summaries' : undefined,
       );
       // Passed straight through rather than re-derived here: the assembly is the only place that
       // knows which calls it made and which compactions it could not finish.
@@ -70,6 +83,11 @@ export class GraphAwareInjector {
         const ghostXml = formatGhosts(ctx.ghosts);
         parts.push(ghostXml);
         tokens += estimate(ghostXml);
+      }
+      if (ctx.messages.length > 0) {
+        const recentXml = formatRecent(ctx.messages);
+        parts.push(recentXml);
+        tokens += estimate(recentXml);
       }
     }
 
@@ -161,6 +179,17 @@ function formatSummaries(summaries: LcmSummary[]): string {
     `  <summary id="${escapeXml(s.id)}" level="${s.level}" tokens="${s.tokens}">${escapeXml(s.content)}</summary>`,
   );
   return `<summaries>\n${lines.join('\n')}\n</summaries>`;
+}
+
+/**
+ * The session's newest messages, newest first (R4c). Message text can contain anything a tool or a
+ * model wrote, so it is escaped for the same reason a summary is: data, never markup.
+ */
+function formatRecent(messages: LcmMessage[]): string {
+  const lines = messages.map((m) =>
+    `  <message role="${escapeXml(m.role)}">${escapeXml(m.content)}</message>`,
+  );
+  return `<recent>\n${lines.join('\n')}\n</recent>`;
 }
 
 const XML_ESCAPES: Record<string, string> = {

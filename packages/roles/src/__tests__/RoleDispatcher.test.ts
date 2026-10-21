@@ -14,7 +14,10 @@ import type {
   RoleName, PartialNodeOutcome, ExecutionTierRecord, ModelSurfaceRecord, AttributedChange,
   WriterLockLedger, ToolCallRecord, TaskId,
 } from '@maf/types';
-import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, NodeFailure, TransportError } from '@maf/types';
+import {
+  makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, makeLcmSummaryId,
+  NodeFailure, TransportError,
+} from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -208,6 +211,8 @@ async function makeFixture(opts: {
    * pathspec resolves under the cwd and matches nothing (R2/N2h).
    */
   cwdSubdir?: boolean;
+  /** The context archive's assembly, when the test is about what the dispatcher does with it. */
+  injector?: GraphAwareInjector;
 }): Promise<Fixture> {
   const workDir = await mkdtemp(path.join(tmpdir(), 'maf-dispatch-'));
   await writeFile(path.join(workDir, 'hello.txt'), 'hello-world', 'utf8');
@@ -256,7 +261,8 @@ async function makeFixture(opts: {
     adapter: opts.adapter,
     baseTools: createDefaultRegistry(),
     roles,
-    injector: { assemble: async () => ({ systemPromptPrefix: '' }) } as unknown as GraphAwareInjector,
+    injector: opts.injector
+      ?? ({ assemble: async () => ({ systemPromptPrefix: '' }) } as unknown as GraphAwareInjector),
     policy: policy.stub,
     attestor: attestor.stub,
     graph: {} as MemoryGraph,
@@ -1599,6 +1605,53 @@ test('N2/N2b: a git failure in the content check fails the reader closed, never 
     assert.equal(failure.reason, 'unexpected_change', 'git cannot settle the content check, so the change is not "reviewed"');
     assert.match(failure.message, /w1\.txt/);
     assert.equal(f.attestor.attributed.length, 0, 'a content check that fails open (N2b) would name the writer here');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('an LCM summary call is written to the transcript with the surface it was made with (R8)', async () => {
+  // R8: the `[surface] lcm summary` line is its own layer. The attestor's record is not enough — an
+  // operator reads the transcript — so every field the engine reports about a call made on this
+  // node's behalf must reach both the line and its metadata, or the call is invisible where the run
+  // is actually read.
+  const adapter = new CliOnlyAdapter();
+  const injector = {
+    assemble: async () => ({
+      systemPromptPrefix: '',
+      lcmSummaryCalls: [{
+        summaryId: makeLcmSummaryId('sum-1'), level: 1, messages: 3, chars: 120,
+        contentTokens: 30, reportedTokens: 42, tokenBudgetCharged: 42,
+        model: 'summary-model',
+        systemPromptSha256: 'a'.repeat(64), promptSha256: 'b'.repeat(64), outputSha256: 'c'.repeat(64),
+      }],
+    }),
+  } as unknown as GraphAwareInjector;
+  const f = await makeFixture({
+    roleExecution: 'cli', adapter, policyHandler: ALLOW, injector,
+  });
+  try {
+    await f.dispatcher.runNode(makeNode(ANALYST));
+    const line = f.transcript.entries.find((e) => e.content.startsWith('[surface] lcm summary'));
+    assert.ok(line, 'the call is in the transcript the operator reads');
+    assert.match(
+      line.content,
+      /^\[surface\] lcm summary sum-1 \(level 1, 3 message\(s\)\): model summary-model;/,
+    );
+    assert.match(
+      line.content,
+      new RegExp(`system sha256 a{64}; prompt sha256 b{64}; output sha256 c{64}`),
+    );
+    assert.match(line.content, /content tokens 30; reported tokens 42$/);
+    assert.equal(line.metadata.kind, 'lcm-summary');
+    assert.equal(line.metadata.tier, 'cli');
+    assert.equal(line.metadata.summaryId, 'sum-1');
+    assert.equal(line.metadata.level, 1);
+    assert.equal(line.metadata.messages, 3);
+    assert.equal(line.metadata.contentTokens, 30);
+    assert.equal(line.metadata.reportedTokens, 42);
+    assert.equal(line.metadata.model, 'summary-model');
+    assert.equal(typeof line.metadata.taskId, 'string', 'the call is attributed to the node\'s task');
   } finally {
     await f.cleanup();
   }
