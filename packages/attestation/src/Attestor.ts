@@ -6,7 +6,7 @@ import type {
   SlsaBuilder, SlsaInvocation, SlsaMaterial, ReviewAttestation,
   RunId, PolicyDecision, SecurityReviewResult, SecurityFindingsRecord, GoldensSection,
   RunOutcome, KeySource, ModelSurfaceRecord, PolicyInForce, ExecutionTierRecord, TaskId,
-  AttributedChange,
+  AttributedChange, LcmDegradedRecord,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { jcs } from './jcs.js';
@@ -256,6 +256,7 @@ export class Attestor implements AttestorHandle {
   private modelSurfaces: ModelSurfaceRecord[] = [];
   private executionTiers: ExecutionTierRecord[] = [];
   private attributedChanges: AttributedChange[] = [];
+  private lcmDegraded: LcmDegradedRecord[] = [];
   private policyInForce: PolicyInForce | undefined;
   private readonly signingSecret: string;
   private readonly keySource: KeySource;
@@ -368,6 +369,15 @@ export class Attestor implements AttestorHandle {
   }
 
   /**
+   * One compaction this run could not complete (WP-3.2 F5). Append-only, in the order met: the
+   * node continued uncompacted rather than failing, so the record is the only place the operator
+   * can learn the archive is behind.
+   */
+  recordLcmDegraded(record: LcmDegradedRecord): void {
+    this.lcmDegraded.push(record);
+  }
+
+  /**
    * Signs the run and writes it to `<attestationsDir>/<runId>.bundle.json`: an in-toto Statement
    * (subjects: the recorded diffs; predicate: the run) with its signature beside it.
    */
@@ -405,6 +415,7 @@ export class Attestor implements AttestorHandle {
       ...(this.modelSurfaces.length > 0 ? { modelSurfaces: this.modelSurfaces } : {}),
       ...(this.executionTiers.length > 0 ? { executionTiers: this.executionTiers } : {}),
       ...(this.attributedChanges.length > 0 ? { attributedChanges: this.attributedChanges } : {}),
+      ...(this.lcmDegraded.length > 0 ? { lcmDegraded: this.lcmDegraded } : {}),
       ...(goldens ? { goldens } : {}),
       bundledAt:        new Date(),
     };

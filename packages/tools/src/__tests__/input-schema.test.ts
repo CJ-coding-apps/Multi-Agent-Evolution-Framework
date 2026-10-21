@@ -59,11 +59,12 @@ const ADVERTISED: Record<string, string> = {
   'git.reset':   '{"to": string (required), "hard": boolean}',
   'patch.apply': '{"diff": string (required), "strip": number, "dryRun": boolean}',
   'test.run':    '{"runner": "auto" | "bun" | "node" | "npm" | "pnpm" | "vitest" | "jest" | "pytest" | "cargo", "filter": string, "timeout": number}',
+  'lcm.expand':  '{"summaryId": string (required)}',
 };
 
 test('every built-in tool declares a closed input schema, and it is the input its execute reads', () => {
   const tools = createDefaultRegistry().getAll();
-  assert.equal(tools.length, 14);
+  assert.equal(tools.length, 15);
   assert.deepEqual(tools.map((t) => String(t.id)).sort(), Object.keys(ADVERTISED).sort());
   for (const tool of tools) {
     const schema = tool.inputSchema;

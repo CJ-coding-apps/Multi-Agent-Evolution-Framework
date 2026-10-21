@@ -7,7 +7,7 @@ export class GhostCueBuilder {
 
     return summaryIds.slice(0, maxCues).map((summaryId: LcmSummaryId, i: number) => ({
       summaryId,
-      cueText: `[Archived context segment ${i + 1} — call lcm_expand("${summaryId}") to recover full content]`,
+      cueText: `[Archived context segment ${i + 1} — call lcm.expand("${summaryId}") to recover full content]`,
       relevance: Math.max(0, 1 - i * 0.1),
     }));
   }
@@ -24,7 +24,7 @@ export class GhostCueBuilder {
   ): GhostCue[] {
     return [...summaries].reverse().slice(0, maxCues).map((s, i) => ({
       summaryId: s.id,
-      cueText: `[Level-${s.level} summary — ${s.content.slice(0, 120).replace(/\n/g, ' ')}… call lcm_expand("${s.id}") to expand]`,
+      cueText: `[Level-${s.level} summary — ${s.content.slice(0, 120).replace(/\n/g, ' ')}… call lcm.expand("${s.id}") to expand]`,
       relevance: Math.max(0, 1 - i * 0.1),
     }));
   }

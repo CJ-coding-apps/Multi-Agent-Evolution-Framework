@@ -29,7 +29,8 @@ const loopable = {
   sendTurn: async () => ({ text: '', toolCalls: [] }),
 } as unknown as TurnAdapter & CliAdapter;
 
-const ANALYST_TOOLS = ['fs.read', 'fs.list', 'fs.stat', 'grep', 'git.status', 'git.diff', 'git.log'];
+// `lcm.expand` is read-only and pathless (WP-3.2 F8): every role can expand a ghost cue.
+const ANALYST_TOOLS = ['fs.read', 'fs.list', 'fs.stat', 'grep', 'lcm.expand', 'git.status', 'git.diff', 'git.log'];
 
 function builtin(name: string): RoleConfig {
   const role = getDefaultRoleConfig(defineRoleName(name));

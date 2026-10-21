@@ -8,7 +8,7 @@
       "promptFile": "prompts/coder.md",
       "allowedTools": [
         "fs.read", "fs.write", "fs.delete", "fs.stat", "fs.list",
-        "grep",
+        "grep", "lcm.expand",
         "git.status", "git.diff", "git.add", "git.commit", "git.log", "git.reset",
         "patch.apply",
         "test.run"
@@ -22,7 +22,7 @@
       "description": "Writes tests only; cannot modify production source.",
       "promptFile": "prompts/tester.md",
       "allowedTools": [
-        "fs.read", "fs.list", "fs.stat", "grep", "test.run", "patch.apply", "fs.write"
+        "fs.read", "fs.list", "fs.stat", "grep", "lcm.expand", "test.run", "patch.apply", "fs.write"
       ],
       "policyTag": "tester",
       "maxToolIterations": 10
@@ -32,7 +32,7 @@
       "description": "Read-only security audit; flags CWE/OWASP issues as JSON.",
       "promptFile": "prompts/security.md",
       "allowedTools": [
-        "fs.read", "fs.list", "fs.stat", "grep", "git.diff", "git.log"
+        "fs.read", "fs.list", "fs.stat", "grep", "lcm.expand", "git.diff", "git.log"
       ],
       "policyTag": "security",
       "maxToolIterations": 10,
@@ -43,7 +43,7 @@
       "description": "Read-only diff review; approve or reject with suggestions.",
       "promptFile": "prompts/reviewer.md",
       "allowedTools": [
-        "fs.read", "grep", "git.diff", "git.log"
+        "fs.read", "grep", "lcm.expand", "git.diff", "git.log"
       ],
       "policyTag": "reviewer",
       "maxToolIterations": 10,
@@ -54,7 +54,7 @@
       "description": "Read-only. Answers a question about the code, investigates, reports. Makes no change.",
       "promptFile": "prompts/analyst.md",
       "allowedTools": [
-        "fs.read", "fs.list", "fs.stat", "grep", "git.status", "git.diff", "git.log"
+        "fs.read", "fs.list", "fs.stat", "grep", "lcm.expand", "git.status", "git.diff", "git.log"
       ],
       "policyTag": "analyst",
       "maxToolIterations": 10,

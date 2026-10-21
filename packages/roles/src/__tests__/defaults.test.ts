@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { makeToolId } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { DEFAULT_ROLE_SET, DEFAULT_ROLE_CATALOG } from '../defaults.js';
 import { DEFAULT_MAX_TOOL_ITERATIONS } from '../RoleConfig.js';
@@ -35,6 +36,32 @@ test('read-only roles cannot write through their allowedTools', () => {
         `role ${roleName} unexpectedly grants ${id}`,
       );
     }
+  }
+});
+
+test('every default role can expand the summary a Dolt cue names (F8)', () => {
+  // Dolt mode's cue says `call lcm.expand("<id>")`. A role without the tool would be handed a
+  // pointer it cannot follow, so the cue would be a dead reference rather than a capability.
+  const tools = createDefaultRegistry();
+  assert.ok(tools.get(makeToolId('lcm.expand')), 'the tool is in the registry every role is cut from');
+  for (const role of DEFAULT_ROLE_SET.roles) {
+    assert.ok(
+      role.allowedTools.includes(makeToolId('lcm.expand')),
+      `role "${role.role}" cannot expand the summary its Dolt cue names`,
+    );
+  }
+});
+
+test('the shipped .maf/roles.yaml grants lcm.expand to every role too (F8)', async () => {
+  const mafDir = path.resolve(__dirname, '../../../../.maf');
+  const roles = await RoleRegistry.fromYamlOrDefault(
+    path.join(mafDir, 'roles.yaml'), mafDir, createDefaultRegistry(),
+  );
+  for (const role of roles.list()) {
+    assert.ok(
+      role.allowedTools.includes(makeToolId('lcm.expand')),
+      `shipped role "${role.role}" cannot expand the summary its Dolt cue names`,
+    );
   }
 });
 
