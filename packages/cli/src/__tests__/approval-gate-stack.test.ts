@@ -9,6 +9,7 @@ import type { AttestationBundle } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { buildRunStack } from '../wiring.js';
+import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { needsLcm } from './runFixture.js';
 
@@ -49,7 +50,7 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
     const runId = makeRunId(crypto.randomUUID());
     const stack = await buildRunStack({
       cwd: repo, mafDir, policy: { value: policyPath, typed: true }, adapter, runId,
-      harnessSha: harness.sha, headless: true,
+      harnessSha: harness.sha, headless: true, lcm: DEFAULT_MAF_CONFIG.lcm,
     });
     try {
       await stack.dispatchTask(harness, 'coder', PROMPT, repo, 60_000, 0);

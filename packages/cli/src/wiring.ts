@@ -22,6 +22,7 @@ import type { HarnessConfig, HarnessStore, ResolvedHarness } from '@maf/harness-
 import type { TaskDispatcher } from '@maf/eval-harness';
 import { importHarness, locateStoredHarness } from './commands/harness.js';
 import { goldensAssetRoot, readAsset } from './assets.js';
+import type { ResolvedMafConfig } from './config/ConfigLoader.js';
 
 /**
  * Shared CLI wiring for run/goldens/evolve commands: one component stack per
@@ -99,6 +100,12 @@ export async function buildRunStack(cfg: {
   allowUngoverned?: boolean;
   /** No one is asked anything: an escalated tool call is refused (D-02). goldens and evolve run so. */
   headless?: boolean;
+  /**
+   * The resolved `lcm` settings the command read (WP-3.2 F12). Passed in rather than hard-coded
+   * here: the mode, threshold, tail, model and operator are operator choices, and a second copy
+   * of their defaults in this file is how `maf run`'s config section became inert before.
+   */
+  lcm: ResolvedMafConfig['lcm'];
 }): Promise<RunStack> {
   const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
   // M1: a setup that fails after this point must not leak the handle. Kùzu keeps files open under
@@ -114,21 +121,62 @@ export async function buildRunStack(cfg: {
       recorder: attestor, mafDir: cfg.mafDir,
       env: cfg.headless === true ? { ...process.env, MAF_HEADLESS: '1' } : process.env,
     });
-    const baseTools = createDefaultRegistry();
     const board = new BlackboardStore();
-    // D-17: the same adapter-backed summarizer `run` uses, in the same mode of call.
+    // D-17: the same adapter-backed summarizer `run` uses, in the same mode of call. `lcm.model`
+    // wins over the run's model (it is the operator saying "summarize with this one"), and the
+    // timeout is the config key F5 asked for rather than a constant in two places.
+    const summarizerModel = cfg.lcm.model ?? cfg.model;
     const summarizerOptions = {
       adapter: cfg.adapter,
       workingDir: cfg.cwd,
-      ...(cfg.model !== undefined ? { model: cfg.model } : {}),
+      timeoutMs: cfg.lcm.summaryTimeoutMs,
+      ...(summarizerModel !== undefined ? { model: summarizerModel } : {}),
     };
     const engine = new LcmEngine({
       dbPath: path.join(cfg.mafDir, 'lcm.db'),
-      contextThreshold: 0.75, freshTailCount: 64, mode: 'Upward',
+      contextThreshold: cfg.lcm.contextThreshold,
+      freshTailCount:   cfg.lcm.freshTailCount,
+      mode:             cfg.lcm.mode,
+      operator:         cfg.lcm.operator === 'agentic-map' ? 'Agentic-Map' : 'LLM-Map',
       summarize:   createAdapterSummarizer(summarizerOptions),
       runSubAgent: createAdapterSubAgent(summarizerOptions),
+      // F1: the summary call is a model call like any other. It goes into the same array, under
+      // the node whose assembly triggered it — and with no trigger (a background pass) it is
+      // attributed to the session rather than made to look like a node's call.
+      recordSummaryCall: (call) => {
+        if (!call.surface) return; // no surface reported: record nothing rather than invent one
+        attestor.recordModelSurface({
+          role: 'lcm',
+          taskId: call.trigger?.taskId ?? makeTaskId(`lcm-${call.sessionId}`),
+          turn: 1,
+          tier: 'cli',
+          nativeTools: 'none',
+          kind: 'lcm-summary',
+          ...call.surface,
+          ...(call.model !== undefined ? { model: call.model } : {}),
+          lcmSummary: {
+            summaryId: call.summaryId,
+            level: call.level,
+            messages: call.messageIds.length,
+            chars: call.content.length,
+            contentTokens: call.contentTokens,
+            ...(call.reportedTokens !== undefined ? { reportedTokens: call.reportedTokens } : {}),
+          },
+        });
+      },
+      // F5: continue uncompacted, and say so where an operator will see it. The transcript line
+      // is written by the dispatcher from `ctx.degraded`, which is per-node; this one is the run's
+      // log, for a background pass that has no node.
+      onDegraded: (record) => {
+        console.error(`[lcm] compaction failed: ${record.reason}; continuing uncompacted`);
+        attestor.recordLcmDegraded(record);
+      },
     });
     lcm = engine;
+    // F8: the Dolt cue names `lcm.expand`; the tool exists in every role registry and resolves
+    // against this run's archive. One expander, shared by the allowlist registry and each task's.
+    const lcmExpand = (summaryId: string) => engine.expandSummary(summaryId);
+    const baseTools = createDefaultRegistry({ lcmExpand });
     const injector = new GraphAwareInjector({ graph, lcm: engine, maxNodes: 40, tokenBudget: 4096 });
     const lcmBridge = new BlackboardToLcmAdapter(board, engine, cfg.runId, cfg.runId);
 
@@ -166,7 +214,7 @@ export async function buildRunStack(cfg: {
         });
         // Bound to this task's directory so the git tools learn its repository root before the agent
         // acts (WP-2.17); the shared `baseTools` above only validates role allowlists.
-        const taskTools = createDefaultRegistry({ projectRoot: workDir });
+        const taskTools = createDefaultRegistry({ projectRoot: workDir, lcmExpand });
         const dispatcher = new RoleDispatcher({
           adapter: cfg.adapter, baseTools: taskTools, roles, injector, policy,
           attestor, approvalGate, graph, transcript, lcmBridge, securityGate: gate,

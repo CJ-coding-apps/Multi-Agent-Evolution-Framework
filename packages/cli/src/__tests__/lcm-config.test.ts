@@ -57,3 +57,41 @@ test('lcm.model outranks the run model for summarization only', () => {
   assert.equal(cfg.model, 'run-model');
   assert.equal(summarizerModelFor(cfg), 'summary-model');
 });
+
+test('everything the engine is built from comes from the lcm section (F12)', async () => {
+  // F12: `buildRunStack` must receive the resolved settings rather than hard-code them. This pins
+  // each one at the config seam the stack reads.
+  await withConfig(
+    'lcm:\n  mode: off\n  operator: agentic-map\n  contextThreshold: 0.5\n  freshTailCount: 8\n  summaryTimeoutMs: 9000\n',
+    async (file) => {
+      const cfg = await ConfigLoader.load(file);
+      assert.equal(cfg.lcm?.mode, 'off', 'mode off is a value, not an unknown key');
+      assert.equal(cfg.lcm?.operator, 'agentic-map');
+      assert.equal(cfg.lcm?.contextThreshold, 0.5);
+      assert.equal(cfg.lcm?.freshTailCount, 8);
+      assert.equal(cfg.lcm?.summaryTimeoutMs, 9000);
+    },
+  );
+});
+
+test('defaults name every engine setting; the operator is llm-map (F12/F14)', () => {
+  const cfg = resolveConfig({ flags: {}, file: {}, defaults: DEFAULT_MAF_CONFIG });
+  assert.equal(cfg.lcm.mode, 'Upward');
+  assert.equal(cfg.lcm.operator, 'llm-map');
+  assert.equal(cfg.lcm.contextThreshold, 0.75);
+  assert.equal(cfg.lcm.freshTailCount, 64);
+  assert.equal(cfg.lcm.summaryTimeoutMs, 120_000);
+});
+
+test('an unknown operator, mode or timeout is refused by name, not defaulted', async () => {
+  const cases: [string, RegExp][] = [
+    ['lcm:\n  operator: agentic\n', /lcm\.operator|agentic-map/],
+    ['lcm:\n  mode: on\n', /lcm\.mode|"off"/],
+    ['lcm:\n  summaryTimeoutMs: 0\n', /lcm\.summaryTimeoutMs|milliseconds/],
+  ];
+  for (const [content, expected] of cases) {
+    await withConfig(content, async (file) => {
+      await assert.rejects(ConfigLoader.load(file), expected);
+    });
+  }
+});

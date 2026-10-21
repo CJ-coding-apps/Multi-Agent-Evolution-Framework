@@ -8,6 +8,7 @@ import { makeRunId } from '@maf/types';
 import { MemoryGraph } from '@maf/memory-graph';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { buildRunStack } from '../wiring.js';
+import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 
 // ORACLE (M1): a setup that fails after the graph is opened closes it. The reported case is a
 // mistyped `--policy` on `goldens`: `buildRunStack` never returns, so nothing could close the
@@ -33,6 +34,7 @@ test('a stack whose policy cannot be resolved closes the graph it opened (M1)', 
       buildRunStack({
         cwd: root, mafDir, policy: { value: 'typo/policy.yaml', typed: true },
         adapter: new ScriptedAdapter(), runId: makeRunId(crypto.randomUUID()), harnessSha: 'a'.repeat(64),
+        lcm: DEFAULT_MAF_CONFIG.lcm,
       }),
       /Policy file ".*typo[/\\]policy\.yaml" not found/,
     );

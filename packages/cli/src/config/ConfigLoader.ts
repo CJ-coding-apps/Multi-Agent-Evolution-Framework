@@ -24,6 +24,13 @@ export interface MafConfig {
     freshTailCount?:   number;
     /** The model summarization calls use. Absent: the run's `--model`, then the adapter's own. */
     model?:            string;
+    /**
+     * Which operator automatic compaction uses (WP-3.2 F3). `agentic-map` needs a sub-agent call
+     * and is refused at run start when the engine has none; it is never silently downgraded.
+     */
+    operator?:         'llm-map' | 'agentic-map';
+    /** How long one summarization call may run before it is a transport failure (F5). */
+    summaryTimeoutMs?: number;
   };
   dag?: {
     maxConcurrent?: number;
@@ -40,7 +47,14 @@ export interface ResolvedMafConfig {
   adapter:  string;
   model?:   string;
   worktree: boolean;
-  lcm:      { mode: LcmMode; contextThreshold: number; freshTailCount: number; model?: string };
+  lcm:      {
+    mode:             LcmMode;
+    contextThreshold: number;
+    freshTailCount:   number;
+    model?:           string;
+    operator:         'llm-map' | 'agentic-map';
+    summaryTimeoutMs: number;
+  };
   dag:      { maxConcurrent: number; retry: RetryPolicy };
   timeouts: { planMs: number; securityReviewMs: number };
 }
@@ -49,7 +63,10 @@ export interface ResolvedMafConfig {
 export const DEFAULT_MAF_CONFIG: Readonly<ResolvedMafConfig> = Object.freeze({
   adapter:  'claude',
   worktree: true,
-  lcm:      Object.freeze({ mode: 'Upward' as const, contextThreshold: 0.75, freshTailCount: 64 }),
+  lcm:      Object.freeze({
+    mode: 'Upward' as const, contextThreshold: 0.75, freshTailCount: 64,
+    operator: 'llm-map' as const, summaryTimeoutMs: 120_000,
+  }),
   dag:      Object.freeze({ maxConcurrent: 4, retry: Object.freeze({ ...DEFAULT_RETRY_POLICY }) }),
   timeouts: Object.freeze({ planMs: 120_000, securityReviewMs: 120_000 }),
 });
@@ -136,6 +153,8 @@ export function resolveConfig({ flags, file, defaults }: ConfigLayers): Resolved
       mode:             flags.lcm?.mode             ?? file.lcm?.mode             ?? defaults.lcm.mode,
       contextThreshold: flags.lcm?.contextThreshold ?? file.lcm?.contextThreshold ?? defaults.lcm.contextThreshold,
       freshTailCount:   flags.lcm?.freshTailCount   ?? file.lcm?.freshTailCount   ?? defaults.lcm.freshTailCount,
+      operator:         flags.lcm?.operator         ?? file.lcm?.operator         ?? defaults.lcm.operator,
+      summaryTimeoutMs: flags.lcm?.summaryTimeoutMs ?? file.lcm?.summaryTimeoutMs ?? defaults.lcm.summaryTimeoutMs,
       ...(lcmModel !== undefined ? { model: lcmModel } : {}),
     },
     dag: {
@@ -176,7 +195,7 @@ export function applyDagSettings(dag: Dag, settings: ResolvedMafConfig['dag']): 
 
 type Section<K extends keyof MafConfig> = Record<keyof NonNullable<MafConfig[K]>, true>;
 const TOP_FIELDS:      Record<keyof MafConfig, true> = { adapter: true, model: true, worktree: true, lcm: true, dag: true, timeouts: true };
-const LCM_FIELDS:      Section<'lcm'>      = { mode: true, contextThreshold: true, freshTailCount: true, model: true };
+const LCM_FIELDS:      Section<'lcm'>      = { mode: true, contextThreshold: true, freshTailCount: true, model: true, operator: true, summaryTimeoutMs: true };
 const DAG_FIELDS:      Section<'dag'>      = { maxConcurrent: true, retry: true };
 const RETRY_FIELDS:    Record<keyof RetryPolicy, true> = { maxAttempts: true, backoffMs: true, backoffFactor: true, jitterMs: true };
 const TIMEOUTS_FIELDS: Section<'timeouts'> = { planMs: true, securityReviewMs: true };
@@ -190,7 +209,9 @@ type Check<T> = (v: unknown) => T | undefined;
 
 const text: Check<string> = (v) => (typeof v === 'string' && v.trim() !== '' ? v : undefined);
 const bool: Check<boolean> = (v) => (typeof v === 'boolean' ? v : undefined);
-const lcmMode: Check<LcmMode> = (v) => (v === 'Upward' || v === 'Dolt' ? v : undefined);
+const lcmMode: Check<LcmMode> = (v) => (v === 'Upward' || v === 'Dolt' || v === 'off' ? v : undefined);
+const lcmOperator: Check<'llm-map' | 'agentic-map'> =
+  (v) => (v === 'llm-map' || v === 'agentic-map' ? v : undefined);
 const fraction: Check<number> = (v) => (typeof v === 'number' && v > 0 && v <= 1 ? v : undefined);
 const count: Check<number> = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
 const positive: Check<number> = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 1 ? v : undefined);
@@ -215,10 +236,12 @@ function readConfig(raw: unknown, problems: Problem[]): MafConfig {
   const lcm = section(own(top, 'lcm'), ['lcm'], LCM_FIELDS, problems);
   if (lcm !== undefined) {
     config.lcm = {};
-    read(config.lcm, 'mode', lcm, ['lcm'], lcmMode, '"Upward" or "Dolt"', problems);
+    read(config.lcm, 'mode', lcm, ['lcm'], lcmMode, '"Upward", "Dolt" or "off"', problems);
     read(config.lcm, 'contextThreshold', lcm, ['lcm'], fraction, 'a number greater than 0 and at most 1', problems);
     read(config.lcm, 'freshTailCount', lcm, ['lcm'], count, 'a whole number, 0 or more', problems);
     read(config.lcm, 'model', lcm, ['lcm'], text, 'a non-empty model name', problems);
+    read(config.lcm, 'operator', lcm, ['lcm'], lcmOperator, '"llm-map" or "agentic-map"', problems);
+    read(config.lcm, 'summaryTimeoutMs', lcm, ['lcm'], positive, 'a whole number of milliseconds, at least 1', problems);
   }
   const dag = section(own(top, 'dag'), ['dag'], DAG_FIELDS, problems);
   if (dag !== undefined) {

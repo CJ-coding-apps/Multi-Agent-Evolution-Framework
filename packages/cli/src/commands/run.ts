@@ -271,23 +271,58 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // overrides `--model` for summarization alone; with neither set, the adapter's own model
     // applies. The calls ask for text only (`nativeTools: false`) and their token counts are the
     // backend's, so compaction is charged against the context budget rather than invented locally.
+    //
+    // The attestor is built first (WP-3.2 F1): a summary is a model call, so the engine records it
+    // where every other call goes, and the engine cannot do that before its recorder exists.
+    const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
     const summarizerModel = summarizerModelFor(cfg);
     const summarizerOptions = {
       adapter,
       workingDir: dir,
+      timeoutMs: cfg.lcm.summaryTimeoutMs,
       ...(summarizerModel !== undefined ? { model: summarizerModel } : {}),
     };
     const lcmSettings = {
       mode:             cfg.lcm.mode,
       contextThreshold: cfg.lcm.contextThreshold,
       freshTailCount:   cfg.lcm.freshTailCount,
+      operator:         cfg.lcm.operator === 'agentic-map' ? ('Agentic-Map' as const) : ('LLM-Map' as const),
     };
-    lcm             = new LcmEngine({
+    const engine = new LcmEngine({
       dbPath:    path.join(mafDir, 'lcm.db'),
       ...lcmSettings,
       summarize:     createAdapterSummarizer(summarizerOptions),
       runSubAgent:   createAdapterSubAgent(summarizerOptions),
+      // F1: the same attribution the stack makes — the node whose assembly triggered the call, or
+      // the session when no node did. The surface carries the model and the prompt/output digests.
+      recordSummaryCall: (call) => {
+        if (!call.surface) return;
+        attestor.recordModelSurface({
+          role: 'lcm',
+          taskId: call.trigger?.taskId ?? makeTaskId(`lcm-${call.sessionId}`),
+          turn: 1,
+          tier: 'cli',
+          nativeTools: 'none',
+          kind: 'lcm-summary',
+          ...call.surface,
+          ...(call.model !== undefined ? { model: call.model } : {}),
+          lcmSummary: {
+            summaryId: call.summaryId,
+            level: call.level,
+            messages: call.messageIds.length,
+            chars: call.content.length,
+            contentTokens: call.contentTokens,
+            ...(call.reportedTokens !== undefined ? { reportedTokens: call.reportedTokens } : {}),
+          },
+        });
+      },
+      // F5: a compaction that fails after its retry leaves the node running uncompacted, and says so.
+      onDegraded: (record) => {
+        console.error(`[lcm] compaction failed: ${record.reason}; continuing uncompacted`);
+        attestor.recordLcmDegraded(record);
+      },
     });
+    lcm = engine;
 
     // ── Worktree, once the run's configuration is known to be usable.
     run = cfg.worktree ? await worktrees.createForRun(runId) : undefined;
@@ -299,7 +334,12 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // The registry the agent gets is bound to the run's working directory now that it exists: the
     // git tools learn the repository root here, before any agent action, so a `.git` the agent later
     // removes or rewrites cannot redirect them (WP-2.17). `baseTools` above only validated the roles.
-    const agentTools = createDefaultRegistry({ projectRoot: cwd });
+    // WP-3.2 F8: `lcm.expand` resolves against this run's archive, so the registry is given the
+    // expander here, beside the engine that owns it.
+    const agentTools = createDefaultRegistry({
+      projectRoot: cwd,
+      lcmExpand: (summaryId: string) => engine.expandSummary(summaryId),
+    });
 
     const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
       logDir: path.join(mafDir, 'transcripts'),
@@ -310,7 +350,6 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     await transcript.init();
     const lcmBridge = new BlackboardToLcmAdapter(board, lcm, sessionId, runId);
-    const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
     // One gate for the run (D-02): an escalated tool call is put to the operator at the terminal,
     // or refused and left as a pending record when no one can answer; either way it is attested.
     const approvalGate = createApprovalGate({ recorder: attestor, mafDir, env, ...(terminal ? { terminal } : {}) });
