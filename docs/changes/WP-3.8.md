@@ -1,0 +1,135 @@
+# WP-3.8 — Kùzu 0.11.3 and the graph export/import (D-58)
+
+Branch `wp/3.8-kuzu-0.11.3` → `wp/phase-3b`. The `kuzu` entry in
+`packages/memory-graph/package.json` and the `kuzu` entries in `pnpm-lock.yaml` changed under the
+maintainer's one-PR exception for this branch; nothing else in either file changed.
+
+## What changed
+
+**The dependency.** `packages/memory-graph` declares `kuzu: "0.11.3"` (exact), replacing
+`^0.7.0` (which resolved to 0.7.1). The lockfile diff is the importer specifier/version, the
+`kuzu@0.7.1` → `kuzu@0.11.3` package entry (with its new integrity hash) and the corresponding
+snapshot key; both versions depend on `cmake-js ^7.3.0` and `node-addon-api ^6.0.0`, so no
+transitive resolution moved. The npm registry prints `Package no longer supported` for 0.11.3 and
+still installs the prebuilt binary; that deprecation is expected — Kùzu 0.11.3 is the final release
+(D-51, WP-3.0p).
+
+**The driver.** `KuzuDriver` reaches the connection only through the public `conn.init()`, which
+both 0.7.1 and 0.11.3 expose; the undocumented `_getConnection()` cast is gone. A database that is a
+**directory** (the 0.7.x shape) fails at `conn.init()` with `Database path cannot be a directory`,
+and that failure is turned into a `GraphOpenError` naming the export/import route (below). Every
+other opening error keeps its own message — inventing a migration story for a genuinely corrupt
+file would send the user down the wrong path.
+
+**One behaviour the bump changed, restored.** 0.7.1 created a missing parent directory when a
+database path was named; 0.11.3 refuses (`Cannot open database because the directory does not
+exist`). `buildRunStack` passes `<mafDir>/memory.kuzu` for a `mafDir` the caller may not have made,
+and the approval-gate stack test caught the difference. The driver now creates the parent (recursive,
+skipped for `:memory:`), so the bump changes nothing a caller can see. A failure to create it is not
+reported from there — the open names the real reason.
+
+**The schema.** `MemoryGraph.initSchema()` used to swallow **every** schema error with
+`catch { /* ignore already-exists */ }`, so a read-only file, a full disk or an unopenable database
+produced a graph that accepted no writes and silently read back nothing. `IF NOT EXISTS` makes the
+expected case a success, so the catch now tolerates only `/already exists/i` and rethrows the rest.
+
+**The transfer.** `packages/memory-graph/src/GraphTransfer.ts` (new) is the version-neutral half:
+`exportGraph` reads nodes and edges ordered by id and writes plain JSON; `parseGraphExport`
+validates a file before anything is written; `importGraph` refuses a non-empty target, writes inside
+`BEGIN TRANSACTION`/`COMMIT` (best-effort `ROLLBACK` on failure) and compares the final node and
+edge counts to the file. Nothing in the format is Kùzu-specific beyond the two read queries, so a
+later importer for another backend reads the same file.
+
+The file is `{ format: "maf-graph", formatVersion: 1, kuzuVersion, exportedAt, nodes[], edges[] }`.
+A node carries `id, kind, label, properties, runId, createdAt, updatedAt`; an edge carries
+`id, fromId, toId, relation, weight, metadata, createdAt`. Properties and metadata are JSON objects,
+not escaped strings. A stored blob that is not JSON aborts the export rather than becoming `{}`: a
+rescue tool must not lose the row it exists to carry.
+
+**The command.** `packages/cli/src/commands/graph.ts` (new) registers:
+
+- `maf graph export [-d <dir>] [--db <path>] [-o <file>]` — defaults `.maf/memory.kuzu` and
+  `<dir>/graph-export.json`; writes the file with mode `0600` because it holds task titles, file
+  paths and failure messages.
+- `maf graph import <file> [-d <dir>] [--db <path>]` — `--db` must name a fresh database; the
+  refusal names the count and suggests `--db`.
+
+**The guard.** Opening a 0.7.x directory now fails with a `GraphOpenError` whose message says what
+happened, names the two commands, and states the case no export can rescue:
+
+> The graph at <path> is a directory written by Kùzu 0.7.x; this maf uses Kùzu 0.11.3, which writes
+> a single file and cannot read the older format (Kùzu changed it before 1.0). Export it with the
+> maf that wrote it — `maf graph export --db <path> --out graph.json` — then import that JSON with
+> this maf: `maf graph import graph.json --db <path>.v11`. If the maf that wrote it predates
+> `graph export`, the graph cannot be migrated; move <path> aside and start a new graph. Original
+> error: …
+
+`maf graph export` on such a database exits non-zero and prints that message on stderr; it does not
+write an empty file.
+
+## Acceptance
+
+| WP-3.8 acceptance | Where it is discharged |
+|---|---|
+| `maf graph export` writes nodes and edges as JSON | `packages/cli/src/__tests__/graph-cli.test.ts` — import → export through the built CLI, then the file's `format`, `formatVersion`, `kuzuVersion`, 4 nodes and 3 edges are asserted |
+| `import` restores them into a fresh database and a query returns the same rows | `packages/memory-graph/src/__tests__/graph-transfer.test.ts` — round trip with a 3-node/2-edge graph (property, timestamp and `0.5` weight equality), and the committed 0.7.1 export imported on 0.11.3 with `recallFailures` by title and by path returning the committed rows |
+| opening a 0.7-format database prints export/upgrade instructions and exits non-zero | `graph-transfer.test.ts` (the `GraphOpenError` and its four clauses) and `graph-cli.test.ts` (exit code, stderr, no output file) |
+| the four real-Kùzu tests pass on 0.11.3 | the existing 24 memory-graph tests pass unchanged on 0.11.3 (`failure-recall`, `graph-parameters`, `native-lifetime`, `query-subgraph`, `no-escaper`); 33/33 with the new file |
+| `db.close()` is called and does not crash | `graph-transfer.test.ts` — a closed graph is a single file with no `.wal` beside it and reopens with its rows; the existing native-lifetime tests (20 opens, GC child, in-flight close) pass on 0.11.3 |
+
+New tests also pin: a non-empty target is refused before any write; a file from a newer
+`formatVersion` is refused with "Upgrade maf"; duplicate ids, an edge to a missing node, an empty id
+and a non-finite weight are refused with the row named; an import that fails halfway rolls back and
+the graph is usable afterwards; and an export taken immediately after writes, with the graph still
+open, returns every row — the export reads through the engine, never by copying a file, so the D2
+checkpoint-before-copy rule is not on this path.
+
+## Decision
+
+**D-58 · The graph moves by export/import, not by compatibility.** Kùzu promised no file-format
+compatibility before 1.0, and measured here: 0.7.1 writes a directory, 0.11.3 writes a single file,
+and 0.11.3 cannot open the directory (`Database path cannot be a directory` at `conn.init()`). The
+migration is therefore explicit: export to version-neutral JSON from a maf that can read the graph,
+then import into a fresh graph with this maf. Import refuses a non-empty target rather than merging
+(merge is a separate operation with its own decision), refuses a file whose format it does not know,
+and validates every row before writing. **Rejected — keep 0.7.1** (D-51: 0.11.3 is the final release
+and the version the graph-lifecycle fixes target). **Rejected — a compatibility shim** (there is no
+reader for the old format in 0.11.3 to shim). **Rejected — a file copy as the migration** (the
+storage layout is exactly what changed, and a stale `.wal` beside a restored database replays onto it
+— the D2 rule recorded in the plan).
+
+## Recorded limit — pre-0.6.0 graphs cannot be migrated
+
+The plan's ordering constraint was that `graph export` ship **while maf is on 0.7.x**, so that an
+existing graph could be exported by the version that wrote it. No released maf carries `graph
+export`: 0.5.0 (the last source release) predates this work, and this branch bumps to 0.11.3 in the
+same change. The committed `fixtures/kuzu-0.7.1-export.json` was generated by running the new
+exporter on 0.7.1 **before** the bump, which proves the artifact, but it cannot retroactively give
+0.5.0 the command.
+
+Consequence: a user who already has a `.maf/memory.kuzu` directory from maf ≤ 0.5.0 has no supported
+maf that can export it. The guard states this in the message ("If the maf that wrote it predates
+`graph export`, the graph cannot be migrated; move <path> aside and start a new graph") rather than
+implying a rescue that does not exist.
+
+**For the maintainer:** either accept the fresh-graph requirement in the 0.6.0 release notes, or
+hold the bump back and ship the exporter first. This fragment takes no position; the branch stops at
+the PR.
+
+## Fixtures
+
+- `packages/memory-graph/src/__tests__/fixtures/kuzu-0.7.1.tar.gz` — a real 0.7.1 database
+  directory (`memory.kuzu/`, checkpointed, empty `.wal`) holding one run's Task → Failure and
+  Task → File rows. It is the "old graph on disk" the guard must refuse.
+- `packages/memory-graph/src/__tests__/fixtures/kuzu-0.7.1-export.json` — that same database
+  exported by `maf graph export` while the repository was still on 0.7.1:
+
+  ```
+  node packages/cli/dist/main.js graph export \
+    --db /tmp/<scratch>/memory.kuzu --out packages/memory-graph/src/__tests__/fixtures/kuzu-0.7.1-export.json
+  ```
+
+  Output: `Exported 4 nodes and 3 edges to … (Kùzu 0.7.1, graph format 1).`
+
+Both are read from `src/__tests__/fixtures` by the tests (the tests run from `dist`, and `tsc` does
+not copy non-TypeScript files), the same arrangement the attestation bundle test uses.

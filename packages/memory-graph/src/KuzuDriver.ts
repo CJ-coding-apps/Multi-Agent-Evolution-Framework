@@ -20,10 +20,29 @@
 // So every result is closed as soon as it has been read, and `close()` then closes the connection
 // and the database in that order, once no query is in flight, so nothing outlives what it points
 // into and the database's address-space reservation is returned when the graph is closed.
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Connection, Database, KuzuModule } from 'kuzu';
 import type { GraphQuery, GraphRow } from '@maf/types';
 
 let kuzuModule: KuzuModule | undefined;
+
+/** The Kùzu library actually loaded, for the export file's record and for error messages. */
+export function kuzuVersion(): string {
+  return loadKuzu().VERSION;
+}
+
+/**
+ * A graph this Kùzu build cannot open. A 0.7.x database is a directory and 0.11.3 writes one
+ * file, so the old graph does not fail as a corrupt file — it fails as the wrong shape, with a
+ * message that says nothing about migration. This class carries the sentence that does (D-58).
+ */
+export class GraphOpenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GraphOpenError';
+  }
+}
 
 function loadKuzu(): KuzuModule {
   if (!kuzuModule) {
@@ -52,13 +71,25 @@ export class KuzuDriver {
 
   constructor(private readonly dbPath: string, bufferPoolSizeBytes = 128 * 1024 * 1024) {
     const kuzu = loadKuzu();
-    this.db   = new kuzu.Database(dbPath, bufferPoolSizeBytes);
-    this.conn = new kuzu.Connection(this.db);
-    // kuzu v0.7.x requires async init before any query. `_getConnection` is undocumented and
-    // resolves to the same object; the cast is narrowed to the one hook rather than the whole
-    // connection, so the rest of this class stays typed.
-    const init = (this.conn as unknown as { _getConnection(): Promise<void> })._getConnection();
-    this.ready = this.track(init).catch(() => undefined);
+    // 0.7.1 created a missing parent directory; 0.11.3 refuses with "Cannot open database
+    // because the directory does not exist". A caller naming a path may not have made its
+    // parent yet (`buildRunStack` is one), so the driver creates it, as the older version did.
+    // A failure here is not reported from here: the open below names the real reason.
+    if (dbPath !== ':memory:') {
+      try { fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true }); } catch { /* reported by the open */ }
+    }
+    try {
+      this.db   = new kuzu.Database(dbPath, bufferPoolSizeBytes);
+      this.conn = new kuzu.Connection(this.db);
+    } catch (err) {
+      throw openFailure(dbPath, err);
+    }
+    // Both 0.7.1 and 0.11.3 expose the same async `init()`. It used to reach through the
+    // undocumented `_getConnection`, which 0.11.3 no longer has.
+    this.ready = this.track(this.conn.init()).catch((err) => { throw openFailure(this.dbPath, err); });
+    // The rejection is still delivered to `run`/`close`; this only stops Node reporting it as
+    // unhandled when a caller constructs a graph and never queries it.
+    this.ready.catch(() => undefined);
   }
 
   /**
@@ -114,4 +145,33 @@ export class KuzuDriver {
     this.conn.close().catch(() => undefined);
     this.db.close().catch(() => undefined);
   }
+}
+
+/**
+ * Turns the native opening failure into the one a user can act on, when it is the
+ * 0.7.x-directory case; every other failure keeps its own message, because inventing a
+ * migration story for a corrupt file would send the user down the wrong path.
+ */
+function openFailure(dbPath: string, err: unknown): unknown {
+  const message = err instanceof Error ? err.message : String(err);
+  const looksLikeVersion = /cannot be a directory|different version|database file version/i.test(message);
+  if (!looksLikeVersion || dbPath === ':memory:') return err;
+
+  let isDirectory = false;
+  try { isDirectory = fs.statSync(dbPath).isDirectory(); } catch { /* missing is a new graph */ }
+  if (!isDirectory) return err;
+
+  const version = safeVersion();
+  return new GraphOpenError(
+    `The graph at ${dbPath} is a directory written by Kùzu 0.7.x; this maf uses Kùzu ${version}, ` +
+    `which writes a single file and cannot read the older format (Kùzu changed it before 1.0). ` +
+    `Export it with the maf that wrote it — \`maf graph export --db ${dbPath} --out graph.json\` — ` +
+    `then import that JSON with this maf: \`maf graph import graph.json --db ${dbPath}.v11\`. ` +
+    `If the maf that wrote it predates \`graph export\`, the graph cannot be migrated; move ${dbPath} ` +
+    `aside and start a new graph. Original error: ${message}`,
+  );
+}
+
+function safeVersion(): string {
+  try { return kuzuVersion(); } catch { return '0.11.3'; }
 }

@@ -15,11 +15,24 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
   constructor(dbPath: string, bufferPoolSizeBytes = 128 * 1024 * 1024) {
     this.driver = new KuzuDriver(dbPath, bufferPoolSizeBytes);
     this.schemaReady = this.initSchema();
+    // The rejection is still delivered to every `run`; this stops Node calling it unhandled
+    // when the graph is constructed and not queried (the version guard and `close()` rely on
+    // this promise not crashing the process before the caller can report it).
+    this.schemaReady.catch(() => undefined);
   }
 
   private async initSchema(): Promise<void> {
     for (const stmt of SCHEMA_DDL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      try { await this.driver.run({ cypher: stmt, params: {} }); } catch { /* ignore already-exists */ }
+      try {
+        await this.driver.run({ cypher: stmt, params: {} });
+      } catch (err) {
+        // `IF NOT EXISTS` makes the expected case a success, so anything caught here is real:
+        // a read-only file, a full disk, a database that cannot be opened at all. Swallowing it
+        // used to turn every one of those into a graph that accepted writes and read back
+        // nothing.
+        if (err instanceof Error && /already exists/i.test(err.message)) continue;
+        throw err;
+      }
     }
   }
 
