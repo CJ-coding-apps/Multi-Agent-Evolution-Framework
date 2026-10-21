@@ -153,6 +153,21 @@ export class LcmStore {
     return rowToSummary(row, parentIds, messageIds);
   }
 
+  /**
+   * A summary only when it covers at least one message of `sessionId` (WP-3.2 R9). `lcm_summaries`
+   * has no session column — ownership is the messages a summary covers — so the check joins through
+   * the link table. `.maf/lcm.db` persists across runs, and without this `lcm.expand` could read an
+   * earlier run's archive from a run that never saw it.
+   */
+  getSummaryInSession(id: LcmSummaryId, sessionId: string): LcmSummary | undefined {
+    const owned = this.db.prepare(
+      `SELECT 1 AS owned FROM lcm_summary_messages sm
+       JOIN lcm_messages m ON m.id = sm.message_id
+       WHERE sm.summary_id = ? AND m.session_id = ? LIMIT 1`,
+    ).get(id, sessionId) as { owned: number } | undefined;
+    return owned ? this.getSummary(id) : undefined;
+  }
+
   searchMessages(query: string, sessionId: string): LcmMessage[] {
     const rows = this.db.prepare(
       `SELECT * FROM lcm_messages WHERE session_id=? AND content LIKE ? ORDER BY created_at DESC LIMIT 50`

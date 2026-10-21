@@ -10,7 +10,7 @@ import { SessionMerger } from './SessionMerger.js';
 import { LlmMap } from './operators/LlmMap.js';
 import { AgenticMap } from './operators/AgenticMap.js';
 import {
-  estimateTokens, summaryContent, MAX_SUMMARY_PROMPT_CHARS, type SummaryOutput,
+  estimateTokens, summaryContent, byteLength, MAX_SUMMARY_PROMPT_BYTES, type SummaryOutput,
 } from './summarizer.js';
 
 /** One summary call, as the engine reports it to its recorder (WP-3.2 F1). */
@@ -25,6 +25,11 @@ export interface LcmSummaryCall {
   contentTokens:   number;
   /** What the backend reported for the call, when it reports anything (F10). */
   reportedTokens?: number;
+  /**
+   * What this call spent against the triggering node's budget (R5): the backend's reported count
+   * when it reports one, else the estimate of the prompt plus the summary.
+   */
+  tokenBudgetCharged: number;
   model?:          string;
   surface?:        ModelSurface;
   trigger?:        LcmTrigger;
@@ -32,6 +37,13 @@ export interface LcmSummaryCall {
 
 export interface LcmEngineConfig {
   dbPath:            string;
+  /**
+   * The session this engine serves (R9). `.maf/lcm.db` outlives a run, so a lookup by summary id
+   * alone could read an earlier run's archive; with this set, `expandSummary` refuses a summary
+   * that covers no message of this session. Absent, the engine is unscoped — the shape a test
+   * that owns the whole database uses.
+   */
+  sessionId?:        string;
   contextThreshold:  number;   // 0.0–1.0, default 0.75 — triggers compaction
   freshTailCount:    number;   // recent messages protected from compaction, default 64
   mode:              LcmMode;
@@ -68,9 +80,15 @@ export interface LcmEngineConfig {
 
 /** One piece of text a summary prompt is built from: a message or a fragment of one. */
 interface Unit {
-  role:     LcmMessage['role'];
-  content:  string;
+  role:       LcmMessage['role'];
+  content:    string;
   messageId?: LcmMessageId;
+  /**
+   * Set on a unit that renders a stored summary at a higher level (R11). A child too large for one
+   * prompt is split into several units, each carrying its child's id, so every parent names exactly
+   * the children whose text it saw.
+   */
+  summaryId?: LcmSummaryId;
 }
 
 /** A summary a higher level summarizes: its id and what it says. */
@@ -80,6 +98,14 @@ interface ParentUnit {
 }
 
 const SUMMARY_UNIT_OVERHEAD = 32; // `[ASSISTANT] ` + the joining newline, generously rounded.
+
+/**
+ * What the injector's `<recent>` block adds around the messages it renders (R4c): the wrapper plus
+ * one `<message role="…"></message>` line per message. Fitting uses the same numbers the renderer
+ * pays, so the archive's share is a real ceiling rather than an approximation of one.
+ */
+const RECENT_WRAPPER_TOKENS = 8;
+const RECENT_MESSAGE_OVERHEAD_TOKENS = 12;
 
 export class LcmEngine implements LcmApi {
   private readonly store: LcmStore;
@@ -140,23 +166,29 @@ export class LcmEngine implements LcmApi {
   }
 
   /**
-   * The context a node is given (WP-3.2, D-17; budget semantics D-52 F2).
+   * The context a node is given (WP-3.2, D-17; budget semantics D-52, R2/R4c).
    *
-   * `messages` are the loop's own recent history. Compaction summarizes exactly the uncompacted
-   * messages outside the fresh tail, and those summarized messages are the only ones not returned
-   * raw. If compaction fails, every uncompacted message is returned raw and the failure is recorded
-   * (F5): nothing is dropped unsummarized.
+   * `messages` are the newest messages of the session, newest first. They are rendered as
+   * `<recent>` after the archive and inside the same budget: a message that does not fit is neither
+   * rendered nor removed from the store — it stays for the next compaction to summarize. Compaction
+   * summarizes exactly the uncompacted messages outside the fresh tail. If it fails, every
+   * uncompacted message is a recent candidate and the failure is recorded (F5): nothing is dropped
+   * unsummarized.
    *
-   * `totalTokens` counts what the injector renders — summaries or ghost cues — and nothing else,
-   * because that is the only thing competing with the rest of the prompt for the injector's
-   * budget. A summary call made during this assembly is charged separately (`compactionTokens`)
-   * and is reserved out of the archive's share before anything is fitted (F1).
+   * `totalTokens` is the size of what the injector renders — summaries/cues plus the recent
+   * messages. A summary call's cost is `compactionTokens`, a budget record and never a reservation
+   * out of the rendered room (R2): the room is about rendered size, the call is about the call.
+   *
+   * `render` asks for summaries where the mode would otherwise offer ghost cues (R14). A cli-tier
+   * role has no `lcm.expand` tool, so a cue telling it to call one is not an instruction it can
+   * follow; the dispatcher asks for summaries there instead.
    */
   async assembleContext(
     sessionId: string,
     tokenBudget: number,
     mode: LcmMode = this.config.mode,
     trigger?: LcmTrigger,
+    render?: 'cues' | 'summaries',
   ): Promise<LcmContext> {
     if (mode === 'off' || tokenBudget <= 0) return emptyContext(mode);
 
@@ -192,44 +224,58 @@ export class LcmEngine implements LcmApi {
       }
     }
 
-    // What stays raw. On success, the fresh tail: everything older is covered by a summary. On
+    // What may stay raw. On success, the fresh tail: everything older is covered by a summary. On
     // failure — or when no compaction was needed or possible — every uncompacted message, so no
-    // message is dropped without a summary that covers it (E10).
+    // message is dropped without a summary that covers it (E10). This is the candidate set; the
+    // budget below decides which of them are actually rendered.
     const remaining = this.store.getUncompactedMessages(sessionId, 0);
-    const messages = degraded
+    const candidates = degraded
       ? remaining
       : overThreshold
         ? this.store.getFreshTail(sessionId, this.config.freshTailCount)
             .filter((m) => m.summaryId === undefined)
         : remaining;
 
-    const archiveBudget = Math.max(0, tokenBudget - compactionTokens);
+    // R2: room is measured on rendered size. The call's reported tokens were subtracted here and
+    // on a backend that reports them (openrouter) that emptied the archive's own room.
+    const archiveBudget = tokenBudget;
     const ghosts: GhostCue[] = [];
     let included: LcmSummary[] = [];
     let used = 0;
+    let offerSummaries = mode === 'Upward';
 
     if (mode === 'Upward') {
       const archive = await this.fitUpward(sessionId, archiveBudget, trigger);
       included = archive.summaries;
       summaryCalls.push(...archive.calls);
       used = included.reduce((s, summary) => s + summary.tokens, 0);
+      if (included.length === 0 && archive.roots.length > 0) {
+        // R12: one root larger than the whole archive used to render nothing and say nothing.
+        // A cue is a sentence, so it fits where the summary did not; the model can expand it.
+        used = this.fitCues(archive.roots, Math.max(0, archiveBudget - used), ghosts);
+      }
+    } else if (render === 'summaries') {
+      // R14: no cues the backend cannot act on. The roots are fitted newest-first, exactly as the
+      // cues would be, without the extra compaction Upward's fit performs.
+      const fitted = fitRootsNewestFirst(this.rootSummaries(sessionId), archiveBudget);
+      included = fitted.summaries;
+      used = fitted.used;
+      offerSummaries = true;
     } else {
       // Cues are sentences, newest first: the most recent archive is the most relevant, and a cue
       // the budget cannot hold is skipped rather than crowding out the rest.
-      for (const cue of this.ghostCues.buildWithContent(this.rootSummaries(sessionId))) {
-        const cost = estimateTokens(cue.cueText);
-        if (used + cost > archiveBudget) continue;
-        ghosts.push(cue);
-        used += cost;
-      }
+      used = this.fitCues(this.rootSummaries(sessionId), archiveBudget, ghosts);
     }
 
+    // R4c: the newest messages, newest first, after the archive and within the same budget.
+    const recent = fitRecent(candidates, Math.max(0, tokenBudget - used));
+
     return {
-      messages,
+      messages: recent.messages,
       ghosts,
-      totalTokens: used,
+      totalTokens: used + recent.tokens,
       ...(compactionTokens > 0 ? { compactionTokens } : {}),
-      ...(mode === 'Upward' ? { summaries: included } : {}),
+      ...(offerSummaries ? { summaries: included } : {}),
       ...(summaryCalls.length > 0 ? { summaryCalls } : {}),
       ...(degradedRecords.length > 0 ? { degraded: degradedRecords } : {}),
     };
@@ -244,15 +290,22 @@ export class LcmEngine implements LcmApi {
   }
 
   /**
-   * A summary and the messages it covers, newest API for `lcm.expand` (WP-3.2 F8): the Dolt cue
+   * A summary and the messages it covers, the API behind `lcm.expand` (WP-3.2 F8, R9): the Dolt cue
    * tells the model to call a tool, so the tool needs the summary text as well as the messages.
    *
    * `summaryId` is a plain `string` because this is the tool boundary, where the id comes from a
    * model. The lookup is a bound store parameter (never query text), so the brand adds no safety
-   * here; an id from another run simply finds nothing.
+   * here. What does matter is the run: `.maf/lcm.db` outlives a run, so an id copied or guessed
+   * from an earlier one is a real id in this database. A scoped engine (`sessionId` set) resolves
+   * only summaries that cover at least one message of its own session; anything else is refused
+   * exactly as an unknown id is. The version this replaces looked the id up on its own and called
+   * the result "not found" only because the caller had no way to ask.
    */
   async expandSummary(summaryId: string): Promise<{ summary: LcmSummary; messages: LcmMessage[] } | undefined> {
-    const summary = this.store.getSummary(summaryId as LcmSummaryId);
+    const id = summaryId as LcmSummaryId;
+    const summary = this.config.sessionId !== undefined
+      ? this.store.getSummaryInSession(id, this.config.sessionId)
+      : this.store.getSummary(id);
     if (!summary) return undefined;
     return { summary, messages: this.store.getMessagesByIds(summary.messageIds) };
   }
@@ -314,7 +367,7 @@ export class LcmEngine implements LcmApi {
       reported.push(spent);
       const surface = await this.recordCall({
         sessionId, summaryId, level: 0, messageIds: messageIdsInGroup, parentIds: [],
-        content, contentTokens, output, trigger,
+        content, contentTokens, output, trigger, inputTokens: promptTokensOf(group),
       });
       if (surface) calls.push(surface);
       level0.push({ id: summaryId, content });
@@ -339,22 +392,26 @@ export class LcmEngine implements LcmApi {
   ): Promise<LcmSummaryId> {
     if (children.length === 1) return children[0]!.id;
 
-    // Each rendered child is packed into a chunk beneath the cap; a child too large for one chunk
-    // is split across summaries, and each summary names exactly the children it saw (F4). The
-    // previous version named the whole group on every chunk, so a summary could claim a parent
-    // whose text was in another call.
-    const rendered = children.map((child) => ({
-      child,
-      unit: { role: 'system' as const, content: `[Level-${level - 1} summary ${child.id}]\n${child.content}` },
-    }));
+    // Each child's rendered text is split into byte-bounded units that carry its id, so a child
+    // too large for one prompt is genuinely split across summaries (R11) and each summary names
+    // exactly the children whose text it saw (F4). The version this replaces built one unit per
+    // child and then claimed every child in the chunk regardless: a summary could name a parent
+    // whose text had been elsewhere, and a comment described a split that never happened.
+    const units: Unit[] = [];
+    for (const child of children) {
+      const rendered = `[Level-${level - 1} summary ${child.id}]\n${child.content}`;
+      for (const content of splitByBytes(rendered, MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD)) {
+        units.push({ role: 'system', content, summaryId: child.id });
+      }
+    }
     const parents: ParentUnit[] = [];
-    for (const chunk of packUnits(rendered.map((entry) => entry.unit))) {
-      const included = rendered.filter((entry) =>
-        chunk.some((unit) => unit === entry.unit));
+    for (const chunk of packUnits(units)) {
+      const childIds = [...new Set(chunk.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
       const output = await this.callBounded(chunk, level, operator);
-      const content = summaryContent(output);
+      // R10: the same masking as level 0. A model can echo a credential it read, and this text is
+      // stored and shown by `lcm.expand` exactly like a level-0 summary's.
+      const content = redactCredentials(summaryContent(output));
       const contentTokens = estimateTokens(content);
-      const childIds = included.map((entry) => entry.child.id);
       const childSummaries = childIds
         .map((id) => this.store.getSummary(id))
         .filter((summary): summary is LcmSummary => summary !== undefined);
@@ -363,7 +420,7 @@ export class LcmEngine implements LcmApi {
       reported.push(reportedTokensOf(output, content));
       const surface = await this.recordCall({
         sessionId, summaryId, level, messageIds, parentIds: childIds,
-        content, contentTokens, output, trigger,
+        content, contentTokens, output, trigger, inputTokens: promptTokensOf(chunk),
       });
       if (surface) calls.push(surface);
       parents.push({ id: summaryId, content });
@@ -374,16 +431,17 @@ export class LcmEngine implements LcmApi {
   /**
    * The Upward archive, newest first, compacting the oldest roots upward when they no longer fit
    * (D-52 F2/F9). Summaries get room before anything else the injector renders, because they are
-   * what the injector renders; the raw tail is the loop's own history and is not charged.
+   * what the injector renders; `roots` is returned so a budget too small for every root can fall
+   * back to cues (R12).
    */
   private async fitUpward(
     sessionId: string,
     budget: number,
     trigger: LcmTrigger | undefined,
-  ): Promise<{ summaries: LcmSummary[]; calls: LcmSummarySurface[] }> {
+  ): Promise<{ summaries: LcmSummary[]; calls: LcmSummarySurface[]; roots: LcmSummary[] }> {
     const calls: LcmSummarySurface[] = [];
     let roots = this.rootSummaries(sessionId);
-    if (roots.length === 0) return { summaries: [], calls };
+    if (roots.length === 0) return { summaries: [], calls, roots };
     // Bounded: each pass halves the root count or stops. A budget too small for even one root
     // stops the loop rather than summarizing forever.
     for (let pass = 0; pass < 8 && roots.length > 1; pass++) {
@@ -394,24 +452,31 @@ export class LcmEngine implements LcmApi {
       const oldest = roots.slice(0, take);
       const operator = this.config.operator ?? 'LLM-Map';
       const level = Math.max(...oldest.map((s) => s.level)) + 1;
-      // A group is bounded by the prompt cap, so a large set of roots becomes several parents;
-      // the outer loop compacts again until one root covers them all or the budget fits.
-      for (const group of packSummaries(oldest)) {
-        const messageIds = [...new Set(group.flatMap((s) => s.messageIds))];
-        const output = await this.callBounded(
-          group.map((summary) => ({
-            role: 'system' as const,
-            content: `[Level-${summary.level} summary ${summary.id}]\n${summary.content}`,
-          })),
-          level, operator,
-        );
+      // A group is bounded by the byte cap, so a large set of roots becomes several summaries.
+      // A root whose text exceeds one prompt is split into byte-bounded units carrying its id,
+      // exactly as `raise` does (R11); no summary's text is truncated and no prompt overflows.
+      const units: Unit[] = [];
+      for (const summary of oldest) {
+        const rendered = `[Level-${summary.level} summary ${summary.id}]\n${summary.content}`;
+        for (const content of splitByBytes(rendered, MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD)) {
+          units.push({ role: 'system', content, summaryId: summary.id });
+        }
+      }
+      for (const group of packUnits(units)) {
+        const parentIds = [...new Set(group.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
+        const children = parentIds
+          .map((id) => this.store.getSummary(id))
+          .filter((summary): summary is LcmSummary => summary !== undefined);
+        const messageIds = [...new Set(children.flatMap((s) => s.messageIds))];
+        const output = await this.callBounded(group, level, operator);
         const content = redactCredentials(summaryContent(output));
         const summaryId = this.store.insertSummary(
-          content, estimateTokens(content), level, operator, group.map((s) => s.id), messageIds,
+          content, estimateTokens(content), level, operator, parentIds, messageIds,
         );
         const surface = await this.recordCall({
-          sessionId, summaryId, level, messageIds, parentIds: group.map((s) => s.id),
+          sessionId, summaryId, level, messageIds, parentIds,
           content, contentTokens: estimateTokens(content), output, trigger,
+          inputTokens: promptTokensOf(group),
         });
         if (surface) calls.push(surface);
       }
@@ -419,7 +484,7 @@ export class LcmEngine implements LcmApi {
     }
     const fit = overflowNewestFirst(roots, budget);
     const kept = roots.filter((s) => !fit.includes(s));
-    return { summaries: kept.slice().reverse(), calls }; // chronological for the prompt
+    return { summaries: kept.slice().reverse(), calls, roots }; // chronological for the prompt
   }
 
   /** Roots: summaries no other summary names as a parent, oldest first. */
@@ -427,6 +492,22 @@ export class LcmEngine implements LcmApi {
     const all = this.store.getSummariesForSession(sessionId);
     const parents = new Set(all.flatMap((summary) => summary.parentIds));
     return all.filter((summary) => !parents.has(summary.id));
+  }
+
+  /**
+   * Fits ghost cues, newest first, into `budget`, appending the ones that fit. A cue is a single
+   * sentence, so one the budget cannot hold is skipped rather than truncated: a truncated cue
+   * would name an id that is no longer the whole id, and the model would expand nothing.
+   */
+  private fitCues(roots: LcmSummary[], budget: number, ghosts: GhostCue[]): number {
+    let used = 0;
+    for (const cue of this.ghostCues.buildWithContent(roots)) {
+      const cost = estimateTokens(cue.cueText);
+      if (used + cost > budget) continue;
+      ghosts.push(cue);
+      used += cost;
+    }
+    return used;
   }
 
   // ── The model call ───────────────────────────────────────────────────────────
@@ -481,16 +562,27 @@ export class LcmEngine implements LcmApi {
     contentTokens: number;
     output: SummaryOutput;
     trigger: LcmTrigger | undefined;
+    /** The rendered prompt's estimate — the input half of the charge when nothing was reported. */
+    inputTokens: number;
   }): Promise<LcmSummarySurface> {
     const reported = typeof call.output === 'string' ? undefined : call.output.tokensUsed;
     const modelSurface = typeof call.output === 'string' ? undefined : call.output.surface;
     const model = typeof call.output === 'string' ? undefined : call.output.model;
+    // R5: what the call spent against the triggering node's budget. The backend's count when it
+    // gave one — note openrouter reports prompt plus output, which is exactly the whole call — and
+    // otherwise the same estimate the package uses everywhere: input plus output.
+    const charged = isTokenCount(reported)
+      ? Math.ceil(reported)
+      : call.inputTokens + call.contentTokens;
     const surface: LcmSummarySurface = {
       summaryId: call.summaryId,
       level:     call.level,
       messages:  call.messageIds.length,
       chars:     call.content.length,
       contentTokens: call.contentTokens,
+      tokenBudgetCharged: charged,
+      ...(call.trigger?.nodeId !== undefined ? { nodeId: call.trigger.nodeId } : {}),
+      ...(call.trigger?.taskId !== undefined ? { taskId: call.trigger.taskId } : {}),
       ...(isTokenCount(reported) ? { reportedTokens: Math.ceil(reported) } : {}),
       ...(model !== undefined ? { model } : {}),
       ...(modelSurface?.systemPromptSha256 !== undefined
@@ -507,6 +599,7 @@ export class LcmEngine implements LcmApi {
       parentIds: call.parentIds,
       content: call.content,
       contentTokens: call.contentTokens,
+      tokenBudgetCharged: charged,
       ...(isTokenCount(reported) ? { reportedTokens: Math.ceil(reported) } : {}),
       ...(typeof call.output !== 'string' && call.output.model !== undefined ? { model: call.output.model } : {}),
       ...(typeof call.output !== 'string' && call.output.surface !== undefined ? { surface: call.output.surface } : {}),
@@ -517,17 +610,17 @@ export class LcmEngine implements LcmApi {
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
-  /** Splits each message into units at the prompt cap and keeps its attribution. */
+  /**
+   * Splits each message into units at the byte cap and keeps its attribution (R3). The cap is
+   * bytes, because that is what the operating system counts: a 64 KiB prompt of `'中'` is 192 KiB
+   * on the wire and the process refused to start.
+   */
   private unitsOf(messages: LcmMessage[]): Unit[] {
-    const perUnit = MAX_SUMMARY_PROMPT_CHARS - SUMMARY_UNIT_OVERHEAD;
+    const perUnit = MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD;
     const units: Unit[] = [];
     for (const message of messages) {
-      for (let start = 0; start < message.content.length; start += perUnit) {
-        units.push({
-          role:      message.role,
-          content:   message.content.slice(start, start + perUnit),
-          messageId: message.id,
-        });
+      for (const content of splitByBytes(message.content, perUnit)) {
+        units.push({ role: message.role, content, messageId: message.id });
       }
     }
     return units;
@@ -567,14 +660,19 @@ function reportedTokensOf(output: SummaryOutput, content: string): number {
   return estimateTokens(content);
 }
 
-/** Units into groups whose rendered prompt fits one argument. */
+/**
+ * Units into groups whose rendered prompt fits one argument, measured in bytes (R3).
+ *
+ * `splitByBytes` bounds every unit, so a unit always fits a group on its own; the `group.length > 0`
+ * guard keeps that invariant rather than producing an empty group for one oversized unit.
+ */
 function packUnits(units: Unit[]): Unit[][] {
   const groups: Unit[][] = [];
   let group: Unit[] = [];
   let size = 0;
   for (const unit of units) {
-    const cost = unit.content.length + SUMMARY_UNIT_OVERHEAD;
-    if (group.length > 0 && size + cost > MAX_SUMMARY_PROMPT_CHARS) {
+    const cost = byteLength(unit.content) + SUMMARY_UNIT_OVERHEAD;
+    if (group.length > 0 && size + cost > MAX_SUMMARY_PROMPT_BYTES) {
       groups.push(group);
       group = [];
       size = 0;
@@ -586,23 +684,75 @@ function packUnits(units: Unit[]): Unit[][] {
   return groups;
 }
 
-/** Stored summaries into groups whose rendered prompts fit one argument (F4, F9). */
-function packSummaries(summaries: LcmSummary[]): LcmSummary[][] {
-  const groups: LcmSummary[][] = [];
-  let group: LcmSummary[] = [];
+/**
+ * Splits text into chunks of at most `maxBytes` UTF-8 bytes without splitting a code point. The
+ * previous cap sliced by UTF-16 code unit, which both miscounted non-ASCII text and could cut a
+ * surrogate pair in half.
+ */
+function splitByBytes(text: string, maxBytes: number): string[] {
+  const chunks: string[] = [];
+  let chunk = '';
   let size = 0;
-  for (const summary of summaries) {
-    const cost = summary.content.length + 64; // level marker, id and separators
-    if (group.length > 0 && size + cost > MAX_SUMMARY_PROMPT_CHARS) {
-      groups.push(group);
-      group = [];
+  for (const char of text) {
+    const bytes = byteLength(char);
+    if (chunk !== '' && size + bytes > maxBytes) {
+      chunks.push(chunk);
+      chunk = '';
       size = 0;
     }
-    group.push(summary);
-    size += cost;
+    chunk += char;
+    size += bytes;
   }
-  if (group.length > 0) groups.push(group);
-  return groups;
+  if (chunk !== '' || chunks.length === 0) chunks.push(chunk);
+  return chunks;
+}
+
+/** The prompt as the summarizer renders it, estimated the package's one way (R5's input half). */
+function promptTokensOf(units: Unit[]): number {
+  return estimateTokens(units.map((unit) => `[${unit.role.toUpperCase()}] ${unit.content}`).join('\n'));
+}
+
+/**
+ * Root summaries fitted newest-first into `budget` without compacting (R14): the Dolt archive for a
+ * caller that cannot expand a cue. Returned oldest-first, like the Upward archive, because that is
+ * the order the injector renders.
+ */
+function fitRootsNewestFirst(
+  roots: LcmSummary[],
+  budget: number,
+): { summaries: LcmSummary[]; used: number } {
+  const kept: LcmSummary[] = [];
+  let used = 0;
+  for (let i = roots.length - 1; i >= 0; i--) {
+    const summary = roots[i]!;
+    if (used + summary.tokens > budget) continue;
+    kept.push(summary);
+    used += summary.tokens;
+  }
+  return { summaries: kept.reverse(), used };
+}
+
+/**
+ * The newest messages fitted into the room the archive left (R4c). `candidates` is oldest-first, so
+ * iterating backwards renders newest-first; a message that does not fit is skipped and stays in the
+ * store for the next compaction. The wrapper and per-message overheads are the injector's own
+ * rendering costs, so the returned size is the rendered size, not an estimate of the content alone.
+ */
+function fitRecent(
+  candidates: LcmMessage[],
+  budget: number,
+): { messages: LcmMessage[]; tokens: number } {
+  if (budget <= RECENT_WRAPPER_TOKENS || candidates.length === 0) return { messages: [], tokens: 0 };
+  const kept: LcmMessage[] = [];
+  let used = RECENT_WRAPPER_TOKENS;
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const message = candidates[i]!;
+    const cost = estimateTokens(message.content) + RECENT_MESSAGE_OVERHEAD_TOKENS;
+    if (used + cost > budget) continue;
+    kept.push(message);
+    used += cost;
+  }
+  return { messages: kept, tokens: used };
 }
 
 /**

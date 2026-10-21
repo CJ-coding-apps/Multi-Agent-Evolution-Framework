@@ -8,17 +8,26 @@
 import type { ModelSurface } from '@maf/types';
 
 /**
- * The most characters one summarization prompt may carry (WP-3.2 F4).
+ * The most bytes one summarization call's prompt may carry (WP-3.2 F4, R3).
  *
- * 64 KiB, because the binding limit is not the model's context but the operating system's: Linux
- * refuses to start a process whose single argv argument exceeds `MAX_ARG_STRLEN` (128 KiB), and a
- * backend that takes its prompt on the command line puts this string in exactly one argument. 64
- * KiB leaves the other half of that ceiling for the system prompt, the argv's own flags and the
- * shell's bookkeeping. The engine splits messages into segments beneath this cap and summarizes
- * the summaries upward, so a chunk is bounded before it reaches any adapter; this constant is the
- * one place the number lives, and the adapter also refuses a prompt over it.
+ * The binding limit is not the model's context but the operating system's: Linux refuses a process
+ * whose single argv argument exceeds `MAX_ARG_STRLEN` (128 KiB), and a backend that takes its prompt
+ * on the command line puts this string in exactly one argument. The verifier measured E2BIG at
+ * about 150,000 bytes. The measure is bytes, not UTF-16 code units: one `'中'` is three bytes and
+ * one code unit, so a character count let a 64 KiB prompt become ~192 KiB on the wire.
+ *
+ * 64 KiB for the prompt leaves half of that ceiling for the system prompt, the argv's own flags and
+ * the shell's bookkeeping; {@link MAX_SUMMARY_ARGV_BYTES} states the whole-command-line budget and
+ * {@link SUMMARY_ARGV_ALLOWANCE_BYTES} the part reserved for what the summarizer does not compose.
  */
-export const MAX_SUMMARY_PROMPT_CHARS = 64 * 1024;
+export const MAX_SUMMARY_PROMPT_BYTES = 64 * 1024;
+/** Everything the backend's command line carries, with ~22 KiB headroom under the measured E2BIG. */
+export const MAX_SUMMARY_ARGV_BYTES = 128 * 1024;
+/** Flags, the model name and the working directory: not the prompt, and not counted above. */
+export const SUMMARY_ARGV_ALLOWANCE_BYTES = 8 * 1024;
+
+/** Bytes on the wire, which is what the operating system's argument limit counts. */
+export function byteLength(text: string): number { return Buffer.byteLength(text, 'utf8'); }
 
 export type SummaryOutput = string | {
   content: string;

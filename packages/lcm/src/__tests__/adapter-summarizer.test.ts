@@ -1,10 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, CliAdapter, LcmMessage,
 } from '@maf/types';
 import { makeLcmMessageId, makeRunId } from '@maf/types';
 import { createAdapterSummarizer, createAdapterSubAgent } from '../AdapterSummarizer.js';
+import {
+  byteLength, MAX_SUMMARY_ARGV_BYTES, MAX_SUMMARY_PROMPT_BYTES, SUMMARY_ARGV_ALLOWANCE_BYTES,
+} from '../summarizer.js';
+
+const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 
 // ORACLE: D-17 (WP-3.2) — summaries come from the run's adapter, with a configurable model, and a
 // summarization call cannot act on the tree. The call must ask for text only (`nativeTools: false`),
@@ -56,7 +62,11 @@ test('a summarization call asks for text only and carries the configured model',
   assert.match(call.prompt, /\[USER\] first/);
   assert.match(call.prompt, /\[USER\] second/);
 
-  assert.deepEqual(output, { content: 'summary text', tokensUsed: 42, model: 'summary-model' });
+  // R6: the backend reported no surface here, so this layer records one from what it knows.
+  assert.equal(typeof output === 'string' ? undefined : output.content, 'summary text');
+  assert.equal(typeof output === 'string' ? undefined : output.tokensUsed, 42);
+  assert.equal(typeof output === 'string' ? undefined : output.model, 'summary-model');
+  assert.ok(typeof output !== 'string' && output.surface !== undefined, 'a summary is a recorded call');
 });
 
 test('the backend surface travels with the summary so the engine can record the call (F1)', async () => {
@@ -72,6 +82,55 @@ test('the backend surface travels with the summary so the engine can record the 
     surface,
     'the digests of what was sent and returned reach the record',
   );
+});
+
+test('a backend that reports no surface still yields one, from what this layer knows (R6)', async () => {
+  // Ollama and OpenRouter return no `modelSurface` today. The summary is still a model call, and a
+  // call with no record is a summary that cannot be attributed — so the digests of the text this
+  // layer sent and received stand in. `toolCatalog: ''` is true: MAF composes no tool catalogue for
+  // a text-only call.
+  const adapter = new ScriptedAdapter({});
+  const output = await createAdapterSummarizer({ adapter, workingDir: '/tmp', model: 'm' })([message('x')], 0);
+  const call = adapter.calls[0]!;
+  const surface = typeof output === 'string' ? undefined : output.surface;
+
+  assert.ok(surface, 'a surface is recorded even when the backend returns none');
+  assert.equal(surface.systemPromptSha256, sha256(call.systemPrompt ?? ''));
+  assert.equal(surface.promptSha256, sha256(call.prompt));
+  assert.equal(surface.outputSha256, sha256('summary text'));
+  assert.equal(surface.toolCatalog, '');
+  assert.deepEqual(surface.argv, []);
+  assert.equal(surface.model, 'm', 'the model the call asked for is on the record');
+});
+
+test('the summarizer measures bytes, not characters, and refuses what the OS would (R3)', async () => {
+  // `'中'` is one UTF-16 code unit and three UTF-8 bytes. 60,000 of them is 180,000 bytes: under the
+  // old character cap, over the byte cap, and far over what one argv argument can carry. The
+  // refusal is this layer's, before a process is started with an argument the operating system
+  // would reject with E2BIG.
+  assert.ok(
+    MAX_SUMMARY_PROMPT_BYTES + SUMMARY_ARGV_ALLOWANCE_BYTES <= MAX_SUMMARY_ARGV_BYTES,
+    'the prompt cap leaves the rest of the command line inside the argv cap',
+  );
+  const big = '中'.repeat(60_000);
+  assert.equal(byteLength(big), 180_000, 'the fixture is what the test says it is');
+  assert.ok(big.length < MAX_SUMMARY_PROMPT_BYTES, 'and a CHARACTER cap would have let it through');
+
+  const adapter = new ScriptedAdapter({ output: 'ok' });
+  await assert.rejects(
+    () => createAdapterSummarizer({ adapter, workingDir: '/tmp' })(
+      [{ ...message('x'), content: big }], 0,
+    ),
+    new RegExp(`180007-byte prompt, over the ${MAX_SUMMARY_PROMPT_BYTES}-byte cap`),
+  );
+  assert.equal(adapter.calls.length, 0, 'the backend was never started with the oversized argument');
+
+  // Just under the cap is sent: the check refuses the oversize, not the non-ASCII.
+  const fits = '中'.repeat(21_000);
+  await createAdapterSummarizer({ adapter, workingDir: '/tmp' })(
+    [{ ...message('x'), content: fits }], 0,
+  );
+  assert.equal(adapter.calls.length, 1);
 });
 
 test('without a model the call leaves the choice to the adapter', async () => {
@@ -110,8 +169,10 @@ test('the sub-agent call is tool-less too, and keeps the caller prompt', async (
   const result = await subAgent('be terse', ['one', 'two']);
 
   // An object, not a bare string: the sub-agent is a summary call too, and its token count,
-  // surface and model must survive the seam or the engine cannot record it (F1).
-  assert.deepEqual(result, { content: 'agentic result', model: 'm' });
+  // surface and model must survive the seam or the engine cannot record it (F1/R6).
+  assert.equal(typeof result === 'string' ? undefined : result.content, 'agentic result');
+  assert.equal(typeof result === 'string' ? undefined : result.model, 'm');
+  assert.ok(typeof result !== 'string' && result.surface !== undefined, 'the sub-agent records a surface');
   const call = adapter.calls[0]!;
   assert.equal(call.nativeTools, false);
   assert.equal(call.systemPrompt, 'be terse');

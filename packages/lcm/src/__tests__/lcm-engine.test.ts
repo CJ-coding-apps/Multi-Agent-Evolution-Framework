@@ -1,19 +1,29 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { TransportError, makeLcmMessageId, makeNodeId, makeRunId, makeTaskId } from '@maf/types';
 import type { LcmDegradedRecord, LcmMessage, LcmMessageId, LcmSummary } from '@maf/types';
 import { LcmEngine } from '../LcmEngine.js';
 import type { LcmEngineConfig, LcmSummaryCall } from '../LcmEngine.js';
 import { LcmStore } from '../LcmStore.js';
 import { SessionMerger } from '../SessionMerger.js';
-import { estimateTokens, MAX_SUMMARY_PROMPT_CHARS } from '../summarizer.js';
+import {
+  estimateTokens, byteLength, MAX_SUMMARY_ARGV_BYTES, MAX_SUMMARY_PROMPT_BYTES,
+  SUMMARY_ARGV_ALLOWANCE_BYTES,
+} from '../summarizer.js';
 
-// ORACLE: D-17 mechanism / D-52 choices (WP-3.2). The LCM is judged on what it hands a model:
-//   - the fresh tail is the NEWEST messages, returned in reading order;
+// ORACLE: D-17 mechanism / D-52 choices (WP-3.2, round 2). The LCM is judged on what it hands a
+// model:
+//   - the fresh tail is the NEWEST messages; they are rendered as `<recent>`, newest first, after
+//     the archive and inside the same budget (R4c), and a message that does not fit stays stored;
 //   - compaction summarizes exactly the messages it stops returning raw, no more and no fewer;
-//   - the budget covers what the injector RENDERS (summaries or cues); the loop's own raw history
-//     is not charged, and a summary call's cost is charged separately and reserved first (F2/F10);
-//   - every summarization call is bounded by MAX_SUMMARY_PROMPT_CHARS and summarized upward (F4/F9);
+//   - the budget covers what the injector RENDERS (summaries or cues, plus `<recent>`). A summary
+//     call's cost is a budget record (`compactionTokens`) and never a reservation out of that room
+//     (R2): room is about rendered size, cost is about the call;
+//   - every summarization call is bounded in BYTES, prompt and system prompt together, and the
+//     summaries are raised upward (F4/F9/R3);
 //   - a failed compaction degrades and keeps every message raw (F5);
 //   - one session has one compaction at a time and one summary per message (F6);
 //   - credentials are masked on the way in, through the prompt, and out of the model (F7);
@@ -92,30 +102,36 @@ test('the fresh tail is the newest messages, in reading order, with ties broken 
   }
 });
 
-test('compaction summarizes exactly the messages it drops, and keeps the fresh tail raw', async (t) => {
+test('compaction summarizes exactly the messages it drops, and renders the tail inside the same budget (R4c)', async (t) => {
   const { engine, summarized } = engineWith();
   t.after(() => engine.close());
   await addMessages(engine, ['m1', 'm2', 'm3', 'm4', 'm5']);
 
-  // 50 raw tokens against a budget of 60: 50 > 60 * 0.75, so compaction runs, and the archive is
-  // charged only for what the injector renders — the cue — not for the raw history (F2).
+  // 50 raw tokens against a budget of 60: 50 > 60 * 0.75, so compaction runs. The archive is
+  // charged for what the injector renders — the cue — and the newest messages are rendered as
+  // `<recent>` after it, inside the same 60-token room (R4c).
   const ctx = await engine.assembleContext('s', 60);
 
   assert.equal(summarized.length, 1, 'one summarization call');
   assert.deepEqual(summarized[0]?.map((m) => m.content), ['m1', 'm2', 'm3'], 'the three oldest, and only those');
 
-  assert.deepEqual(ctx.messages.map((m) => m.content), ['m4', 'm5'], 'the newest two stay raw');
+  assert.deepEqual(ctx.messages.map((m) => m.content), ['m5', 'm4'], 'the newest two stay raw, newest first');
   assert.equal(ctx.summaries, undefined, 'Dolt mode offers cues, not summary objects');
 
   assert.equal(ctx.ghosts.length, 1, 'the archive is offered as a cue');
   const cue = ctx.ghosts[0]!;
-  assert.equal(
-    ctx.totalTokens,
-    estimateTokens(cue.cueText),
-    'totalTokens is exactly the rendered cue — the 20 raw tail tokens are not charged',
+  assert.ok(ctx.totalTokens <= 60, `rendered ${ctx.totalTokens} tokens for a 60-token budget`);
+  assert.ok(
+    ctx.totalTokens > estimateTokens(cue.cueText),
+    'the recent messages are rendered too, and charged with the cue (R4c)',
   );
   assert.equal(ctx.compactionTokens, estimateTokens('summary-1'), 'the summary call is charged separately');
-  assert.ok(ctx.totalTokens + ctx.compactionTokens! <= 60, 'the archive share was reserved first');
+  // R2: the call's cost is a record, not a reservation out of the rendered room. The round-1 bug
+  // subtracted it here, which on a backend that reports tokens emptied the archive.
+  assert.ok(
+    ctx.totalTokens + ctx.compactionTokens! > 60,
+    'the rendered room is not reduced by the call\'s cost',
+  );
 
   const expanded = await engine.lcm_expand(cue.summaryId);
   assert.deepEqual(
@@ -129,15 +145,18 @@ test('compaction summarizes exactly the messages it drops, and keeps the fresh t
   assert.equal(summarized.length, 1, 'already-summarized messages are not re-summarized');
 });
 
-test('no compaction below the threshold, and every message is returned uncharged', async (t) => {
+test('no compaction below the threshold; the recent messages are rendered and charged (R4c)', async (t) => {
   const { engine, summarized } = engineWith();
   t.after(() => engine.close());
   await addMessages(engine, ['m1', 'm2', 'm3'], 10);
 
   const ctx = await engine.assembleContext('s', 1_000);
   assert.equal(summarized.length, 0, 'roomy budget: no summarization call');
-  assert.deepEqual(ctx.messages.map((m) => m.content), ['m1', 'm2', 'm3']);
-  assert.equal(ctx.totalTokens, 0, 'raw history is the loop\'s own and is not charged (F2)');
+  assert.deepEqual(ctx.messages.map((m) => m.content), ['m3', 'm2', 'm1'], 'newest first (R4c)');
+  assert.equal(ctx.summaries, undefined, 'Dolt with no archive has nothing to offer');
+  assert.deepEqual(ctx.ghosts, []);
+  assert.ok(ctx.totalTokens > 0, 'the injector renders these messages, so they are charged');
+  assert.ok(ctx.totalTokens <= 1_000);
   assert.equal(ctx.compactionTokens, undefined, 'no call was made');
 });
 
@@ -150,12 +169,12 @@ test('Upward mode returns summaries, Dolt mode returns cues — never both', asy
   assert.equal(upward.summaries?.length, 1, 'Upward: the archive is summary objects');
   assert.equal(upward.summaries?.[0]?.content, 'summary-1');
   assert.deepEqual(upward.ghosts, [], 'Upward does not also emit cues');
-  assert.deepEqual(upward.messages.map((m) => m.content), ['m4', 'm5'], 'the fresh tail is unchanged');
-  assert.equal(
-    upward.totalTokens,
-    upward.summaries!.reduce((sum, summary) => sum + summary.tokens, 0),
-    'the charged cost is the rendered summaries, not the raw tail',
+  assert.deepEqual(upward.messages.map((m) => m.content), ['m5', 'm4'], 'the fresh tail is unchanged, newest first');
+  assert.ok(
+    upward.totalTokens > upward.summaries!.reduce((sum, summary) => sum + summary.tokens, 0),
+    'the summaries and the recent messages are both rendered, and both are charged (R4c)',
   );
+  assert.ok(upward.totalTokens <= 40, 'and both stay inside the one budget');
 
   // A cue is a sentence, not three tokens, so it needs a budget it actually fits in — and the
   // reason it needs one is the next test's rule: the budget is a ceiling in both modes.
@@ -256,11 +275,17 @@ test('a summary call is recorded with its surface and trigger, and charged to th
   assert.equal(call.surface?.outputSha256, 'c'.repeat(64));
   assert.equal(call.contentTokens, estimateTokens('summary text'));
   assert.equal(call.reportedTokens, 1_234, 'the backend count is on the record');
+  assert.equal(
+    call.tokenBudgetCharged,
+    1_234,
+    'R5: what the call spent is the backend\'s count when it reports one',
+  );
 
   assert.equal(ctx.compactionTokens, 1_234, 'and it is charged to the node');
   const surface = ctx.summaryCalls?.[0];
   assert.equal(surface?.reportedTokens, 1_234);
   assert.equal(surface?.contentTokens, estimateTokens('summary text'));
+  assert.equal(surface?.tokenBudgetCharged, 1_234);
 
   const expanded = await engine.expandSummary(call.summaryId);
   assert.equal(
@@ -270,13 +295,14 @@ test('a summary call is recorded with its surface and trigger, and charged to th
   );
 });
 
-test('every summarization call is bounded, and the summaries are raised to one root (F4)', async (t) => {
+test('every summarization call is bounded in bytes, and the summaries are raised to one root (F4/R3)', async (t) => {
   const rendered: number[] = [];
   const perMessage: number[] = [];
   const { engine } = engineWith({
     summarize: async (messages) => {
-      rendered.push(messages.reduce((sum, message) => sum + message.content.length + 32, 0));
-      perMessage.push(Math.max(...messages.map((message) => message.content.length)));
+      // The prompt as the run's summarizer renders it (AdapterSummarizer: `[ROLE] content`).
+      rendered.push(byteLength(messages.map((m) => `[${m.role.toUpperCase()}] ${m.content}`).join('\n')));
+      perMessage.push(Math.max(...messages.map((m) => byteLength(m.content))));
       return `s-${rendered.length}`;
     },
   });
@@ -287,11 +313,15 @@ test('every summarization call is bounded, and the summaries are raised to one r
 
   assert.equal(rendered.length, 71, '70 bounded level-0 calls, then one level-1 call');
   assert.ok(
-    Math.max(...rendered) <= MAX_SUMMARY_PROMPT_CHARS,
-    `largest rendered prompt ${Math.max(...rendered)} exceeds ${MAX_SUMMARY_PROMPT_CHARS}`,
+    Math.max(...rendered) <= MAX_SUMMARY_PROMPT_BYTES,
+    `largest rendered prompt ${Math.max(...rendered)} bytes exceeds ${MAX_SUMMARY_PROMPT_BYTES}`,
   );
   assert.ok(
-    Math.max(...perMessage) < MAX_SUMMARY_PROMPT_CHARS,
+    Math.max(...rendered) + SUMMARY_ARGV_ALLOWANCE_BYTES <= MAX_SUMMARY_ARGV_BYTES,
+    'the prompt leaves the rest of the command line inside its cap',
+  );
+  assert.ok(
+    Math.max(...perMessage) < MAX_SUMMARY_PROMPT_BYTES,
     'no single message fragment reaches the OS single-argument limit',
   );
 
@@ -300,6 +330,48 @@ test('every summarization call is bounded, and the summaries are raised to one r
     new Set(expanded!.messages.map((m) => m.id)),
     new Set(ids),
     'the root covers all 70 messages',
+  );
+});
+
+test('the byte cap holds for multi-byte text, where a character cap did not (R3)', async (t) => {
+  // 60,000 `'中'` is 60,000 UTF-16 code units but 180,000 bytes: comfortably under a 64 KiB
+  // CHARACTER cap, and far over the 128 KiB the operating system allows one argv argument. The
+  // round-1 implementation measured characters and would have handed this to the backend whole.
+  const rendered: number[] = [];
+  const { engine } = engineWith({
+    contextThreshold: 0,
+    freshTailCount: 0,
+    mode: 'Upward',
+    summarize: async (messages) => {
+      rendered.push(byteLength(messages.map((m) => `[${m.role.toUpperCase()}] ${m.content}`).join('\n')));
+      return `summary-${rendered.length}`;
+    },
+  });
+  t.after(() => engine.close());
+
+  const big = '中'.repeat(60_000);
+  assert.equal(byteLength(big), 180_000, 'the fixture is what the test says it is');
+  const ids = await addMessages(engine, [big, big, big, big], 1);
+
+  const ctx = await engine.assembleContext('s', 100, 'Upward');
+  assert.equal(ctx.degraded, undefined, 'every call fit; nothing degraded');
+  assert.ok(rendered.length > 4, 'the four messages were split across more than four calls');
+  assert.ok(
+    Math.max(...rendered) <= MAX_SUMMARY_PROMPT_BYTES,
+    `largest rendered prompt ${Math.max(...rendered)} bytes exceeds ${MAX_SUMMARY_PROMPT_BYTES}`,
+  );
+  assert.ok(
+    Math.max(...rendered) + SUMMARY_ARGV_ALLOWANCE_BYTES <= MAX_SUMMARY_ARGV_BYTES,
+    'every call, with the summarizer\'s own flags, is inside the command-line cap',
+  );
+
+  const root = ctx.summaries?.[0];
+  assert.ok(root, 'the archive is rendered as a summary');
+  const expanded = await engine.expandSummary(root.id);
+  assert.deepEqual(
+    new Set(expanded!.messages.map((m) => m.id)),
+    new Set(ids),
+    'no message was lost to a chunk boundary',
   );
 });
 
@@ -336,7 +408,7 @@ test('a transport failure is retried; a verdict is not (F5)', async (t) => {
   assert.equal(verdictAttempts, 1, 'a judgement is terminal, never retried');
 });
 
-test('a compaction that fails degrades: every message stays raw and the failure is recorded (F5)', async (t) => {
+test('a compaction that fails degrades: nothing leaves the store, and the failure is recorded (F5)', async (t) => {
   const degraded: LcmDegradedRecord[] = [];
   const { engine } = engineWith({
     mode: 'Upward',
@@ -355,13 +427,30 @@ test('a compaction that fails degrades: every message stays raw and the failure 
   assert.equal(degraded[0]!.taskId, 't');
   assert.equal(degraded[0]!.nodeId, 'n');
   assert.equal(ctx.degraded?.[0]?.reason, 'backend down', 'the context carries the same record');
+  // R4c: the renderer takes the newest messages that fit, and a message that does not fit stays in
+  // the store rather than being dropped — the next compaction still has it.
   assert.deepEqual(
     ctx.messages.map((m) => m.content),
-    ['m1', 'm2', 'm3', 'm4', 'm5'],
-    'nothing is dropped without a summary that covers it (E10)',
+    ['m5', 'm4', 'm3', 'm2'],
+    'the newest messages that fit, newest first; the fifth waits for the next compaction',
   );
   assert.deepEqual(ctx.summaries, []);
-  assert.equal(ctx.totalTokens, 0);
+  assert.ok(ctx.totalTokens <= 60);
+});
+
+test('a message the budget cannot hold is neither rendered nor dropped (R4c)', async (t) => {
+  const { engine } = engineWith({ mode: 'Upward' });
+  t.after(() => engine.close());
+  await addMessages(engine, ['older message', 'newest message']);
+
+  // Room for the wrapper and one message only: the newest is rendered, the older stays stored.
+  const ctx = await engine.assembleContext('s', 25, 'Upward');
+  assert.deepEqual(ctx.messages.map((m) => m.content), ['newest message']);
+  assert.equal(
+    (await engine.lcm_grep('older', 's')).length,
+    1,
+    'the message that did not fit is still in the store for the next compaction',
+  );
 });
 
 test('four concurrent assemblies make one call and cover each message exactly once (F6)', async (t) => {
@@ -383,7 +472,7 @@ test('four concurrent assemblies make one call and cover each message exactly on
   assert.equal(summarized.length, 1, 'the session lock serialized the passes');
   for (const ctx of contexts) {
     assert.equal(ctx.ghosts.length, 1, 'every assembly sees the same archive');
-    assert.deepEqual(ctx.messages.map((m) => m.content), ['m4', 'm5']);
+    assert.deepEqual(ctx.messages.map((m) => m.content), ['m5', 'm4'], 'newest first (R4c)');
   }
 
   const summaryId = contexts[0]!.ghosts[0]!.summaryId;
@@ -395,17 +484,14 @@ test('four concurrent assemblies make one call and cover each message exactly on
   );
 });
 
-test('credentials are masked into the archive, through the prompt, and out of the model (F7)', async (t) => {
-  const prompts: string[] = [];
-  const { engine } = engineWith({
-    summarize: async (messages) => {
-      prompts.push(messages.map((m) => m.content).join('\n'));
-      return { content: 'the model echoed AKIAIOSFODNN7EXAMPLE back' };
-    },
-  });
+// Each masking layer is pinned on its own (F7, R8): a test that asserts all three at once passes
+// while any one of them still works, which is how a layer can regress unnoticed.
+
+test('a credential is masked on the way into the store (F7a)', async (t) => {
+  const { engine } = engineWith();
   t.after(() => engine.close());
 
-  const id = await engine.addMessage({
+  await engine.addMessage({
     sessionId: 's', runId: RUN, role: 'user',
     content: 'aws: AKIAIOSFODNN7EXAMPLE', tokens: 5,
   });
@@ -413,11 +499,45 @@ test('credentials are masked into the archive, through the prompt, and out of th
   const [stored] = await engine.lcm_grep('aws', 's');
   assert.doesNotMatch(stored!.content, /AKIAIOSFODNN7EXAMPLE/, 'the store keeps no key');
   assert.match(stored!.content, /\[REDACTED:aws-access-key\]/);
+});
 
-  const summaryId = await engine.summarizeChunk([id], 'LLM-Map');
+test('a key already in the store is masked before the summarizer sees it (F7b)', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-lcm-mask-'));
+  const dbPath = path.join(dir, 'lcm.db');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  // Written straight to the store, not through `addMessage`: this is the shape of a database
+  // written by an older version, or by any writer that did not pass the engine's front door. The
+  // prompt boundary must hold on its own.
+  const store = new LcmStore(dbPath);
+  const id = store.insertMessage({
+    sessionId: 's', runId: RUN, role: 'user', content: 'aws: AKIAIOSFODNN7EXAMPLE', tokens: 5,
+  });
+  store.close();
+
+  const prompts: string[] = [];
+  const engine = new LcmEngine({
+    dbPath, contextThreshold: 0.75, freshTailCount: 0, mode: 'Upward',
+    summarize: async (messages) => {
+      prompts.push(messages.map((m) => m.content).join('\n'));
+      return 'ok';
+    },
+  });
+  t.after(() => engine.close());
+
+  await engine.summarizeChunk([id], 'LLM-Map');
   assert.doesNotMatch(prompts[0]!, /AKIAIOSFODNN7EXAMPLE/, 'the summarizer never sees the key');
   assert.match(prompts[0]!, /\[REDACTED:aws-access-key\]/);
+});
 
+test('a key the model echoes is masked out of the stored summary (F7c)', async (t) => {
+  const { engine } = engineWith({
+    summarize: async () => ({ content: 'the model echoed AKIAIOSFODNN7EXAMPLE back' }),
+  });
+  t.after(() => engine.close());
+  const [id] = await addMessages(engine, ['m1'], 1);
+
+  const summaryId = await engine.summarizeChunk([id!], 'LLM-Map');
   const expanded = await engine.expandSummary(summaryId);
   assert.doesNotMatch(
     expanded!.summary.content,
@@ -516,6 +636,205 @@ test('ghost cues are offered newest-first, so the most recent archive is not cro
     'the cue names the tool and the id it expands',
   );
   assert.doesNotMatch(ctx.ghosts[0]!.cueText, /lcm_expand/);
+});
+
+// ── Round-2 rulings ──────────────────────────────────────────────────────────
+
+test('a backend that reports token usage does not shrink the room it renders into (R2)', async (t) => {
+  // The round-1 bug returned on exactly the backends that report a count: the call's cost was
+  // subtracted from the prompt's free space, so a 9,000-token report against a 60-token budget
+  // emptied the archive. Room is about rendered size; the call is about the call.
+  const { engine } = engineWith({
+    mode: 'Upward',
+    summarize: async () => ({ content: 'summary-1', tokensUsed: 9_000 }),
+  });
+  t.after(() => engine.close());
+  await addMessages(engine, ['m1', 'm2', 'm3', 'm4', 'm5']);
+
+  const ctx = await engine.assembleContext('s', 60, 'Upward');
+  assert.equal(ctx.summaries?.length, 1, 'the archive is still in the prompt');
+  assert.equal(ctx.messages.length, 2, 'and the newest messages still fit beside it');
+  assert.ok(ctx.totalTokens <= 60, `rendered ${ctx.totalTokens} tokens for a 60-token budget`);
+  assert.equal(ctx.compactionTokens, 9_000, 'the call is charged to the record, not to the room');
+});
+
+test('a call that reports no count is charged input plus output (R5)', async (t) => {
+  // R5: record always. When the backend reports nothing, the charge is this package's estimate —
+  // the rendered prompt plus the summary — and it is on both records even though no built-in role
+  // sets a `tokenBudget` to enforce it against.
+  const calls: LcmSummaryCall[] = [];
+  const { engine } = engineWith({
+    mode: 'Upward',
+    summarize: async () => 'summary-1',
+    recordSummaryCall: (call) => { calls.push(call); },
+  });
+  t.after(() => engine.close());
+  await addMessages(engine, ['m1', 'm2', 'm3', 'm4', 'm5']);
+
+  const ctx = await engine.assembleContext('s', 60, 'Upward');
+  assert.equal(calls.length, 1);
+  const call = calls[0]!;
+  // The prompt is `[USER] m1\n[USER] m2\n[USER] m3` (29 chars → 8 tokens); `summary-1` is 3.
+  assert.equal(call.tokenBudgetCharged, 11, 'input plus output, estimated');
+  assert.equal(call.reportedTokens, undefined, 'nothing was reported, and nothing was invented');
+  assert.equal(ctx.compactionTokens, 3, 'what compaction records is what the call produced');
+  assert.equal(ctx.summaryCalls?.[0]?.tokenBudgetCharged, 11);
+});
+
+test('expand is scoped to its own run, though the database outlives the run (R9)', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-lcm-runs-'));
+  const dbPath = path.join(dir, 'lcm.db');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const engineFor = (sessionId: string, summary: string) => new LcmEngine({
+    dbPath, sessionId, contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async () => summary,
+  });
+
+  const runA = engineFor('run-a', 'summary from run A');
+  const aId = await runA.addMessage({
+    sessionId: 'run-a', runId: makeRunId('run-a'), role: 'user', content: 'A only', tokens: 1,
+  });
+  const aSummary = await runA.summarizeChunk([aId], 'LLM-Map');
+  assert.ok(await runA.expandSummary(aSummary), 'run A can expand its own archive');
+  runA.close();
+
+  const runB = engineFor('run-b', 'summary from run B');
+  t.after(() => runB.close());
+  const bId = await runB.addMessage({
+    sessionId: 'run-b', runId: makeRunId('run-b'), role: 'user', content: 'B only', tokens: 1,
+  });
+  const bSummary = await runB.summarizeChunk([bId], 'LLM-Map');
+
+  assert.equal(
+    await runB.expandSummary(aSummary),
+    undefined,
+    'run B cannot read the summary run A left in the shared .maf/lcm.db',
+  );
+  assert.deepEqual(await runB.lcm_expand(aSummary), [], 'and the tool shape is empty, not a partial read');
+  assert.ok(await runB.expandSummary(bSummary), 'its own archive still resolves');
+
+  // The scoping is the engine's, not the store's: an unscoped engine over the same file — a test,
+  // or a merge tool acting deliberately — can still read both. Every other read names its session
+  // explicitly (`lcm_grep`, `assembleContext`), so `expandSummary` was the one that crossed runs.
+  const unscoped = new LcmEngine({
+    dbPath, contextThreshold: 1, freshTailCount: 0, mode: 'Upward', summarize: async () => 'x',
+  });
+  t.after(() => unscoped.close());
+  assert.ok(await unscoped.expandSummary(aSummary));
+  assert.ok(await unscoped.expandSummary(bSummary));
+});
+
+test('a credential the model echoes at a raise level is masked too (R10)', async (t) => {
+  // Level-0 output was masked; the text that `raise` composed from a model's answer was not. Both
+  // are stored summaries and both are shown by `lcm.expand`.
+  const { engine } = engineWith({
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async (_messages, depth) => (
+      depth === 0 ? 'ordinary summary' : 'the model echoed AKIAIOSFODNN7EXAMPLE back'
+    ),
+  });
+  t.after(() => engine.close());
+
+  // Two 40,000-byte messages are two prompts, so the two level-0 summaries are raised together.
+  const ids = await addMessages(engine, ['a'.repeat(40_000), 'b'.repeat(40_000)], 1);
+  const rootId = await engine.summarizeChunk(ids, 'LLM-Map');
+
+  const root = (await engine.expandSummary(rootId))!.summary;
+  assert.equal(root.level, 1, 'the two level-0 summaries were raised');
+  assert.doesNotMatch(root.content, /AKIAIOSFODNN7EXAMPLE/, 'the raise masks what the model echoed');
+  assert.match(root.content, /\[REDACTED:aws-access-key\]/);
+});
+
+test('a child too large for one prompt is split across parents that each name it (R11)', async (t) => {
+  let call = 0;
+  const { engine } = engineWith({
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async (_messages, depth) => {
+      if (depth > 0) return 'parent summary';
+      call += 1;
+      return call === 1 ? 'x'.repeat(150_000) : 'small child';
+    },
+  });
+  t.after(() => engine.close());
+
+  // Two prompts make two level-0 summaries: the first is 150,000 bytes (three bounded units), the
+  // second is small (one). The split is real — each parent names exactly the children whose text
+  // it saw, rather than all of them being claimed by the first parent.
+  const ids = await addMessages(engine, ['a'.repeat(40_000), 'b'.repeat(40_000)], 1);
+  const rootId = await engine.summarizeChunk(ids, 'LLM-Map');
+
+  const root = (await engine.expandSummary(rootId))!.summary;
+  assert.equal(root.level, 2, 'the level-1 parents were raised to one root');
+
+  const tree = await summaryTree(engine, rootId);
+  const hugeChild = [...tree.values()].find((s) => s.level === 0 && s.content.length === 150_000);
+  assert.ok(hugeChild, 'the oversized level-0 summary is in the tree');
+  const smallChild = [...tree.values()].find((s) => s.level === 0 && s.id !== hugeChild.id);
+  assert.ok(smallChild, 'the small level-0 summary is in the tree too');
+
+  const level1 = [...tree.values()].filter((s) => s.level === 1);
+  const namingHuge = level1.filter((s) => s.parentIds.includes(hugeChild.id));
+  assert.equal(namingHuge.length, 3, 'the child is split across three parents, not truncated into one');
+  assert.equal(
+    namingHuge.flatMap((s) => s.parentIds).filter((id) => id === hugeChild.id).length,
+    3,
+    'each of those parents names it exactly once — no parent claims text it never saw',
+  );
+  const namingSmall = level1.filter((s) => s.parentIds.includes(smallChild.id));
+  assert.equal(namingSmall.length, 1, 'the small child fits one prompt, so one parent names it');
+  assert.equal(root.parentIds.length, 3, 'the root names all three level-1 parents');
+
+  const covered = new Set(
+    [...namingHuge, ...namingSmall].flatMap((s) => s.messageIds),
+  );
+  assert.deepEqual(
+    [...covered].sort(),
+    [...ids].sort(),
+    'the parents together cover both messages, and nothing was lost to a chunk boundary',
+  );
+});
+
+test('a single root too large for the archive is offered as a cue, not silently dropped (R12)', async (t) => {
+  const { engine } = engineWith({
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async () => 'y'.repeat(20_000),
+  });
+  t.after(() => engine.close());
+  const [id] = await addMessages(engine, ['m1'], 1);
+  const rootId = await engine.summarizeChunk([id!], 'LLM-Map');
+
+  // The root is ~5,000 tokens and the archive has 4,096. Before R12 the prompt carried nothing and
+  // said nothing; a cue is a sentence, so it fits and names an id that expands.
+  const ctx = await engine.assembleContext('s', 4_096, 'Upward');
+  assert.deepEqual(ctx.summaries, [], 'the summary itself does not fit');
+  assert.equal(ctx.ghosts.length, 1, 'the archive is still offered, as a cue');
+  assert.equal(ctx.ghosts[0]!.summaryId, rootId);
+  assert.ok(ctx.totalTokens <= 4_096);
+  assert.deepEqual(
+    (await engine.lcm_expand(rootId)).map((m) => m.content),
+    ['m1'],
+    'the cue names an id that expands',
+  );
+});
+
+test('a caller that cannot expand a cue is given summaries instead (R14)', async (t) => {
+  // A cli-tier role has no `lcm.expand` tool (MAF tools are in-process only), so a Dolt cue telling
+  // it to call one is an instruction it cannot follow. The dispatcher asks for `summaries` there.
+  const { engine } = engineWith({ contextThreshold: 1, freshTailCount: 0 });
+  t.after(() => engine.close());
+  const ids = await addMessages(engine, ['m1', 'm2', 'm3'], 1);
+  const rootId = await engine.summarizeChunk(ids, 'LLM-Map');
+
+  const summaries = await engine.assembleContext('s', 1_000, 'Dolt', undefined, 'summaries');
+  assert.equal(summaries.summaries?.length, 1, 'the archive is summary objects');
+  assert.equal(summaries.summaries?.[0]?.id, rootId);
+  assert.deepEqual(summaries.ghosts, [], 'and no cue the caller cannot act on');
+
+  // The mode's default is unchanged: Dolt without the override still offers cues.
+  const cues = await engine.assembleContext('s', 1_000, 'Dolt');
+  assert.equal(cues.summaries, undefined);
+  assert.equal(cues.ghosts.length, 1);
 });
 
 test('a merged run keeps its summaries and can expand them from the target session (F3)', async () => {

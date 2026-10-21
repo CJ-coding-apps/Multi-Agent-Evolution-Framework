@@ -702,6 +702,16 @@ export interface LcmSummarySurface {
   contentTokens:  number;
   reportedTokens?: number;
   /**
+   * What the call spent against the triggering node's budget (WP-3.2 R5): the backend's reported
+   * tokens when it reports them, otherwise the estimate of the prompt plus the summary. Recorded on
+   * every call, so a run can see the cost even when the role sets no `tokenBudget`; enforcement
+   * (subtracting it before the turn) applies only where a role has one.
+   */
+  tokenBudgetCharged?: number;
+  /** The node whose assembly triggered the call; absent for a background pass (WP-3.2 R5). */
+  nodeId?:        NodeId;
+  taskId?:        TaskId;
+  /**
    * The model-facing surface of the call, when the backend reported one (WP-3.2 F1). Repeated here
    * rather than only on the attestor's record because the `[surface]` transcript line is written by
    * the caller that owns the transcript, and that caller has only this object.
@@ -722,6 +732,21 @@ export interface LcmDegradedRecord {
   nodeId?:   NodeId;
   /** Why compaction stopped, as the summarizer or operator reported it. */
   reason:    string;
+}
+
+/**
+ * The LCM settings in force for a run (WP-3.2 R4a), recorded once in the bundle. Without it a
+ * bundle cannot say which mode ran, so a `lcm.mode: off` control had to be established by the
+ * absence of every other record rather than by a statement.
+ */
+export interface LcmSettingsRecord {
+  mode:              LcmMode;
+  operator:          'LLM-Map' | 'Agentic-Map';
+  contextThreshold:  number;
+  freshTailCount:    number;
+  summaryTimeoutMs:  number;
+  /** The model the summaries were asked for; absent when the adapter chose its own. */
+  model?:            string;
 }
 
 export interface LcmMessage {
@@ -755,18 +780,21 @@ export interface GhostCue {
 
 export interface LcmContext {
   /**
-   * The loop's own recent history, oldest first, for a caller that also owns the turn's history.
-   * It is NOT charged against `totalTokens` (WP-3.2 F2): the injector renders summaries and cues,
-   * not these, so charging them only crowded the archive out of the prompt.
+   * The newest messages of the session, newest first, which the injector renders as `<recent>`
+   * after the summaries and within the same budget (WP-3.2 R4c). A message that does not fit is
+   * neither rendered nor dropped from the store: it stays for the next compaction to summarize.
    */
   messages:    LcmMessage[];
   ghosts:      GhostCue[];
-  /** Tokens of what the injector renders — summaries or ghost cues — and nothing else. */
+  /**
+   * Tokens of what the injector renders — summaries or cues, plus those recent messages.
+   * (`totalTokens` is the rendered size, never the cost of the call that produced a summary.)
+   */
   totalTokens: number;
   /**
-   * Tokens a summary call spent during this assembly (WP-3.2 F1). A summary is a model call like
-   * any other, so its cost is charged to the same node's budget; the engine reserves this out of
-   * the archive's share before it fits anything. Absent when no call was made.
+   * Tokens a summary call spent during this assembly (WP-3.2 F1/R5). A summary is a model call
+   * like any other, so its cost is charged to the same node's budget record; it is NOT reserved
+   * out of the archive's rendered room (R2). Absent when no call was made.
    */
   compactionTokens?: number;
   /**
@@ -797,6 +825,11 @@ export interface LcmApi {
     tokenBudget: number,
     mode?: LcmMode,
     trigger?: LcmTrigger,
+    /**
+     * `'summaries'` asks the Dolt mode for its archive as summaries rather than cues, for a caller
+     * that cannot expand a cue (WP-3.2 R14). Absent leaves the mode's own delivery.
+     */
+    render?: 'cues' | 'summaries',
   ): Promise<LcmContext>;
   lcm_grep(query: string, sessionId: string): Promise<LcmMessage[]>;
   lcm_expand(summaryId: LcmSummaryId): Promise<LcmMessage[]>;
@@ -1283,6 +1316,11 @@ export interface AttestationBundle {
    * be recorded before the run continues.
    */
   lcmDegraded?:      LcmDegradedRecord[];
+  /**
+   * The LCM settings this run ran with (WP-3.2 R4a), recorded once. Absent in a bundle written by
+   * a version that did not record them; a reader must not read absence as `mode: off`.
+   */
+  lcmSettings?:      LcmSettingsRecord;
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;
@@ -1311,6 +1349,11 @@ export interface AttestorHandle {
    * on the transcript.
    */
   recordLcmDegraded?(record: LcmDegradedRecord): void;
+  /**
+   * Attach the LCM settings in force (WP-3.2 R4a), recorded once per run. Optional so a test double
+   * that records only tool calls still satisfies the handle.
+   */
+  recordLcmSettings?(settings: LcmSettingsRecord): void;
   /**
    * The tool calls recorded for one task (F10). A node's `no_change` failure names the policy
    * rules that denied that node's *own* calls, so the reader is told which rule stopped the write

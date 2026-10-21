@@ -1,7 +1,10 @@
-import type { CliAdapter, LcmMessage } from '@maf/types';
+import { createHash } from 'node:crypto';
+import type { CliAdapter, LcmMessage, ModelSurface } from '@maf/types';
 import { redactCredentials, TransportError } from '@maf/types';
 import type { SummaryOutput } from './summarizer.js';
-import { MAX_SUMMARY_PROMPT_CHARS } from './summarizer.js';
+import {
+  byteLength, MAX_SUMMARY_ARGV_BYTES, MAX_SUMMARY_PROMPT_BYTES, SUMMARY_ARGV_ALLOWANCE_BYTES,
+} from './summarizer.js';
 
 // D-17: summaries come from the run's adapter, not from a local stub. The CLI wires this to the
 // same `CliAdapter` the run executes with, and to the model the run was given (or the one the
@@ -43,13 +46,14 @@ export function createAdapterSummarizer(
     if (messages.length === 0) {
       throw new Error('LCM summarization was asked to summarize no messages.');
     }
-    const prompt = boundedPrompt(
-      messages.map((m) => `[${m.role.toUpperCase()}] ${redactCredentials(m.content)}`).join('\n'),
-      'LCM summarization',
-    );
     const systemPrompt = depth === 0
       ? SUMMARY_SYSTEM_PROMPT
       : `${SUMMARY_SYSTEM_PROMPT}\nThese are summaries of earlier summaries: preserve every fact they already compressed.`;
+    const prompt = boundedPrompt(
+      messages.map((m) => `[${m.role.toUpperCase()}] ${redactCredentials(m.content)}`).join('\n'),
+      systemPrompt,
+      'LCM summarization',
+    );
 
     const result = await options.adapter.invoke({
       prompt,
@@ -77,10 +81,22 @@ export function createAdapterSummarizer(
     if (content === '') {
       throw new Error(`LCM summarization failed: the ${options.adapter.name} adapter returned an empty summary.`);
     }
+    // R6: not every backend reports a surface (ollama and openrouter return none today). A summary
+    // is a model call like any other, so one is recorded from what this layer knows: the two prompts
+    // and the output it was handed, and the model it asked for. MAF composed no tool catalogue for
+    // a text-only call, which is what `''` means here.
+    const surface: ModelSurface = result.modelSurface ?? {
+      systemPromptSha256: sha256(systemPrompt),
+      toolCatalog: '',
+      promptSha256: sha256(prompt),
+      outputSha256: sha256(result.output),
+      argv: [],
+      ...(options.model !== undefined ? { model: options.model } : {}),
+    };
     return {
       content,
       ...(result.tokensUsed !== undefined ? { tokensUsed: result.tokensUsed } : {}),
-      ...(result.modelSurface !== undefined ? { surface: result.modelSurface } : {}),
+      surface,
       ...(options.model !== undefined ? { model: options.model } : {}),
     };
   };
@@ -94,11 +110,13 @@ export function createAdapterSubAgent(
   options: AdapterSummarizerOptions,
 ): (systemPrompt: string, userMessages: string[]) => Promise<SummaryOutput> {
   return async (systemPrompt, userMessages) => {
+    const prompt = boundedPrompt(
+      userMessages.map((message) => redactCredentials(message)).join('\n\n'),
+      systemPrompt,
+      'LCM Agentic-Map',
+    );
     const result = await options.adapter.invoke({
-      prompt: boundedPrompt(
-        userMessages.map((message) => redactCredentials(message)).join('\n\n'),
-        'LCM Agentic-Map',
-      ),
+      prompt,
       systemPrompt,
       workingDir: options.workingDir,
       timeoutMs: options.timeoutMs ?? 120_000,
@@ -125,27 +143,57 @@ export function createAdapterSubAgent(
     }
     // The backend's count and surface travel with the text (F1): Agentic-Map's summary is recorded
     // in the same array as every role call, and its tokens are charged to the budget that paid.
+    // R6: a backend that reports no surface still gets one recorded, as on the LLM-Map path.
+    const surface: ModelSurface = result.modelSurface ?? {
+      systemPromptSha256: sha256(systemPrompt),
+      toolCatalog: '',
+      promptSha256: sha256(prompt),
+      outputSha256: sha256(result.output),
+      argv: [],
+      ...(options.model !== undefined ? { model: options.model } : {}),
+    };
     return {
       content,
       ...(result.tokensUsed !== undefined ? { tokensUsed: result.tokensUsed } : {}),
-      ...(result.modelSurface !== undefined ? { surface: result.modelSurface } : {}),
+      surface,
       ...(options.model !== undefined ? { model: options.model } : {}),
     };
   };
 }
 
 /**
- * Refuses a prompt over the single-argument ceiling (F4) rather than letting the operating system
- * refuse the process start with E2BIG, which names neither the package nor the reason. The engine
- * chunks below this limit, so reaching this sentence is a defect in the caller, and it should fail
- * as one.
+ * Refuses a prompt over the command-line ceiling (F4, R3) rather than letting the operating system
+ * refuse the process start with E2BIG, which names neither the package nor the reason.
+ *
+ * The measure is bytes, not characters, and it is the whole command line rather than the prompt
+ * alone. The claude adapter hands the prompt to the backend as one argv argument
+ * (`-p -- <prompt>`) and has no stdin form for this call — codex is the adapter that reads stdin, and
+ * a summary is made by the run's own adapter — so the prompt, the system prompt, the flags and the
+ * model name all share the limit. A `'中'` is one character and three bytes, which is exactly how a
+ * 64 KiB character cap became a ~192 KiB argument.
+ *
+ * The engine chunks below {@link MAX_SUMMARY_PROMPT_BYTES}, so reaching this sentence is a defect
+ * in the caller, and it should fail as one.
  */
-function boundedPrompt(prompt: string, what: string): string {
-  if (prompt.length > MAX_SUMMARY_PROMPT_CHARS) {
+function boundedPrompt(prompt: string, systemPrompt: string, what: string): string {
+  const promptBytes = byteLength(prompt);
+  if (promptBytes > MAX_SUMMARY_PROMPT_BYTES) {
     throw new Error(
-      `${what} built a ${prompt.length}-character prompt, over the ${MAX_SUMMARY_PROMPT_CHARS}-character ` +
+      `${what} built a ${promptBytes}-byte prompt, over the ${MAX_SUMMARY_PROMPT_BYTES}-byte ` +
       `cap for one backend argument. The engine is expected to chunk below it.`,
     );
   }
+  const argvBytes = promptBytes + byteLength(systemPrompt) + SUMMARY_ARGV_ALLOWANCE_BYTES;
+  if (argvBytes > MAX_SUMMARY_ARGV_BYTES) {
+    throw new Error(
+      `${what} built a command line of about ${argvBytes} bytes (prompt, system prompt and the ` +
+      `summarizer's own flags), over the ${MAX_SUMMARY_ARGV_BYTES}-byte cap for one process start.`,
+    );
+  }
   return prompt;
+}
+
+/** The hex digest a surface records; the same construction the adapters use. */
+function sha256(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
 }
