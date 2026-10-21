@@ -9,7 +9,7 @@ import { TranscriptLogger } from '../TranscriptLogger.js';
 import type { TranscriptLoggerConfig } from '../TranscriptLogger.js';
 import { CompressionAgent } from '../CompressionAgent.js';
 
-// ORACLE: D-26 (WP-3.2). The logger this replaces passed transcript-entry ids to the LCM as if they
+// ORACLE: D-17 (WP-3.2). The logger this replaces passed transcript-entry ids to the LCM as if they
 // were LCM message ids (`chunk.map(e => e.id) as never[]`), so compaction failed the FOREIGN KEY,
 // the failure was swallowed with `.catch(() => undefined)`, and the entries were dropped from the
 // in-memory transcript anyway. A run lost context and nothing said so. The logger must hand over the

@@ -16,7 +16,7 @@ export interface TranscriptLoggerConfig {
   /**
    * A background compaction that failed. Compaction cannot throw at `append`, so this replaces the
    * `.catch(() => undefined)` the previous logger used — which hid a FOREIGN KEY failure and left
-   * compaction never running, while the transcript still dropped entries (D-26).
+   * compaction never running, while the transcript still dropped entries (D-17).
    */
   onCompactionError?: (err: unknown) => void;
 }
@@ -62,7 +62,7 @@ export class TranscriptLogger {
     // Add to the LCM store and keep the id *it* assigned. Compaction summarizes rows in the LCM,
     // and the transcript entry's own id is not one of them: the version this replaces passed
     // `chunk.map(e => e.id) as never[]`, so compaction failed the foreign key and the entries were
-    // spliced away anyway (D-26).
+    // spliced away anyway (D-17).
     const messageId = await this.config.lcm.addMessage({
       sessionId: this.runId,
       runId:     this.runId,

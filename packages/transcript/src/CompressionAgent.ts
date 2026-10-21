@@ -10,7 +10,7 @@ export interface CompressionAgentConfig {
   /**
    * A compaction that failed. Compaction runs in the background from `ingest`, so a rejection
    * cannot be thrown at the caller; it must not vanish either. The logger this replaces dropped
-   * it with `.catch(() => undefined)`, which is how a run kept losing context (D-26).
+   * it with `.catch(() => undefined)`, which is how a run kept losing context (D-17).
    */
   onError?: (err: unknown) => void;
 }
@@ -37,7 +37,7 @@ export class CompressionAgent {
     this.totalTokens += entry.tokens;
 
     // One pass may not be enough: an entry appended while a pass is in flight has to be picked up
-    // after it, or a run that keeps appending strands a growing backlog (D-26's silent loss in a
+    // after it, or a run that keeps appending strands a growing backlog (D-17's silent loss in a
     // quieter form). The loop ends when the threshold is met or the queue is empty; a failure
     // rejects out of the loop, is reported, and leaves the entries in place.
     if (this.inFlight === undefined && this.overThreshold()) {
