@@ -8,7 +8,8 @@ import { createAdapterSummarizer, createAdapterSubAgent } from '../AdapterSummar
 
 // ORACLE: D-17 (WP-3.2) — summaries come from the run's adapter, with a configurable model, and a
 // summarization call cannot act on the tree. The call must ask for text only (`nativeTools: false`),
-// must charge the backend's own token count, and must fail loudly rather than return nothing.
+// must charge the backend's own token count, must carry the backend's surface so the engine can
+// record the call (F1), and must fail loudly rather than return nothing.
 
 const CAPS: AdapterCapabilities = {
   supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: false,
@@ -55,7 +56,22 @@ test('a summarization call asks for text only and carries the configured model',
   assert.match(call.prompt, /\[USER\] first/);
   assert.match(call.prompt, /\[USER\] second/);
 
-  assert.deepEqual(output, { content: 'summary text', tokensUsed: 42 });
+  assert.deepEqual(output, { content: 'summary text', tokensUsed: 42, model: 'summary-model' });
+});
+
+test('the backend surface travels with the summary so the engine can record the call (F1)', async () => {
+  const surface = {
+    systemPromptSha256: 'a'.repeat(64), toolCatalog: '', argv: [],
+    promptSha256: 'b'.repeat(64), outputSha256: 'c'.repeat(64),
+  };
+  const adapter = new ScriptedAdapter({ modelSurface: surface });
+  const output = await createAdapterSummarizer({ adapter, workingDir: '/tmp' })([message('x')], 0);
+
+  assert.deepEqual(
+    typeof output === 'string' ? undefined : output.surface,
+    surface,
+    'the digests of what was sent and returned reach the record',
+  );
 });
 
 test('without a model the call leaves the choice to the adapter', async () => {
@@ -93,7 +109,9 @@ test('the sub-agent call is tool-less too, and keeps the caller prompt', async (
 
   const result = await subAgent('be terse', ['one', 'two']);
 
-  assert.equal(result, 'agentic result');
+  // An object, not a bare string: the sub-agent is a summary call too, and its token count,
+  // surface and model must survive the seam or the engine cannot record it (F1).
+  assert.deepEqual(result, { content: 'agentic result', model: 'm' });
   const call = adapter.calls[0]!;
   assert.equal(call.nativeTools, false);
   assert.equal(call.systemPrompt, 'be terse');

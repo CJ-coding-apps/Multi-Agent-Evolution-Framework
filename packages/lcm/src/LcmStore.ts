@@ -108,7 +108,7 @@ export class LcmStore {
    * Every message of a session, oldest first. There is deliberately no `limit` parameter: the
    * version that had one answered `ORDER BY created_at ASC LIMIT ?`, so a caller asking for the
    * "fresh tail" was handed the OLDEST messages and the tail was destroyed on the second
-   * compaction pass (D-26). The newest N has its own method, {@link getFreshTail}.
+   * compaction pass (D-17). The newest N has its own method, {@link getFreshTail}.
    */
   getMessagesBySession(sessionId: string): LcmMessage[] {
     const rows = this.db.prepare(
@@ -188,6 +188,19 @@ export class LcmStore {
       ORDER BY s.created_at ASC, s.rowid ASC
     `).all(sessionId) as SumRow[];
     return rows.map((row) => this.getSummary(makeLcmSummaryId(row.id))!);
+  }
+
+  /**
+   * Links an existing summary to more messages (WP-3.2 F3). A merge copies a session's messages
+   * under new ids; the summary that covered the originals is shared, and this is what makes it
+   * visible from the target session as well.
+   */
+  linkSummaryMessages(summaryId: LcmSummaryId, messageIds: LcmMessageId[]): void {
+    const stmt = this.db.prepare(`INSERT OR IGNORE INTO lcm_summary_messages VALUES (?,?)`);
+    const txn = this.db.transaction(() => {
+      for (const id of messageIds) stmt.run(summaryId, id);
+    });
+    txn();
   }
 
   markSummarized(messageIds: LcmMessageId[], summaryId: LcmSummaryId): void {

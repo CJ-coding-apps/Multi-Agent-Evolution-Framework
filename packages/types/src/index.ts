@@ -1,3 +1,7 @@
+// WP-3.2: Lossless Context Memory (D-17 mechanism, D-52 choices). This file carries the LCM
+// types, the summary-call surface a bundle records, and the `lcmDegraded` entry a run writes when
+// compaction could not run; the package that implements them is `@maf/lcm`.
+//
 // ─────────────────────────────────────────────────────────────────────────────
 // BRANDED IDs — zero-cost type safety
 // ─────────────────────────────────────────────────────────────────────────────
@@ -662,7 +666,63 @@ export interface BlackboardSnapshot {
 // LCM — LOSSLESS CONTEXT MEMORY
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type LcmMode = 'Dolt' | 'Upward';
+/**
+ * How the LCM hands a node its archive (D-17), or `off` for no compaction at all (D-52, F14).
+ *
+ *  - `Dolt`   — ghost cues; the model calls `lcm.expand` to recover a segment on demand.
+ *  - `Upward` — the summaries themselves are rendered ahead of the fresh tail.
+ *  - `off`    — nothing is compacted, summarized or cued. The mode is recorded so a run can say
+ *               the feature was off rather than leave its absence unexplained.
+ */
+export type LcmMode = 'Dolt' | 'Upward' | 'off';
+
+/**
+ * What asked for an assembly, so a summary call can be attributed (WP-3.2 F1). A node's assembly
+ * names its task and node; a background pass (`CompressionAgent`) has neither, and says so by
+ * leaving them out — the record then carries the session alone rather than inventing an owner.
+ */
+export interface LcmTrigger {
+  taskId?: TaskId;
+  nodeId?: NodeId;
+}
+
+/**
+ * What a summary call cost and covered (WP-3.2, D-52 F1/F10). `contentTokens` is the summary's own
+ * context size (4 chars ≈ 1 token, the package's estimate); `reportedTokens` is what the backend
+ * said the call used, when it says anything. The two answer different questions and a bundle
+ * records both rather than making one stand for the other.
+ */
+export interface LcmSummarySurface {
+  summaryId:      LcmSummaryId;
+  level:          number;
+  /** The messages this summary covers at level 0; empty for a summary of summaries. */
+  messages:       number;
+  /** Characters of summary content written. */
+  chars:          number;
+  contentTokens:  number;
+  reportedTokens?: number;
+  /**
+   * The model-facing surface of the call, when the backend reported one (WP-3.2 F1). Repeated here
+   * rather than only on the attestor's record because the `[surface]` transcript line is written by
+   * the caller that owns the transcript, and that caller has only this object.
+   */
+  model?:              string;
+  systemPromptSha256?: string;
+  promptSha256?:       string;
+  outputSha256?:       string;
+}
+
+/**
+ * A compaction this run could not complete (WP-3.2 F5). The node continues uncompacted, and the
+ * bundle says so: a failure that leaves no trace is indistinguishable from compaction that ran.
+ */
+export interface LcmDegradedRecord {
+  sessionId: string;
+  taskId?:   TaskId;
+  nodeId?:   NodeId;
+  /** Why compaction stopped, as the summarizer or operator reported it. */
+  reason:    string;
+}
 
 export interface LcmMessage {
   id:         LcmMessageId;
@@ -694,27 +754,49 @@ export interface GhostCue {
 }
 
 export interface LcmContext {
+  /**
+   * The loop's own recent history, oldest first, for a caller that also owns the turn's history.
+   * It is NOT charged against `totalTokens` (WP-3.2 F2): the injector renders summaries and cues,
+   * not these, so charging them only crowded the archive out of the prompt.
+   */
   messages:    LcmMessage[];
   ghosts:      GhostCue[];
+  /** Tokens of what the injector renders — summaries or ghost cues — and nothing else. */
   totalTokens: number;
+  /**
+   * Tokens a summary call spent during this assembly (WP-3.2 F1). A summary is a model call like
+   * any other, so its cost is charged to the same node's budget; the engine reserves this out of
+   * the archive's share before it fits anything. Absent when no call was made.
+   */
+  compactionTokens?: number;
   /**
    * Upward mode (WP-3.2): the summaries the compaction produced, which the injector renders
    * ahead of the fresh tail. Dolt mode instead offers them as `ghosts` the model can expand.
    * Optional and additive so a consumer written against 0.5.0 is unaffected.
    */
   summaries?:  LcmSummary[];
+  /**
+   * The summary calls this assembly made (WP-3.2 F1). The engine records each one with the run's
+   * attestor; the caller that owns the transcript writes their `[surface]` lines from here, because
+   * the engine has no transcript and a background pass has no task to attribute one to.
+   */
+  summaryCalls?: LcmSummarySurface[];
+  /** Compactions this assembly could not complete (WP-3.2 F5). */
+  degraded?:    LcmDegradedRecord[];
 }
 
 export interface LcmApi {
   addMessage(msg: Omit<LcmMessage, 'id' | 'createdAt'>): Promise<LcmMessageId>;
   summarizeChunk(
     messageIds: LcmMessageId[],
-    operator: 'LLM-Map' | 'Agentic-Map'
+    operator: 'LLM-Map' | 'Agentic-Map',
+    trigger?: LcmTrigger,
   ): Promise<LcmSummaryId>;
   assembleContext(
     sessionId: string,
     tokenBudget: number,
-    mode?: LcmMode
+    mode?: LcmMode,
+    trigger?: LcmTrigger,
   ): Promise<LcmContext>;
   lcm_grep(query: string, sessionId: string): Promise<LcmMessage[]>;
   lcm_expand(summaryId: LcmSummaryId): Promise<LcmMessage[]>;
@@ -1195,6 +1277,12 @@ export interface AttestationBundle {
    * which is the same as "none happened".
    */
   attributedChanges?: AttributedChange[];
+  /**
+   * Compactions this run could not complete (WP-3.2 F5), in the order they were met. Absent when
+   * none were — a reader may treat that as "no degradation", because F5 requires every failure to
+   * be recorded before the run continues.
+   */
+  lcmDegraded?:      LcmDegradedRecord[];
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;
@@ -1217,6 +1305,12 @@ export interface AttestorHandle {
    * Optional so a test double that records only tool calls still satisfies the handle.
    */
   recordAttribution?(record: AttributedChange): void;
+  /**
+   * Attach a compaction this run could not complete (WP-3.2 F5). Optional so a test double that
+   * records only tool calls still satisfies the handle; absent, the run still degrades and says so
+   * on the transcript.
+   */
+  recordLcmDegraded?(record: LcmDegradedRecord): void;
   /**
    * The tool calls recorded for one task (F10). A node's `no_change` failure names the policy
    * rules that denied that node's *own* calls, so the reader is told which rule stopped the write
@@ -1436,6 +1530,13 @@ export interface ModelSurface {
    */
   outputSha256?:      string;
   /**
+   * The model the call named, when it named one (WP-3.2 F1). A summary call can use a model
+   * different from the role call that triggered it — `lcm.model` exists for exactly that — so the
+   * surface says which model was asked for rather than leaving a reader to infer it from the run.
+   * Absent when the adapter chose its own.
+   */
+  model?:             string;
+  /**
    * The backend argv. Payload positionals — the system-prompt value and the trailing prompt — are
    * replaced by `<name: N bytes, sha256 H>` markers, so the *flags* (including the empty string that
    * is `--tools ""`) are readable without the record carrying the whole prompt.
@@ -1467,6 +1568,14 @@ export interface ModelSurfaceRecord extends ModelSurface {
    * keep everything whatever was asked. It is what was *asked for*, not what the backend did with it.
    */
   nativeTools?: 'full' | 'read-only' | 'none';
+  /**
+   * Which kind of call this was (WP-3.2 F1). Absent reads as a role call, so a bundle written
+   * before this field parses unchanged; `'lcm-summary'` is the compaction model call, which is a
+   * model call like any other and appears in the same array rather than in a second record.
+   */
+  kind?:  'role-call' | 'lcm-summary';
+  /** What a `kind: 'lcm-summary'` call covered and cost. Present only on those records. */
+  lcmSummary?: LcmSummarySurface;
 }
 
 /**
