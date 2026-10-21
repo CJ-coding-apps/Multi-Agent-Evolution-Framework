@@ -33,6 +33,16 @@ reported from there — the open names the real reason.
 produced a graph that accepted no writes and silently read back nothing. `IF NOT EXISTS` makes the
 expected case a success, so the catch now tolerates only `/already exists/i` and rethrows the rest.
 
+**Table setup starts with the first query, not the constructor (F15).** The constructor used to
+start the DDL sequence immediately. `buildRunStack` can fail at once after constructing the graph
+(a typed `--policy` naming no file), so `close()` could run between two DDL statements: the driver
+released the database, the next statement threw, and the caller's `rm` raced handles that were not
+yet closed — `ENOTEMPTY … memory.kuzu`, measured at 1 in 20 on the base branch and 6 in 60 under
+load. Setup is now lazy: `ensureSchema()` starts it once, and every query awaits it. A graph that
+is opened and closed without a query runs no DDL at all, so the close is deterministic. The
+regression test opens and removes 60 graphs in a row; the M1 stack-cleanup test ran 20/20 after the
+change.
+
 **The transfer.** `packages/memory-graph/src/GraphTransfer.ts` (new) is the version-neutral half:
 `exportGraph` reads nodes and edges ordered by id and writes plain JSON; `parseGraphExport`
 validates a file before anything is written; `importGraph` refuses a non-empty target, writes inside
