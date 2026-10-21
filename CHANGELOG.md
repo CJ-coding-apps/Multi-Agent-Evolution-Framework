@@ -9,6 +9,8 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-20
+
 0.5.0 is the packaging release ([D-48](docs/DECISIONS.md)): `maf` installs from npm, `maf init`
 prepares a repository, and a run with no policy file is governed by the built-in policy instead of by
 nothing. The LCM/failover/evolver work [D-47](docs/DECISIONS.md) put in 0.5.0 moves to 0.6.0.
