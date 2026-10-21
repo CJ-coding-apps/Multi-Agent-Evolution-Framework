@@ -4,7 +4,7 @@ import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
 import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
-import type { AdapterName, CliAdapter, DagNode, RetryPolicy } from '@maf/types';
+import type { AdapterName, CliAdapter, Dag, DagNode, RetryPolicy } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine } from '@maf/lcm';
@@ -16,7 +16,7 @@ import { GIT_EMPTY_TREE, ReviewGate, SecurityReviewGate, WorktreeManager, resolv
 import type { FinishResult, Reviewer, RunWorktree } from '@maf/git-ops';
 import { DagRunner, createWriterLockLedger, withRetry } from '@maf/dag-runner';
 import { GraphAwareInjector } from '@maf/prompt-injector';
-import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
+import { DagSynthesizer, RetrievalAugmentedPlanner } from '@maf/planning-agent';
 import { TranscriptLogger } from '@maf/transcript';
 import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
@@ -48,6 +48,8 @@ export interface RunOptions {
   policy:   string;
   roles:    string;
   harness?: string;
+  /** Read the DAG from a JSON workflow spec instead of asking the planner to make one (WP-3.6). */
+  planFrom?: string;
   /** Let a writer role run on the cli tier, outside MAF's gates (D-01). */
   allowUngoverned?: boolean;
   /** Ask a reviewer to decide each writer change; advisory unless the harness requires review (D-34). */
@@ -94,6 +96,7 @@ export function registerRunCommand(program: Command, deps: RunDeps = {}): void {
     .option('--policy <path>', 'Path to policy YAML file (default: .maf/policy.yaml, else the built-in policy); "none" runs without rules', '.maf/policy.yaml')
     .option('--roles <path>', 'Path to roles YAML file', '.maf/roles.yaml')
     .option('--harness <ref>', 'Harness id, sha, or "current" (default: CURRENT if set, else legacy-default from --roles (overrides --roles when given))')
+    .option('--plan-from <path>', 'Read the DAG from a JSON workflow spec instead of planning it with the model (WP-3.6)')
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .option('--review', 'Ask at the terminal to approve each writer change (advisory unless the harness requires review; D-34)')
     .action(async (taskDescription: string, opts: RunOptions, cmd: Command) => {
@@ -355,8 +358,17 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     });
 
     // Generate DAG; the run's concurrency and retry policy come from the config (WP-2.5).
-    say('[maf] planning...');
-    const dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
+    // `--plan-from` reads a spec the operator wrote (WP-3.6): no model call, and the same file always
+    // yields the same DAG. Otherwise the planner is asked, as before.
+    let dag: Dag;
+    if (opts.planFrom !== undefined) {
+      const specPath = path.resolve(opts.planFrom);
+      say(`[maf] plan: ${specPath} (read from spec, no model call)`);
+      dag = applyDagSettings(await new DagSynthesizer(roles).fromFile(specPath, runId), cfg.dag);
+    } else {
+      say('[maf] planning...');
+      dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
+    }
 
     // Run DAG
     const dagRunner = new DagRunner();
