@@ -1,9 +1,10 @@
 import type { LcmMessage, LcmSummaryId } from '@maf/types';
 import type { LcmStore } from '../LcmStore.js';
+import { summaryContent, summaryTokens, type SummaryOutput } from '../summarizer.js';
 
 export interface LlmMapConfig {
-  // Calls the underlying LLM with the messages and returns a summary string
-  summarize(messages: LcmMessage[], depth: number): Promise<string>;
+  /** The run's model call: summarize this chunk of messages. */
+  summarize(messages: LcmMessage[], depth: number): Promise<SummaryOutput>;
   store: LcmStore;
 }
 
@@ -17,8 +18,9 @@ export class LlmMap {
     depth = 0,
     parentIds: LcmSummaryId[] = [],
   ): Promise<LcmSummaryId> {
-    const content = await this.config.summarize(messages, depth);
-    const tokens  = Math.ceil(content.length / 4);
+    const output  = await this.config.summarize(messages, depth);
+    const content = summaryContent(output);
+    const tokens  = summaryTokens(output, content);
     const messageIds = messages.map((m) => m.id);
     const summaryId  = this.config.store.insertSummary(content, tokens, depth, 'LLM-Map', parentIds, messageIds);
     this.config.store.markSummarized(messageIds, summaryId);

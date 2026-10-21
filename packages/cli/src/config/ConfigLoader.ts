@@ -22,6 +22,8 @@ export interface MafConfig {
     mode?:             LcmMode;
     contextThreshold?: number;
     freshTailCount?:   number;
+    /** The model summarization calls use. Absent: the run's `--model`, then the adapter's own. */
+    model?:            string;
   };
   dag?: {
     maxConcurrent?: number;
@@ -38,7 +40,7 @@ export interface ResolvedMafConfig {
   adapter:  string;
   model?:   string;
   worktree: boolean;
-  lcm:      { mode: LcmMode; contextThreshold: number; freshTailCount: number };
+  lcm:      { mode: LcmMode; contextThreshold: number; freshTailCount: number; model?: string };
   dag:      { maxConcurrent: number; retry: RetryPolicy };
   timeouts: { planMs: number; securityReviewMs: number };
 }
@@ -125,6 +127,7 @@ export function resolveConfig({ flags, file, defaults }: ConfigLayers): Resolved
   const fr = flags.dag?.retry;
   const lr = file.dag?.retry;
   const model = flags.model ?? file.model ?? defaults.model;
+  const lcmModel = flags.lcm?.model ?? file.lcm?.model ?? defaults.lcm.model;
   return {
     adapter:  flags.adapter ?? file.adapter ?? defaults.adapter,
     ...(model !== undefined ? { model } : {}),
@@ -133,6 +136,7 @@ export function resolveConfig({ flags, file, defaults }: ConfigLayers): Resolved
       mode:             flags.lcm?.mode             ?? file.lcm?.mode             ?? defaults.lcm.mode,
       contextThreshold: flags.lcm?.contextThreshold ?? file.lcm?.contextThreshold ?? defaults.lcm.contextThreshold,
       freshTailCount:   flags.lcm?.freshTailCount   ?? file.lcm?.freshTailCount   ?? defaults.lcm.freshTailCount,
+      ...(lcmModel !== undefined ? { model: lcmModel } : {}),
     },
     dag: {
       maxConcurrent: flags.dag?.maxConcurrent ?? file.dag?.maxConcurrent ?? defaults.dag.maxConcurrent,
@@ -172,7 +176,7 @@ export function applyDagSettings(dag: Dag, settings: ResolvedMafConfig['dag']): 
 
 type Section<K extends keyof MafConfig> = Record<keyof NonNullable<MafConfig[K]>, true>;
 const TOP_FIELDS:      Record<keyof MafConfig, true> = { adapter: true, model: true, worktree: true, lcm: true, dag: true, timeouts: true };
-const LCM_FIELDS:      Section<'lcm'>      = { mode: true, contextThreshold: true, freshTailCount: true };
+const LCM_FIELDS:      Section<'lcm'>      = { mode: true, contextThreshold: true, freshTailCount: true, model: true };
 const DAG_FIELDS:      Section<'dag'>      = { maxConcurrent: true, retry: true };
 const RETRY_FIELDS:    Record<keyof RetryPolicy, true> = { maxAttempts: true, backoffMs: true, backoffFactor: true, jitterMs: true };
 const TIMEOUTS_FIELDS: Section<'timeouts'> = { planMs: true, securityReviewMs: true };
@@ -214,6 +218,7 @@ function readConfig(raw: unknown, problems: Problem[]): MafConfig {
     read(config.lcm, 'mode', lcm, ['lcm'], lcmMode, '"Upward" or "Dolt"', problems);
     read(config.lcm, 'contextThreshold', lcm, ['lcm'], fraction, 'a number greater than 0 and at most 1', problems);
     read(config.lcm, 'freshTailCount', lcm, ['lcm'], count, 'a whole number, 0 or more', problems);
+    read(config.lcm, 'model', lcm, ['lcm'], text, 'a non-empty model name', problems);
   }
   const dag = section(own(top, 'dag'), ['dag'], DAG_FIELDS, problems);
   if (dag !== undefined) {

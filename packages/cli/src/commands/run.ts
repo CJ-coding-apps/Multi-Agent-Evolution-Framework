@@ -7,7 +7,7 @@ import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
 import type { AdapterName, CliAdapter, DagNode, RetryPolicy } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
-import { LcmEngine } from '@maf/lcm';
+import { LcmEngine, createAdapterSummarizer, createAdapterSubAgent } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor, componentId } from '@maf/attestation';
@@ -27,6 +27,7 @@ import { ensureMafDir } from '../ensureMafDir.js';
 import { loadCommandPolicy, resolveRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
+import type { ResolvedMafConfig } from '../config/ConfigLoader.js';
 import type { MafConfig } from '../config/ConfigLoader.js';
 
 const SECURITY_REVIEW_FALLBACK_PROMPT = `You are a security auditor. Review the supplied diff for vulnerabilities. Respond with a strict JSON block:
@@ -99,6 +100,15 @@ export function registerRunCommand(program: Command, deps: RunDeps = {}): void {
     .action(async (taskDescription: string, opts: RunOptions, cmd: Command) => {
       await runTask(taskDescription, opts, { ...deps, given: (flag) => cmd.getOptionValueSource(flag) === 'cli' });
     });
+}
+
+/**
+ * The model summarization calls use (D-17): `lcm.model` when the config names one, else the model
+ * the run was given, else the adapter's own. Summarization has its own setting so an operator can
+ * buy a cheaper model for compaction without changing the model that does the work.
+ */
+export function summarizerModelFor(cfg: Pick<ResolvedMafConfig, 'lcm' | 'model'>): string | undefined {
+  return cfg.lcm.model ?? cfg.model;
 }
 
 /**
@@ -257,10 +267,26 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     // Wire all components
     const board     = new BlackboardStore();
+    // D-17: summaries come from the run's own adapter, with the model the run chose. `lcm.model`
+    // overrides `--model` for summarization alone; with neither set, the adapter's own model
+    // applies. The calls ask for text only (`nativeTools: false`) and their token counts are the
+    // backend's, so compaction is charged against the context budget rather than invented locally.
+    const summarizerModel = summarizerModelFor(cfg);
+    const summarizerOptions = {
+      adapter,
+      workingDir: dir,
+      ...(summarizerModel !== undefined ? { model: summarizerModel } : {}),
+    };
+    const lcmSettings = {
+      mode:             cfg.lcm.mode,
+      contextThreshold: cfg.lcm.contextThreshold,
+      freshTailCount:   cfg.lcm.freshTailCount,
+    };
     lcm             = new LcmEngine({
       dbPath:    path.join(mafDir, 'lcm.db'),
-      ...cfg.lcm,
-      summarize: async (messages) => messages.map((m) => m.content.slice(0, 200)).join('\n'),
+      ...lcmSettings,
+      summarize:     createAdapterSummarizer(summarizerOptions),
+      runSubAgent:   createAdapterSubAgent(summarizerOptions),
     });
 
     // ── Worktree, once the run's configuration is known to be usable.

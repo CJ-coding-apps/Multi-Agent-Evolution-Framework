@@ -697,6 +697,12 @@ export interface LcmContext {
   messages:    LcmMessage[];
   ghosts:      GhostCue[];
   totalTokens: number;
+  /**
+   * Upward mode (WP-3.2): the summaries the compaction produced, which the injector renders
+   * ahead of the fresh tail. Dolt mode instead offers them as `ghosts` the model can expand.
+   * Optional and additive so a consumer written against 0.5.0 is unaffected.
+   */
+  summaries?:  LcmSummary[];
 }
 
 export interface LcmApi {

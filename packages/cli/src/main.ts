@@ -59,10 +59,16 @@ program
     const mafDir = path.join(path.resolve(opts.dir), '.maf');
     const target = makeRunId(targetRunId ?? crypto.randomUUID());
     const graph  = new MemoryGraph(path.join(mafDir, 'memory.kuzu'));
+    // `merge-runs` merges stored memory; it never assembles a context and so never summarizes.
+    // An unreachable stub that *fabricated* a summary would be worse than an error, so this one
+    // refuses: a future caller that compacts through it learns it must supply a real summarizer
+    // (D-17 — the engine never invents a summary).
     const lcm    = new LcmEngine({
       dbPath: path.join(mafDir, 'lcm.db'),
       contextThreshold: 0.75, freshTailCount: 64, mode: 'Upward',
-      summarize: async (msgs) => msgs.map((m) => m.content.slice(0, 200)).join('\n'),
+      summarize: async () => {
+        throw new Error('merge-runs does not summarize: supply an adapter-backed summarizer to compact.');
+      },
     });
 
     const report = await graph.mergeRuns([makeRunId(runId1), makeRunId(runId2)], target);

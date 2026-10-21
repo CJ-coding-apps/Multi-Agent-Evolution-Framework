@@ -1,6 +1,7 @@
 import type { LcmMessage, LcmSummaryId, RunId } from '@maf/types';
 import { makeRunId } from '@maf/types';
 import type { LcmStore } from '../LcmStore.js';
+import { estimateTokens } from '../summarizer.js';
 
 export interface AgenticMapConfig {
   store: LcmStore;
@@ -25,7 +26,7 @@ Output in plain prose. Do not include metadata or timestamps.`;
   ): Promise<LcmSummaryId> {
     const formatted = messages.map((m) => `[${m.role.toUpperCase()}] ${m.content}`);
     const content   = await this.config.runSubAgent(AgenticMap.SYSTEM_PROMPT, formatted);
-    const tokens    = Math.ceil(content.length / 4);
+    const tokens    = estimateTokens(content);
     const messageIds = messages.map((m) => m.id);
     const summaryId  = this.config.store.insertSummary(content, tokens, depth, 'Agentic-Map', parentIds, messageIds);
     this.config.store.markSummarized(messageIds, summaryId);

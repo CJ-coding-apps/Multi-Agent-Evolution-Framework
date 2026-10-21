@@ -104,17 +104,44 @@ export class LcmStore {
     return id;
   }
 
-  getMessagesBySession(sessionId: string, limit?: number): LcmMessage[] {
-    const rows = limit
-      ? this.db.prepare(`SELECT * FROM lcm_messages WHERE session_id=? ORDER BY created_at ASC LIMIT ?`).all(sessionId, limit) as MsgRow[]
-      : this.db.prepare(`SELECT * FROM lcm_messages WHERE session_id=? ORDER BY created_at ASC`).all(sessionId) as MsgRow[];
+  /**
+   * Every message of a session, oldest first. There is deliberately no `limit` parameter: the
+   * version that had one answered `ORDER BY created_at ASC LIMIT ?`, so a caller asking for the
+   * "fresh tail" was handed the OLDEST messages and the tail was destroyed on the second
+   * compaction pass (D-26). The newest N has its own method, {@link getFreshTail}.
+   */
+  getMessagesBySession(sessionId: string): LcmMessage[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM lcm_messages WHERE session_id=? ORDER BY created_at ASC, rowid ASC`,
+    ).all(sessionId) as MsgRow[];
     return rows.map(rowToMessage);
   }
 
+  /**
+   * The newest `count` messages of a session, returned in chronological order so a prompt reads
+   * forward. `rowid` breaks a tie between messages written in the same millisecond — the normal
+   * case for a transcript and a run's tool output.
+   */
+  getFreshTail(sessionId: string, count: number): LcmMessage[] {
+    if (count <= 0) return [];
+    const rows = this.db.prepare(
+      `SELECT * FROM lcm_messages WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+    ).all(sessionId, count) as MsgRow[];
+    return rows.reverse().map(rowToMessage);
+  }
+
+  /**
+   * The messages behind `ids`, in reading order — the order the ids arrive in is not a chronology
+   * and an `IN (...)` scan is free to return them in any order. A summarizer handed `m3, m1, m2`
+   * writes a summary that misstates what happened, and `lcm_expand` should replay the segment
+   * forward, so both read this.
+   */
   getMessagesByIds(ids: LcmMessageId[]): LcmMessage[] {
     if (ids.length === 0) return [];
     const placeholders = ids.map(() => '?').join(',');
-    const rows = this.db.prepare(`SELECT * FROM lcm_messages WHERE id IN (${placeholders})`).all(...ids) as MsgRow[];
+    const rows = this.db.prepare(
+      `SELECT * FROM lcm_messages WHERE id IN (${placeholders}) ORDER BY created_at ASC, rowid ASC`,
+    ).all(...ids) as MsgRow[];
     return rows.map(rowToMessage);
   }
 
@@ -133,15 +160,34 @@ export class LcmStore {
     return rows.map(rowToMessage);
   }
 
-  // Returns messages not yet linked to a summary (candidates for compaction)
+  /**
+   * The messages compaction may summarize: every uncompacted message except the newest
+   * `freshTailCount`, oldest first. "Except the newest N" is applied to the uncompacted rows
+   * themselves, so this returns exactly the set that will stop being raw context — compaction
+   * summarizes the entries it drops and nothing else.
+   */
   getUncompactedMessages(sessionId: string, freshTailCount: number): LcmMessage[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM lcm_messages WHERE session_id=? AND summary_id IS NULL ORDER BY created_at ASC, rowid ASC`,
+    ).all(sessionId) as MsgRow[];
+    const droppable = Math.max(0, rows.length - Math.max(0, freshTailCount));
+    return rows.slice(0, droppable).map(rowToMessage);
+  }
+
+  /**
+   * Every summary that covers at least one message of this session, oldest first — the archive
+   * the ghost cues and the Upward mode's context are built from.
+   */
+  getSummariesForSession(sessionId: string): LcmSummary[] {
     const rows = this.db.prepare(`
-      SELECT * FROM lcm_messages
-      WHERE session_id=? AND summary_id IS NULL
-      ORDER BY created_at ASC
-      LIMIT MAX(0, (SELECT COUNT(*) FROM lcm_messages WHERE session_id=?) - ?)
-    `).all(sessionId, sessionId, freshTailCount) as MsgRow[];
-    return rows.map(rowToMessage);
+      SELECT DISTINCT s.id, s.content, s.tokens, s.level, s.operator, s.created_at, s.rowid AS rowid
+      FROM lcm_summaries s
+      JOIN lcm_summary_messages sm ON sm.summary_id = s.id
+      JOIN lcm_messages m          ON m.id = sm.message_id
+      WHERE m.session_id = ?
+      ORDER BY s.created_at ASC, s.rowid ASC
+    `).all(sessionId) as SumRow[];
+    return rows.map((row) => this.getSummary(makeLcmSummaryId(row.id))!);
   }
 
   markSummarized(messageIds: LcmMessageId[], summaryId: LcmSummaryId): void {

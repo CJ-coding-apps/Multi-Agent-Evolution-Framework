@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { makeAgentId, makeNodeId, makeTaskId } from '@maf/types';
 import type { DagNode, CliAdapter, GraphQueryRunner, RunId } from '@maf/types';
 import { BlackboardStore } from '@maf/blackboard';
-import { LcmEngine } from '@maf/lcm';
+import { LcmEngine, createAdapterSummarizer, createAdapterSubAgent } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor } from '@maf/attestation';
@@ -116,10 +116,17 @@ export async function buildRunStack(cfg: {
     });
     const baseTools = createDefaultRegistry();
     const board = new BlackboardStore();
+    // D-17: the same adapter-backed summarizer `run` uses, in the same mode of call.
+    const summarizerOptions = {
+      adapter: cfg.adapter,
+      workingDir: cfg.cwd,
+      ...(cfg.model !== undefined ? { model: cfg.model } : {}),
+    };
     const engine = new LcmEngine({
       dbPath: path.join(cfg.mafDir, 'lcm.db'),
       contextThreshold: 0.75, freshTailCount: 64, mode: 'Upward',
-      summarize: async (msgs) => msgs.map((m) => m.content.slice(0, 200)).join('\n'),
+      summarize:   createAdapterSummarizer(summarizerOptions),
+      runSubAgent: createAdapterSubAgent(summarizerOptions),
     });
     lcm = engine;
     const injector = new GraphAwareInjector({ graph, lcm: engine, maxNodes: 40, tokenBudget: 4096 });

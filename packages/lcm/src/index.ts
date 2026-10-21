@@ -7,3 +7,7 @@ export { LlmMap } from './operators/LlmMap.js';
 export type { LlmMapConfig } from './operators/LlmMap.js';
 export { AgenticMap } from './operators/AgenticMap.js';
 export type { AgenticMapConfig } from './operators/AgenticMap.js';
+export { estimateTokens, summaryContent, summaryTokens } from './summarizer.js';
+export type { SummaryOutput } from './summarizer.js';
+export { createAdapterSummarizer, createAdapterSubAgent } from './AdapterSummarizer.js';
+export type { AdapterSummarizerOptions } from './AdapterSummarizer.js';

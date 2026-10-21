@@ -1,4 +1,4 @@
-import type { MemorySubgraph, MemoryNode, MemoryEdge, GhostCue } from '@maf/types';
+import type { MemorySubgraph, MemoryNode, MemoryEdge, GhostCue, LcmSummary } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import type { LcmEngine } from '@maf/lcm';
 
@@ -35,9 +35,16 @@ export class GraphAwareInjector {
       tokens += estimate(xml);
     }
 
-    // 2. Add ghost cues from LCM if available
+    // 2. Add LCM context if available. The two modes deliver the archive differently (D-17):
+    //    Dolt hands over ghost cues, Upward hands over the summaries themselves. The injector
+    //    renders whichever it is given, so a mode that returns neither adds nothing.
     if (this.config.lcm && sessionId) {
       const ctx = await this.config.lcm.assembleContext(sessionId, this.config.tokenBudget - tokens);
+      if (ctx.summaries && ctx.summaries.length > 0) {
+        const summaryXml = formatSummaries(ctx.summaries);
+        parts.push(summaryXml);
+        tokens += estimate(summaryXml);
+      }
       if (ctx.ghosts.length > 0) {
         const ghostXml = formatGhosts(ctx.ghosts);
         parts.push(ghostXml);
@@ -99,9 +106,34 @@ function formatEdge(e: MemoryEdge): string {
 
 function formatGhosts(ghosts: GhostCue[]): string {
   const lines = ghosts.map((g) =>
-    `  <ghost id="${g.summaryId}" relevance="${g.relevance.toFixed(2)}">${g.cueText}</ghost>`,
+    `  <ghost id="${g.summaryId}" relevance="${g.relevance.toFixed(2)}">${escapeXml(g.cueText)}</ghost>`,
   );
   return `<ghost-cues>\n${lines.join('\n')}\n</ghost-cues>`;
+}
+
+/**
+ * Upward mode's archive. Summary content is text an earlier model produced from an earlier run,
+ * so it goes into the prompt escaped: a summary is data, not markup and not instructions.
+ */
+function formatSummaries(summaries: LcmSummary[]): string {
+  const lines = summaries.map((s) =>
+    `  <summary id="${escapeXml(s.id)}" level="${s.level}" tokens="${s.tokens}">${escapeXml(s.content)}</summary>`,
+  );
+  return `<summaries>\n${lines.join('\n')}\n</summaries>`;
+}
+
+const XML_ESCAPES: Record<string, string> = {
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;',
+};
+
+/**
+ * One pass over the five XML metacharacters, so escaping is never re-applied to its own output.
+ * It is also shaped this way because the repo-wide rule against rewriting a quote on its way into
+ * a query (memory-graph's `no-escaper` guard) matches a `replace(/…/g` whose needle is a lone
+ * quote; this is XML, not Cypher, but the rule cannot tell the two apart and must stay broad.
+ */
+function escapeXml(text: string): string {
+  return text.replace(/[&<>"']/g, (ch) => XML_ESCAPES[ch] ?? ch);
 }
 
 function estimate(text: string): number { return Math.ceil(text.length / 4); }
