@@ -1310,6 +1310,14 @@ export interface CliAdapter {
   isAvailable(): Promise<boolean>;
   invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult>;
   stream(options: AdapterInvokeOptions): AsyncGenerator<string>;
+  /**
+   * An optional one-time check that the backend can take the argv MAF builds for it, asked once
+   * before a run plans (WP-3.9 F5). Only a backend whose argv depends on flags MAF must find has
+   * anything to check — today `claude` and its `--tools`. Throws an error that names what it found;
+   * what it returns is the adapter's own (which binary, which version), so the seam stays backend-
+   * neutral.
+   */
+  preflight?(): Promise<unknown>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

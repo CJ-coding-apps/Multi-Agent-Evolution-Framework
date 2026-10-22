@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord,
@@ -13,6 +15,9 @@ import {
 } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
+
+/** How long a preflight probe may take. A CLI that hangs on `--help` is a broken CLI, not a run. */
+const PROBE_TIMEOUT_MS = 10_000;
 
 /**
  * MCP isolation for every `claude` spawn: `--strict-mcp-config` ("only use MCP servers from
@@ -82,6 +87,15 @@ export interface ClaudeAdapterOptions {
   spawnStreaming?: typeof spawnStreaming;
 }
 
+/**
+ * What a successful `preflight` learned: the binary PATH resolved and the version it reported.
+ * Returned so a caller can name both without parsing an error message, and so a test can pin them.
+ */
+export interface ClaudePreflight {
+  path:    string;
+  version: string;
+}
+
 export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
   readonly name = 'claude' as const;
   private readonly spawn:          typeof spawnAndCollect;
@@ -133,6 +147,55 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       await execFileAsync('claude', ['--version'], { env: backendEnv() });
       return true;
     } catch { return false; }
+  }
+
+  /**
+   * Check once, before a run plans, that the `claude` on PATH can take the argv this adapter
+   * builds for it (WP-3.9 F5).
+   *
+   * Every governed turn and both isolated cli-tier sets pass `--tools`; a binary that does not
+   * know the flag exits 1 on *every* node, and the run reports a plan full of identical failures
+   * rather than one sentence about the CLI. So the adapter resolves `claude` on PATH itself, asks
+   * the resolved binary (`--version` then `--help`, both with `backendEnv()`), and refuses unless
+   * `--help` lists `--tools`. A failure names the resolved path and the version found, which is
+   * what tells a stale binary apart from a missing one.
+   */
+  async preflight(): Promise<ClaudePreflight> {
+    const env = backendEnv();
+    const searched = (env['PATH'] ?? '').split(path.delimiter).filter((dir) => dir !== '');
+    const binary = resolveOnPath('claude', searched, env);
+    if (binary === undefined) {
+      throw new Error(
+        'claude preflight: no executable named "claude" was found on PATH ' +
+        `(${searched.length} director${searched.length === 1 ? 'y' : 'ies'} searched). ` +
+        'Install the Claude Code CLI and make sure it is on PATH.',
+      );
+    }
+
+    const version = firstLine(await this.probe(binary, '--version', env));
+    const help = await this.probe(binary, '--help', env);
+    if (!/--tools\b/.test(help)) {
+      throw new Error(
+        `claude preflight: ${binary} (version ${version || 'unreported'}) does not support --tools, ` +
+        'which MAF passes on every governed turn and on both isolated cli-tier sets. ' +
+        'Upgrade the Claude Code CLI until `claude --help` lists --tools, then run again.',
+      );
+    }
+    return { path: binary, version };
+  }
+
+  /** One question to the resolved binary. A failure names the path and what it did instead. */
+  private async probe(binary: string, flag: string, env: NodeJS.ProcessEnv): Promise<string> {
+    try {
+      const { stdout, stderr } = await execFileAsync(binary, [flag], { env, timeout: PROBE_TIMEOUT_MS });
+      return `${stdout}${stderr}`;
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? firstLine(err.message) : String(err);
+      throw new Error(
+        `claude preflight: ${binary} could not answer ${flag} (${detail}). ` +
+        'The Claude Code CLI is installed but not usable by MAF; repair or reinstall it.',
+      );
+    }
   }
 
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
@@ -221,4 +284,32 @@ function elidePayloads(argv: readonly string[]): string[] {
     if (argv[i - 1] === '--' && i === argv.length - 1) return elided('prompt', arg);
     return arg;
   });
+}
+
+/** The first non-empty line of a probe's output, trimmed; `''` when it said nothing. */
+function firstLine(text: string): string {
+  return text.split('\n').map((line) => line.trim()).find((line) => line !== '') ?? '';
+}
+
+/**
+ * The `claude` a bare `claude` spawn would resolve to, found the way the OS finds it: every PATH
+ * directory in order, and on Windows every PATHEXT extension. Resolved here so a failure can name
+ * the binary that answered — an `ENOENT` on a bare name says only that one of many did not.
+ */
+function resolveOnPath(bin: string, dirs: readonly string[], env: NodeJS.ProcessEnv): string | undefined {
+  const extensions = process.platform === 'win32'
+    ? (env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD').split(';').filter((ext) => ext !== '')
+    : [''];
+  for (const dir of dirs) {
+    for (const extension of extensions) {
+      // Windows permits a quoted PATH entry; the quotes are the shell's, not the directory's.
+      const candidate = path.join(dir.replace(/^"|"$/g, ''), `${bin}${extension}`);
+      try {
+        if (!fs.statSync(candidate).isFile()) continue;
+        if (process.platform !== 'win32') fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch { /* not a runnable candidate; the next one may be */ }
+    }
+  }
+  return undefined;
 }

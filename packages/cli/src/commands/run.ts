@@ -155,6 +155,13 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   const adapterRegistry = ctx.adapters?.() ?? createAdapterRegistry();
   const adapter = await resolveAdapter(cfg.adapter, adapterRegistry);
 
+  // ── Preflight (WP-3.9 F5): once, before anything is planned. Claude's argv carries `--tools`
+  // on every governed turn and on both isolated cli-tier sets, and a binary that does not know
+  // the flag exits 1 on every node — so a plan of identical failures was how a stale CLI read.
+  // Asking `--version` and `--help` here names the binary and the version found, before a
+  // worktree, a store or a plan exists.
+  if (adapter.preflight) await adapter.preflight();
+
   const baseTools = createDefaultRegistry();
 
   // ── Harness (WP-2.9): --harness, else an operator-set CURRENT, else legacy-default minted from
