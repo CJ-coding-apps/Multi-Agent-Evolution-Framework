@@ -121,6 +121,37 @@ test('a plain Error is recorded under the name it was given, not its class', asy
   assert.deepEqual(reasons, { named: 'LockfileDrift', plain: 'Error', anon: 'Anonymous' });
 });
 
+test('a credential in the task, the label or the error never reaches the memory graph (WP-3.9 F4)', async () => {
+  // The memory graph outlives the run and its records come back into a later planner's prompt
+  // (`<past-failures>`), so whatever a failed node put in the record would be replayed to a model.
+  // The two shapes here are the two tiers: an unambiguous key FORMAT, and a `name = value` that
+  // only the broader model-facing set catches.
+  const awsKey = 'AKIAIOSFODNN7EXAMPLE';
+  const assigned = 'password = "correct-horse-battery"';
+  const recorder = capturing();
+
+  const dag = dagOf([{ id: 'impl', label: `read the key ${awsKey}`, agentRole: 'coder', retry: NO_WAIT }]);
+  const node = dag.nodes.get(makeNodeId('impl'))!;
+  node.metadata['taskDescription'] = `Rotate ${awsKey} in deploy.env`;
+  node.metadata['runTitle'] = `Credential rotation (${awsKey})`;
+
+  await new DagRunner().run({
+    dag, board: new BlackboardStore(), failureRecorder: recorder,
+    executor: async () => { throw new NodeFailure('adapter_failed', `login refused: ${assigned}`, 1); },
+  });
+
+  const [record] = recorder.records;
+  assert.ok(record, 'the failure was recorded');
+  const asWritten = JSON.stringify(record);
+  assert.doesNotMatch(asWritten, /AKIAIOSFODNN7EXAMPLE/, 'no key format reaches the graph');
+  assert.doesNotMatch(asWritten, /correct-horse-battery/, 'no assigned secret reaches the graph');
+  assert.match(record.label, /\[REDACTED:aws-access-key\]/);
+  assert.match(record.task, /\[REDACTED:aws-access-key\]/);
+  assert.match(record.runTitle ?? '', /\[REDACTED:aws-access-key\]/);
+  assert.match(record.message, /\[REDACTED:generic-secret\]/);
+  assert.equal(record.reason, 'adapter_failed', 'the reason is a class name, not agent text');
+});
+
 test('a recorder that never answers holds up the run for the bounded wait only', { timeout: 10_000 }, async (t) => {
   // F2: the dispatch loop races every running node's promise, this one included, so an unbounded
   // wait on the recorder stalled the whole run — the dependent's verdict, the queued writer, and

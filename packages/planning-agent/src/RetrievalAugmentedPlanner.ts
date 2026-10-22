@@ -3,7 +3,7 @@ import type {
   Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
   GraphQueryRunner,
 } from '@maf/types';
-import { makeNodeId, DEFAULT_RETRY_POLICY } from '@maf/types';
+import { makeNodeId, DEFAULT_RETRY_POLICY, redactText } from '@maf/types';
 import { recallFailures } from '@maf/memory-graph';
 import type { RecalledFailure } from '@maf/memory-graph';
 import type { LcmEngine } from '@maf/lcm';
@@ -124,8 +124,11 @@ export class RetrievalAugmentedPlanner {
 
     if (failures.length === 0) return '';
 
+    // Redacted again on the way out, not only on the way in (WP-3.9 F4): a graph written before
+    // the record boundary redacted still holds whatever a past failure put there, and this text is
+    // about to become part of a model's system prompt on a later run.
     const items = failures
-      .map((f) => `- Task "${oneLine(f.task)}" (${f.role}) → ${f.reason}: ${oneLine(f.message)}`)
+      .map((f) => redactText(`- Task "${oneLine(f.task)}" (${f.role}) → ${f.reason}: ${oneLine(f.message)}`))
       .join('\n');
     return `<past-failures>\nThese similar tasks failed previously — avoid repeating these patterns:\n${items}\n</past-failures>`;
   }
