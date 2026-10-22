@@ -1,11 +1,17 @@
 import type { LcmMessage, LcmSummaryId, RunId } from '@maf/types';
 import { makeRunId } from '@maf/types';
 import type { LcmStore } from '../LcmStore.js';
+import { summaryContent, summaryTokens, type SummaryOutput } from '../summarizer.js';
+import type { SummarySource } from './LlmMap.js';
 
 export interface AgenticMapConfig {
   store: LcmStore;
-  // Spawns a full sub-agent session and returns its output
-  runSubAgent(systemPrompt: string, userMessages: string[]): Promise<string>;
+  /**
+   * Spawns a full sub-agent session and returns its output. An object is accepted as well as a
+   * string, so the backend's own token count and model-facing surface travel back with the text
+   * (WP-3.2 F1): a summary made through this operator is recorded and budgeted like any other.
+   */
+  runSubAgent(systemPrompt: string, userMessages: string[]): Promise<SummaryOutput>;
 }
 
 // Agentic-Map operator: each chunk gets a full sub-agent session.
@@ -18,14 +24,24 @@ Output in plain prose. Do not include metadata or timestamps.`;
 
   constructor(private readonly config: AgenticMapConfig) {}
 
+  /**
+   * Calls the sub-agent and returns its answer; the engine inserts the summary (WP-3.2). The
+   * caller chooses this operator through `lcm.operator` and gets an error if no sub-agent was
+   * supplied — never a silent fall back to LLM-Map.
+   */
+  async complete(sources: SummarySource[], _depth = 0): Promise<SummaryOutput> {
+    const formatted = sources.map((source) => `[${source.role.toUpperCase()}] ${source.content}`);
+    return this.config.runSubAgent(AgenticMap.SYSTEM_PROMPT, formatted);
+  }
+
   async run(
     messages: LcmMessage[],
     depth = 0,
     parentIds: LcmSummaryId[] = [],
   ): Promise<LcmSummaryId> {
-    const formatted = messages.map((m) => `[${m.role.toUpperCase()}] ${m.content}`);
-    const content   = await this.config.runSubAgent(AgenticMap.SYSTEM_PROMPT, formatted);
-    const tokens    = Math.ceil(content.length / 4);
+    const output    = await this.complete(messages, depth);
+    const content   = summaryContent(output);
+    const tokens    = summaryTokens(output, content);
     const messageIds = messages.map((m) => m.id);
     const summaryId  = this.config.store.insertSummary(content, tokens, depth, 'Agentic-Map', parentIds, messageIds);
     this.config.store.markSummarized(messageIds, summaryId);
@@ -38,10 +54,10 @@ Output in plain prose. Do not include metadata or timestamps.`;
     items: LcmMessage[],
     runId: RunId = makeRunId('agentic-map'),
   ): Promise<LcmSummaryId[]> {
+    void runId;
     const results: LcmSummaryId[] = [];
     for (const msg of items) {
-      const id = await this.run([msg], 0);
-      results.push(id);
+      results.push(await this.run([msg], 0));
     }
     return results;
   }

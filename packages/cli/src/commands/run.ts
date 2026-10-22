@@ -7,7 +7,7 @@ import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
 import type { AdapterName, CliAdapter, DagNode, RetryPolicy } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
-import { LcmEngine } from '@maf/lcm';
+import type { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor, componentId } from '@maf/attestation';
@@ -24,9 +24,10 @@ import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterR
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { loadCommandPolicy, resolveRunHarness } from '../wiring.js';
+import { createRunLcm, loadCommandPolicy, resolveRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
+import type { ResolvedMafConfig } from '../config/ConfigLoader.js';
 import type { MafConfig } from '../config/ConfigLoader.js';
 
 const SECURITY_REVIEW_FALLBACK_PROMPT = `You are a security auditor. Review the supplied diff for vulnerabilities. Respond with a strict JSON block:
@@ -257,11 +258,23 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     // Wire all components
     const board     = new BlackboardStore();
-    lcm             = new LcmEngine({
-      dbPath:    path.join(mafDir, 'lcm.db'),
-      ...cfg.lcm,
-      summarize: async (messages) => messages.map((m) => m.content.slice(0, 200)).join('\n'),
+    // D-17, F1, R1: summaries come from the run's own adapter, with the model the run chose, and
+    // the whole LCM construction is the one factory goldens and evolve use. It records the settings
+    // in force once (R4a), attributes every summary call to the node whose assembly triggered it,
+    // records what that call cost (R5), and logs/records a degraded compaction (F5). The attestor
+    // is built first because the factory records into it.
+    const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
+    const runLcm = createRunLcm({
+      mafDir,
+      cwd:     dir,
+      adapter,
+      ...(cfg.model !== undefined ? { model: cfg.model } : {}),
+      lcm:       cfg.lcm,
+      sessionId,
+      attestor,
     });
+    const engine = runLcm.engine;
+    lcm = engine;
 
     // ── Worktree, once the run's configuration is known to be usable.
     run = cfg.worktree ? await worktrees.createForRun(runId) : undefined;
@@ -273,7 +286,12 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // The registry the agent gets is bound to the run's working directory now that it exists: the
     // git tools learn the repository root here, before any agent action, so a `.git` the agent later
     // removes or rewrites cannot redirect them (WP-2.17). `baseTools` above only validated the roles.
-    const agentTools = createDefaultRegistry({ projectRoot: cwd });
+    // WP-3.2 F8: `lcm.expand` resolves against this run's archive, so the registry is given the
+    // expander here, beside the engine that owns it.
+    const agentTools = createDefaultRegistry({
+      projectRoot: cwd,
+      lcmExpand: (summaryId: string) => runLcm.expand(summaryId),
+    });
 
     const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
       logDir: path.join(mafDir, 'transcripts'),
@@ -284,7 +302,6 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     await transcript.init();
     const lcmBridge = new BlackboardToLcmAdapter(board, lcm, sessionId, runId);
-    const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
     // One gate for the run (D-02): an escalated tool call is put to the operator at the terminal,
     // or refused and left as a pending record when no one can answer; either way it is attested.
     const approvalGate = createApprovalGate({ recorder: attestor, mafDir, env, ...(terminal ? { terminal } : {}) });

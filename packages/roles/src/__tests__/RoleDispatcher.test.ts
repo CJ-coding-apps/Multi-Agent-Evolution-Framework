@@ -14,7 +14,10 @@ import type {
   RoleName, PartialNodeOutcome, ExecutionTierRecord, ModelSurfaceRecord, AttributedChange,
   WriterLockLedger, ToolCallRecord, TaskId,
 } from '@maf/types';
-import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, NodeFailure, TransportError } from '@maf/types';
+import {
+  makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, makeLcmSummaryId,
+  NodeFailure, TransportError,
+} from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -208,6 +211,8 @@ async function makeFixture(opts: {
    * pathspec resolves under the cwd and matches nothing (R2/N2h).
    */
   cwdSubdir?: boolean;
+  /** The context archive's assembly, when the test is about what the dispatcher does with it. */
+  injector?: GraphAwareInjector;
 }): Promise<Fixture> {
   const workDir = await mkdtemp(path.join(tmpdir(), 'maf-dispatch-'));
   await writeFile(path.join(workDir, 'hello.txt'), 'hello-world', 'utf8');
@@ -256,7 +261,8 @@ async function makeFixture(opts: {
     adapter: opts.adapter,
     baseTools: createDefaultRegistry(),
     roles,
-    injector: { assemble: async () => ({ systemPromptPrefix: '' }) } as unknown as GraphAwareInjector,
+    injector: opts.injector
+      ?? ({ assemble: async () => ({ systemPromptPrefix: '' }) } as unknown as GraphAwareInjector),
     policy: policy.stub,
     attestor: attestor.stub,
     graph: {} as MemoryGraph,
@@ -1602,4 +1608,104 @@ test('N2/N2b: a git failure in the content check fails the reader closed, never 
   } finally {
     await f.cleanup();
   }
+});
+
+test('an LCM summary call is written to the transcript with the surface it was made with (R8)', async () => {
+  // R8: the `[surface] lcm summary` line is its own layer. The attestor's record is not enough — an
+  // operator reads the transcript — so every field the engine reports about a call made on this
+  // node's behalf must reach both the line and its metadata, or the call is invisible where the run
+  // is actually read.
+  const adapter = new CliOnlyAdapter();
+  const injector = {
+    assemble: async () => ({
+      systemPromptPrefix: '',
+      lcmSummaryCalls: [{
+        summaryId: makeLcmSummaryId('sum-1'), level: 1, messages: 3, chars: 120,
+        contentTokens: 30, reportedTokens: 42, tokenBudgetCharged: 42,
+        model: 'summary-model',
+        systemPromptSha256: 'a'.repeat(64), promptSha256: 'b'.repeat(64), outputSha256: 'c'.repeat(64),
+      }],
+    }),
+  } as unknown as GraphAwareInjector;
+  const f = await makeFixture({
+    roleExecution: 'cli', adapter, policyHandler: ALLOW, injector,
+  });
+  try {
+    await f.dispatcher.runNode(makeNode(ANALYST));
+    const line = f.transcript.entries.find((e) => e.content.startsWith('[surface] lcm summary'));
+    assert.ok(line, 'the call is in the transcript the operator reads');
+    assert.match(
+      line.content,
+      /^\[surface\] lcm summary sum-1 \(level 1, 3 message\(s\)\): model summary-model;/,
+    );
+    assert.match(
+      line.content,
+      new RegExp(`system sha256 a{64}; prompt sha256 b{64}; output sha256 c{64}`),
+    );
+    assert.match(line.content, /content tokens 30; reported tokens 42$/);
+    assert.equal(line.metadata.kind, 'lcm-summary');
+    assert.equal(line.metadata.tier, 'cli');
+    assert.equal(line.metadata.summaryId, 'sum-1');
+    assert.equal(line.metadata.level, 1);
+    assert.equal(line.metadata.messages, 3);
+    assert.equal(line.metadata.contentTokens, 30);
+    assert.equal(line.metadata.reportedTokens, 42);
+    assert.equal(line.metadata.model, 'summary-model');
+    assert.equal(typeof line.metadata.taskId, 'string', 'the call is attributed to the node\'s task');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// R14, at the dispatcher: the tier a node will actually run on decides what the archive renders.
+// A Dolt cue says `call lcm.expand(id)`, and only an in-process turn is handed MAF's tool registry
+// to call it with, so a cli-tier role must be assembled with `mafToolsAvailable: false` — the
+// injector then renders `<summaries>` rather than a cue it cannot follow. `true` for every tier is
+// the mutant this test kills; the in-process half pins the other direction.
+test('the dispatcher tells the injector whether the node can call MAF tools (R14)', async () => {
+  const seen: Array<{ role?: string; mafToolsAvailable?: boolean }> = [];
+  const injector = {
+    assemble: async (
+      _taskContext: string,
+      _sessionId?: string,
+      agentRole?: string,
+      _trigger?: unknown,
+      options?: { mafToolsAvailable?: boolean },
+    ) => {
+      seen.push({
+        ...(agentRole !== undefined ? { role: agentRole } : {}),
+        ...(options?.mafToolsAvailable !== undefined
+          ? { mafToolsAvailable: options.mafToolsAvailable }
+          : {}),
+      });
+      return { systemPromptPrefix: '', estimatedTokens: 0 };
+    },
+  } as unknown as GraphAwareInjector;
+
+  const cli = await makeFixture({
+    roleExecution: 'cli', adapter: new CliOnlyAdapter(), policyHandler: ALLOW, injector,
+  });
+  try {
+    await cli.dispatcher.runNode(makeNode(ANALYST));
+  } finally {
+    await cli.cleanup();
+  }
+  assert.deepEqual(seen, [{ role: 'analyst', mafToolsAvailable: false }],
+    'a cli-tier role has no MAF tools, so it gets summaries, not a cue it cannot call');
+
+  const adapter = new StubTurnAdapter();
+  adapter.turnsToServe = [
+    { text: 'reading', toolCalls: [{ toolUseId: 'u1', toolName: 'fs.read', input: { path: 'hello.txt' } }] },
+    { text: 'done reading', toolCalls: [] },
+  ];
+  const inProcess = await makeFixture({
+    roleExecution: 'in-process', adapter, policyHandler: ALLOW, injector,
+  });
+  try {
+    await inProcess.dispatcher.runNode(makeNode(ANALYST));
+  } finally {
+    await inProcess.cleanup();
+  }
+  assert.deepEqual(seen[1], { role: 'analyst', mafToolsAvailable: true },
+    'an in-process role can call lcm.expand, so a cue is an instruction it can follow');
 });

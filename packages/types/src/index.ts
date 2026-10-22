@@ -1,3 +1,7 @@
+// WP-3.2: Lossless Context Memory (D-17 mechanism, D-52 choices). This file carries the LCM
+// types, the summary-call surface a bundle records, and the `lcmDegraded` entry a run writes when
+// compaction could not run; the package that implements them is `@maf/lcm`.
+//
 // ─────────────────────────────────────────────────────────────────────────────
 // BRANDED IDs — zero-cost type safety
 // ─────────────────────────────────────────────────────────────────────────────
@@ -662,7 +666,88 @@ export interface BlackboardSnapshot {
 // LCM — LOSSLESS CONTEXT MEMORY
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type LcmMode = 'Dolt' | 'Upward';
+/**
+ * How the LCM hands a node its archive (D-17), or `off` for no compaction at all (D-52, F14).
+ *
+ *  - `Dolt`   — ghost cues; the model calls `lcm.expand` to recover a segment on demand.
+ *  - `Upward` — the summaries themselves are rendered ahead of the fresh tail.
+ *  - `off`    — nothing is compacted, summarized or cued. The mode is recorded so a run can say
+ *               the feature was off rather than leave its absence unexplained.
+ */
+export type LcmMode = 'Dolt' | 'Upward' | 'off';
+
+/**
+ * What asked for an assembly, so a summary call can be attributed (WP-3.2 F1). A node's assembly
+ * names its task and node; a background pass (`CompressionAgent`) has neither, and says so by
+ * leaving them out — the record then carries the session alone rather than inventing an owner.
+ */
+export interface LcmTrigger {
+  taskId?: TaskId;
+  nodeId?: NodeId;
+}
+
+/**
+ * What a summary call cost and covered (WP-3.2, D-52 F1/F10). `contentTokens` is the summary's own
+ * context size (4 chars ≈ 1 token, the package's estimate); `reportedTokens` is what the backend
+ * said the call used, when it says anything. The two answer different questions and a bundle
+ * records both rather than making one stand for the other.
+ */
+export interface LcmSummarySurface {
+  summaryId:      LcmSummaryId;
+  level:          number;
+  /** The messages this summary covers at level 0; empty for a summary of summaries. */
+  messages:       number;
+  /** Characters of summary content written. */
+  chars:          number;
+  contentTokens:  number;
+  reportedTokens?: number;
+  /**
+   * What the call spent against the triggering node's budget (WP-3.2 R5): the backend's reported
+   * tokens when it reports them, otherwise the estimate of the prompt plus the summary. Recorded on
+   * every call, so a run can see the cost even when the role sets no `tokenBudget`; enforcement
+   * (subtracting it before the turn) applies only where a role has one.
+   */
+  tokenBudgetCharged?: number;
+  /** The node whose assembly triggered the call; absent for a background pass (WP-3.2 R5). */
+  nodeId?:        NodeId;
+  taskId?:        TaskId;
+  /**
+   * The model-facing surface of the call, when the backend reported one (WP-3.2 F1). Repeated here
+   * rather than only on the attestor's record because the `[surface]` transcript line is written by
+   * the caller that owns the transcript, and that caller has only this object.
+   */
+  model?:              string;
+  systemPromptSha256?: string;
+  promptSha256?:       string;
+  outputSha256?:       string;
+}
+
+/**
+ * A compaction this run could not complete (WP-3.2 F5). The node continues uncompacted, and the
+ * bundle says so: a failure that leaves no trace is indistinguishable from compaction that ran.
+ */
+export interface LcmDegradedRecord {
+  sessionId: string;
+  taskId?:   TaskId;
+  nodeId?:   NodeId;
+  /** Why compaction stopped, as the summarizer or operator reported it. */
+  reason:    string;
+}
+
+/**
+ * The LCM settings in force for a run (WP-3.2 R4a), recorded once in the bundle. Without it a
+ * bundle cannot say which mode ran, so a `lcm.mode: off` control had to be established by the
+ * absence of every other record rather than by a statement.
+ */
+export interface LcmSettingsRecord {
+  mode:              LcmMode;
+  operator:          'LLM-Map' | 'Agentic-Map';
+  contextThreshold:  number;
+  freshTailCount:    number;
+  summaryTimeoutMs:  number;
+  /** The model the summaries were asked for; absent when the adapter chose its own. */
+  model?:            string;
+}
 
 export interface LcmMessage {
   id:         LcmMessageId;
@@ -694,21 +779,59 @@ export interface GhostCue {
 }
 
 export interface LcmContext {
+  /**
+   * The newest messages of the session, newest first, which the injector renders as `<recent>`
+   * after the summaries and within the same budget (WP-3.2 R4c). The tail that stays raw is what
+   * the budget rendered, not a fixed count: at every assembly every message of the session is
+   * rendered here, covered by a summary, or newer than the assembly (V1), and a message that did
+   * not fit was compacted at that same assembly.
+   */
   messages:    LcmMessage[];
   ghosts:      GhostCue[];
+  /**
+   * Tokens of what the injector renders — summaries or cues, plus those recent messages.
+   * (`totalTokens` is the rendered size, never the cost of the call that produced a summary.)
+   */
   totalTokens: number;
+  /**
+   * Tokens a summary call spent during this assembly (WP-3.2 F1/R5). A summary is a model call
+   * like any other, so its cost is charged to the same node's budget record; it is NOT reserved
+   * out of the archive's rendered room (R2). Absent when no call was made.
+   */
+  compactionTokens?: number;
+  /**
+   * Upward mode (WP-3.2): the summaries the compaction produced, which the injector renders
+   * ahead of the fresh tail. Dolt mode instead offers them as `ghosts` the model can expand.
+   * Optional and additive so a consumer written against 0.5.0 is unaffected.
+   */
+  summaries?:  LcmSummary[];
+  /**
+   * The summary calls this assembly made (WP-3.2 F1). The engine records each one with the run's
+   * attestor; the caller that owns the transcript writes their `[surface]` lines from here, because
+   * the engine has no transcript and a background pass has no task to attribute one to.
+   */
+  summaryCalls?: LcmSummarySurface[];
+  /** Compactions this assembly could not complete (WP-3.2 F5). */
+  degraded?:    LcmDegradedRecord[];
 }
 
 export interface LcmApi {
   addMessage(msg: Omit<LcmMessage, 'id' | 'createdAt'>): Promise<LcmMessageId>;
   summarizeChunk(
     messageIds: LcmMessageId[],
-    operator: 'LLM-Map' | 'Agentic-Map'
+    operator: 'LLM-Map' | 'Agentic-Map',
+    trigger?: LcmTrigger,
   ): Promise<LcmSummaryId>;
   assembleContext(
     sessionId: string,
     tokenBudget: number,
-    mode?: LcmMode
+    mode?: LcmMode,
+    trigger?: LcmTrigger,
+    /**
+     * `'summaries'` asks the Dolt mode for its archive as summaries rather than cues, for a caller
+     * that cannot expand a cue (WP-3.2 R14). Absent leaves the mode's own delivery.
+     */
+    render?: 'cues' | 'summaries',
   ): Promise<LcmContext>;
   lcm_grep(query: string, sessionId: string): Promise<LcmMessage[]>;
   lcm_expand(summaryId: LcmSummaryId): Promise<LcmMessage[]>;
@@ -1189,6 +1312,17 @@ export interface AttestationBundle {
    * which is the same as "none happened".
    */
   attributedChanges?: AttributedChange[];
+  /**
+   * Compactions this run could not complete (WP-3.2 F5), in the order they were met. Absent when
+   * none were — a reader may treat that as "no degradation", because F5 requires every failure to
+   * be recorded before the run continues.
+   */
+  lcmDegraded?:      LcmDegradedRecord[];
+  /**
+   * The LCM settings this run ran with (WP-3.2 R4a), recorded once. Absent in a bundle written by
+   * a version that did not record them; a reader must not read absence as `mode: off`.
+   */
+  lcmSettings?:      LcmSettingsRecord;
   /** Golden-suite outcome for the harness under test (eval-harness runs only). */
   goldens?:          GoldensSection;
   signature:         string;
@@ -1211,6 +1345,17 @@ export interface AttestorHandle {
    * Optional so a test double that records only tool calls still satisfies the handle.
    */
   recordAttribution?(record: AttributedChange): void;
+  /**
+   * Attach a compaction this run could not complete (WP-3.2 F5). Optional so a test double that
+   * records only tool calls still satisfies the handle; absent, the run still degrades and says so
+   * on the transcript.
+   */
+  recordLcmDegraded?(record: LcmDegradedRecord): void;
+  /**
+   * Attach the LCM settings in force (WP-3.2 R4a), recorded once per run. Optional so a test double
+   * that records only tool calls still satisfies the handle.
+   */
+  recordLcmSettings?(settings: LcmSettingsRecord): void;
   /**
    * The tool calls recorded for one task (F10). A node's `no_change` failure names the policy
    * rules that denied that node's *own* calls, so the reader is told which rule stopped the write
@@ -1430,6 +1575,13 @@ export interface ModelSurface {
    */
   outputSha256?:      string;
   /**
+   * The model the call named, when it named one (WP-3.2 F1). A summary call can use a model
+   * different from the role call that triggered it — `lcm.model` exists for exactly that — so the
+   * surface says which model was asked for rather than leaving a reader to infer it from the run.
+   * Absent when the adapter chose its own.
+   */
+  model?:             string;
+  /**
    * The backend argv. Payload positionals — the system-prompt value and the trailing prompt — are
    * replaced by `<name: N bytes, sha256 H>` markers, so the *flags* (including the empty string that
    * is `--tools ""`) are readable without the record carrying the whole prompt.
@@ -1461,6 +1613,14 @@ export interface ModelSurfaceRecord extends ModelSurface {
    * keep everything whatever was asked. It is what was *asked for*, not what the backend did with it.
    */
   nativeTools?: 'full' | 'read-only' | 'none';
+  /**
+   * Which kind of call this was (WP-3.2 F1). Absent reads as a role call, so a bundle written
+   * before this field parses unchanged; `'lcm-summary'` is the compaction model call, which is a
+   * model call like any other and appears in the same array rather than in a second record.
+   */
+  kind?:  'role-call' | 'lcm-summary';
+  /** What a `kind: 'lcm-summary'` call covered and cost. Present only on those records. */
+  lcmSummary?: LcmSummarySurface;
 }
 
 /**

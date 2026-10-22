@@ -721,10 +721,44 @@ export class RoleDispatcher {
     const roleTools = new RoleToolRegistry(this.config.baseTools, role.allowedTools);
     const rolePrompt = await this.config.roles.loadPrompt(role);
 
-    const { systemPromptPrefix } = await this.config.injector.assemble(
-      node.label, this.config.sessionId, role.role,
+    // The node whose assembly this is: a summary call made while preparing its prompt is a model
+    // call MAF made on this node's behalf, and it is attributed and charged here (WP-3.2 F1). A
+    // background compaction with no node passes no trigger and is attributed to the session.
+    const assembled = await this.config.injector.assemble(
+      node.label, this.config.sessionId, role.role, { taskId, nodeId: node.id },
+      // R14: a Dolt cue says "call lcm.expand", and only an in-process turn has MAF's tool registry
+      // to call it with. A cli-tier role gets the archive as summaries instead of an instruction it
+      // cannot follow.
+      { mafToolsAvailable: resolved.tier === 'in-process' },
     );
-    const systemPrompt = [systemPromptPrefix, rolePrompt].filter(Boolean).join('\n');
+    const systemPrompt = [assembled.systemPromptPrefix, rolePrompt].filter(Boolean).join('\n');
+    // The archive's own transcript lines: the calls it made, and any compaction that could not
+    // finish (F1, F5). Written before the node's turn so the call is recorded whether or not the
+    // turn that follows it fails.
+    for (const call of assembled.lcmSummaryCalls ?? []) {
+      await this.config.transcript.append(
+        'system',
+        `[surface] lcm summary ${call.summaryId} (level ${call.level}, ${call.messages} message(s)): ` +
+        `model ${call.model ?? '(unrecorded)'}; system sha256 ${call.systemPromptSha256 ?? '(none)'}; ` +
+        `prompt sha256 ${call.promptSha256 ?? '(none)'}; output sha256 ${call.outputSha256 ?? '(none)'}; ` +
+        `content tokens ${call.contentTokens}; reported tokens ${call.reportedTokens ?? '(none)'}`,
+        { agentRole: role.role, taskId, nodeId: node.id, tier: 'cli', kind: 'lcm-summary',
+          summaryId: call.summaryId, level: call.level, messages: call.messages,
+          contentTokens: call.contentTokens,
+          ...(call.reportedTokens !== undefined ? { reportedTokens: call.reportedTokens } : {}),
+          ...(call.model !== undefined ? { model: call.model } : {}),
+          ...(call.systemPromptSha256 !== undefined ? { systemPromptSha256: call.systemPromptSha256 } : {}),
+          ...(call.promptSha256 !== undefined ? { promptSha256: call.promptSha256 } : {}),
+          ...(call.outputSha256 !== undefined ? { outputSha256: call.outputSha256 } : {}) },
+      );
+    }
+    for (const record of assembled.lcmDegraded ?? []) {
+      await this.config.transcript.append(
+        'system',
+        `[lcm] compaction failed: ${record.reason}; continuing uncompacted`,
+        { agentRole: role.role, taskId, nodeId: node.id, kind: 'lcm-degraded' },
+      );
+    }
 
     const nodeTask = (node.metadata as Record<string, unknown>)['taskDescription'];
     const userPrompt = typeof nodeTask === 'string' && nodeTask ? nodeTask : node.label;
@@ -739,7 +773,15 @@ export class RoleDispatcher {
     };
     const modelChoice = role.model ?? this.config.modelOverride;
     if (modelChoice) invokeOpts.model = modelChoice;
-    if (role.tokenBudget) invokeOpts.tokenBudget = role.tokenBudget;
+    if (role.tokenBudget) {
+      // F1/R5: the summary call was made for this node, so it spends this node's budget. The engine
+      // records `tokenBudgetCharged` on every call — the backend's reported count when it gave one,
+      // else input plus output — and that is what is subtracted. Recorded always, enforced here,
+      // where a budget exists; no built-in role sets one, and D-52 says so.
+      const summarySpend = (assembled.lcmSummaryCalls ?? [])
+        .reduce((sum, call) => sum + (call.tokenBudgetCharged ?? call.reportedTokens ?? call.contentTokens), 0);
+      invokeOpts.tokenBudget = Math.max(0, role.tokenBudget - summarySpend);
+    }
     if (this.config.temperature !== undefined) invokeOpts.temperature = this.config.temperature;
     // A reader on the cli tier does not get the backend's write tools (F7). The in-process tier
     // needs nothing here — MAF runs every tool through the registry, and a reader's registry holds
