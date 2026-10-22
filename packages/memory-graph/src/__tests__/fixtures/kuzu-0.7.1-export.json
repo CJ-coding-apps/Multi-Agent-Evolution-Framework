@@ -1,0 +1,86 @@
+{
+  "format": "maf-graph",
+  "formatVersion": 1,
+  "kuzuVersion": "0.7.1",
+  "exportedAt": "2026-10-21T16:02:08.353Z",
+  "nodes": [
+    {
+      "id": "fail-1",
+      "kind": "Failure",
+      "label": "n1",
+      "properties": {
+        "nodeId": "n1",
+        "role": "coder",
+        "reason": "adapter_failed",
+        "message": "claude exited 1: not logged in",
+        "exitCode": 1
+      },
+      "runId": "run-2026-09-30-lcm",
+      "createdAt": "2026-09-30T12:00:00.000Z",
+      "updatedAt": "2026-09-30T12:00:00.000Z"
+    },
+    {
+      "id": "file-1",
+      "kind": "File",
+      "label": "src/auth/login.ts",
+      "properties": {},
+      "runId": "run-2026-09-30-lcm",
+      "createdAt": "2026-09-30T12:00:00.000Z",
+      "updatedAt": "2026-09-30T12:00:00.000Z"
+    },
+    {
+      "id": "run-1",
+      "kind": "Run",
+      "label": "run-2026-09-30-lcm",
+      "properties": {
+        "title": "Add rate limiting to the login endpoint"
+      },
+      "runId": "run-2026-09-30-lcm",
+      "createdAt": "2026-09-30T12:00:00.000Z",
+      "updatedAt": "2026-09-30T12:00:00.000Z"
+    },
+    {
+      "id": "task-1",
+      "kind": "Task",
+      "label": "Add rate limiting to the login endpoint",
+      "properties": {
+        "nodeId": "n1",
+        "nodeLabel": "implement",
+        "role": "coder",
+        "runTitle": "Add rate limiting to the login endpoint"
+      },
+      "runId": "run-2026-09-30-lcm",
+      "createdAt": "2026-09-30T12:00:00.000Z",
+      "updatedAt": "2026-09-30T12:00:00.000Z"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-1",
+      "fromId": "run-1",
+      "toId": "task-1",
+      "relation": "PRODUCED",
+      "weight": 1,
+      "metadata": {},
+      "createdAt": "2026-09-30T12:00:00.000Z"
+    },
+    {
+      "id": "edge-2",
+      "fromId": "task-1",
+      "toId": "fail-1",
+      "relation": "CAUSED_FAILURE",
+      "weight": 1,
+      "metadata": {},
+      "createdAt": "2026-09-30T12:00:00.000Z"
+    },
+    {
+      "id": "edge-3",
+      "fromId": "task-1",
+      "toId": "file-1",
+      "relation": "MODIFIED",
+      "weight": 1,
+      "metadata": {},
+      "createdAt": "2026-09-30T12:00:00.000Z"
+    }
+  ]
+}
