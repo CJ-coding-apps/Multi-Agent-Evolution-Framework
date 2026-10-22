@@ -108,10 +108,12 @@ How a bundle is signed, and what a signature does **not** establish today, state
   `test.run`, the `git.*` tools and `grep` (rg or grep) — inherit MAF's whole environment,
   `MAF_SIGNING_KEY` included. `test.run` runs project code with it. The `git.*` tools never run a hook,
   even one the agent wrote (see *The agent's git tools* below). `patch.apply` runs its `git apply` with
-  an allowlisted environment instead — `PATH`, `HOME`, locale, the temp directory — so no `MAF_*`
-  variable, the signing key included, reaches it; that child runs project state it did not write, so it
-  is a tool child and not maf's own. So an agent that can run a command — directly, or through a test it
-  wrote — can read the key and sign a bundle of its own. A signature shows that whoever made the bundle
+  an allowlisted environment instead — `PATH`, `HOME`, locale, the temp directory — and against an empty
+  throwaway git directory, with the system and global git configuration and every extension point
+  disabled, so no `MAF_*` variable, the signing key included, reaches it, and no filter driver or hook
+  can run; that child runs project state it did not write, so it is a tool child and not maf's own. So
+  an agent that can run a command — directly, or through a test it wrote — can read the key and sign a
+  bundle of its own. A signature shows that whoever made the bundle
   held the key; on a run whose agent could run commands, that includes the agent.
 - **It is signed, not sealed.** Anyone who can write to the bundle's directory can replace it with one
   they signed with the same key.
@@ -575,10 +577,11 @@ checked path and the executed path are the same value because both come from tha
 what stops a spelling from being confined in one place and not the other. `git.diff` declares and diffs
 one list (`paths`). `git.add` and `patch.apply` are confined by the policy engine only: it checks the
 resolved form of what they declare, and the tool then hands its own input to git (with literal
-pathspecs, or — for `patch.apply` — the diff itself to `git apply`). For `patch.apply` the declared name
-and the written name are the same string git reported for the same bytes and the same `-p`, so the two
-cannot disagree by spelling; but it is not one resolved value, and a direct call that skips the policy
-engine gets no root confinement from MAF beyond the tool's own refusal of absolute and `..` names.
+pathspecs, or — for `patch.apply` — the diff itself to `git apply`). For `patch.apply` the declaration and
+the write are git reading the same diff file in one sealed context with the same `-p`, so the two cannot
+disagree by spelling or by directory; but it is not one resolved value, and a direct call
+that skips the policy engine gets no root confinement from MAF beyond the tool's own refusal of absolute
+and `..` names.
 
 Three things this does **not** cover, so none is mistaken for it:
 
@@ -595,21 +598,35 @@ Three things this does **not** cover, so none is mistaken for it:
 - It applies to the paths a tool **declares** — `ToolPlugin.declaredPaths(input)`, a pure function of the
   input. For a `cli`-tier role, whose tool calls maf never sees, no path is declared and none is checked.
 
-`patch.apply` does not read diff headers. It asks `git apply --numstat -z` which files the diff names,
-on the same temporary file and with the same `-p` the apply is given, so the paths the policy is shown
-are the paths git writes — one parser, and it is the writer. A diff git cannot read, one that names no
-file, and one git only reports in a form a path list cannot describe are refused as a `Deny` under rule
-id `builtin:declaration` before the policy is asked, because an undeclared write is not an allowed one.
-The forms refused from `--summary` are renames, copies, mode changes, symlinks and submodules: for a
-rename `--numstat` names only the new side, which would let a protected file be renamed away while the
-policy was asked about its destination; the others change the tree in ways a list of paths does not
-describe. Binary patches are refused from their `-` line counts. Absolute names and names containing
-`..` are refused by name, `--check` runs before the apply so a diff that would fail changes nothing, and
-`--reject` is never passed, so no `.orig` or `.rej` file is left behind. Names are compared NFC-normalized
-on every platform, and case-insensitively on macOS and Windows, whose filesystems resolve `.ENV` to
-`.env`: a `+++ b/.ENV` header is held to the `**/.env*` rule there. This is stricter than `patch` — a
-context diff, an `Index:`-only diff, a normal diff, an ed diff or a wholly indented section is refused
-rather than applied, because git applies unified diffs only — and the strictness is the point: a diff
+`patch.apply` does not read diff headers. It asks `git apply` which files the diff names — `--numstat -z`
+forward and `-R --numstat -z` reversed — and applies with the same `git apply`, the same diff file, the
+same `-p` and the same environment, so the paths the policy is shown are the paths git writes. Every git
+call runs in one sealed context: a fresh empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree,
+`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CEILING_DIRECTORIES` at the worktree's parent,
+`toolEnv()`, and `-c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null`. No
+filter driver is defined in that directory, so none can run whatever `.gitattributes` an agent writes, and
+the repository's own config — hooks, fsmonitor, filter drivers — never reaches the apply. Git names the old
+file on the old side and the new one on the new side, so the declaration is the union of the two lists: a
+deletion declares the file that disappears. A name that appears on one side only is an implicit rename —
+`--- a/.env` / `+++ b/notes.txt` with no rename lines — and is refused, because the forward list alone
+would name only the destination while the apply deletes the protected source.
+
+A diff git cannot read, one that names no file, and one git only reports in a form a path list cannot
+describe are refused as a `Deny` under rule id `builtin:declaration` before the policy is asked, because
+an undeclared write is not an allowed one. The forms refused from `--summary` are renames, copies, mode
+changes, symlinks and submodules; a declared path that is already a symlink is refused too, since a plain
+diff rewrites the link in place and the policy would have been asked about its target. Creating a mode
+`100755` file is allowed: whether an agent may write a script at a given path is a policy question, not
+one path declaration can answer. Binary patches are refused from their `-` line counts. Absolute names and
+names containing `..` are refused by name, `--check` runs before the apply so a diff that would fail
+changes nothing, and `--reject` is never passed, so no `.orig` or `.rej` file is left behind. Nothing is
+loosened relative to `git apply` — there is no `--recount` — so a wrong hunk count fails with git's own
+message and the agent retries. Deny and Escalate rules compare NFC-normalized names, and
+case-insensitively on macOS and Windows, whose filesystems resolve `.ENV` to `.env`: a `+++ b/.ENV` header
+is held to the `**/.env*` rule there. `Allow` rules and `allowedPathGlobs` stay exact, so folding never
+makes a verdict more permissive. This is stricter than `patch` — a context diff, an `Index:`-only diff, a
+normal diff, an ed diff or any indented section header is refused rather than applied, because git applies
+unified diffs only and skips an indented section while exiting 0 — and the strictness is the point: a diff
 whose targets cannot be declared is not one whose write may be assumed safe.
 
 ### `test.run` executes project code
