@@ -18,9 +18,8 @@ import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 test('a stack whose policy cannot be resolved closes the graph it opened (M1)', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-stack-m1-'));
   // The handle is native state no filesystem check can see reliably: Kùzu lets the same database be
-  // reopened while one is open, and the removal only *sometimes* reports ENOTEMPTY (the reported
-  // one-in-three). The close itself is the observable, and the mutation (drop it from the catch)
-  // is what makes this test red.
+  // reopened while one is open. The close itself is the observable, and the mutation (drop it from
+  // the catch) is what makes this test red.
   const realClose = MemoryGraph.prototype.close;
   let closes = 0;
   MemoryGraph.prototype.close = function close(this: MemoryGraph): void {
@@ -39,13 +38,13 @@ test('a stack whose policy cannot be resolved closes the graph it opened (M1)', 
       /Policy file ".*typo[/\\]policy\.yaml" not found/,
     );
     assert.equal(closes, 1, 'the graph the failed stack opened was closed before the error was rethrown');
-    // And the directory it lived in is removable afterwards, as goldens' cleanup needs. Node reports
-    // ENOTEMPTY transiently while the closed graph's directory entries are still settling (this is
-    // the one-in-three the comment above names), so the removal retries the way `fs.rm` documents;
-    // a graph that was *not* closed keeps the directory and still fails once the retries are spent.
-    await rm(mafDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    // And the directory it lived in is removable afterwards, as goldens' cleanup needs — in one
+    // attempt. A graph whose handles are still open keeps the directory and fails here; retrying
+    // would hide exactly the thing this test exists to catch (WP-3.8's lazy setup made the close
+    // deterministic, so the retry #52 carried is no longer needed).
+    await rm(mafDir, { recursive: true, force: true });
   } finally {
     MemoryGraph.prototype.close = realClose;
-    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    await rm(root, { recursive: true, force: true });
   }
 });
