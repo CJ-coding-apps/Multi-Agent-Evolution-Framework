@@ -18,6 +18,9 @@
  * `process.env`, and the child cannot mutate the parent's environment.
  */
 
+// WP-3.9 — new file. `@maf/types` is additive only: nothing in it was renamed, narrowed or
+// removed for this work; the package gained this module and a re-export in `index.ts`.
+
 /**
  * The variables a tool-spawned child inherits. Deliberately small:
  *

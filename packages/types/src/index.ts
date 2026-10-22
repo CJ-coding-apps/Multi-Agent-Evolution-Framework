@@ -384,6 +384,7 @@ export class PathConfinementError extends Error {
  *
  * WP-3.9.
  */
+// WP-3.9 — additive only: a new exported error type; no existing declaration changed shape.
 export class ToolDeclarationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -1310,6 +1311,8 @@ export interface CliAdapter {
   isAvailable(): Promise<boolean>;
   invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult>;
   stream(options: AdapterInvokeOptions): AsyncGenerator<string>;
+  // WP-3.9 — additive only: an optional member, so every adapter written before this still
+  // satisfies `CliAdapter` unchanged.
   /**
    * An optional one-time check that the backend can take the argv MAF builds for it, asked once
    * before a run plans (WP-3.9 F5). Only a backend whose argv depends on flags MAF must find has
@@ -1598,6 +1601,7 @@ export {
   redactCredentialsRecord, redactRecord,
 } from './redaction.js';
 
+// WP-3.9 — additive only: a new re-export; no existing export moved or changed.
 /**
  * The environment a child process may inherit. Two policies, one home: backend CLIs get the
  * user's environment minus maf's own `MAF_*` variables; tools that run project code get an

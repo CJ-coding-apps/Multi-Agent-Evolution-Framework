@@ -47,7 +47,7 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
   pattern set would mangle the evidence the bundle exists to be. So a credential in another format, or one
   nested a level down inside the input, is recorded as written. Treat a bundle as containing whatever the
   run printed and whatever the agent chose to type. Failure messages, which also reach the bundle's
-  run outcome and the memory graph, are masked the same way — every text a failure quotes is scrubbed
+  run outcome and the memory graph, are masked — every text a failure quotes is scrubbed
   before it is quoted: a failed node's output tail, a backend's stderr or HTTP error-body tail, the `no_work`
   answer excerpt (the first 200 characters of the model's answer, masked and then whitespace-collapsed), the
   malformed-`tool_call` snippet a parse error carries, the security gate's `Raw:` tail, and the gate's parsed
@@ -58,9 +58,10 @@ Worth stating plainly, because it decides what is and is not a vulnerability her
   rather than preserved by its head. One mask here is deliberately not the same mask: the **model-view**
   processor that feeds text back to the model marks `[REDACTED:<label>]` too, but from a **broader** pattern
   set (it adds a `generic-secret` heuristic), while the record's mask strips credential *formats* only — so a
-  heuristic secret is masked in the history and stays in the record. That divergence is by design and is now
-  the only one: the record's mask is one implementation, `@maf/types`; the model-view's broader set is the
-  other.
+  heuristic secret is masked in the history and stays in the record. The failure record written to the
+  memory graph is the other place the broader set applies (WP-3.9): that record is replayed into a later
+  planner's prompt, so it is model-facing text like the history, not evidence, and a heuristic secret is
+  masked there. The bundle's own failure text keeps the eight formats.
 - **A refused escalation leaves a record in the clear** at `.maf/approvals/pending/<id>.json` when no one
   could be asked: the approval request (its id, the run, the task, the tool and the rule), the request's
   hash, the declared paths, a timestamp and the reason. The tool's input is not written there.
@@ -381,6 +382,15 @@ A role runs in one of two tiers:
   backend acts under its own permission settings. `claude` is still given the empty, strict MCP
   configuration; `gemini` an MCP allowlist that names no configured server; `codex` no MCP flag.
 
+**The backend is asked once whether it can take that argv.** `maf run` calls the adapter's optional
+`preflight` after resolving the adapter and before anything is planned (WP-3.9). For `claude` this
+resolves the binary on PATH, asks it `--version` and `--help` — both with the backend environment,
+both bounded at ten seconds — and refuses to start unless `--help` lists `--tools`, the flag every
+governed turn and both isolated cli-tier sets pass. A binary that does not know the flag would
+otherwise exit 1 on every node, which reads as a plan full of identical failures rather than as one
+sentence about the CLI; the refusal names the resolved path and the version found. `goldens` and
+`evolve` do not ask it, and no other adapter has anything to check.
+
 The diff is the one thing maf observes on the `cli` tier, and it observes it only *after* the node finishes.
 A writer's diff runs from the node's start commit to whatever the tree holds when it ends; a reader's diff is
 the change *its own turn* made, taken between two working-tree snapshots that bracket the turn, so work the
@@ -442,8 +452,11 @@ The harness the bundle names carries each role's `execution` setting, and the bu
 Recalled failure output and LCM excerpts are agent output from earlier runs and enter later planner
 prompts as untrusted text. The planner's prompt carries a `<past-failures>` block — up to five failures
 recalled from the memory graph, each with the error a failed node left, which can quote a backend's own
-output tail — and `<past-context>` excerpts from LCM. Agents wrote them, or wrote what they quote; MAF
-does not filter them or tell the model they are untrusted, so text planted in one run can steer a later plan.
+output tail — and `<past-context>` excerpts from LCM. Agents wrote them, or wrote what they quote.
+Credentials in a failure record are masked twice (WP-3.9): once where the record is written to the
+memory graph, and again where it is rendered into `<past-failures>`, because a record written before
+that boundary existed still holds what a past failure put there. Nothing else is filtered, and the
+model is not told the text is untrusted, so text planted in one run can still steer a later plan.
 What it cannot do is widen a plan's privileges: every role name the planner emits is checked against the
 role set, and every node runs under its role's tier, policy and gates.
 
@@ -610,13 +623,20 @@ Three things this does **not** cover, so none is mistaken for it:
 ### Configuration is a closed schema
 
 `.maf/config.yaml` accepts only the keys a run reads, and an unknown key stops the run with its line
-number instead of being ignored (`packages/cli/src/config/ConfigLoader.ts`). Each section is checked
-against its own known set, and `__proto__` and `constructor` are unknown keys in every one of them:
-a file that names either is refused before any of it is used, so a key cannot reach a prototype, and
-a `constructor.prototype` entry is refused the same way. Every key is read with `Object.hasOwn`, so a
-value inherited from `Object.prototype` cannot stand in for one the file did not set. A file that
-exists and cannot be read in full is refused for the same reason — a typo must not silently take a
-default.
+number instead of being ignored (`packages/cli/src/config/ConfigLoader.ts`). Every key is read with
+`Object.hasOwn`, so a value inherited from `Object.prototype` cannot stand in for one the file did
+not set. A file that exists and cannot be read in full is refused for the same reason — a typo must
+not silently take a default.
+
+A file may not name a prototype key, at any depth: `__proto__`, `constructor` and `prototype` are
+refused at the line they appear on, before any of the file is used (WP-3.9). The refusal is in
+`parseYamlDocument` (`packages/policy-engine/src/PolicyLoader.ts`), the one parse every `.maf/` file
+goes through — `config.yaml`, `policy.yaml` and `roles.yaml` alike — so it is the parser's rule, not
+each loader's to remember. The parsed document holds such a key as an **own** key, so the loaded value
+is not itself poisoned; what the refusal prevents is the next reader that copies it with a plain
+assignment. A workflow spec read as JSON does not pass through that parser, so `DagParser.fromYamlText`
+repeats the refusal in a `JSON.parse` reviver, and a key refused there is reported as such rather than
+as a syntax error.
 
 ### `test.run` executes project code
 
@@ -635,10 +655,17 @@ Four limits bound it, all enforced in the tool rather than left to the runner:
 - **The run has a ceiling.** `timeout` defaults to 120 seconds and is clamped to
   `MAX_TEST_TIMEOUT_MS` — fifteen minutes — however large the caller's value. A test command is a tool
   call inside a node's budget, not a background job.
-- **The whole process group is killed.** On timeout the runner is spawned `detached` on POSIX, so it
-  leads its own group, and `SIGKILL` goes to `-pid`, which reaches the runner's children too (vitest
-  workers, `npm`'s script shell). A test proves a grandchild does not survive. On Windows there are no
-  POSIX process groups and only the runner itself is signalled.
+- **The whole process group is killed, on every exit MAF can observe.** The runner is spawned
+  `detached` on POSIX, so it leads its own group, and `SIGKILL` goes to `-pid`, which reaches the
+  runner's children too (vitest workers, `npm`'s script shell). The group is killed when the run
+  times out, when it ends normally — a runner that exits 0 can leave a worker or a server behind —
+  and when MAF itself exits or receives `SIGINT` / `SIGTERM`: a process-level hook kills every
+  group still in flight, then re-raises the signal at itself, so MAF dies with the status it would
+  have had without the hook. Tests prove a grandchild survives neither a timeout nor a normal exit,
+  and that a forwarded interrupt reaches it. Two limits: a child that leaves the group (anything
+  that calls `setsid()` or `setpgid()`) is not reached by `-pid`, and neither is a Windows tree,
+  where there are no POSIX process groups and only the runner itself is signalled; a `SIGKILL` to
+  MAF runs no handler at all, so the groups it started survive it.
 
 It runs with the tool allowlist, not MAF's environment: `MAF_SIGNING_KEY` and every other `MAF_*`
 variable are absent, as are provider tokens (see the key bullet above). It does not hide the key from
@@ -653,10 +680,19 @@ MAF.
 `maf evolve` proposes a change, evaluates it, and ships it only if a deterministic gate accepts it
 (`packages/evolver/src/gate.ts`): the model proposes, the gate decides. One edit kind,
 `adjust_tool_allowlist`, adds tools to a role's allowlist. The gate judges every added tool by the
-permission level the tool itself declares, never by its name, and an addition of a `write`, `execute`
-or `dangerous` tool to an ordinary role is rejected at stage `b4-write-tool-widening` with the tools
-and the role named. Adding only `read` tools is not a widening and is considered on its merits. The
-evolver may tune a prompt, a budget or a model; it cannot turn a reader into a writer.
+permission level the tool itself declares, never by its name. The widening it judges is the
+candidate's allowlist **minus the current one**, not the manifest's `add` list: a tool the role
+already holds is not a widening, and a manifest cannot launder one through `remove`. Widening an
+ordinary role with a `write`, `execute` or `dangerous` tool returns `needs-approval` at stage
+`b4-write-tool-widening`, with the tools and the role named; the loop records that outcome and never
+ships the candidate on its own. Adding only `read` tools is not a widening and is considered on its
+merits. The evolver may tune a prompt, a budget or a model; it cannot turn a reader into a writer.
+
+The widening rule costs nothing — it is a pure function of the two harnesses — so the loop applies it
+**before** the smoke test and the golden suite: a manifest that widens a role reaches the operator
+with no model call and no evaluation spend. Its permission map is a required argument of the gate; an
+omitted map used to skip the rule silently, and a tool the map does not name is treated as
+`dangerous`, never as `read`.
 
 The only route to a write tool is the operator. An edit whose target role is safety-adjacent
 (`security`, `reviewer`) is routed to the operator at stage `b3`, before any evaluation spend, and the
