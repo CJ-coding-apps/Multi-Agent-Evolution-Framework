@@ -53,9 +53,9 @@ single unqualified sentence about "the spec format" would be false for one of th
 ### Reading a plan instead of asking for one
 
 - **`packages/cli/src/commands/run.ts`** — `--plan-from <path>` (`RunOptions.planFrom`, line 105
-  option / 52 type). The spec is synthesized at 199–206, before `checkForRun` at 266; the plan branch
-  prints `[maf] plan: <path> (read from spec, no model call)` at 383. The planner is **not
-  constructed** on that path — its factory lives only in the `else` branch at 387–397 — so there is no
+  option / 52 type). The spec is synthesized at 201–209, before `checkForRun` at 269; the plan branch
+  prints `[maf] plan: <path> (read from spec, no model call)` at 386. The planner is **not
+  constructed** on that path — its factory lives only in the `else` branch at 388–401 — so there is no
   call to make and nothing to fall back to. DAG settings (`--config`'s `dag`) still apply, through the
   same `applyDagSettings` the planned path uses.
 - **`packages/planning-agent/src/DagSynthesizer.ts`** — `fromFile` stats the file first (size is
@@ -94,9 +94,9 @@ Every one of these is raised before anything is created (F1):
 
 `planSource` says where the plan came from — `{ kind: 'spec', path, sha256 }` (the digest of the bytes
 that were read) or `{ kind: 'planner' }` — and is recorded in three places: the attestation bundle's
-invocation parameters (`run.ts:432`), one transcript line (`plan source: spec <path> (sha256 <hex>)` /
-`plan source: the planner`, `run.ts:314`, built at 505), and the Run node's properties
-(`run.ts:373`). Without it, a run planned by a model and a run read from a file differ only in a line
+invocation parameters (`run.ts:435`), one transcript line (`plan source: spec <path> (sha256 <hex>)` /
+`plan source: the planner`, `run.ts:317`, built at 508), and the Run node's properties
+(`run.ts:376`). Without it, a run planned by a model and a run read from a file differ only in a line
 of stdout that is not part of the signed record.
 
 ## Decisions
@@ -153,7 +153,7 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
 
 | File | Why |
 |---|---|
-| `packages/cli/src/commands/run.ts` | The spec's "run.ts flag", plus what the flag needs: the `DagSynthesizer` import, the spec branch at 199–206 (deliberately before `checkForRun`), the plan line, `planSource` on the Run node / transcript / bundle, and the planner factory confined to the `else` branch so it cannot be constructed on this path. |
+| `packages/cli/src/commands/run.ts` | The spec's "run.ts flag", plus what the flag needs: the `DagSynthesizer` import, the spec branch at 201–209 (deliberately before `checkForRun`), the plan line, `planSource` on the Run node / transcript / bundle, and the planner factory confined to the `else` branch so it cannot be constructed on this path. |
 | `packages/types/src/index.ts` | Additive: the `PlanSource` union the bundle, transcript and Run node share. Nothing existing changed shape. |
 | `.github/workflows/ci.yml` | **Withheld pending the maintainer's ruling (F8).** `ece3ba2` added two e2e steps (a two-node `--plan-from` run and a duplicate-id refusal). This branch removes them, returning the file byte-for-byte to `wp/phase-3b`'s version, because F8's ruling has not been granted. The two steps belong in `ci.yml` when it is. |
 | `packages/cli/src/__tests__/plan-from.test.ts` | The end-to-end tests (see Proof). |
