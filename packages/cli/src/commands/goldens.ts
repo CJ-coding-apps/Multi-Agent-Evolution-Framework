@@ -116,7 +116,11 @@ async function packagedDefaultHarness(): Promise<{ harness: HarnessConfig; sourc
  */
 export async function resolveGoldensAdapter(name: string, corpusRoot: string): Promise<CliAdapter> {
   if (name !== SCRIPTED_ADAPTER_NAME) return resolveAdapter(name, createAdapterRegistry());
-  const corpus: unknown = JSON.parse(await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'));
+  // WP-3.9 G5: the same corpus file `goldens run` reads, through the same reviver. This was the
+  // reader that did not check — `GoldenRunner` and `maf evolve` both routed theirs.
+  const corpus: unknown = JSON.parse(
+    await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'), refusePrototypeKey,
+  );
   assertGoldenCorpus(corpus);
   return new ScriptedAdapter(await loadScriptedTasks(corpusRoot, corpus));
 }
