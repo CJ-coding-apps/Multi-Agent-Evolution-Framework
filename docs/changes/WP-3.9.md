@@ -149,7 +149,10 @@ states each as implemented.
   `packages/dag-runner/src/__tests__/spec-keys.test.ts` covers them in the document, a node and
   `config`, and proves the same words as **values** (`label: 'constructor'`) still parse;
   `packages/roles/src/__tests__/roles-file-loading.test.ts` covers the block, JSON and nested
-  forms.
+  forms. It also covers a prototype key reached **through a YAML alias** — `a: &k __proto__`, then
+  `*k : 1` (round 2, G17) — because the visitor resolves an alias key before checking it; measured:
+  reading `pair.key` instead of `pair.key.resolve(doc)` lets the key through to `toJS` and fails
+  that test.
 
 ### The backend is asked once whether it can take the argv MAF builds
 

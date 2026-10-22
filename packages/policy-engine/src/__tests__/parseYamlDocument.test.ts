@@ -96,6 +96,22 @@ test('a prototype key is refused at parse time, at any depth (WP-3.9 F10)', () =
   assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
 });
 
+test('a prototype key reached through a YAML alias is refused, not loaded (WP-3.9 G17)', () => {
+  // `a: &k __proto__` anchors a scalar; `*k : 1` uses it as a key. The Pair visitor resolves the
+  // alias before checking, so what is refused is the key it stands for — reading `pair.key.value`
+  // directly would see an Alias node, whose value is undefined, and let the key through to `toJS`.
+  const err = syntaxError('a: &k __proto__\nb:\n  *k : 1\n');
+  assert.equal(err.line, 3);
+  assert.ok(err.reason.includes('__proto__'), err.reason);
+  assert.match(err.reason, /names a prototype/);
+
+  // At the document's own top level, and for the other two names.
+  assert.match(syntaxError('a: &k constructor\n*k : 1\n').reason, /names a prototype/);
+  assert.match(syntaxError('a: &k prototype\nb:\n  *k : 1\n').reason, /names a prototype/);
+  // An alias whose anchor is not a prototype name is ordinary data.
+  assert.deepEqual(parseYamlDocument('a: &k plain\nb:\n  *k : 1\n', '/p').value, { a: 'plain', b: { plain: 1 } });
+});
+
 test('a "<<" merge key is refused at any depth, naming the line, rather than loaded as an ordinary key', () => {
   // YAML 1.2 has no merge keys: this used to load as a role with a literal "<<" field and no
   // `execution`, so the role ran on the cli tier and nothing said so (verifier finding F2).
