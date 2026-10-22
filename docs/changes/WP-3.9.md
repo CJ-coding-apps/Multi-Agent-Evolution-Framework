@@ -388,7 +388,7 @@ role, and moves on without a smoke test or a golden run. No flag grants this par
 not it is set. What changed is who answers the question. WP-3.7's live row holds on this verdict —
 the row is the end-to-end check on what an operator is offered, and it is why this ruling is
 recorded rather than left as an internal detail. The order the gate asks in — invariants first,
-then b4, both the moment the manifest exists — is the next entry.
+then b4, both the moment the manifest exists — is its own entry below.
 
 **A round that is only in the report was not archived (round 2, G8).** D-59 says the loop *records*
 `needs-approval`; the graph write that makes the record durable was correct but untested, so a loop
@@ -516,6 +516,20 @@ branches — `packages/cli/src/__tests__/approval-gate-stack.test.ts`,
 `const mafDir` line (this branch saying the directory is created here; WP-3.2 saying the stores do
 not create it). Keeping either comment resolves it; the rest of what either side adds there —
 including the `mkdir` call and its import — is identical.
+
+### Overlap with WP-3.6 (#54) and WP-3.7
+
+`packages/dag-runner/src/DagParser.ts` is WP-3.6's, and this branch changes it (the `JSON.parse`
+reviver for a workflow spec). #54 — WP-3.6's own fixes — changes the same file. Measured with
+`git merge-tree` against #54's head `29d7641`: three files are shared with this branch —
+`DagParser.ts`, `packages/cli/src/commands/run.ts` and `packages/types/src/index.ts`. The first and
+third auto-merge; `run.ts` conflicts, because both branches' changes sit inside `runTask`.
+Whichever lands second resolves it. The PR body lists the range this branch touches.
+
+`packages/evolver/**` and `packages/cli/src/commands/evolve.ts` are WP-3.7's. This branch changes
+them for the widening rule — the `needs-approval` verdict, the required permission map, the
+pre-spend check, and the round written to the graph — so WP-3.7 starts from those changes rather
+than from the pre-3.9 files.
 
 ### The `claude` preflight check
 
