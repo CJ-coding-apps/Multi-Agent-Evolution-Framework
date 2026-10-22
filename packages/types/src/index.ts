@@ -252,6 +252,15 @@ export interface DagConfig {
   reviewGateNodeIds: NodeId[];
 }
 
+// WP-3.6 — additive: where a run's DAG came from. The bundle and the Run node record it, so an
+// operator reading an attestation can tell a plan a model made from one a file asked for; without
+// it the two runs differ only in a line of stdout that is not part of the signed record.
+export type PlanSource =
+  /** `--plan-from`: the DAG was read from this file, whose bytes hash to `sha256`. */
+  | { kind: 'spec'; path: string; sha256: string }
+  /** The planner was asked, and its answer is the plan. */
+  | { kind: 'planner' };
+
 /** 'Unschedulable' is a real verdict: the DAG was valid but never ran to completion. */
 export type RunStatus = 'Succeeded' | 'Failed' | 'Unschedulable';
 

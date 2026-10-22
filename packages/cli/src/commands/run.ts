@@ -4,7 +4,7 @@ import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
 import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
-import type { AdapterName, CliAdapter, Dag, DagNode, RetryPolicy } from '@maf/types';
+import type { AdapterName, CliAdapter, Dag, DagNode, PlanSource, RetryPolicy } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine } from '@maf/lcm';
@@ -78,6 +78,12 @@ export interface RunDeps {
   adapters?: () => Map<AdapterName, CliAdapter>;
   /** Decides review requests in place of the terminal reviewer, which needs a TTY. */
   reviewer?: Reviewer;
+  /**
+   * Builds the planner; `new RetrievalAugmentedPlanner(...)` when unset. A seam, not a policy:
+   * `--plan-from` must not construct one at all, and only a test can see a constructor that is
+   * never called.
+   */
+  createPlanner?: (args: ConstructorParameters<typeof RetrievalAugmentedPlanner>[0]) => RetrievalAugmentedPlanner;
 }
 
 export interface RunContext extends RunDeps {
@@ -184,6 +190,26 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     }
   }
 
+  // ── The plan, when the operator wrote one (WP-3.6, F1): read, validate and synthesize it here —
+  // after the role set, and before `checkForRun` creates a `maf/<runId>` branch, before the
+  // worktree, and before the run's own stores (memory, transcript, LCM) open — so every spec
+  // refusal leaves the repository and `.maf/` as it found them. The harness store is the one
+  // exception: it is resolved above, because the spec's roles come from it, which is why the
+  // refusal test pre-saves its harness. Recall is not applied: a spec is the operator's plan, and
+  // memory must not alter it (F7). The path is resolved against `--dir`, as `--roles` and
+  // `--policy` are (F11).
+  let specPlan: { dag: Dag; source: { kind: 'spec'; path: string; sha256: string } } | undefined;
+  if (opts.planFrom !== undefined) {
+    const specPath = path.resolve(dir, opts.planFrom);
+    const read = await new DagSynthesizer(roles).fromFile(specPath, runId, { runTitle: taskDescription });
+    specPlan = {
+      dag:    applyDagSettings(read.dag, cfg.dag),
+      source: { kind: 'spec', path: specPath, sha256: read.sha256 },
+    };
+  }
+  // Where the plan came from, recorded on the Run node, in the bundle and in the transcript (F4).
+  const planSource: PlanSource = specPlan?.source ?? { kind: 'planner' };
+
   // ── Tiers (D-01): the dispatcher refuses an ungoverned writer when its node comes up; refusing
   // here, before planning, saves the planner's tokens and the worktree.
   const ungoverned = roles.list().filter((r) => isWriterRole(r) && effectiveTier(r, adapter) === 'cli');
@@ -286,6 +312,9 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     });
 
     await transcript.init();
+    // Where the plan came from, as the run's own first record (F4): the bundle is written at the end
+    // and the transcript as the run goes, so a run that fails still says what it was asked to run.
+    await transcript.append('system', planSourceLine(planSource), { planSource });
     const lcmBridge = new BlackboardToLcmAdapter(board, lcm, sessionId, runId);
     const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
     // One gate for the run (D-02): an escalated tool call is put to the operator at the terminal,
@@ -310,15 +339,6 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     });
 
     const injector = new GraphAwareInjector({ graph, lcm, maxNodes: 40, tokenBudget: 4096 });
-    const planner  = new RetrievalAugmentedPlanner({
-      graph, lcm, injector,
-      // The registry is the role set in force: it supplies the default role AND the answer to
-      // "is this name real?". The planner used to carry `defaultRole` plus a `validRoles` set
-      // and *warn* before assigning the default, which was the writer.
-      roles,
-      roleCatalog: roles.catalog(),
-      generatePlan: planGenerator(adapter, { workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry, ...model }),
-    });
 
     // The scheduler's writer lock, as a ledger the dispatcher can read (WP-3.0c, the F7 window):
     // when an in-process reader's bracket shows a change, the dispatcher asks who held the lock
@@ -353,20 +373,30 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // Record run start in memory graph (harness provenance)
     await graph.addNode({
       kind: 'Run', label: runId,
-      properties: { taskDescription, adapter: cfg.adapter, harnessId: harness.id, harness_sha: harness.sha },
+      properties: { taskDescription, adapter: cfg.adapter, harnessId: harness.id, harness_sha: harness.sha, planSource },
       runId,
     });
 
     // Generate DAG; the run's concurrency and retry policy come from the config (WP-2.5).
     // `--plan-from` reads a spec the operator wrote (WP-3.6): no model call, and the same file always
-    // yields the same DAG. Otherwise the planner is asked, as before.
+    // yields the same DAG. Otherwise the planner is asked, as before — and it is constructed only
+    // here, so the spec path has no planner to build (F3).
     let dag: Dag;
-    if (opts.planFrom !== undefined) {
-      const specPath = path.resolve(opts.planFrom);
-      say(`[maf] plan: ${specPath} (read from spec, no model call)`);
-      dag = applyDagSettings(await new DagSynthesizer(roles).fromFile(specPath, runId), cfg.dag);
+    if (specPlan !== undefined) {
+      say(`[maf] plan: ${specPlan.source.path} (read from spec, no model call)`);
+      dag = specPlan.dag;
     } else {
       say('[maf] planning...');
+      const createPlanner = ctx.createPlanner ?? ((args) => new RetrievalAugmentedPlanner(args));
+      const planner = createPlanner({
+        graph, lcm, injector,
+        // The registry is the role set in force: it supplies the default role AND the answer to
+        // "is this name real?". The planner used to carry `defaultRole` plus a `validRoles` set
+        // and *warn* before assigning the default, which was the writer.
+        roles,
+        roleCatalog: roles.catalog(),
+        generatePlan: planGenerator(adapter, { workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry, ...model }),
+      });
       dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
     }
 
@@ -402,7 +432,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       { id: componentId(`@maf/adapter-${cfg.adapter}`), modelVersion: cfg.model ?? 'default' },
       {
         configSource: await harnessStore.configSource(harness),
-        parameters:  { harnessId: harness.id },
+        parameters:  { harnessId: harness.id, planSource },
         environment: {},
       },
       [],
@@ -472,6 +502,13 @@ export function planGenerator(
  */
 export function writerLock(roles: RoleRegistry, adapter: CliAdapter, baseTools: ToolRegistry): (node: DagNode) => boolean {
   return (node) => roles.hasRole(node.agentRole) ? isWriterForLock(roles.getRole(node.agentRole), adapter, baseTools) : true;
+}
+
+/** The transcript's line for where the plan came from (WP-3.6, F4). */
+function planSourceLine(source: PlanSource): string {
+  return source.kind === 'spec'
+    ? `plan source: spec ${source.path} (sha256 ${source.sha256})`
+    : 'plan source: the planner';
 }
 
 /**
