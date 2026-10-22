@@ -162,13 +162,18 @@ function openFailure(dbPath: string, err: unknown): unknown {
   if (!isDirectory) return err;
 
   const version = safeVersion();
+  // The route has to be one a user can actually follow. No released maf carries `graph export`,
+  // and this Kùzu cannot read the old format, so "export it with the maf that wrote it" was an
+  // instruction no installed version could carry out. A memory graph from 0.5.x or earlier is not
+  // carried into this one: it holds failure recall history, and nothing else that lives here.
   return new GraphOpenError(
-    `The graph at ${dbPath} is a directory written by Kùzu 0.7.x; this maf uses Kùzu ${version}, ` +
-    `which writes a single file and cannot read the older format (Kùzu changed it before 1.0). ` +
-    `Export it with the maf that wrote it — \`maf graph export --db ${dbPath} --out graph.json\` — ` +
-    `then import that JSON with this maf: \`maf graph import graph.json --db ${dbPath}.v11\`. ` +
-    `If the maf that wrote it predates \`graph export\`, the graph cannot be migrated; move ${dbPath} ` +
-    `aside and start a new graph. Original error: ${message}`,
+    `The graph at ${dbPath} was written by Kùzu 0.7.x, and this maf uses Kùzu ${version}, which ` +
+    `cannot read the older format (Kùzu changed it before 1.0). It holds this repository's recall ` +
+    `history — the failures and plans earlier runs recorded — and nothing else: your code, branches ` +
+    `and attestations live elsewhere and are unaffected, and a new graph simply starts empty. To keep ` +
+    `the old one and let maf start a new graph, run:\n\n` +
+    `    mv ${dbPath} ${dbPath}.0.7-backup\n\n` +
+    `maf does not move or delete it for you. Original error: ${message}`,
   );
 }
 

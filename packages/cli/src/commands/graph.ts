@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import type { Command } from 'commander';
 import {
   MemoryGraph, exportGraph, importGraph, parseGraphExport, kuzuVersion,
@@ -22,6 +22,15 @@ export interface GraphImportOutcome {
 
 /** `maf graph export`, minus the process: reads the graph, writes the JSON, closes the graph. */
 export async function runGraphExport(dbPath: string, outFile: string): Promise<GraphExportOutcome> {
+  // Opening a graph that is not there creates an empty one, and exporting that writes a file
+  // that reads like a successful rescue of nothing. Refuse before anything is opened, so a
+  // mistyped path leaves the directory exactly as it was.
+  try {
+    await stat(dbPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`no graph at ${dbPath}`);
+    throw err;
+  }
   const graph = new MemoryGraph(dbPath);
   try {
     const version = kuzuVersion();

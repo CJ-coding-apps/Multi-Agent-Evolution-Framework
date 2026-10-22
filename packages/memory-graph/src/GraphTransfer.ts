@@ -76,14 +76,57 @@ export async function exportGraph(graph: GraphQueryRunner, kuzuVersion: string):
     params: {},
   });
 
+  const nodes = nodeRows.map(exportedNode);
+  const edges = edgeRows.map(exportedEdge);
+  // An export the importer would refuse is not an export. The rows are checked while they are
+  // still in hand — before the caller writes a byte — because a rescue file that cannot be read
+  // back fails at exactly the moment it is needed.
+  assertExportable(nodes, edges);
+
   return {
     format: GRAPH_EXPORT_FORMAT,
     formatVersion: GRAPH_EXPORT_FORMAT_VERSION,
     kuzuVersion,
     exportedAt: new Date().toISOString(),
-    nodes: nodeRows.map(exportedNode),
-    edges: edgeRows.map(exportedEdge),
+    nodes,
+    edges,
   };
+}
+
+const NODE_REQUIRED_FIELDS = ['id', 'kind', 'label', 'runId', 'createdAt', 'updatedAt'] as const;
+const EDGE_REQUIRED_FIELDS = ['id', 'fromId', 'toId', 'relation', 'createdAt'] as const;
+
+/**
+ * The export half of the import's own rules: every field `parseGraphExport` requires non-empty,
+ * and a weight it requires finite. The first bad row stops the export, naming the row and the
+ * field; no file is written, because the caller only writes what this function returned.
+ */
+function assertExportable(nodes: ExportedNode[], edges: ExportedEdge[]): void {
+  nodes.forEach((node, i) => {
+    const where = `node ${i} (MemoryNode ${JSON.stringify(node.id || '(no id)')})`;
+    for (const field of NODE_REQUIRED_FIELDS) {
+      if (node[field] === '') {
+        throw new GraphTransferError(
+          `Cannot export ${where}: ${field} is empty. The importer requires it, so the file would be unreadable.`,
+        );
+      }
+    }
+  });
+  edges.forEach((edge, i) => {
+    const where = `edge ${i} (MemoryEdge ${JSON.stringify(edge.id || '(no id)')})`;
+    for (const field of EDGE_REQUIRED_FIELDS) {
+      if (edge[field] === '') {
+        throw new GraphTransferError(
+          `Cannot export ${where}: ${field} is empty. The importer requires it, so the file would be unreadable.`,
+        );
+      }
+    }
+    if (!Number.isFinite(edge.weight)) {
+      throw new GraphTransferError(
+        `Cannot export ${where}: weight is ${String(edge.weight)}, not a finite number. The importer requires one, so the file would be unreadable.`,
+      );
+    }
+  });
 }
 
 /**

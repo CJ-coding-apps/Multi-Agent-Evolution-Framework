@@ -8,8 +8,19 @@ import { KuzuDriver } from './KuzuDriver.js';
 import { SCHEMA_DDL } from './schema.js';
 import { intLiteral, idListParams } from './cypherText.js';
 
+/**
+ * What `MemoryGraph` asks of its driver. `KuzuDriver` is the implementation production uses; the
+ * interface is named separately because schema setup's failure path — a DDL statement that
+ * rejects with something other than "already exists" — can only be exercised by a driver that
+ * fails on purpose.
+ */
+export interface GraphDriver {
+  run(query: GraphQuery): Promise<GraphRow[]>;
+  close(): void;
+}
+
 export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
-  private driver: KuzuDriver;
+  private driver: GraphDriver;
   /**
    * Table setup, started by the first query and awaited by every query after it — never by the
    * constructor. Starting it eagerly let `close()` run in the middle of the DDL sequence: the
@@ -20,8 +31,8 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
    */
   private schemaReady: Promise<void> | undefined;
 
-  constructor(dbPath: string, bufferPoolSizeBytes = 128 * 1024 * 1024) {
-    this.driver = new KuzuDriver(dbPath, bufferPoolSizeBytes);
+  constructor(dbPath: string, bufferPoolSizeBytes = 128 * 1024 * 1024, driver?: GraphDriver) {
+    this.driver = driver ?? new KuzuDriver(dbPath, bufferPoolSizeBytes);
   }
 
   private ensureSchema(): Promise<void> {

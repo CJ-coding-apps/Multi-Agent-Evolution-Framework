@@ -237,7 +237,7 @@ test('an import that fails halfway rolls back, and the graph is usable afterward
   }
 });
 
-test('opening a Kùzu 0.7.1 directory refuses it with the export-then-import route', async () => {
+test('opening a Kùzu 0.7.1 directory refuses it, names the path, and gives the one command that keeps it', async () => {
   const dir = await tempDir('maf-transfer-old-');
   try {
     await execFileAsync('tar', ['-xzf', KUZU_071_TARBALL, '-C', dir]);
@@ -256,12 +256,64 @@ test('opening a Kùzu 0.7.1 directory refuses it with the export-then-import rou
       (err: unknown) => {
         assert.ok(err instanceof GraphOpenError, `expected a GraphOpenError, got ${String(err)}`);
         assert.match(err.message, /0\.7\.x/);
-        assert.match(err.message, /maf graph export/);
-        assert.match(err.message, /maf graph import/);
-        assert.match(err.message, /cannot be migrated/, 'the one case no export can rescue is said plainly');
+        assert.ok(err.message.includes(`The graph at ${old} `), `the refusal names the path: ${err.message}`);
+        assert.match(err.message, /recall\s+history/, 'it says what the graph held');
+        assert.match(err.message, /code, branches\s+and attestations live elsewhere/, 'and what it did not');
+        assert.match(err.message, /starts empty/, 'the fresh graph is stated, not implied');
+        assert.ok(
+          err.message.includes(`mv ${old} ${old}.0.7-backup`),
+          `the one command names this path: ${err.message}`,
+        );
+        assert.match(err.message, /does not move or delete it for you/, 'maf does not act on the user\'s file');
+        // The route this replaced was one no installed maf could carry out: no released version
+        // has `graph export`, and this Kùzu cannot read the format it would have to export.
+        assert.doesNotMatch(err.message, /maf graph export/);
+        assert.doesNotMatch(err.message, /maf graph import/);
         return true;
       },
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('export refuses a row the importer would refuse, naming the row and the field', async () => {
+  const dir = await tempDir('maf-transfer-export-invariant-');
+  try {
+    // An empty runId: the import's `requiredString` rejects it, so the export must not write it.
+    const emptyRun = new MemoryGraph(path.join(dir, 'a.kuzu'));
+    try {
+      await emptyRun.addNode({ kind: 'Task', label: 'no run', properties: {}, runId: makeRunId('') });
+      await assert.rejects(
+        () => exportGraph(emptyRun, kuzuVersion()),
+        (err: unknown) => {
+          assert.ok(err instanceof GraphTransferError, `expected a GraphTransferError, got ${String(err)}`);
+          assert.match(err.message, /^Cannot export node 0 \(MemoryNode ".+"\): runId is empty\./);
+          assert.match(err.message, /would be unreadable/);
+          return true;
+        },
+      );
+    } finally {
+      emptyRun.close();
+    }
+
+    // A non-finite weight: the same rule on the edge side.
+    const badWeight = new MemoryGraph(path.join(dir, 'b.kuzu'));
+    try {
+      const from = await badWeight.addNode({ kind: 'Task', label: 'from', properties: {}, runId: makeRunId('r1') });
+      const to = await badWeight.addNode({ kind: 'Task', label: 'to', properties: {}, runId: makeRunId('r1') });
+      await badWeight.addEdge({ fromId: from, toId: to, relation: 'DEPENDS_ON', weight: Number.NaN, metadata: {} });
+      await assert.rejects(
+        () => exportGraph(badWeight, kuzuVersion()),
+        (err: unknown) => {
+          assert.ok(err instanceof GraphTransferError, `expected a GraphTransferError, got ${String(err)}`);
+          assert.match(err.message, /^Cannot export edge 0 \(MemoryEdge ".+"\): weight is NaN, not a finite number\./);
+          return true;
+        },
+      );
+    } finally {
+      badWeight.close();
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

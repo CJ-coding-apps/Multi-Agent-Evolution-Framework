@@ -5,6 +5,8 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { makeRunId } from '@maf/types';
+import { MemoryGraph } from '@maf/memory-graph';
 
 // ORACLE (WP-3.8, D-58). The rescue is a command a user runs *because* their graph no longer opens,
 // so what matters is the process: the exit code, and the sentence on the failing stream. The
@@ -31,19 +33,66 @@ async function tempDir(prefix: string): Promise<string> {
   return mkdtemp(path.join(tmpdir(), prefix));
 }
 
-test('graph export on a Kùzu 0.7.1 directory exits non-zero and prints the export/import route', async () => {
+test('graph export on a Kùzu 0.7.1 directory exits non-zero and gives the one command that keeps it', async () => {
   const dir = await tempDir('maf-graph-cli-old-');
   try {
     await execFileAsync('tar', ['-xzf', KUZU_071_TARBALL, '-C', dir]);
+    const old = path.join(dir, 'memory.kuzu');
     const out = path.join(dir, 'export.json');
-    const result = await runCli(['graph', 'export', '--db', path.join(dir, 'memory.kuzu'), '--out', out]);
+    const result = await runCli(['graph', 'export', '--db', old, '--out', out]);
 
     assert.notEqual(result.code, 0, 'a graph it cannot read is a failure, not an empty export');
     assert.match(result.stderr, /Kùzu 0\.7\.x/);
-    assert.match(result.stderr, /maf graph export/);
-    assert.match(result.stderr, /maf graph import/);
+    assert.ok(result.stderr.includes(`mv ${old} ${old}.0.7-backup`), result.stderr);
+    assert.match(result.stderr, /does not move or delete it for you/);
+    // The route this replaced needed a `graph export` that no released maf has.
+    assert.doesNotMatch(result.stderr, /maf graph export/);
     assert.doesNotMatch(result.stdout, /Exported/, 'nothing was written');
     await assert.rejects(() => stat(out), /ENOENT/);
+    assert.ok((await stat(old)).isDirectory(), 'and the old graph is exactly where it was');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('graph export on a path that holds no graph exits non-zero and creates nothing', async () => {
+  const dir = await tempDir('maf-graph-cli-missing-');
+  try {
+    // A typo in --db used to open a fresh database at that path and "export" zero rows — a file
+    // that reads like a successful rescue of nothing. The refusal comes before anything is opened.
+    const db = path.join(dir, 'missing', 'memory.kuzu');
+    const out = path.join(dir, 'export.json');
+    const result = await runCli(['graph', 'export', '--db', db, '--out', out]);
+
+    assert.notEqual(result.code, 0);
+    assert.ok(result.stderr.includes(`no graph at ${db}`), result.stderr);
+    await assert.rejects(() => stat(out), /ENOENT/, 'no export file');
+    await assert.rejects(() => stat(path.join(dir, 'missing')), /ENOENT/, 'not even the parent directory');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('graph export refuses a row the importer would reject, and writes no file', async () => {
+  const dir = await tempDir('maf-graph-cli-badrow-');
+  try {
+    const db = path.join(dir, 'memory.kuzu');
+    const graph = new MemoryGraph(db);
+    try {
+      await graph.addNode({ kind: 'Task', label: 'no run', properties: {}, runId: makeRunId('') });
+    } finally {
+      graph.close();
+    }
+
+    const out = path.join(dir, 'export.json');
+    const result = await runCli(['graph', 'export', '--db', db, '--out', out]);
+
+    assert.notEqual(result.code, 0, 'a file that cannot be imported is not an export');
+    // The CLI prefixes the thrown message with `[maf] error: `; the sentence after it is the
+    // exporter's own, and it is the half a reader acts on.
+    assert.match(result.stderr, /^\[maf\] error: Cannot export node 0 \(MemoryNode ".+"\): runId is empty\./m);
+    assert.doesNotMatch(result.stdout, /Exported/);
+    await assert.rejects(() => stat(out), /ENOENT/, 'the partial file was never written');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
