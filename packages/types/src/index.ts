@@ -1589,9 +1589,8 @@ export {
 } from './redaction.js';
 
 /**
- * The environment for a child that runs project code — `patch.apply` runs `git apply`, so this
- * module lands with it. The allowlist keeps `GIT_DIR`, `GIT_CONFIG_*` and every provider token in
- * maf's own environment out of a child the run's patch controls; `toolEnv()` is the same helper
- * WP-3.9 uses for every agent-code spawn.
+ * The environment for a child that runs project code. In 0.5.1 that child is `patch.apply`'s
+ * `git apply`: the allowlist keeps `GIT_DIR`/`GIT_CONFIG_*`, every provider token and every
+ * `MAF_*` variable in maf's own environment out of a process a patch an agent wrote controls.
  */
-export { TOOL_ENV_ALLOWLIST, toolEnv, backendEnv, isMafVariable } from './childEnv.js';
+export { toolEnv } from './childEnv.js';
