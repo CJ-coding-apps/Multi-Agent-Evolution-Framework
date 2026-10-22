@@ -178,8 +178,15 @@ export function buildTestCommand(runner: ConcreteRunner, input: TestInput): stri
     case 'node':    return ['node', '--test'];
     case 'pnpm':    return ['pnpm', 'test'];
     case 'npm':     return ['npm', 'test'];
-    case 'vitest':  return ['npx', 'vitest', 'run', ...(filter ? ['--reporter=verbose', filter] : [])];
-    case 'jest':    return ['npx', 'jest', '--forceExit', ...(filter ? ['--testPathPattern', filter] : [])];
+    // `--no-install`: without it `npx` downloads the runner from the registry when the project does
+    // not have it installed — a network fetch (and code execution) chosen by a model-authored
+    // `runner` field. With it, a missing runner fails by name instead (WP-3.9 F15).
+    //
+    // No `--` before vitest's filter, deliberately (WP-3.9 F12): vitest parses with cac, which cuts
+    // argv at `--` and puts everything after it in `options['--']` rather than in `filters`, so
+    // `vitest run -- <filter>` silently runs the whole suite instead of filtering it.
+    case 'vitest':  return ['npx', '--no-install', 'vitest', 'run', ...(filter ? ['--reporter=verbose', filter] : [])];
+    case 'jest':    return ['npx', '--no-install', 'jest', '--forceExit', ...(filter ? ['--testPathPattern', filter] : [])];
     case 'pytest':  return ['python', '-m', 'pytest', ...(filter ? ['-k', filter] : [])];
     case 'cargo':   return ['cargo', 'test', ...(filter ? ['--', filter] : [])];
     default: {

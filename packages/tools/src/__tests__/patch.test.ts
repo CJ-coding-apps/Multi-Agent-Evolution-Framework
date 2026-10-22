@@ -203,20 +203,30 @@ test('execute writes the temp diff 0600, hands it to patch, and removes it', asy
     `#!/bin/sh\n${process.execPath} -e 'const fs=require("node:fs");` +
     `const i=process.argv.indexOf("-i");const p=process.argv[i+1];` +
     `fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({` +
-    `args: process.argv.slice(2), file: p, mode: (fs.statSync(p).mode&0o777).toString(8)}));' -- "$@"\n`,
+    `args: process.argv.slice(2), file: p, mode: (fs.statSync(p).mode&0o777).toString(8),` +
+    `maf: Object.keys(process.env).filter((k) => /^MAF_/i.test(k))}));' -- "$@"\n`,
   );
   await chmod(fake, 0o755);
   const savedPath = process.env['PATH'];
+  const savedKey = process.env['MAF_SIGNING_KEY'];
   process.env['PATH'] = `${binDir}${path.delimiter}${savedPath ?? ''}`;
-  t.after(() => { process.env['PATH'] = savedPath; });
+  process.env['MAF_SIGNING_KEY'] = 'test-signing-key';
+  t.after(() => {
+    process.env['PATH'] = savedPath;
+    if (savedKey === undefined) delete process.env['MAF_SIGNING_KEY'];
+    else process.env['MAF_SIGNING_KEY'] = savedKey;
+  });
 
   const result = await new PatchApplyTool().execute({ diff: GIT_DIFF }, ctxIn(root));
   assert.equal(result.exitCode, 0, result.stderr);
 
-  const { args, file: tmpFile, mode } = JSON.parse(await readFile(record, 'utf8')) as {
-    args: string[]; file: string; mode: string;
+  const { args, file: tmpFile, mode, maf } = JSON.parse(await readFile(record, 'utf8')) as {
+    args: string[]; file: string; mode: string; maf: string[];
   };
   assert.equal(mode, '600');
+  // WP-3.9 F6: `patch` is a process maf spawns while an agent's diff is in flight; it gets the tool
+  // allowlist, so a signing key in maf's own environment is not inherited by the child.
+  assert.deepEqual(maf, [], 'no MAF_* variable reaches the patch process');
   // The two flags that keep a rejected hunk from leaving `<path>.orig` and `<path>.rej` behind:
   // both are a copy of the target and a copy of the hunk, and either can be a secret.
   assert.ok(args.includes('--no-backup-if-mismatch'), `argv was ${args.join(' ')}`);

@@ -122,6 +122,34 @@ test('grep refuses a path that leaves the project root with a failed result, and
   }
 });
 
+// WP-3.9 F6: the search binary is spawned while an agent's input is in flight, so it gets the tool
+// allowlist. Reverting `env: toolEnv()` to the ambient `process.env` passed this whole file before.
+test('both search binaries are spawned with the tool allowlist, not maf\'s environment', async (t) => {
+  const savedKey = process.env['MAF_SIGNING_KEY'];
+  process.env['MAF_SIGNING_KEY'] = 'test-signing-key';
+  t.after(() => {
+    if (savedKey === undefined) delete process.env['MAF_SIGNING_KEY'];
+    else process.env['MAF_SIGNING_KEY'] = savedKey;
+  });
+
+  // Both wire points: the rg spawn, and the grep fallback that a missing rg reaches.
+  for (const [label, rg] of [['rg', FOUND], ['grep fallback', NOT_INSTALLED]] as const) {
+    const seen: NodeJS.ProcessEnv[] = [];
+    const spawn: GrepSpawn = (command, _args, options) => {
+      seen.push(options.env ?? {});
+      return command === 'rg' ? rg : FOUND;
+    };
+
+    await new GrepTool(spawn).execute({ pattern: 'needle' }, ctxIn(CWD));
+
+    assert.equal(seen.length, rg === FOUND ? 1 : 2, `${label}: every spawn is inspected`);
+    for (const env of seen) {
+      assert.deepEqual(Object.keys(env).filter((k) => /^MAF_/i.test(k)), [], `${label}: no MAF_* variable reaches the search binary`);
+      assert.notEqual(env['PATH'], undefined, `${label}: the binary still gets PATH (the filter is not "no environment")`);
+    }
+  }
+});
+
 test('the grep fallback takes the same -e/-- shape when rg is not installed', async () => {
   for (const pattern of OPTION_SHAPED) {
     for (const ignoreCase of [false, true]) {

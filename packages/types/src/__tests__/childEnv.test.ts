@@ -84,6 +84,17 @@ test('isMafVariable names the family and nothing else', () => {
   assert.equal(isMafVariable('PATH'), false);
 });
 
+test('on Windows the match is case-insensitive, because the environment is (WP-3.9 F15)', () => {
+  // `process.env` on Windows folds case, so `maf_signing_key` in a PowerShell prompt IS the key
+  // the child reads as `MAF_SIGNING_KEY`; a case-sensitive match would pass it to a backend CLI.
+  assert.equal(isMafVariable('maf_signing_key', 'win32'), true);
+  assert.equal(isMafVariable('Maf_Headless', 'win32'), true);
+  assert.equal(isMafVariable('PATH', 'win32'), false);
+  // POSIX keeps the exact spelling: `maf_signing_key` there is a different variable, and maf sets
+  // none of them, so it is the user's and stays.
+  assert.equal(isMafVariable('maf_signing_key', 'linux'), false);
+});
+
 test('a real child started with toolEnv cannot read MAF_SIGNING_KEY', () => {
   const out = spawnSync(
     process.execPath,

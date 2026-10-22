@@ -59,9 +59,17 @@ export function toolEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEn
   return env;
 }
 
-/** True for the variables maf sets for itself, which a backend CLI has no reason to see. */
-export function isMafVariable(key: string): boolean {
-  return key.startsWith('MAF_');
+/**
+ * True for the variables maf sets for itself, which a backend CLI has no reason to see.
+ *
+ * Case-insensitive on Windows, where the environment is case-insensitive: a `maf_signing_key`
+ * set from a PowerShell prompt names the same variable the child reads as `MAF_SIGNING_KEY`, so a
+ * case-sensitive match would hand it over. The platform is a parameter so the rule is testable on
+ * every platform (WP-3.9 F15).
+ */
+export function isMafVariable(key: string, platform: NodeJS.Platform = process.platform): boolean {
+  const name = platform === 'win32' ? key.toUpperCase() : key;
+  return name.startsWith('MAF_');
 }
 
 /**

@@ -116,8 +116,14 @@ test('a positional filter follows "--" so it cannot be read as an option', () =>
   assert.deepEqual(buildTestCommand('bun', { filter: 'name' }), ['bun', 'test', '--', 'name']);
   assert.deepEqual(buildTestCommand('cargo', { filter: 'name' }), ['cargo', 'test', '--', 'name']);
   // Where the filter is an option's value, `--` would change how the runner parses the rest.
-  assert.deepEqual(buildTestCommand('jest', { filter: 'name' }), ['npx', 'jest', '--forceExit', '--testPathPattern', 'name']);
+  assert.deepEqual(buildTestCommand('jest', { filter: 'name' }),
+    ['npx', '--no-install', 'jest', '--forceExit', '--testPathPattern', 'name']);
   assert.deepEqual(buildTestCommand('pytest', { filter: 'name' }), ['python', '-m', 'pytest', '-k', 'name']);
+  // Vitest is positional, but cac cuts argv at `--` and files the rest under `options['--']`, so a
+  // `--` here would run the whole suite with the filter silently dropped (WP-3.9 F12). `--no-install`
+  // keeps `npx` from fetching a runner the project does not have (WP-3.9 F15).
+  assert.deepEqual(buildTestCommand('vitest', { filter: 'name' }),
+    ['npx', '--no-install', 'vitest', 'run', '--reporter=verbose', 'name']);
   assert.deepEqual(buildTestCommand('node', { filter: 'ignored' }), ['node', '--test']);
 });
 
