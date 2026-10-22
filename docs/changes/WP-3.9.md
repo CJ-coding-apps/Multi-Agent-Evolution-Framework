@@ -191,6 +191,13 @@ states each as implemented.
   `packages/cli/src/__tests__/eval-commands.test.ts` drives `maf evolve` end to end — the real
   registry, loop and gate, with a stand-in stack and adapter — and reads the recorded round: outcome
   `reject`, stage `b-invariants`, the unknown id and the known tools in the note, no critic call.
+- **Proof the round is archived, not only reported (round 2, G8).** The loop tests above read
+  `report.rounds`; none asked whether the round reached the graph. A test in the same file now
+  drives a widening into a real Kùzu `MemoryGraph`, finds the `EvolutionRound` node, and reads it
+  back **by id** — its kind, the run it belongs to, and the stored `outcome`, `manifest`, `note`
+  and `gate` — which is how a later consumer reaches the round. Measured: N3e, the veto path
+  pushing to `rounds` and never calling `record`, fails exactly this test and nothing else
+  (25/26, on `the needs-approval round was written to the graph`).
 
 ### Every `.maf/` JSON file is read through one prototype-key reviver
 
@@ -242,6 +249,14 @@ role, and moves on without a smoke test or a golden run. No flag grants this par
 not it is set. What changed is who answers the question. WP-3.7's live row holds on this verdict —
 the row is the end-to-end check on what an operator is offered, and it is why this ruling is
 recorded rather than left as an internal detail.
+
+**A round that is only in the report was not archived (round 2, G8).** D-59 says the loop *records*
+`needs-approval`; the graph write that makes the record durable was correct but untested, so a loop
+that pushed the round to `report.rounds` and skipped the graph kept every test green. The proof is
+now a real graph write read back by id. Rejected: asserting against the recording stub — it proves
+`addNode` was called, not that a round is on the graph and retrievable, and the loop deliberately
+swallows a recording error (L4), so a stub cannot tell a write from a failure either. Rejected:
+reading the round back by querying its label or outcome — the id is what a consumer gets and holds.
 
 **Order — invariants first, then b4, and both the moment the manifest exists (round 2, G3/G4).**
 The two checks used to be asked at different moments and neither early enough. `gateWidening` ran

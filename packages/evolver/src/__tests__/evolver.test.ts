@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { GraphQuery, PermissionLevel } from '@maf/types';
 import { makeRunId } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
-import type { MemoryGraph } from '@maf/memory-graph';
+import { MemoryGraph } from '@maf/memory-graph';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import {
   assertChangeManifest, applyEdit, ManifestError,
@@ -392,6 +395,56 @@ test('loop: a widening is caught BEFORE the critic, the smoke test and the golde
   assert.equal(smoked, 0, 'no smoke test ran for a manifest that widens a role');
   assert.deepEqual(evaluated, [CURRENT.sha], 'only the baseline was evaluated, never the candidate');
   assert.equal(report.ships, 0);
+});
+
+test('loop: a needs-approval round is written to the graph and reads back by id (WP-3.9 G8)', async (t) => {
+  // The round is archived in `report.rounds` AND on the graph. The second half is the one an
+  // operator, a UI or a later run actually reads, and it was unproven: a loop that pushed the round
+  // to the report and never wrote it to the memory graph passed every test. So this drives the
+  // round into a real Kùzu database — not a stub — then finds it the way a consumer would: by id.
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-evolve-graph-'));
+  const graph = new MemoryGraph(path.join(dir, 'memory.kuzu'));
+  t.after(async () => { graph.close(); await rm(dir, { recursive: true, force: true }); });
+
+  const opts = loopOpts({
+    graph,
+    metaGenerate: mockMeta([manifestJson({
+      kind: 'adjust_tool_allowlist', role: 'coder', add: ['test.run'], remove: [],
+    }, ['t2'])]),
+    patience: 1,
+  });
+  const report = await evolve(opts);
+  assert.equal(report.rounds[0]?.outcome, 'needs-approval');
+
+  const found = await graph.run({
+    cypher: 'MATCH (n:MemoryNode) WHERE n.kind = $kind RETURN n.id AS id',
+    params: { kind: 'EvolutionRound' },
+  });
+  assert.equal(found.length, 1, 'the needs-approval round was written to the graph');
+  const id = String(found[0]?.['id'] ?? '');
+  assert.notEqual(id, '', 'the written round carries an id');
+
+  const [node] = await graph.run({
+    cypher: 'MATCH (n:MemoryNode {id: $id}) RETURN n.kind AS kind, n.run_id AS runId, n.properties AS properties',
+    params: { id },
+  });
+  assert.equal(node?.['kind'], 'EvolutionRound', 'the id reads back as the round it named');
+  assert.equal(node?.['runId'], String(opts.runId), 'and it is scoped to the run that asked for it');
+
+  const stored = JSON.parse(String(node?.['properties'])) as {
+    outcome: string;
+    note: string;
+    manifest: { edit: { kind: string; role: string; add: string[] } };
+    gate: { verdict: string; reason: string };
+  };
+  assert.equal(stored.outcome, 'needs-approval');
+  assert.equal(stored.manifest.edit.kind, 'adjust_tool_allowlist');
+  assert.equal(stored.manifest.edit.role, 'coder');
+  assert.deepEqual(stored.manifest.edit.add, ['test.run'],
+    'the manifest the operator is being asked about is stored, not just its outcome');
+  assert.match(stored.note, /b4-write-tool-widening/, 'with the reason it needs approval');
+  assert.equal(stored.gate.verdict, 'needs-approval');
+  assert.match(stored.gate.reason, /b4-write-tool-widening/);
 });
 
 test('loop: an unknown tool id is refused at b-invariants before the critic (WP-3.9 G4)', async () => {
