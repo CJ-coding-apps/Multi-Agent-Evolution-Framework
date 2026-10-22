@@ -143,8 +143,19 @@ states each as implemented.
 - **Proof.** `packages/adapters/claude/src/__tests__/preflight.test.ts` puts a stand-in `claude` on
   PATH and proves the returned path is the binary rather than the bare name, that both questions
   were asked, and that a `--help` without `--tools` is refused naming path and version; a third
-  case runs with an empty PATH. `packages/cli/src/__tests__/preflight-wiring.test.ts` drives a fake
-  adapter through `maf run` and proves the call happens once with zero adapter calls behind it.
+  case runs with an empty PATH. Both stand-in probes are also proved to receive `backendEnv()`
+  (round 2, G6). `packages/cli/src/__tests__/preflight-wiring.test.ts` drives a fake adapter
+  through `maf run` and proves the call happens once with zero adapter calls behind it.
+- **Proof the refusal stops the run (round 2, G7).** A second test in the same file runs the
+  **real** `ClaudeAdapter` — not a stub whose `preflight()` throws — against a stand-in `claude`
+  on PATH whose `--help` has no `--tools`, through `driveRun`, which is the wiring `main.ts`
+  registers. It asserts three separate facts: the throw carries the preflight sentence naming the
+  binary and version (which `main.ts` turns into `[maf] error: …` and exit 1); the stand-in was
+  asked exactly `--version`, `--version`, `--help` — the availability check and the two probes —
+  so a planner call (`--print …`) was never made; and `.maf/harnesses` and `.maf/worktrees` do not
+  exist, so no store was opened. Measured: swallowing the refusal (`await preflight().catch(() => {})`)
+  fails this test, and moving the call to after the harness is resolved fails it on the
+  never-opened-store assertion.
 
 ### The evolver cannot widen a role into a writer
 
