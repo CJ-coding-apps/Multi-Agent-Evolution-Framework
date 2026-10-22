@@ -13,7 +13,7 @@ reproduction is worth more than a description.
 
 ## Supported versions
 
-MAF is pre-1.0 (currently 0.5.0). Only the most recent release is supported; fixes land there and are not
+MAF is pre-1.0 (currently 0.5.1). Only the most recent release is supported; fixes land there and are not
 backported. Please reproduce against the latest version, on Node 22 — the version CI builds and tests
 on — before reporting.
 
@@ -590,6 +590,11 @@ Three things this does **not** cover, so none is mistaken for it:
   `allowedPathGlobs`.
 - It applies to the paths a tool **declares** — `ToolPlugin.declaredPaths(input)`, a pure function of the
   input. For a `cli`-tier role, whose tool calls maf never sees, no path is declared and none is checked.
+
+`patch.apply` declares the names in every header form `patch` reads — `---`/`+++`, a context diff's
+`***`/`---` pair, `Index:`, and `diff --git` — each cut at the timestamp TAB and stripped by the same
+`-p` number passed to `patch`; a diff whose headers name no file is refused as a `Deny` under rule id
+`builtin:declaration` before the policy is asked, because an undeclared write is not an allowed one.
 
 ### `test.run` executes project code
 

@@ -2,7 +2,7 @@ import type {
   ToolPlugin, ToolInput, ToolResult, ToolContext,
   PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalAsk, ApprovalGateHandle, ApprovalOutcome,
 } from '@maf/types';
-import { PathConfinementError, PathEscapeError, toolFailureMessage, toolInputProblem } from '@maf/types';
+import { PathConfinementError, PathEscapeError, ToolDeclarationError, toolFailureMessage, toolInputProblem } from '@maf/types';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
 
@@ -31,8 +31,10 @@ export interface GatedExecDeps {
  * verdict the policy gave and returned. A tool's built-in confinement (`PathConfinementError`, from
  * `declaredPaths` or from `execute` before it acts) is refused the same way policy refuses, as a
  * `Deny` under rule id `builtin:git-dir`; so is a path the tool resolved outside the project root
- * as it ran (`PathEscapeError`), under `builtin:path-escape`. Processor-mediated input edits happen upstream of this function —
- * policy always sees the final input.
+ * as it ran (`PathEscapeError`), under `builtin:path-escape`. A tool that cannot declare what it will
+ * touch at all (`ToolDeclarationError`) is refused under `builtin:declaration`: policy was never asked, so
+ * no rule could have covered the call, and an undeclared call is not an allowed one. Processor-mediated
+ * input edits happen upstream of this function — policy always sees the final input.
  *
  * Secret redaction (L1): policy evaluation and execution use the REAL input, but
  * the values persisted (attestation bundle on disk + memory graph) and the result
@@ -72,7 +74,7 @@ export async function executeToolGated(
   try {
     declaredPaths = tool.declaredPaths(input);
   } catch (err: unknown) {
-    const deny = confinementDeny(err);
+    const deny = builtinRefusal(err);
     if (deny !== undefined) return refuse(deny, undefined, tool, input, ctx, deps, new Date(), Date.now());
     throw err;
   }
@@ -104,7 +106,7 @@ export async function executeToolGated(
   try {
     rawResult = await tool.execute(input, ctx);
   } catch (err: unknown) {
-    const deny = confinementDeny(err);
+    const deny = builtinRefusal(err);
     if (deny !== undefined) return refuse(deny, undefined, tool, input, ctx, deps, invokedAt, start);
     // A refusal raised inside a tool is still a refusal, and keeps the refusal's path.
     if (err instanceof PolicyViolationError) throw err;
@@ -139,9 +141,14 @@ export async function executeToolGated(
   return result;
 }
 
-/** The rule ids a built-in confinement refusal is recorded under: they are no policy file's rules. */
+/** The rule ids a built-in refusal is recorded under: they are no policy file's rules. */
 const BUILTIN_GIT_DIR_RULE = 'builtin:git-dir';
 const BUILTIN_PATH_ESCAPE_RULE = 'builtin:path-escape';
+/**
+ * A tool that cannot say which paths it will touch. The policy was never asked, so no rule could
+ * have covered the call — and a call no rule can see is refused, not run.
+ */
+const BUILTIN_DECLARATION_RULE = 'builtin:declaration';
 
 /** The rule id a call whose input does not match the tool's schema is recorded under. */
 const BUILTIN_INPUT_SCHEMA_RULE = 'builtin:input-schema';
@@ -181,12 +188,14 @@ async function answerMalformed(
 }
 
 /**
- * A tool's own confinement refusal, as the `Deny` it is recorded and reported as: a path into `.git`,
- * or a path that resolves outside the project root. `undefined` for any other error.
+ * A tool's own refusal, as the `Deny` it is recorded and reported as: a path into `.git`, a path that
+ * resolves outside the project root, or a declaration the tool cannot produce at all. `undefined` for
+ * any other error.
  */
-function confinementDeny(err: unknown): Refusal | undefined {
+function builtinRefusal(err: unknown): Refusal | undefined {
   if (err instanceof PathConfinementError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_GIT_DIR_RULE };
   if (err instanceof PathEscapeError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_PATH_ESCAPE_RULE };
+  if (err instanceof ToolDeclarationError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_DECLARATION_RULE };
   return undefined;
 }
 

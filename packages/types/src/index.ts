@@ -376,6 +376,19 @@ export class PathConfinementError extends Error {
   }
 }
 
+/**
+ * A tool cannot say which paths it will touch, so no path rule can cover it. Thrown from
+ * `declaredPaths` — `patch.apply` on a diff whose headers name no file, or name one only in a form
+ * it does not read — and turned by the gate into an attested refusal (`builtin:declaration`) that
+ * the model is handed, so nothing runs. Fail-closed: an undeclarable call is not an unjudged one.
+ */
+export class ToolDeclarationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ToolDeclarationError';
+  }
+}
+
 export interface DagNodeExecution {
   nodeId:      NodeId;
   runId:       RunId;

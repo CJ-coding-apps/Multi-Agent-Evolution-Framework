@@ -9,6 +9,29 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-22
+
+A patch closing two holes in `patch.apply`'s path declaration. `patch.apply` decides which files a diff
+touches by reading its headers, and the policy engine matches path rules against that list. A header with
+a timestamp — the normal output of plain `diff -u`: a `+++` line reading `+++ b/Cargo.lock`, then a TAB,
+then `2026-01-01 …` — declared the name with the tab and the timestamp still on it, which
+`protect-lock-files` does not match; and an `Index:`-only header declared nothing at all, so every path
+rule missed, `deny-env-files` included. In both cases the call was allowed and `patch` wrote the file.
+Found by the WP-3.9 verifier against the shipped `.maf/policy.yaml`. No API changes; a policy file of the
+user's own is unaffected.
+
+### Fixed
+
+- **`patch.apply` reads every header form `patch` reads, and refuses a diff whose file names it cannot
+  read** (F1). `extractDiffPaths` now cuts each name at the first TAB outside quotes (so a timestamp is not
+  part of the name), reads `Index:` names and a context diff's `***`/`---` pair (and skips its
+  `*** 1,4 ****` hunk separators), and applies the same `-p` strip it passes to `patch` — so the declared
+  path and the written path are the same. A diff that names no file, or whose names all vanish under the
+  chosen strip, is refused with `ToolDeclarationError` before the policy is asked; the gate records it as
+  a `Deny` under rule id `builtin:declaration`, attested and reported as the refusal it is rather than run
+  as a call policy allowed. Tests cover a timestamped `+++`/`---`, a context diff, an `Index:`-only diff and
+  a `diff --git` header with a TAB, each against the shipped policy and each for `.env`.
+
 ## [0.5.0] - 2026-10-20
 
 0.5.0 is the packaging release ([D-48](docs/DECISIONS.md)): `maf` installs from npm, `maf init`
