@@ -273,21 +273,30 @@ states each as implemented.
   way as for an unparseable index — **no id resolves** — while the harness stays reachable by its
   sha, because the index is a lookup and the content is addressed by the hash.
 - **Explained, not routed** — the remaining `JSON.parse` calls in `packages/*/src` parse what is
-  not a configuration file: the attestation package's own `package.json`; an in-memory statement
-  round-tripped through JSON in `Attestor.signedBytes`; a blackboard **value** read back from the
-  blackboard's own sqlite column; and six inputs that are model output or a target repository's
-  own `package.json` (the planner, the critic, the llm-judge, the security reviewer, the planning
-  agent's plan block, and `test.run`'s runner detection). Each is read field by field and fails
-  closed where the shape is wrong, and none is copied key by key into a prototype. A value or a
-  model answer is data: refusing a document because a *value* names `__proto__` would reject data
-  the run itself wrote.
+  not a configuration file. The count is measured, not sampled: 30 call sites, 16 routed and 14
+  here. Ten are model or provider output, each read field by field and failing closed on a wrong
+  shape: the tool-call block (`adapters/base/src/turnProtocol.ts`), the JSON response and the
+  streamed chunk in `OllamaAdapter` and `OpenRouterAdapter`, the judge's verdict
+  (`eval-harness/src/judge.ts`), the planner's and the critic's verdicts
+  (`evolver/src/planner.ts`, `evolver/src/loop.ts`), the security reviewer's
+  (`git-ops/src/SecurityReviewGate.ts`), and the planning agent's plan block
+  (`planning-agent/src/RetrievalAugmentedPlanner.ts`). Two are a `package.json`: the attestation
+  package's own (`attestation/src/version.ts`) and the target repository's, for `test.run`'s
+  runner detection (`tools/src/plugins/test-runner.ts`). One is a blackboard **value** read back from the blackboard's own sqlite
+  column. One is an in-memory round-trip of maf's own object in `Attestor.signedBytes`. None is
+  copied key by key into a prototype, and a value or a model answer is data: refusing a document
+  because a *value* names `__proto__` would reject data the run itself wrote.
 - **Proof.** `packages/types/src/__tests__/protoKey.test.ts` pins the reviver for all three keys
   at depth and leaves an ordinary document alone;
   `packages/harness-config/src/__tests__/harness-config.test.ts` proves a harness file naming
   `__proto__` is refused with the key named and is **not** reported as "not parseable", and that a
-  poisoned `index.json` resolves no id. Both were measured as mutants: removing the reviver from
-  the harness-file read fails only the first test, and removing it from the index read fails only
-  the second.
+  poisoned `index.json` resolves no id; and
+  `packages/cli/src/__tests__/goldens-offline.test.ts` proves the `scripted` adapter refuses a
+  corpus that names one. The first two were measured as mutants: removing the reviver from the
+  harness-file read fails only the first test, and removing it from the index read fails only the
+  second. The third reader was the gap round 2 found — `GoldenRunner` and `maf evolve` routed
+  their corpus read and `resolveGoldensAdapter` did not — so the sentence above was false for one
+  of the three names it listed until that call site was fixed.
 
 ## Decisions
 
@@ -540,8 +549,8 @@ flag-support check was added afterwards.
 ## Verification
 
 - `pnpm -r build` and `pnpm -r typecheck` clean, and `grep "error TS"` over the build output = 0.
-- Every package suite: `pnpm -r test` — **1212 tests, 1211 passed, 1 skipped, 0 failed**, measured
-  at `e784558`, the head the count was taken at. Round 2 added 21 of them: `cli` +6, `tools` +3,
+- Every package suite: `pnpm -r test` — **1213 tests, 1212 passed, 1 skipped, 0 failed**, measured
+  at `4ead112`, the head the count was taken at. Round 2 added 22 of them: `cli` +7, `tools` +3,
   `adapters/claude` +3, `harness-config` +2, `evolver` +2, `adapters/codex` +2, `types` +2,
   `policy-engine` +1. (The earlier sentence named `5e17601` as "the last commit that changes code"
   and said the commits after it were documentation: `9c29b6b` then changed code, so that
