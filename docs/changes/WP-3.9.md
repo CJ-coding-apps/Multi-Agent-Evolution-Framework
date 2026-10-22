@@ -540,10 +540,12 @@ flag-support check was added afterwards.
 ## Verification
 
 - `pnpm -r build` and `pnpm -r typecheck` clean, and `grep "error TS"` over the build output = 0.
-- Every package suite: `pnpm -r test` — **1191 tests, 1190 passed, 1 skipped, 0 failed**, measured
-  at `142f725`, the head the count was taken at. (The earlier sentence named `5e17601` as "the last
-  commit that changes code" and said the commits after it were documentation: `9c29b6b` then
-  changed code, so that construction is gone rather than re-worded.)
+- Every package suite: `pnpm -r test` — **1212 tests, 1211 passed, 1 skipped, 0 failed**, measured
+  at `e784558`, the head the count was taken at. Round 2 added 21 of them: `cli` +6, `tools` +3,
+  `adapters/claude` +3, `harness-config` +2, `evolver` +2, `adapters/codex` +2, `types` +2,
+  `policy-engine` +1. (The earlier sentence named `5e17601` as "the last commit that changes code"
+  and said the commits after it were documentation: `9c29b6b` then changed code, so that
+  construction is gone rather than re-worded.)
 - The four repository guards: `check:build-output`, `check:test-scripts`, `check:workspace-deps`,
   `check:doc-refs`.
 
