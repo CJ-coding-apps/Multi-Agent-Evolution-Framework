@@ -242,3 +242,52 @@ test('a whole-repository tool declares no path — a path rule cannot match it, 
 test('fs.write declares exactly the file it will write', () => {
   assert.deepEqual(new FsWriteTool().declaredPaths({ path: 'a.txt', content: 'x' }), ['a.txt']);
 });
+
+// Round 3, R2-H1/HS18: what the policy approves must be what the apply writes, by check. The gate
+// hands its declaration to `execute` on the context; a tool that recomputes a different set there is
+// refused, recorded as a Deny under `builtin:declaration` — not run under the Allow of another set.
+test('a declaration that understates what the diff writes is refused where the tool writes it', async () => {
+  await inScratch({ 'a.txt': 'one\n', 'b.txt': 'two\n' }, async (dir) => {
+    const attestor = new SpyAttestor();
+    const ctx = ctxIn(dir, attestor, ALLOW);
+    const real = new PatchApplyTool();
+
+    // The mutant: the gate is told one file, and the diff writes two.
+    const understating: ToolPlugin = {
+      id: real.id,
+      name: real.name,
+      description: real.description,
+      permissionLevel: real.permissionLevel,
+      inputSchema: real.inputSchema,
+      declaredPaths(input): string[] { return real.declaredPaths(input as never).slice(0, 1); },
+      execute(input, inner): Promise<ToolResult> { return real.execute(input as never, inner); },
+    };
+
+    // Two sections as git separates them, so the diff really does write both files.
+    const twoFiles = [
+      'diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-one', '+ONE',
+      'diff --git a/b.txt b/b.txt', '--- a/b.txt', '+++ b/b.txt', '@@ -1 +1 @@', '-two', '+TWO',
+      '',
+    ].join('\n');
+
+    // The gate is asked about one path and allows the call.
+    assert.deepEqual(understating.declaredPaths({ diff: twoFiles }), ['a.txt']);
+
+    await assert.rejects(
+      () => executeToolGated(understating, { diff: twoFiles }, ctx, { policy: ALLOW, attestor }),
+      /Policy violation: Deny/,
+    );
+
+    const refusal = attestor.records[attestor.records.length - 1];
+    assert.equal(refusal?.policyDecision.verdict, 'Deny');
+    assert.equal(refusal?.policyDecision.ruleId, 'builtin:declaration');
+    assert.equal(refusal?.result.metadata['refused'], true);
+    assert.equal(await readFile(path.join(dir, 'a.txt'), 'utf8'), 'one\n', 'nothing was written');
+    assert.equal(await readFile(path.join(dir, 'b.txt'), 'utf8'), 'two\n');
+
+    // Anti-vacuity: the tool itself, declaring what it writes, is allowed the same call.
+    const control = await executeToolGated(real, { diff: twoFiles }, ctx, { policy: ALLOW, attestor });
+    assert.equal(control.exitCode, 0, control.stderr);
+    assert.equal(await readFile(path.join(dir, 'b.txt'), 'utf8'), 'TWO\n');
+  });
+});

@@ -124,6 +124,17 @@ export interface ToolContext {
   agentRole?:    string;
   policy:        PolicyEngineHandle;
   attestor:      AttestorHandle;
+
+  /**
+   * The declaration the policy approved for this call, when it was approved.
+   *
+   * `executeToolGated` sets it on the context it hands `execute` and nowhere else, so the policy
+   * and the approval gate see the caller's own context. A tool whose declaration can be recomputed
+   * where it acts must compare the two and refuse when they differ: an approval is of a set of
+   * paths, and a call that would write a different set was never approved. Absent on a direct call
+   * to `execute` (a test, or a caller that is not the gate), where there is nothing to compare.
+   */
+  approvedPaths?: readonly string[];
 }
 
 export interface ToolPlugin<I extends ToolInput = ToolInput> {
@@ -136,11 +147,17 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
   /**
    * The filesystem paths this call will touch, as the tool itself declares them.
    *
-   * MUST be a pure function of `input`: the policy layer calls it before any rule and
-   * before `execute`, so a tool that only reveals its paths while running (patch.apply
-   * derived them inside `execute` and wrote them back onto the input) is invisible to
-   * path rules — the shipped `protect-secrets` Deny matched `fs.write ".env"` and skipped
-   * `patch.apply` on the same file.
+   * MUST be a pure function of `input` and, where given, `ctx`: the same input and the same
+   * context must always give the same declaration. The policy layer calls it before any rule and
+   * before `execute`, so a tool that only reveals its paths while running (patch.apply derived
+   * them inside `execute` and wrote them back onto the input) is invisible to path rules — the
+   * shipped `protect-secrets` Deny matched `fs.write ".env"` and skipped `patch.apply` on the
+   * same file.
+   *
+   * `ctx` is optional and is the caller's own context, without `approvedPaths`. It is there for a
+   * declaration that has to read the tree — a name that is a symlink today, say — so the gate can
+   * record a refusal instead of an Allow that `execute` then declines. A tool that does not read
+   * the tree ignores it and must behave the same with and without it.
    *
    * MUST over-declare rather than under-declare: a path that is declared but never touched
    * can only make a rule match sooner, while a path that is touched but not declared is a
@@ -152,7 +169,7 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
    * and a path that leaves the root is refused. A tool that takes a path from `input` should
    * resolve it the same way — see `resolveInside`.
    */
-  declaredPaths(input: I): string[];
+  declaredPaths(input: I, ctx?: ToolContext): string[];
 
   /**
    * The input `execute` reads, field by field. The in-process loop advertises it in the tool

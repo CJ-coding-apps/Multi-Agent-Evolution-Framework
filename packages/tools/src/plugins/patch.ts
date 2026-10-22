@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import {
   closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync,
 } from 'node:fs';
+import type { Stats } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -176,8 +177,8 @@ function gitFailure(r: GitResult): string {
 
 function refusal(detail: string): ToolDeclarationError {
   return new ToolDeclarationError(
-    `patch.apply refuses this diff: ${detail} The call is refused before the policy is asked, because `
-    + 'an undeclared write is not an allowed one.',
+    `patch.apply refuses this diff: ${detail} The call is refused rather than run, and nothing is `
+    + 'written, because a write the policy did not approve is not an allowed one.',
   );
 }
 
@@ -277,13 +278,19 @@ function refuseSummaryForms(sealed: SealedGit): void {
 
 /**
  * A section header git does not read is a section git does not apply — and `git apply` exits 0
- * having skipped it, so the agent is told its whole diff applied. An indented or `X`-prefixed
- * `+++`, `---` or `diff --git` line is refused rather than guessed at.
+ * having skipped it, so the agent is told its whole diff applied.
+ *
+ * Only what can *be* a section start is refused: an indented `--- ` line immediately followed by a
+ * `+++ ` line at the same indent, or an indented `diff --git ` line. The first pattern used to refuse
+ * any indented `--- `/`+++ `/`diff --git ` line anywhere, and a hunk body is a space followed by the
+ * file's own text — so a YAML file whose unchanged lines are ` --- # Source: chart/a.yaml` (what
+ * `helm template` emits) could not be patched at all. A context pair that quotes a diff's own
+ * `---`/`+++` lines is still refused, because those bytes are identical to an indented section.
  *
  * The pattern only ever refuses; it never names a file. It is deliberately matched anywhere in the
  * diff, because where a section starts is exactly what the parser was wrong about before.
  */
-const INDENTED_SECTION = /^[ \tX]+(?:\+\+\+ |--- |diff --git )/m;
+const INDENTED_SECTION = /^([ \tX]+)--- [^\n]*\n\1\+\+\+ |^[ \tX]+diff --git /m;
 
 function refuseIndentedSection(diff: string): void {
   const match = INDENTED_SECTION.exec(diff);
@@ -344,23 +351,86 @@ function stripOf(input: PatchInput): number {
 }
 
 /**
+ * `lstat`, with the two "there is nothing here" errors read as no entry: `ENOENT` (the name does not
+ * exist) and `ENOTDIR` (a prefix is a regular file, so nothing can exist below it — git fails on that
+ * with its own message). Any other error is a refusal naming it: a path that cannot be checked for a
+ * symbolic link is not one this tool will write through. A component over the name limit (256 bytes
+ * on APFS) gives `ENAMETOOLONG`, which used to escape `execute` as a raw `Error`.
+ */
+function lstatOrRefuse(target: string, declared: string): Stats | undefined {
+  try {
+    return lstatSync(target, { throwIfNoEntry: false });
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOTDIR') return undefined;
+    const detail = err instanceof Error ? err.message : String(err);
+    throw refusal(
+      `it would write ${JSON.stringify(declared)}, and checking that path failed (${detail}). A path `
+      + 'that cannot be checked for a symbolic link is refused rather than assumed safe.',
+    );
+  }
+}
+
+/**
  * A plain unified diff with no mode lines rewrites an existing symlink *in place*: the new content
  * becomes its target. `--summary` reports nothing for that, and the declared name is the link, which
  * the policy resolves as the file it points at today — so `link -> README` could be repointed at
  * `.env` while the policy was asked about `README`. patch.apply does not write to or through a link:
- * any declared name that is one now is refused here, before the check.
+ * any declared name that is one now, or that reaches the name through one, is refused here.
+ *
+ * Every prefix is checked, not just the last component: `d -> src` makes `d/x.js` a write through a
+ * link, and git's "affected file is beyond a symbolic link" refused it only after the policy had
+ * allowed it. `cfg -> .maf` and `out -> <outside the root>` are the same shape.
+ *
+ * It runs at declaration time (where `ctx` is given) and again in `execute`: the gate records a
+ * `Deny` rather than an Allow that the call then fails under, and the second pass covers a link
+ * created between the two.
  */
 function refuseSymlinkTargets(root: string, paths: readonly string[]): void {
   for (const p of paths) {
-    const stat = lstatSync(path.join(root, p), { throwIfNoEntry: false });
-    if (stat?.isSymbolicLink() === true) {
-      throw refusal(
-        `it would write ${JSON.stringify(p)}, which is a symbolic link. git rewrites a link in place, `
-        + 'so the write would land wherever the link points rather than at the name the policy was '
-        + 'shown. Remove the link, or patch the file it points at by that file\'s own name.',
-      );
+    const segments = p.split('/');
+    for (let i = 1; i <= segments.length; i++) {
+      const prefix = segments.slice(0, i).join('/');
+      const stat = lstatOrRefuse(path.join(root, prefix), p);
+      if (stat === undefined) break;                 // nothing here, so nothing below it either
+      if (stat.isSymbolicLink()) {
+        const through = prefix === p ? '' : ` through ${JSON.stringify(prefix)}`;
+        throw refusal(
+          `it would write ${JSON.stringify(p)}${through}, which is a symbolic link. git rewrites a `
+          + 'link in place, so the write would land wherever the link points rather than at the name '
+          + 'the policy was shown. Remove the link, or patch the file it points at by that file\'s own name.',
+        );
+      }
+      if (!stat.isDirectory()) break;                // a regular file has nothing below it
     }
   }
+}
+
+/**
+ * The paths the policy approved must be the paths the apply writes, by check.
+ *
+ * `declaredPaths` produces the gate's set, and `execute` produces its own in the sealed context it
+ * is about to write from. They are the same bytes and the same `-p` in an equivalent sealed context,
+ * so they agree today — this makes that a check rather than an assumption. A name on one side and
+ * not the other, in either direction, refuses the call before `--check` and before anything is
+ * written: an approval is of a set of paths, and a call that would write a different set was never
+ * approved. Compared as sorted lists, so a difference in order is not a difference, and a repeated
+ * name is.
+ *
+ * Raised as a `ToolDeclarationError` like every other declaration refusal — `executeToolGated`
+ * records it as a `Deny` under `builtin:declaration` — but not through `refusal()`: that helper says
+ * the policy was never asked, which is false here. It was asked, about a different set.
+ */
+function refuseApprovedDifference(approved: readonly string[] | undefined, declared: readonly string[]): void {
+  if (approved === undefined) return;
+  const left = [...approved].sort();
+  const right = [...declared].sort();
+  if (left.length === right.length && left.every((p, i) => p === right[i])) return;
+  throw new ToolDeclarationError(
+    `patch.apply refused this call: the policy approved ${JSON.stringify(left)}, and in the context `
+    + `this call would write in, the same diff declares ${JSON.stringify(right)}. The paths the policy `
+    + 'approves must be the paths the apply writes, so a call whose two declarations differ is refused, '
+    + 'and nothing was written.',
+  );
 }
 
 /**
@@ -389,12 +459,18 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
   }, ['diff']);
 
   /**
-   * A pure function of the diff — the same value the policy layer is handed, computed the
-   * same way every time — and no longer a second parser. `git apply --numstat -z` names the files
-   * git itself will write, in both directions, so the declaration cannot disagree with the apply by
-   * reading a header spelling differently, or by being computed in a different repository context.
+   * A pure function of the diff and the tree under it — the same value the policy layer is handed,
+   * computed the same way every time — and no longer a second parser. `git apply --numstat -z` names
+   * the files git itself will write, in both directions, so the declaration cannot disagree with the
+   * apply by reading a header spelling differently.
+   *
+   * With `ctx` it runs in a sealed context at the worktree root, which is where `execute` runs; without
+   * one (a direct caller) it names paths only and uses a private directory, which git cannot observe
+   * through an empty `GIT_DIR`. The gate passes `ctx`, so the policy's declaration is computed where
+   * the apply will be, and a declared name that is a symlink now is refused as a verdict rather than
+   * earning an Allow that `execute` then declines.
    */
-  declaredPaths(input: PatchInput): string[] {
+  declaredPaths(input: PatchInput, ctx?: ToolContext): string[] {
     if (typeof input.diff !== 'string') {
       // The gate checks the schema first; a direct caller gets the same answer: no diff, no declaration,
       // and no call.
@@ -403,9 +479,11 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
         + 'call has none, so no path rule can cover it.',
       );
     }
-    const paths = withSealedDiff(input.diff, stripOf(input), null, (sealed) => declaredFromGit(sealed, input.diff));
+    const worktree = ctx === undefined ? null : ctx.projectRoot;
+    const paths = withSealedDiff(input.diff, stripOf(input), worktree, (sealed) => declaredFromGit(sealed, input.diff));
     // Before policy, as fs.write does: a diff that touches .git is refused whatever the rules say.
     refuseGitDirPaths(this.name, paths);
+    if (ctx !== undefined) refuseSymlinkTargets(ctx.projectRoot, paths);
     return paths;
   }
 
@@ -414,12 +492,14 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
     const unusable = this.unusable(input, t);
     if (unusable !== undefined) return unusable;
 
-    // Declared here as well as at the gate: a direct caller gets the same refusals, and the paths
-    // the apply is confirmed against are the paths this call itself read from git. The declaration
-    // and the write share one sealed context — the same diff file, the same directory, the same
-    // environment — so the git that names the files is the git that writes them.
+    // Declared here as well as at the gate: a direct caller gets the same refusals, the paths the
+    // apply runs against are the paths this call itself read from git, and — via `ctx.approvedPaths` —
+    // they must be the paths the policy approved. The declaration and the write share one sealed
+    // context — the same diff file, the same directory, the same environment — so the git that names
+    // the files is the git that writes them.
     const outcome = await withSealedDiffAsync(input.diff, stripOf(input), ctx.projectRoot, async (sealed) => {
       const declared = declaredFromGit(sealed, input.diff);
+      refuseApprovedDifference(ctx.approvedPaths, declared);
       refuseGitDirPaths(this.name, declared);
       await refuseGitDirTargets(this.name, ctx, declared);
       refuseSymlinkTargets(ctx.projectRoot, declared);

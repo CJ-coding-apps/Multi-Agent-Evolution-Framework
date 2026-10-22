@@ -346,7 +346,9 @@ async function exercise(row: Row): Promise<Outcome> {
   const input = row.strip === undefined ? { diff: row.diff } : { diff: row.diff, strip: row.strip };
 
   let declared: string[] | Error;
-  try { declared = tool.declaredPaths(input); } catch (err: unknown) { declared = err as Error; }
+  // The same context the gate gives it: the declaration is computed where the apply will run, so a
+  // path that is a symlink now is refused here as a verdict (R2-L2/HS23), not allowed and then failed.
+  try { declared = tool.declaredPaths(input, ctxIn(row.role)); } catch (err: unknown) { declared = err as Error; }
 
   const attestor = new SpyAttestor();
   let decision: PolicyDecision | undefined;
