@@ -10,7 +10,7 @@ import {
   PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, parsePlannerResponse,
 } from './planner.js';
 import type { MetaGenerate, RoleCatalogEntry } from './planner.js';
-import { gateEvaluate } from './gate.js';
+import { gateEvaluate, gateWidening } from './gate.js';
 import type { GateDecision } from './gate.js';
 
 export interface EvolveRoundRecord {
@@ -38,8 +38,13 @@ export interface EvolveOptions {
   onShip: (candidate: HarnessConfig, improvements: string[]) => Promise<void>;
   roleCatalog: RoleCatalogEntry[];
   knownToolIds: ReadonlySet<string>;
-  /** Permission level per known tool; enables the gate's write-tool widening rule. */
-  toolPermissions?: ReadonlyMap<string, PermissionLevel>;
+  /**
+   * Permission level per known tool (WP-3.9 F7: required). The gate's widening rule is the
+   * evolver's one defence against turning a reader into a writer, and while this was optional a
+   * caller that omitted it skipped the rule silently. A tool the map does not name is treated as
+   * `dangerous`, never as harmless.
+   */
+  toolPermissions: ReadonlyMap<string, PermissionLevel>;
   knownProcessorNames: ReadonlySet<string>;
   knownModels?: ReadonlySet<string>;
   safetyAdjacentRoles?: ReadonlySet<string>;
@@ -205,10 +210,28 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       continue;
     }
 
-    // ── 5. Evolver: apply the FINAL manifest → candidate → smoke test (fail fast) ──
-    const finalCandidate = applyEdit(base, manifest.edit, `${base.id}-r${round + 1}`);
+    // ── 5. Evolver: apply the FINAL manifest → candidate → pre-smoke widening check → smoke ──
+    // `applyEdit` is deterministic and free; the widening rule is a pure function of the two
+    // harnesses. Both run before the smoke test, so a manifest that turns a reader into a writer
+    // reaches the operator without a model call or a golden run (WP-3.9 F7). The gate asks the
+    // same question again later — stages are pure, so the answer cannot differ.
+    const finalManifest = manifest;
+    const finalCandidate = applyEdit(base, finalManifest.edit, `${base.id}-r${round + 1}`);
+    const widening = gateWidening({
+      manifest: finalManifest, candidate: finalCandidate, current: base,
+      knownToolIds: opts.knownToolIds,
+      toolPermissions: opts.toolPermissions,
+      knownProcessorNames: opts.knownProcessorNames,
+      safetyAdjacentRoles: safetyAdjacent,
+    });
+    if (widening) {
+      idle++;
+      await record(rec({ manifest: finalManifest, gate: widening, outcome: 'needs-approval', note: widening.reason }));
+      if (idle >= patience) { stopReason = 'patience'; break; }
+      continue;
+    }
     try {
-      const smokeTarget = manifest.targetTasks[0];
+      const smokeTarget = finalManifest.targetTasks[0];
       if (smokeTarget) await opts.runSmoke(finalCandidate, smokeTarget);
     } catch (err) {
       idle++;
@@ -223,10 +246,10 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     // ── 6. Gate (mandatory, deterministic) ──
     const candidateScores = await opts.runGoldens(finalCandidate);
     const gate = gateEvaluate({
-      manifest, candidate: finalCandidate, current: base,
+      manifest: finalManifest, candidate: finalCandidate, current: base,
       currentScores: baseline, candidateScores,
       knownToolIds: opts.knownToolIds,
-      ...(opts.toolPermissions ? { toolPermissions: opts.toolPermissions } : {}),
+      toolPermissions: opts.toolPermissions,
       knownProcessorNames: opts.knownProcessorNames,
       safetyAdjacentRoles: safetyAdjacent,
       ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),

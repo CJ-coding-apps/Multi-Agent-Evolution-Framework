@@ -26,9 +26,14 @@ export interface GateContext {
   /**
    * What each known tool may do. A widening is judged by the tool's own permission level, not by
    * its name: the same edit that adds `fs.read` is harmless and the one that adds `fs.write`
-   * hands a role the tree. Omitted only by callers that predate the widening rule.
+   * hands a role the tree.
+   *
+   * Required (WP-3.9 F7). It was optional, and an omitted map skipped the widening rule
+   * entirely — the one check that stops the evolver turning a reader into a writer failed open
+   * for a caller that forgot an argument. A caller must now say what every tool it recognises
+   * may do; a tool the map does not know is treated as `dangerous`, never as `read`.
    */
-  toolPermissions?: ReadonlyMap<string, PermissionLevel>;
+  toolPermissions: ReadonlyMap<string, PermissionLevel>;
   /** Processor names resolvable by the static registry. */
   knownProcessorNames: ReadonlySet<string>;
   /** Installed adapter models for retarget bounds (empty = unconstrained). */
@@ -47,6 +52,49 @@ function judgeOnlyImprovement(ctx: GateContext): boolean {
   if (improved.length === 0) return false;
   // If ANY improved task has a non-judge verifier, the improvement is grounded.
   return improved.every((id) => judgeIds.has(id));
+}
+
+/** What a widening says: the one gate verdict that names a decision the operator may make. */
+type NeedsApproval = Extract<GateDecision, { verdict: 'needs-approval' }>;
+
+/** A gate context without the evaluation artifacts — what a rule that costs nothing needs. */
+export type GateStaticContext = Omit<GateContext, 'currentScores' | 'candidateScores'>;
+
+/** The levels that make an added tool a widening rather than another way to read. */
+const WRITE_LEVELS: ReadonlySet<PermissionLevel> = new Set<PermissionLevel>(['write', 'execute', 'dangerous']);
+
+/**
+ * Stage b4, exported (WP-3.9 F7): the widening rule, as a pure function of the manifest and the
+ * two harnesses. It costs nothing — no model call, no golden run — so a caller that evaluates a
+ * candidate (the loop's smoke test, then the full suite) asks it first, and a manifest that
+ * widens a role never spends anything.
+ *
+ * The widening is the candidate's surface minus the current one (WP-3.9 F8), not the manifest's
+ * `add` list: `add` is what the model claims, and a tool the role already holds is not something
+ * the edit granted. Taken from the two role sets, an `add` of a tool that is already there (or an
+ * add cancelled by a remove) is not a widening, and a `remove` cannot hide a tool the candidate
+ * still gains.
+ */
+export function gateWidening(ctx: GateStaticContext): NeedsApproval | undefined {
+  const { manifest, candidate, current } = ctx;
+  if (manifest.edit.kind !== 'adjust_tool_allowlist') return undefined;
+  const role = manifest.edit.role;
+  const surfaceOf = (harness: HarnessConfig): ReadonlySet<string> =>
+    new Set(harness.roleSet.roles.find((r) => r.role === role)?.allowedTools ?? []);
+  const before = surfaceOf(current);
+  const widened = [...surfaceOf(candidate)].filter((tool) => {
+    if (before.has(tool)) return false;
+    // A level the map does not name is not assumed harmless: the gate refuses what it cannot
+    // classify rather than granting it.
+    return WRITE_LEVELS.has(ctx.toolPermissions.get(tool) ?? 'dangerous');
+  });
+  if (widened.length === 0) return undefined;
+  return {
+    verdict: 'needs-approval',
+    reason: `b4-write-tool-widening: edit grants ${widened.map((t) => JSON.stringify(t)).join(', ')} ` +
+      `to role "${role}"; a write, execute or dangerous tool may be added to a role only by ` +
+      'operator approval (§6.3)',
+  };
 }
 
 export function gateEvaluate(ctx: GateContext): GateDecision {
@@ -89,26 +137,16 @@ export function gateEvaluate(ctx: GateContext): GateDecision {
     };
   }
 
-  // ── stage b4: a write tool cannot be added to an ordinary role ──
+  // ── stage b4: widening an ordinary role into a writer needs the operator ──
   // b3 has already routed every edit that targets a safety-adjacent role to the operator, so an
   // edit still here targets an ordinary role. Widening that role's surface with a tool that can
-  // change the tree or run code is the mutation the gate exists to refuse: the evolver may tune a
-  // prompt, a budget or a model, but it may not make a reader a writer. A write tool reaches a
-  // safety-adjacent role only through the operator, at b3 — never by a candidate that ships itself.
-  if (manifest.edit.kind === 'adjust_tool_allowlist' && ctx.toolPermissions !== undefined) {
-    const widened = manifest.edit.add.filter((tool) => {
-      const level = ctx.toolPermissions?.get(tool);
-      return level === 'write' || level === 'execute' || level === 'dangerous';
-    });
-    if (widened.length > 0) {
-      return {
-        verdict: 'reject', stage: 'b4-write-tool-widening',
-        reason: `edit grants ${widened.map((t) => JSON.stringify(t)).join(', ')} to role ` +
-          `"${manifest.edit.role}"; a write or execute tool may be granted only to a role marked ` +
-          `sensitive, and then only by operator approval (§6.3)`,
-      };
-    }
-  }
+  // change the tree or run code is the mutation the evolver may not perform on its own: it may
+  // tune a prompt, a budget or a model, but it may not make a reader a writer. The verdict is
+  // `needs-approval` rather than `reject` (WP-3.9 F8): the operator may grant the tool, and a
+  // candidate that ships itself still cannot. The rule itself lives in `gateWidening`, so the
+  // loop can apply it before a smoke test spends anything.
+  const widening = gateWidening(ctx);
+  if (widening) return widening;
 
   // ── stage d: seesaw (regression check) — evaluation artifacts were produced by the caller ──
   const seesaw = seesawDecision(ctx.currentScores, ctx.candidateScores);
