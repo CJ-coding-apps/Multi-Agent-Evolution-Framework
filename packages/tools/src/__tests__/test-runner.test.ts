@@ -70,12 +70,23 @@ test('runner "pnpm" runs pnpm rather than falling through to npm', async (t) => 
 
 test('a runner cannot read MAF_SIGNING_KEY: the child gets the tool allowlist only', async (t) => {
   const root = await project(t);
-  // Assert inside the child, so the test fails if the variable reaches it however the runner
-  // reports the outcome. `node --test` exits non-zero when its only test fails.
+  // The child writes what it observed, and this test asserts on that file rather than on the inner
+  // runner's status (WP-3.9 G14). Two reasons, both measured by the verifier: an inherited
+  // `NODE_TEST_CONTEXT` puts the inner `--test` in child mode, where a failing assertion still
+  // exits 0 — so a tool that passes the parent environment through kept this test green. The
+  // `NODE_TEST_*` variables are therefore removed for the duration (a pass-through mutant cannot
+  // inherit them), and the observation is recorded before the in-child assertions so the outer
+  // assertion holds even if a runner reports a failure the way this one used to.
   await writeFile(path.join(root, 'env.test.js'), [
     "const test = require('node:test');",
     "const assert = require('node:assert');",
+    "const { writeFileSync } = require('node:fs');",
     "test('no MAF variable', () => {",
+    "  writeFileSync('env.json', JSON.stringify({",
+    "    key: process.env.MAF_SIGNING_KEY ?? null,",
+    "    state: process.env.MAF_RUNTIME_STATE ?? null,",
+    "    path: process.env.PATH ?? null,",
+    "  }));",
     "  assert.equal(process.env.MAF_SIGNING_KEY, undefined);",
     "  assert.equal(process.env.MAF_RUNTIME_STATE, undefined);",
     "  assert.ok(process.env.PATH, 'PATH is the one thing a runner needs');",
@@ -83,6 +94,8 @@ test('a runner cannot read MAF_SIGNING_KEY: the child gets the tool allowlist on
     '',
   ].join('\n'));
   const saved = { sign: process.env['MAF_SIGNING_KEY'], state: process.env['MAF_RUNTIME_STATE'] };
+  const savedTestVars = Object.entries(process.env).filter(([k]) => k.startsWith('NODE_TEST_'));
+  for (const [key] of savedTestVars) delete process.env[key];
   process.env['MAF_SIGNING_KEY'] = 'test-key-must-not-reach-the-runner';
   process.env['MAF_RUNTIME_STATE'] = '/tmp/state-must-not-reach-the-runner';
   t.after(() => {
@@ -90,10 +103,17 @@ test('a runner cannot read MAF_SIGNING_KEY: the child gets the tool allowlist on
     else process.env['MAF_SIGNING_KEY'] = saved.sign;
     if (saved.state === undefined) delete process.env['MAF_RUNTIME_STATE'];
     else process.env['MAF_RUNTIME_STATE'] = saved.state;
+    for (const [key, value] of savedTestVars) if (value !== undefined) process.env[key] = value;
   });
 
   const result = await new TestRunnerTool().execute({ runner: 'node' }, ctxIn(root));
   assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+  const observed = JSON.parse(await readFile(path.join(root, 'env.json'), 'utf8')) as {
+    key: string | null; state: string | null; path: string | null;
+  };
+  assert.equal(observed.key, null, 'MAF_SIGNING_KEY did not reach the runner');
+  assert.equal(observed.state, null, 'MAF_RUNTIME_STATE did not reach the runner');
+  assert.notEqual(observed.path, null, 'PATH did reach it');
 });
 
 test('a filter that begins with "-" is refused rather than passed as an option', async (t) => {

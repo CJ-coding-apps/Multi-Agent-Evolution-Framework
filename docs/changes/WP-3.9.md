@@ -98,6 +98,15 @@ states each as implemented.
   empty body → 13/14, failing only the normal-exit test; drop `'SIGTERM'` from the hook's signal
   list → 13/14, failing only the SIGTERM test (on the reaping assertion: without a listener Node's
   default action still ends the parent by SIGTERM, so the survivor is the observable).
+- **Proof of the allowlist test itself (round 2, G14).** The env child now **records what it
+  observed** to `env.json` and the test asserts on that file, and `NODE_TEST_*` is removed from the
+  parent for the call's duration. An inherited `NODE_TEST_CONTEXT` puts the inner `--test` in child
+  mode, where a **failing assertion still exits 0**, so a spawner that passed the whole parent
+  environment through kept this test green. Measured on `env: process.env`: 8/14, with this test
+  first in the failure list and the process-group tests dying incidentally. The observation is
+  written before the in-child assertions, so the verdict does not depend on how a runner reports a
+  failure; the other `runner: 'node'` stand-ins were checked and have no assertion inside the child,
+  so the trap does not apply to them.
 
 ### A past failure cannot carry a secret into a prompt
 
