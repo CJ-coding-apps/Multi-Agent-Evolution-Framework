@@ -1,5 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { closeSync, mkdtempSync, openSync, rmdirSync, unlinkSync, writeSync } from 'node:fs';
+import {
+  closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync,
+} from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -26,40 +28,138 @@ interface GitResult {
 }
 
 /**
- * Runs `git apply` on `diff`, with the diff written once to a 0600 file in a private directory.
+ * Everything one declaration or one apply shares across its git calls: the file holding the bytes,
+ * the directory those calls run in, and the empty git directory that keeps configuration out.
  *
- * The declaration and the apply read the same bytes because they both hand `git apply` the file
- * this writes — never a re-serialised copy of the model's argument. `toolEnv()` keeps the child
- * to the allowlist (no `GIT_DIR`/`GIT_CONFIG_*` from the ambient environment, no maf secrets), and
- * the two `-c` overrides stop a repository setting from running hooks or an fsmonitor process.
- *
- * Synchronous on purpose: `declaredPaths` is called by the gate before policy, and its signature
- * is synchronous for every tool. A local `git apply --numstat` is the price of one parser, and it
- * is measured in milliseconds.
+ * It exists so that no call can be built differently from another. The declaration and the apply
+ * read the same file, run in the same directory, and are given the same `-p`, because they are
+ * handed the same value rather than each constructing its own.
  */
-function withDiffFile<T>(diff: string, cwd: string, fn: (file: string) => T): T {
+interface SealedGit {
+  /** The 0600 file holding the diff. Every call in this invocation is handed this absolute path. */
+  readonly file: string;
+  /** The worktree every call is run against; also the child's working directory. */
+  readonly cwd: string;
+  /** A git directory with no config, so no filter, hook or fsmonitor is defined anywhere git looks. */
+  readonly gitDir: string;
+  readonly strip: number;
+}
+
+/**
+ * A git directory with nothing in it: `HEAD`, no `config`, no objects.
+ *
+ * Pointing every call at one is what keeps repository configuration out of the apply. A filter
+ * driver is defined in configuration (`filter.<name>.clean`), so a git directory with no config
+ * defines none, and an agent-written `.gitattributes` can select exactly nothing. Neither can a
+ * hook or an fsmonitor run: neither can be named. `git apply` needs no index, and it is told the
+ * worktree separately, so an empty directory is a complete answer.
+ *
+ * The layout is written rather than produced by `git init`, because this module spawns `git` in
+ * one place only — a second spawn to build the sandbox would be one more thing that can differ.
+ */
+function emptyGitDir(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'maf-gitdir-'));
+  mkdirSync(path.join(dir, 'objects'));
+  mkdirSync(path.join(dir, 'refs'));
+  writeFileSync(path.join(dir, 'HEAD'), 'ref: refs/heads/maf-apply\n', { mode: 0o600 });
+  return dir;
+}
+
+/** Writes the diff once, 0600, in a private directory, and builds the empty git directory. */
+function openSealedDiff(diff: string, strip: number, worktree: string | null): SealedGit {
   const dir = mkdtempSync(path.join(tmpdir(), 'maf-patch-'));
   const file = path.join(dir, 'diff.patch');
+  const gitDir = emptyGitDir();
   const fd = openSync(file, 'wx', 0o600);
   try {
     writeSync(fd, diff, undefined, 'utf8');
   } finally {
     closeSync(fd);
   }
+  // A declaration names paths and touches nothing, so the diff's own directory is the worktree it
+  // is resolved against; an apply names the directory it will write into.
+  return { file, cwd: worktree === null ? dir : path.resolve(worktree), gitDir, strip };
+}
+
+function closeSealedDiff(sealed: SealedGit): void {
+  rmSync(path.dirname(sealed.file), { recursive: true, force: true });
+  rmSync(sealed.gitDir, { recursive: true, force: true });
+}
+
+function withSealedDiff<T>(
+  diff: string,
+  strip: number,
+  worktree: string | null,
+  fn: (sealed: SealedGit) => T,
+): T {
+  const sealed = openSealedDiff(diff, strip, worktree);
   try {
-    return fn(file);
+    return fn(sealed);
   } finally {
-    try { unlinkSync(file); } catch { /* the call already answered */ }
-    try { rmdirSync(dir); } catch { /* ditto */ }
+    closeSealedDiff(sealed);
   }
 }
 
-function runGitApply(args: readonly string[], file: string, cwd: string): GitResult {
+/** `withSealedDiff` for a callback that has to await: the sandbox outlives the whole call. */
+async function withSealedDiffAsync<T>(
+  diff: string,
+  strip: number,
+  worktree: string | null,
+  fn: (sealed: SealedGit) => Promise<T>,
+): Promise<T> {
+  const sealed = openSealedDiff(diff, strip, worktree);
+  try {
+    return await fn(sealed);
+  } finally {
+    closeSealedDiff(sealed);
+  }
+}
+
+/**
+ * The environment every git call gets.
+ *
+ * `toolEnv()` keeps maf's own variables out — `MAF_*`, provider tokens, and the host's
+ * `GIT_DIR`/`GIT_*`. The rest is what seals the repository:
+ *
+ *  - `GIT_DIR` is the empty throwaway directory, so no `filter.*` or any other setting reaches the
+ *    apply, whatever the worktree's `.git/config` says;
+ *  - `GIT_WORK_TREE` is the worktree, so a patch path is relative to it and not to the directory
+ *    the child happens to run in. `--numstat` used to run in `tmpdir()`, and when that directory sat
+ *    inside some repository git prefixed every path with the subdirectory — the declaration and the
+ *    write then named different files;
+ *  - `GIT_CEILING_DIRECTORIES` is the worktree's parent, the rule `runIsolatedGit` uses, so no
+ *    discovery can climb out of it;
+ *  - the system and global config files are off, so a user's `apply.whitespace` or a filter driver
+ *    in `$HOME/.gitconfig` cannot change the bytes written.
+ */
+function sealedEnv(sealed: SealedGit): NodeJS.ProcessEnv {
+  return {
+    ...toolEnv(),
+    PWD: sealed.cwd,
+    GIT_DIR: sealed.gitDir,
+    GIT_WORK_TREE: sealed.cwd,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: devNull,
+    GIT_CEILING_DIRECTORIES: path.dirname(sealed.cwd),
+  };
+}
+
+/**
+ * The one place a git invocation is built. Every call — `--numstat`, `-R --numstat`, `--summary`,
+ * `--check` and the apply itself — is given the same environment, the same `-c` overrides, the same
+ * `-p` and the same diff file. Nothing else in this module spawns git.
+ *
+ * The three `-c` overrides are set in addition to the empty git directory, not instead of it: they
+ * pin the same settings `runIsolatedGit` pins, so a future caller that passes a real `GIT_DIR` still
+ * gets no hook and no fsmonitor.
+ */
+function runGitApply(sealed: SealedGit, args: readonly string[]): GitResult {
   const r = spawnSync('git', [
     '-c', `core.hooksPath=${devNull}`,
     '-c', 'core.fsmonitor=false',
-    'apply', ...args, file,
-  ], { cwd, env: toolEnv(), encoding: 'utf8', maxBuffer: MAX_OUTPUT });
+    '-c', `core.attributesFile=${devNull}`,
+    'apply', `-p${sealed.strip}`, ...args, sealed.file,
+  ], { cwd: sealed.cwd, env: sealedEnv(sealed), encoding: 'utf8', maxBuffer: MAX_OUTPUT });
   return {
     status: r.status,
     stdout: r.stdout ?? '',
@@ -129,66 +229,138 @@ function numstatPath(entry: string): string {
   return safePath(raw!);
 }
 
+/** The names `git apply --numstat -z` reports for this diff, forward or with `-R`. */
+function numstatPaths(sealed: SealedGit, reverse: boolean): string[] {
+  const flag = reverse ? '-R ' : '';
+  const r = runGitApply(sealed, [...(reverse ? ['-R'] : []), '--numstat', '-z']);
+  if (r.status !== 0) {
+    throw refusal(
+      `git apply ${flag}--numstat could not read it (${gitFailure(r)}). patch.apply applies with `
+      + 'git, so a diff git cannot parse is one it cannot declare or write.',
+    );
+  }
+  const entries = r.stdout.split('\0').filter((entry) => entry !== '');
+  if (entries.length === 0) {
+    throw refusal(
+      'git apply --numstat reported no files, so no path rule can cover what the call would do. '
+      + 'Use a unified diff whose headers name the files.',
+    );
+  }
+  return entries.map(numstatPath);
+}
+
 /**
- * The files a diff touches, from `git apply` itself.
+ * The forms `--summary` names that a path list cannot describe, refused by their own name.
  *
- * This is the one parser fix: the tool no longer reads headers, because every header spelling
- * GNU patch accepts was a chance for the declaration and the apply to disagree, and five separate
- * spellings were still open after the first attempt. The policy is asked about exactly the paths
- * `git apply --numstat -z` reports for the same bytes and the same `-p`, so the checked set and
- * the written set cannot differ.
- *
- * `--summary` is read too, and a diff that renames, copies, changes a mode, or creates a symlink
- * or submodule is refused: `--numstat` gives only the new name for a rename (so a protected file
- * could be renamed away undeclared), and the other forms change the tree in ways a path list does
- * not describe. Binary patches are refused from their `-` line counts. Creation and deletion of
- * regular files are allowed — for those the single name is the whole story.
- *
- * Nothing is applied here: `--numstat` and `--summary` parse the patch and do not touch the tree.
- * The gate calls this synchronously before policy, so every refusal is a `Deny` recorded under
- * `builtin:declaration`, and nothing runs.
+ * `--numstat` gives only the new name for a rename, so a protected file could be renamed away while
+ * the policy was asked about its destination. Copies, mode changes and symlink or submodule creation
+ * change the tree in ways a list of paths does not describe. Creating a regular file — including one
+ * with the executable bit (`create mode 100755 run.sh`) — is not one of them: it is a path write, and
+ * the file list is the whole story. Creating an executable is allowed on purpose; an agent that
+ * writes a script writes a script.
  */
-function declaredFromGit(diff: string, strip: number): string[] {
-  const flags = ['--recount', `-p${strip}`];
-  return withDiffFile(diff, tmpdir(), (file) => {
-    const numstat = runGitApply([...flags, '--numstat', '-z'], file, tmpdir());
-    if (numstat.status !== 0) {
+function refuseSummaryForms(sealed: SealedGit): void {
+  const summary = runGitApply(sealed, ['--summary']);
+  if (summary.status !== 0) {
+    throw refusal(`git apply --summary could not read it (${gitFailure(summary)}).`);
+  }
+  for (const line of summary.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')) {
+    if (/^(rename|copy|mode change)\b/.test(line) || /\bmode (120000|160000)\b/.test(line)) {
       throw refusal(
-        `git apply --numstat could not read it (${gitFailure(numstat)}). patch.apply applies with `
-        + 'git, so a diff git cannot parse is one it cannot declare or write.',
+        `git reports ${JSON.stringify(line)}. patch.apply refuses renames, copies, mode changes, `
+        + 'symlinks and submodules: the file list git reports for them does not describe everything '
+        + 'the apply changes. Use fs.move for a rename, and a diff for content.',
       );
     }
-    const entries = numstat.stdout.split('\0').filter((entry) => entry !== '');
-    if (entries.length === 0) {
-      throw refusal(
-        'git apply --numstat reported no files, so no path rule can cover what the call would do. '
-        + 'Use a unified diff whose headers name the files.',
-      );
-    }
+  }
+}
 
-    const summary = runGitApply([...flags, '--summary'], file, tmpdir());
-    if (summary.status !== 0) {
-      throw refusal(`git apply --summary could not read it (${gitFailure(summary)}).`);
-    }
-    for (const line of summary.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')) {
-      if (/^(rename|copy|mode change)\b/.test(line) || /\bmode (120000|160000)\b/.test(line)) {
-        throw refusal(
-          `git reports ${JSON.stringify(line)}. patch.apply refuses renames, copies, mode changes, `
-          + 'symlinks and submodules: the file list git reports for them does not describe everything '
-          + 'the apply changes. Use fs.move for a rename, and a diff for content.',
-        );
-      }
-    }
+/**
+ * A section header git does not read is a section git does not apply — and `git apply` exits 0
+ * having skipped it, so the agent is told its whole diff applied. An indented or `X`-prefixed
+ * `+++`, `---` or `diff --git` line is refused rather than guessed at.
+ *
+ * The pattern only ever refuses; it never names a file. It is deliberately matched anywhere in the
+ * diff, because where a section starts is exactly what the parser was wrong about before.
+ */
+const INDENTED_SECTION = /^[ \tX]+(?:\+\+\+ |--- |diff --git )/m;
 
-    const paths = entries.map(numstatPath);
-    // The same bytes, the same `-p`: a name is declared once however many sections touch it.
-    return [...new Set(paths)];
-  });
+function refuseIndentedSection(diff: string): void {
+  const match = INDENTED_SECTION.exec(diff);
+  if (match !== null) {
+    throw refusal(
+      `it has an indented section header (${JSON.stringify(match[0].trim())}). git applies the `
+      + 'unindented part of a diff and silently ignores an indented one, so the call would apply some '
+      + 'of what the diff names and report success. Every section must start at the beginning of a line.',
+    );
+  }
+}
+
+/**
+ * The files a diff touches, from `git apply` itself, in both directions.
+ *
+ * This is still the one-parser design: the tool does not read headers. `--numstat -z` names the
+ * files git will write for the same bytes and the same `-p`, so the checked set and the written set
+ * cannot differ by spelling. What the forward list alone does not describe is a section whose old
+ * and new names differ: `diff --git a/.env b/notes.txt` with no rename header deletes `.env` and
+ * writes `notes.txt`, and `--numstat` names only the destination. `-R --numstat` names the old side,
+ * and a non-rename patch names the same files both ways; creation and deletion give the same name
+ * both ways too, because only the counts swap. So a name that appears on only one side is a rename
+ * or a copy that did not say so, and it is refused.
+ *
+ * Nothing here writes: `--numstat` and `--summary` parse the patch and do not touch the tree.
+ */
+function declaredFromGit(sealed: SealedGit, diff: string): string[] {
+  refuseIndentedSection(diff);
+  refuseSummaryForms(sealed);
+  const forward = numstatPaths(sealed, false);
+  const reverse = numstatPaths(sealed, true);
+  // Compared as sets, not by position: `-R` reports the sections of a multi-file patch in its own
+  // order, so an ordinary two-file diff legitimately gives the same names in a different sequence
+  // (measured: forward `README, Cargo.lock`, reversed `Cargo.lock, README`). What must hold is that
+  // every name on one side is also on the other. (Two swapped renames would pass, and that is safe:
+  // both names are then declared and written, so the policy is asked about all of them.)
+  const forwardSet = new Set(forward);
+  const reverseSet = new Set(reverse);
+  const onlyNew = forward.filter((name) => !reverseSet.has(name));
+  const onlyOld = reverse.filter((name) => !forwardSet.has(name));
+  if (onlyNew.length > 0 || onlyOld.length > 0) {
+    throw refusal(
+      `git names ${JSON.stringify(onlyOld[0] ?? '(nothing)')} on the old side and `
+      + `${JSON.stringify(onlyNew[0] ?? '(nothing)')} on the new. A section whose two names differ is `
+      + 'a rename or a copy, even without a rename header, and git reports only the new side: a '
+      + 'protected file could be moved away while the policy was asked about its destination. Use '
+      + 'fs.move for a rename, and a diff for content.',
+    );
+  }
+  // The union, so the declaration is every name either direction reported, whatever a rename
+  // header might have said. For an ordinary diff the two lists are the same list.
+  return [...new Set([...forward, ...reverse])];
 }
 
 /** The strip the command will be given, one value for both the declaration and the argv. */
 function stripOf(input: PatchInput): number {
   return typeof input.strip === 'number' && Number.isInteger(input.strip) && input.strip >= 0 ? input.strip : 1;
+}
+
+/**
+ * A plain unified diff with no mode lines rewrites an existing symlink *in place*: the new content
+ * becomes its target. `--summary` reports nothing for that, and the declared name is the link, which
+ * the policy resolves as the file it points at today — so `link -> README` could be repointed at
+ * `.env` while the policy was asked about `README`. patch.apply does not write to or through a link:
+ * any declared name that is one now is refused here, before the check.
+ */
+function refuseSymlinkTargets(root: string, paths: readonly string[]): void {
+  for (const p of paths) {
+    const stat = lstatSync(path.join(root, p), { throwIfNoEntry: false });
+    if (stat?.isSymbolicLink() === true) {
+      throw refusal(
+        `it would write ${JSON.stringify(p)}, which is a symbolic link. git rewrites a link in place, `
+        + 'so the write would land wherever the link points rather than at the name the policy was '
+        + 'shown. Remove the link, or patch the file it points at by that file\'s own name.',
+      );
+    }
+  }
 }
 
 /**
@@ -219,8 +391,8 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
   /**
    * A pure function of the diff — the same value the policy layer is handed, computed the
    * same way every time — and no longer a second parser. `git apply --numstat -z` names the files
-   * git itself will write, so the declaration cannot disagree with the apply by reading a header
-   * spelling differently.
+   * git itself will write, in both directions, so the declaration cannot disagree with the apply by
+   * reading a header spelling differently, or by being computed in a different repository context.
    */
   declaredPaths(input: PatchInput): string[] {
     if (typeof input.diff !== 'string') {
@@ -231,7 +403,7 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
         + 'call has none, so no path rule can cover it.',
       );
     }
-    const paths = declaredFromGit(input.diff, stripOf(input));
+    const paths = withSealedDiff(input.diff, stripOf(input), null, (sealed) => declaredFromGit(sealed, input.diff));
     // Before policy, as fs.write does: a diff that touches .git is refused whatever the rules say.
     refuseGitDirPaths(this.name, paths);
     return paths;
@@ -241,23 +413,31 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
     const t = performance.now();
     const unusable = this.unusable(input, t);
     if (unusable !== undefined) return unusable;
-    // Declared here as well as at the gate: a direct caller gets the same refusals, and the paths
-    // the apply is confirmed against are the paths this call itself read from git.
-    const declared = this.declaredPaths(input);
-    await refuseGitDirTargets(this.name, ctx, declared);
 
-    const flags = ['--recount', `-p${stripOf(input)}`];
-    const result = withDiffFile(input.diff, ctx.cwd, (file) => {
+    // Declared here as well as at the gate: a direct caller gets the same refusals, and the paths
+    // the apply is confirmed against are the paths this call itself read from git. The declaration
+    // and the write share one sealed context — the same diff file, the same directory, the same
+    // environment — so the git that names the files is the git that writes them.
+    const outcome = await withSealedDiffAsync(input.diff, stripOf(input), ctx.projectRoot, async (sealed) => {
+      const declared = declaredFromGit(sealed, input.diff);
+      refuseGitDirPaths(this.name, declared);
+      await refuseGitDirTargets(this.name, ctx, declared);
+      refuseSymlinkTargets(ctx.projectRoot, declared);
+
       // Check first, and apply only what passed: a multi-file diff that fails one file changes
       // nothing. git apply is all-or-nothing without `--reject`, and no `--reject` is passed.
-      const check = runGitApply([...flags, '--check'], file, ctx.cwd);
-      if (check.status !== 0) return check;
+      const check = runGitApply(sealed, ['--check']);
+      if (check.status !== 0) return { declared, result: check };
       if (input.dryRun) {
-        return { status: 0, stdout: `checked ${declared.length} file(s)`, stderr: '' } satisfies GitResult;
+        return {
+          declared,
+          result: { status: 0, stdout: `checked ${declared.length} file(s)`, stderr: '' } satisfies GitResult,
+        };
       }
-      return runGitApply(flags, file, ctx.cwd);
+      return { declared, result: runGitApply(sealed, []) };
     });
 
+    const result = outcome.result;
     return {
       stdout: result.stdout,
       stderr: result.stderr || result.error || '',

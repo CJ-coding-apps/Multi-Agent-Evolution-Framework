@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import {
-  lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync,
+  symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -20,6 +21,13 @@ import { PatchApplyTool } from '../plugins/patch.js';
 // is asked. The previous design read the diff's headers itself, and `VERDICT-Verify2b` found five
 // header forms that got past it (space timestamp, octal escapes, indented sections, `Index:` with
 // no space, `//` in the path); every one of them is now refused by git or named by git.
+//
+// The round-2 review pins the context those calls share. Every git call is built by
+// one function, run in the worktree, handed the same 0600 file by absolute path, and given an empty
+// throwaway git directory with the system and global config off — so a repository's filters, hooks
+// and fsmonitor cannot reach the write, and a `TMPDIR` inside some repository cannot change the name
+// the declaration reports. The declaration also compares `--numstat` in both directions, because
+// the forward list names only the destination of a rename that did not say it was one.
 
 const ALLOW: PolicyEngineHandle = {
   async evaluate(): Promise<PolicyDecision> { return { verdict: 'Allow' }; },
@@ -278,7 +286,9 @@ test('execute applies the diff and names the result', async () => {
   const before = snapshot(repo);
   const result = await tool.execute({ diff: UNIFIED_LOCK }, ctxIn());
   assert.equal(result.exitCode, 0, result.stderr);
-  assert.deepEqual(changedSince(before), ['cargo.lock']);
+  // The expectation goes through `pathKey` too: on Linux the file is `Cargo.lock`, and a literal
+  // lower-case name here is a Mac-only count (HP2/HS2).
+  assert.deepEqual(changedSince(before), [pathKey('Cargo.lock')]);
   assert.equal(readFileSync(path.join(repo, 'Cargo.lock'), 'utf8'), 'lock2\n');
   assert.equal(typeof result.duration, 'number');
 });
@@ -309,26 +319,205 @@ test('a multi-file diff that fails one file changes neither', async () => {
 test('a failed apply leaves no .orig, no .rej and no temp file behind', async () => {
   resetRepo();
   const before = snapshot(repo);
-  const tmpBefore = readdirSync(tmpdir()).filter((name) => name.startsWith('maf-patch-')).sort();
-  const result = await tool.execute({
-    diff: '--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-nope\n+lock2\n',
-  }, ctxIn());
-  assert.notEqual(result.exitCode, 0);
-  assert.deepEqual(changedSince(before), []);
-  const leftovers = readdirSync(repo, { recursive: true })
-    .map(String)
-    .filter((name) => name.endsWith('.orig') || name.endsWith('.rej'));
+  // A private TMPDIR for this test only (HS12): listing the machine's shared temp directory made
+  // the assertion depend on what every other test and every other process on the machine was doing,
+  // so a sibling's leftover could fail it and this test's own leftover could hide in the crowd.
+  const savedTmp = process.env['TMPDIR'];
+  const ownTmp = mkdtempSync(path.join(scratch, 'tmp-isolated-'));
+  process.env['TMPDIR'] = ownTmp;
+  let leftovers: string[] = [];
+  try {
+    const result = await tool.execute({
+      diff: '--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-nope\n+lock2\n',
+    }, ctxIn());
+    assert.notEqual(result.exitCode, 0);
+    assert.deepEqual(changedSince(before), []);
+    leftovers = readdirSync(repo, { recursive: true })
+      .map(String)
+      .filter((name) => name.endsWith('.orig') || name.endsWith('.rej'));
+  } finally {
+    if (savedTmp === undefined) delete process.env['TMPDIR']; else process.env['TMPDIR'] = savedTmp;
+  }
   assert.deepEqual(leftovers, []);
-  assert.deepEqual(
-    readdirSync(tmpdir()).filter((name) => name.startsWith('maf-patch-')).sort(),
-    tmpBefore,
-    'the temp directory and diff are removed on every path',
-  );
+  assert.deepEqual(readdirSync(ownTmp), [], 'the temp directory and diff are removed on every path');
+  rmSync(ownTmp, { recursive: true, force: true });
+});
+
+// ─── round 2: both sides of the name, links, strictness ─────────────────────
+
+/**
+ * The shape that made HP1 possible: a `diff --git` header naming two files with no `rename from/to`
+ * lines. git deletes the old file and writes the new one, and `--numstat` reports only the new name.
+ */
+function implicitRename(from: string, to: string): string {
+  return `diff --git a/${from} b/${to}\n--- a/${from}\n+++ b/${to}\n@@ -1 +1 @@\n-SAFE=1\n+LEAK=1\n`;
+}
+
+test('a section whose two names differ without saying rename is refused (HP1)', () => {
+  for (const [from, to] of [
+    ['.env', 'notes.txt'],
+    ['Cargo.lock', 'away.lock'],
+    ['.maf/policy.yaml', 'x.txt'],
+  ] as const) {
+    assert.throws(
+      () => tool.declaredPaths({ diff: implicitRename(from, to) }),
+      (err: unknown) => err instanceof ToolDeclarationError
+        && err.message.includes(`git names "${from}" on the old side and "${to}" on the new`),
+      `${from} -> ${to}`,
+    );
+  }
+});
+
+test('a normal git diff read at -p0 is refused, because its two sides are a/ and b/ (HP1)', () => {
+  const diff = [
+    'diff --git a/README b/README', 'index 1111111..2222222 100644',
+    '--- a/README', '+++ b/README', '@@ -1 +1 @@', '-r', '+s', '',
+  ].join('\n');
+  // At -p0 git keeps the `a/` and `b/` prefixes, so the old and new names differ without a rename.
+  assert.throws(() => tool.declaredPaths({ diff, strip: 0 }), /old side/);
+  // At the default -p1 the same bytes name one file in both directions.
+  assert.deepEqual(tool.declaredPaths({ diff }), ['README']);
+});
+
+test('a deletion is a plain delete: one name both directions, so it is declared (HP1)', () => {
+  const diff = '--- a/Cargo.lock\n+++ /dev/null\n@@ -1 +0,0 @@\n-lock1\n';
+  assert.deepEqual(tool.declaredPaths({ diff }), ['Cargo.lock']);
+});
+
+test('a patch to a path that is currently a symlink is refused, and the link is untouched (HP4)', async () => {
+  resetRepo();
+  const link = path.join(repo, 'linked.lock');
+  rmSync(link, { force: true });
+  symlinkSync('.env', link);
+  try {
+    // The declared name is the link; the policy sees `.env`, which is what it points at today, so
+    // a rewrite of the link would land in a file the policy was never asked about.
+    const diff = '--- a/linked.lock\n+++ b/linked.lock\n@@ -1 +1 @@\n-SAFE=1\n+LEAK=1\n';
+    await assert.rejects(() => tool.execute({ diff }, ctxIn()), /symbolic link/);
+    assert.equal(readlinkSync(link), '.env');
+    assert.equal(readFileSync(path.join(repo, '.env'), 'utf8'), 'SAFE=1\n');
+  } finally {
+    rmSync(link, { force: true });
+  }
+});
+
+test('two files concatenated by diff -u apply as one patch, without --recount (HP5)', async () => {
+  resetRepo();
+  const before = snapshot(repo);
+  const diff = UNIFIED_LOCK + '--- a/README\n+++ b/README\n@@ -1 +1 @@\n-r\n+s\n';
+  const result = await tool.execute({ diff }, ctxIn());
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.deepEqual(changedSince(before), [pathKey('Cargo.lock'), pathKey('README')].sort());
+  assert.equal(readFileSync(path.join(repo, 'Cargo.lock'), 'utf8'), 'lock2\n');
+  assert.equal(readFileSync(path.join(repo, 'README'), 'utf8'), 's\n');
+});
+
+test('an indented section header is refused rather than silently skipped (HP6)', () => {
+  const whole = [
+    ' diff --git a/Cargo.lock b/Cargo.lock', ' --- a/Cargo.lock', ' +++ b/Cargo.lock',
+    ' @@ -1 +1 @@', ' -lock1', ' +lock2', '',
+  ].join('\n');
+  const second = [
+    '--- a/README', '+++ b/README', '@@ -1 +1 @@', '-r', '+s',
+    ' diff --git a/Cargo.lock b/Cargo.lock', '--- a/Cargo.lock', '+++ b/Cargo.lock',
+    '@@ -1 +1 @@', '-lock1', '+lock2', '',
+  ].join('\n');
+  for (const diff of [whole, second]) {
+    assert.throws(() => tool.declaredPaths({ diff }), /indented section header/, JSON.stringify(diff));
+  }
+});
+
+test('no filter, hook or fsmonitor named in repository configuration can run (HP3)', async () => {
+  resetRepo();
+  const marker = path.join(scratch, `ran-${process.pid}.txt`);
+  rmSync(marker, { force: true });
+  const hooks = mkdtempSync(path.join(scratch, 'hooks-'));
+  const fakeGlobal = path.join(scratch, 'fake-global-gitconfig');
+  const savedGlobal = process.env['GIT_CONFIG_GLOBAL'];
+  // 1. A filter in the repository's own config, selected by a file the patch writes.
+  writeFileSync(path.join(repo, '.gitattributes'), 'Cargo.lock filter=evil\n');
+  assert.equal(git(repo, ['config', 'filter.evil.clean', `sh -c 'echo CLEAN >> ${marker}; cat'`]).status, 0);
+  assert.equal(git(repo, ['config', 'filter.evil.smudge', `sh -c 'echo SMUDGE >> ${marker}; cat'`]).status, 0);
+  // 2. A hook directory and an fsmonitor program, both named in the repository's own config.
+  writeFileSync(path.join(hooks, 'applypatch-msg'), `#!/bin/sh\necho HOOK >> '${marker}'\n`, { mode: 0o755 });
+  writeFileSync(path.join(hooks, 'post-index-change'), `#!/bin/sh\necho HOOK >> '${marker}'\n`, { mode: 0o755 });
+  assert.equal(git(repo, ['config', 'core.hooksPath', hooks]).status, 0);
+  const fsmon = path.join(scratch, 'fsmonitor.sh');
+  writeFileSync(fsmon, `#!/bin/sh\necho FSMON >> '${marker}'\nexit 1\n`, { mode: 0o755 });
+  assert.equal(git(repo, ['config', 'core.fsmonitor', fsmon]).status, 0);
+  // 3. A global config of the user's, with a filter of the same name.
+  writeFileSync(fakeGlobal, `[filter "evil"]\n\tclean = sh -c 'echo GLOBAL >> ${marker}; cat'\n`);
+  process.env['GIT_CONFIG_GLOBAL'] = fakeGlobal;
+  try {
+    const result = await tool.execute({ diff: UNIFIED_LOCK }, ctxIn());
+    assert.equal(result.exitCode, 0, result.stderr);
+  } finally {
+    if (savedGlobal === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+    else process.env['GIT_CONFIG_GLOBAL'] = savedGlobal;
+    git(repo, ['config', '--unset', 'filter.evil.clean']);
+    git(repo, ['config', '--unset', 'filter.evil.smudge']);
+    git(repo, ['config', '--unset', 'core.hooksPath']);
+    git(repo, ['config', '--unset', 'core.fsmonitor']);
+    rmSync(hooks, { recursive: true, force: true });
+    rmSync(fakeGlobal, { force: true });
+  }
+  assert.equal(existsSync(marker), false, 'nothing a filter, hook or fsmonitor would have run did run');
+  assert.equal(readFileSync(path.join(repo, 'Cargo.lock'), 'utf8'), 'lock2\n');
+  resetRepo();
+});
+
+test('a TMPDIR inside a repository does not change the path declared or written (HS1)', async () => {
+  resetRepo();
+  const savedTmp = process.env['TMPDIR'];
+  const nested = path.join(repo, 'tmpdir');
+  mkdirSync(nested, { recursive: true });
+  process.env['TMPDIR'] = nested;
+  try {
+    // The diff file now lives inside the repository. Before the sealed context, git ran the
+    // declaration there and reported `tmpdir/maf-patch-…/.maf/policy.yaml`, while the apply wrote
+    // `.maf/policy.yaml` — a Deny rule on the real name never fired.
+    const diff = '--- a/.maf/policy.yaml\n+++ b/.maf/policy.yaml\n@@ -1 +1 @@\n-policy\n+changed\n';
+    assert.deepEqual(tool.declaredPaths({ diff }), ['.maf/policy.yaml']);
+    const result = await tool.execute({ diff }, ctxIn());
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(readFileSync(path.join(repo, '.maf/policy.yaml'), 'utf8'), 'changed\n');
+    assert.equal(existsSync(path.join(nested, '.maf')), false, 'nothing was written relative to TMPDIR');
+  } finally {
+    if (savedTmp === undefined) delete process.env['TMPDIR']; else process.env['TMPDIR'] = savedTmp;
+    rmSync(nested, { recursive: true, force: true });
+  }
+  resetRepo();
+});
+
+test('dryRun where the diff does not apply fails non-zero, and git was asked (HP8)', async () => {
+  resetRepo();
+  const before = snapshot(repo);
+  const shim = gitShim();
+  try {
+    const result = await tool.execute({
+      diff: '--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-nope\n+lock2\n',
+      dryRun: true,
+    }, ctxIn());
+    assert.notEqual(result.exitCode, 0, 'a dry run that would fail must not answer success');
+  } finally {
+    shim.restore();
+  }
+  const calls = readFileSync(shim.record, 'utf8').trim().split('\n');
+  assert.equal(calls.length, 4, calls.join('\n'));
+  assert.match(calls[3]!, /apply -p1 --check /, 'the dry run asks git, and asks it with --check');
+  assert.deepEqual(changedSince(before), []);
+  rmSync(shim.dir, { recursive: true, force: true });
 });
 
 // ─── the child: flags, environment, and the file it reads ───────────────────
 
-/** A `git` on PATH that records how it was called and then runs the real one. */
+/**
+ * A `git` on PATH that records how it was called and then runs the real one.
+ *
+ * `stat` is done by node rather than by `stat(1)`: BSD and GNU spell the format differently
+ * (`stat -f "%Lp"` against `stat -c "%a"`), and the old `a || b` fallback read as a Mac-only test
+ * — on Linux the first form exits 0 having printed nothing useful (HP2/HS2).
+ */
 function gitShim(): { dir: string; record: string; restore: () => void } {
   const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
   assert.notEqual(real, '', 'git must be on PATH for this test');
@@ -336,12 +525,18 @@ function gitShim(): { dir: string; record: string; restore: () => void } {
   const record = path.join(dir, 'calls.txt');
   writeFileSync(record, '');
   const script = path.join(dir, 'git');
+  // Double quotes only: the script sits inside single quotes in the sh wrapper.
+  const modeOf = 'const fs=require("node:fs");'
+    + 'try{process.stdout.write((fs.statSync(process.argv[1]).mode&0o777).toString(8))}'
+    + 'catch{process.stdout.write("?")}';
   writeFileSync(script, [
     '#!/bin/sh',
     'last=""',
     'for a in "$@"; do last="$a"; done',
-    'mode=$(stat -f "%Lp" "$last" 2>/dev/null || stat -c "%a" "$last")',
-    `printf 'CALL mode=%s gitdir=%s maf=%s args="%s"\\n' "$mode" "\${GIT_DIR-}" "\${MAF_TOKEN-}" "$*" >> '${record}'`,
+    `mode=$(node -e '${modeOf}' "$last")`,
+    `printf 'CALL mode=%s gitdir=%s wt=%s nss=%s ngl=%s maf=%s cwd=%s file=%s args="%s"\\n' `
+      + `"$mode" "\${GIT_DIR-}" "\${GIT_WORK_TREE-}" "\${GIT_CONFIG_NOSYSTEM-}" "\${GIT_CONFIG_GLOBAL-}" `
+      + `"\${MAF_TOKEN-}" "$(pwd)" "$last" "$*" >> '${record}'`,
     `exec '${real}' "$@"`,
     '',
   ].join('\n'), { mode: 0o755 });
@@ -353,7 +548,12 @@ function gitShim(): { dir: string; record: string; restore: () => void } {
   };
 }
 
-test('git is run with the two overrides, --recount, the 0600 diff, and nothing from maf\'s environment', async () => {
+/** One recorded field, by name, up to the next space. */
+function callField(call: string, name: string): string {
+  return new RegExp(`(?:^| )${name}=([^ ]*)`).exec(call)?.[1] ?? '';
+}
+
+test('every git call shares one sealed context, one diff file, and no --recount', async () => {
   // Before the shim is on PATH, so the record holds the tool's calls and nothing else's.
   resetRepo();
   const shim = gitShim();
@@ -371,20 +571,33 @@ test('git is run with the two overrides, --recount, the 0600 diff, and nothing f
   }
 
   const calls = readFileSync(shim.record, 'utf8').trim().split('\n');
-  // numstat, summary, check, apply.
-  assert.equal(calls.length, 4, calls.join('\n'));
+  // summary, forward numstat, reverse numstat, check, apply — five calls, one context.
+  assert.equal(calls.length, 5, calls.join('\n'));
+  const files = new Set(calls.map((call) => callField(call, 'file')));
+  assert.equal(files.size, 1, 'every call is handed the same diff file');
   for (const call of calls) {
     assert.match(call, /mode=600/, 'the diff file is private to the call that wrote it');
-    assert.match(call, /gitdir= /, 'GIT_DIR from maf\'s own environment never reaches the child');
-    assert.match(call, /maf= /, 'maf\'s secrets never reach the child');
+    assert.match(callField(call, 'gitdir'), /maf-gitdir-/, 'GIT_DIR is the empty throwaway directory');
+    assert.doesNotMatch(call, /not-the-repo/, 'GIT_DIR from maf\'s own environment never reaches the child');
+    assert.equal(callField(call, 'wt'), repo, 'the worktree is the project root, not the temp folder (HS1)');
+    assert.equal(callField(call, 'nss'), '1');
+    assert.equal(callField(call, 'ngl'), '/dev/null');
+    assert.equal(callField(call, 'cwd'), repo, 'the child runs in the worktree, so patch paths are relative to it');
+    assert.equal(callField(call, 'maf'), '', 'maf\'s secrets never reach the child');
     assert.match(call, /-c core\.hooksPath=\/dev\/null/);
     assert.match(call, /-c core\.fsmonitor=false/);
-    assert.match(call, /apply .*--recount/);
+    assert.match(call, /-c core\.attributesFile=\/dev\/null/);
+    assert.match(call, /apply -p1 /, 'the declaration and the apply are given the same strip');
+    assert.doesNotMatch(call, /--recount/, '--recount breaks an ordinary multi-file `diff -u` (HP5)');
     assert.doesNotMatch(call, /--reject|--3way|--index|--unidiff-zero|-C0/);
   }
-  assert.match(calls[0]!, /--numstat -z/);
-  assert.match(calls[1]!, /--summary/);
-  assert.match(calls[2]!, /--check/);
+  assert.match(calls[0]!, /apply -p1 --summary /);
+  assert.match(calls[1]!, /apply -p1 --numstat -z /);
+  assert.doesNotMatch(calls[1]!, /-R /, 'the forward list is the forward list');
+  assert.match(calls[2]!, /apply -p1 -R --numstat -z /, 'the old side is read too (HP1)');
+  assert.match(calls[3]!, /apply -p1 --check /);
+  assert.doesNotMatch(calls[4]!, /--summary|--numstat|--check/, 'the write is the plain apply');
+  rmSync(shim.dir, { recursive: true, force: true });
 });
 
 test('a git that cannot be spawned is a refusal, not an exception out of the gate', () => {
@@ -392,7 +605,7 @@ test('a git that cannot be spawned is a refusal, not an exception out of the gat
   const empty = mkdtempSync(path.join(scratch, 'empty-path-'));
   process.env['PATH'] = empty;
   try {
-    assert.throws(() => tool.declaredPaths({ diff: UNIFIED_LOCK }), /refuses this diff: .*git apply --numstat could not read it/);
+    assert.throws(() => tool.declaredPaths({ diff: UNIFIED_LOCK }), /refuses this diff: .*could not read it/);
   } finally {
     process.env['PATH'] = originalPath;
   }

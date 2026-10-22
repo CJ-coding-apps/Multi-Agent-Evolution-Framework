@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import {
-  lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync,
+  symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -23,10 +24,12 @@ import { executeToolGated } from '../index.js';
 // The verdict measured the old header parser against GNU patch and found 17 mismatches: five
 // independent ways a file a shipped rule protects (`.env`, `*.lock`, `.maf/policy.yaml`, the tester
 // allow-list) could be written under an `Allow`. The fix is not a better header parser — it is to
-// stop parsing headers. `patch.apply` now asks `git apply` which files the diff names
-// (`--numstat -z`) and refuses what git reports in forms a path list cannot describe
-// (`--summary`: renames, copies, mode changes, symlinks, submodules), then applies the same bytes
-// with the same `-p`. The declaration and the write are the same program reading the same file.
+// stop parsing headers. `patch.apply` asks `git apply` which files the diff names, forward and
+// reversed (the same file, the same `-p`, the same sealed context), refuses what git reports in
+// forms a path list cannot describe (`--summary`: renames, copies, mode changes, submodules), and
+// refuses a section whose two directions name different files — that is a rename git was never
+// told about, and one direction alone shows only its destination. It then applies the same bytes in
+// that same context. The declaration and the write are the same program reading the same file.
 //
 // Every row below is asserted against the policy file the repository ships, loaded the way a run
 // loads it, and the table drives `executeToolGated`, the real gate. Two properties hold for every
@@ -35,9 +38,10 @@ import { executeToolGated } from '../index.js';
 //   1. either the call is refused before policy or with it, and nothing is written; or
 //   2. the set of files the apply writes is exactly the set the policy was shown.
 //
-// Where git's answer differs from GNU patch's, the difference is stated in the row: git refuses
-// context diffs, `Index:`-only diffs, indented sections, normal and ed diffs, so those rows are
-// refusals now — fail-closed, which is what the verdict asked for.
+// Where git's answer differs from GNU patch's, the difference is stated in the row: `git apply`
+// cannot read context diffs, `Index:`-only diffs, normal or ed diffs, and silently skips an indented
+// section, so the tool refuses those before git is asked — fail-closed, which is what the verdict
+// asked for.
 
 // dist/__tests__ → package → packages → repository root.
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
@@ -246,24 +250,23 @@ const ROWS: Row[] = [
   { n: 31, name: '--- /dev/null creation', diff: '--- /dev/null\n+++ b/new.lock\n@@ -0,0 +1 @@\n+new\n',
     expect: { declared: ['new.lock'], verdict: 'Escalate', ruleId: 'protect-lock-files' } },
   { n: 32, name: 'multi-file unified, no diff --git separators', diff: readmeSection() + unified('a/Cargo.lock', 'b/Cargo.lock'),
-    expect: { declared: ['README'], verdict: 'Allow' },
-    note: 'under `--recount` git reads the concatenated sections as one: it names README and the '
-      + 'check fails, so the failed apply writes nothing. Fail-closed, and pinned because CJ '
-      + 'required `--recount`.' },
+    expect: { declared: ['README', 'Cargo.lock'], verdict: 'Escalate', ruleId: 'protect-lock-files' },
+    note: 'git reads the concatenated `diff -u` sections one after the other and names both files. '
+      + '(`--recount` made git read them as one section, which is why it was dropped.)' },
   { n: 33, name: 'CRLF line endings', diff: '--- a/Cargo.lock\r\n+++ b/Cargo.lock\r\n@@ -1 +1 @@\r\n-lock1\r\n+lock2\r\n',
     expect: { declared: ['Cargo.lock'], verdict: 'Escalate', ruleId: 'protect-lock-files' },
     note: 'git keeps the CR in the hunk body and the apply fails; the policy refuses the call first either way.' },
   { n: 34, name: 'whole diff indented 2 spaces', diff: readmeSection().split('\n').map((l) => (l === '' ? l : `  ${l}`)).join('\n'),
-    expect: { declared: 'REFUSED' }, note: 'git does not accept indented sections; no file is named.' },
+    expect: { declared: 'REFUSED' },
+    note: 'git would skip the whole section and exit 0; the indented header is refused instead.' },
   { n: 35, name: 'README then a space-indented .env section', diff: readmeSection() + '  --- a/.env\n  +++ b/.env\n  @@ -1 +1 @@\n  -SAFE=1\n  +LEAK=1\n',
-    expect: { declared: ['README'], verdict: 'Allow' },
-    note: 'git ignores the indented section entirely; the unindented README section then fails its '
-      + 'check and nothing is written, `.env` included.' },
+    expect: { declared: 'REFUSED' },
+    note: 'git ignores the indented section and reports success for the rest; refused, because the '
+      + 'agent would be told the whole diff applied when only part of it did.' },
   { n: 36, name: 'README then a TAB-indented Cargo.lock section', diff: readmeSection() + '\t--- a/Cargo.lock\n\t+++ b/Cargo.lock\n\t@@ -1 +1 @@\n\t-lock1\n\t+lock2\n',
-    expect: { declared: ['README'], verdict: 'Allow' },
-    note: 'git applies only the README section; the declared set is the written set.' },
+    expect: { declared: 'REFUSED' } },
   { n: 37, name: 'README then an X-prefixed Cargo.lock section', diff: readmeSection() + 'X--- a/Cargo.lock\nX+++ b/Cargo.lock\nX@@ -1 +1 @@\nX-lock1\nX+lock2\n',
-    expect: { declared: ['README'], verdict: 'Allow' } },
+    expect: { declared: 'REFUSED' } },
   { n: 38, name: 'normal diff, no names', diff: '1c1\n< r\n---\n> s\n',
     expect: { declared: 'REFUSED' }, note: 'the tool promises a unified diff; git applies nothing else.' },
   { n: 39, name: 'normal diff with Index:, -p0', strip: 0, diff: 'Index: Cargo.lock\n1c1\n< lock1\n---\n> lock2\n',
@@ -296,6 +299,26 @@ const ROWS: Row[] = [
   { n: 50, name: 'hunk body line beginning `--- `', diff: '--- a/n.txt\n+++ b/n.txt\n@@ -1 +1 @@\n--- a/Cargo.lock\n+replaced\n',
     expect: { declared: ['n.txt'], verdict: 'Allow' },
     note: 'the removed line\'s content is `-- a/Cargo.lock`; git reads it as a hunk line, never as a header.' },
+
+  // Round 2 (HP1, HP6b): the forms where a path list read forwards alone names only half the
+  // change. `--summary` reports nothing for any of them, so both directions of `--numstat` are what
+  // makes them visible.
+  { n: 51, name: 'implicit rename of .env to notes.txt', diff: 'diff --git a/.env b/notes.txt\n--- a/.env\n+++ b/notes.txt\n' + envHunk,
+    expect: { declared: 'REFUSED' },
+    note: 'git reports `notes.txt` forward and `.env` reversed. The forward list alone says Allow, '
+      + 'and the apply deletes `.env`.' },
+  { n: 52, name: 'implicit rename of Cargo.lock to away.txt', diff: 'diff --git a/Cargo.lock b/away.txt\n--- a/Cargo.lock\n+++ b/away.txt\n@@ -1 +1 @@\n-lock1\n+lock2\n',
+    expect: { declared: 'REFUSED' } },
+  { n: 53, name: 'implicit rename of .maf/policy.yaml to policy-copy.txt', diff: 'diff --git a/.maf/policy.yaml b/policy-copy.txt\n--- a/.maf/policy.yaml\n+++ b/policy-copy.txt\n@@ -1 +1 @@\n-policy\n+tampered\n',
+    expect: { declared: 'REFUSED' } },
+  { n: 54, name: 'deletion of Cargo.lock', diff: 'diff --git a/Cargo.lock b/Cargo.lock\ndeleted file mode 100644\n--- a/Cargo.lock\n+++ /dev/null\n@@ -1 +0,0 @@\n-lock1\n',
+    expect: { declared: ['Cargo.lock'], verdict: 'Escalate', ruleId: 'protect-lock-files' },
+    note: 'a deletion names the same file both ways — only the counts swap — so it is a plain write '
+      + 'to that path, and the lock rule refuses it.' },
+  { n: 55, name: 'diff --git header applied at -p0', strip: 0, diff: 'diff --git a/README b/README\n--- a/README\n+++ b/README\n@@ -1 +1 @@\n-r\n+s\n',
+    expect: { declared: 'REFUSED' },
+    note: 'at -p0 the prefix is not stripped, so git names `a/README` and `b/README` — two different '
+      + 'files — and the section is a rename it was not told about.' },
 ];
 
 // ─── the runner every row and every regression test uses ────────────────────
@@ -459,22 +482,29 @@ test('R9 — a rename with an octal target is refused for being a rename', async
   assert.match(o.declared.message, /rename notes => Cargo\.lock2/);
 });
 
-test('R10 — a space-indented .env section after README writes nothing', async () => {
+test('R10 — a space-indented .env section after README is refused, and `.env` is untouched', async () => {
   const o = await runRow(35);
+  assert.ok(o.declared instanceof ToolDeclarationError);
+  assert.match(o.declared.message, /indented section header/);
   assert.deepEqual(o.changed, []);
   assert.equal(readFileSync(path.join(projectRoot, '.env'), 'utf8'), 'SAFE=1\n');
 });
 
-test('R11 — TAB- and X-prefixed sections are ignored by git, and only what was declared is written', async () => {
+test('R11 — TAB- and X-prefixed sections are refused: git would apply only the README half', async () => {
   for (const n of [36, 37]) {
     const o = await runRow(n);
-    assert.deepEqual(o.changed, ['readme'], `row ${n}`);
+    assert.ok(o.declared instanceof ToolDeclarationError, `row ${n}: ${JSON.stringify(o.declared)}`);
+    assert.match(o.declared.message, /indented section header/, `row ${n}`);
+    assert.deepEqual(o.changed, [], `row ${n}: nothing is written, README included`);
+    assert.equal(readFileSync(path.join(projectRoot, 'README'), 'utf8'), 'r\n', `row ${n}`);
     assert.equal(readFileSync(path.join(projectRoot, 'Cargo.lock'), 'utf8'), 'lock1\n', `row ${n}`);
   }
 });
 
 test('R12 — a wholly indented diff is refused', async () => {
-  await runRow(34);
+  const o = await runRow(34);
+  assert.ok(o.declared instanceof ToolDeclarationError);
+  assert.match(o.declared.message, /indented section header/);
 });
 
 test('R13 — `Index:.env` and `Index:<TAB>.env` after a section are refused with the whole diff', async () => {
@@ -548,22 +578,31 @@ test('R21 — a multi-file diff whose second file fails changes nothing', async 
 test('R22 — a failed apply leaves no .orig, no .rej and no temp file behind', async () => {
   resetRepo();
   const before = snapshot();
-  const tmpBefore = readdirSync(tmpdir()).filter((name) => name.startsWith('maf-patch-')).sort();
-  const attestor = new SpyAttestor();
-  const result = await executeToolGated(tool, {
-    diff: '--- a/notes\n+++ b/notes\n@@ -1 +1 @@\n-nope\n+n\n',
-  }, ctxIn(), { policy: engine, attestor });
-  assert.notEqual(result.exitCode, 0);
-  assert.deepEqual(changedSince(before), []);
-  const leftovers = readdirSync(projectRoot, { recursive: true })
-    .map(String)
-    .filter((name) => name.endsWith('.orig') || name.endsWith('.rej'));
-  assert.deepEqual(leftovers, []);
-  assert.deepEqual(
-    readdirSync(tmpdir()).filter((name) => name.startsWith('maf-patch-')).sort(),
-    tmpBefore,
-    'the private temp directory and the diff are removed on every path',
-  );
+  // A private TMPDIR, so the assertion is about what this call made rather than about what else
+  // on the machine happens to be in the system temp directory.
+  const privateTmp = mkdtempSync(path.join(tmpdir(), 'maf-051-tmp-'));
+  const saved = process.env['TMPDIR'];
+  process.env['TMPDIR'] = privateTmp;
+  try {
+    const attestor = new SpyAttestor();
+    const result = await executeToolGated(tool, {
+      diff: '--- a/notes\n+++ b/notes\n@@ -1 +1 @@\n-nope\n+n\n',
+    }, ctxIn(), { policy: engine, attestor });
+    assert.notEqual(result.exitCode, 0);
+    assert.deepEqual(changedSince(before), []);
+    const leftovers = readdirSync(projectRoot, { recursive: true })
+      .map(String)
+      .filter((name) => name.endsWith('.orig') || name.endsWith('.rej'));
+    assert.deepEqual(leftovers, []);
+    assert.deepEqual(
+      readdirSync(privateTmp),
+      [],
+      'the private temp directory, the diff file and the empty git directory are removed on every path',
+    );
+  } finally {
+    if (saved === undefined) delete process.env['TMPDIR']; else process.env['TMPDIR'] = saved;
+    rmSync(privateTmp, { recursive: true, force: true });
+  }
 });
 
 test('R23 — an unusable temp directory fails the call before git runs and writes nothing', async () => {
@@ -655,4 +694,97 @@ test('`.ENV` is declared as git names it and denied by `**/.env*` on a case-inse
   assert.equal(decision.ruleId, 'deny-env-files', 'the same file as `.env` on APFS and NTFS');
   assert.deepEqual(changedSince(before), []);
   assert.equal(readFileSync(path.join(projectRoot, '.env'), 'utf8'), 'SAFE=1\n');
+});
+
+// ─── round 2: what only a second git call, or a stat, can see ───────────────
+
+test('HP1 — an implicit rename of a protected file is refused and moves nothing', async () => {
+  const cases: ReadonlyArray<{ n: number; from: string; to: string; body: string }> = [
+    { n: 51, from: '.env', to: 'notes.txt', body: envHunk },
+    { n: 52, from: 'Cargo.lock', to: 'away.txt', body: '@@ -1 +1 @@\n-lock1\n+lock2\n' },
+    { n: 53, from: '.maf/policy.yaml', to: 'policy-copy.txt', body: '@@ -1 +1 @@\n-policy\n+tampered\n' },
+  ];
+  for (const { n, from, to, body } of cases) {
+    const o = await exercise({
+      n, name: `implicit rename ${from} -> ${to}`,
+      diff: `diff --git a/${from} b/${to}\n--- a/${from}\n+++ b/${to}\n${body}`,
+      expect: { declared: 'REFUSED' },
+    });
+    assertRow(o);
+    assert.ok(o.declared instanceof ToolDeclarationError);
+    assert.match(o.declared.message, /on the old side and .* on the new/);
+    assert.ok(o.declared.message.includes(JSON.stringify(from)), `${from}: the source is named`);
+    assert.ok(o.declared.message.includes(JSON.stringify(to)), `${to}: the destination is named`);
+    assert.deepEqual(o.changed, [], `${from}: neither side moves`);
+    assert.equal(readFileSync(path.join(projectRoot, from), 'utf8'), SEED[from]!, `${from}: unchanged`);
+    assert.equal(existsSync(path.join(projectRoot, to)), false, `${to}: never created`);
+  }
+});
+
+test('HP4 — a plain diff on a symlink is refused: git rewrites the link in place', async () => {
+  resetRepo();
+  symlinkSync('README', path.join(projectRoot, 'link'));
+  const before = snapshot();
+  const diff = 'diff --git a/link b/link\n--- a/link\n+++ b/link\n@@ -1 +1 @@\n-r\n+SAFE=1\n';
+
+  // git names the link both ways and `--summary` says nothing: the declaration is `link`, and the
+  // write lands on whatever the link points at now — which the policy never saw.
+  assert.deepEqual(tool.declaredPaths({ diff }), ['link']);
+
+  const attestor = new SpyAttestor();
+  await assert.rejects(
+    () => executeToolGated(tool, { diff }, ctxIn(), { policy: engine, attestor }),
+    (err: unknown) => err instanceof PolicyViolationError,
+  );
+  const decision = attestor.records[0]!.policyDecision as { verdict: string; ruleId?: string };
+  assert.equal(decision.verdict, 'Deny');
+  assert.equal(decision.ruleId, 'builtin:declaration');
+  assert.deepEqual(changedSince(before), []);
+  assert.equal(readlinkSync(path.join(projectRoot, 'link')), 'README');
+  assert.equal(readFileSync(path.join(projectRoot, 'README'), 'utf8'), 'r\n');
+});
+
+test('HS1 — a temp directory inside the repository cannot change the name the declaration reports', async () => {
+  resetRepo();
+  const inside = mkdtempSync(path.join(projectRoot, 'scratch-'));
+  const before = snapshot();
+  // The declaration writes the diff to a private directory under TMPDIR and asks git from there.
+  // When that directory was inside some repository and git was left to discover one, it prefixed
+  // every name with the directory's path relative to the root — so the policy was asked about
+  // `scratch-…/.maf/policy.yaml` while the apply wrote `.maf/policy.yaml`.
+  const saved = process.env['TMPDIR'];
+  process.env['TMPDIR'] = inside;
+  try {
+    const diff = '--- a/.maf/policy.yaml\n+++ b/.maf/policy.yaml\n@@ -1 +1 @@\n-policy\n+tampered\n';
+    assert.deepEqual(
+      tool.declaredPaths({ diff }),
+      ['.maf/policy.yaml'],
+      'the same name the apply would write, wherever the temp directory happens to be',
+    );
+
+    const attestor = new SpyAttestor();
+    await assert.rejects(
+      () => executeToolGated(tool, { diff }, ctxIn(), { policy: engine, attestor }),
+      (err: unknown) => err instanceof PolicyViolationError,
+    );
+    const decision = attestor.records[0]!.policyDecision as { verdict: string; ruleId?: string };
+    assert.equal(decision.verdict, 'Deny');
+    assert.equal(decision.ruleId, 'deny-maf-dir', 'the shipped rule for maf\'s own directory');
+    assert.deepEqual(changedSince(before), []);
+    assert.equal(readFileSync(path.join(projectRoot, '.maf/policy.yaml'), 'utf8'), 'policy\n');
+  } finally {
+    if (saved === undefined) delete process.env['TMPDIR']; else process.env['TMPDIR'] = saved;
+    rmSync(inside, { recursive: true, force: true });
+  }
+});
+
+test('HP5 — a concatenated two-file `diff -u` is declared as both files and applies', async () => {
+  const o = await exercise({
+    n: 56, name: 'concatenated diff -u',
+    diff: '--- a/README\n+++ b/README\n@@ -1 +1 @@\n-r\n+rr\n--- a/notes\n+++ b/notes\n@@ -1 +1 @@\n-n\n+nn\n',
+    expect: { declared: ['README', 'notes'], verdict: 'Allow' },
+  });
+  assertRow(o);
+  assert.equal(o.result?.exitCode, 0, `the apply succeeds: ${o.result?.stderr ?? ''}`);
+  assert.deepEqual(o.changed, ['README', 'notes'].map(pathKey).sort());
 });
