@@ -83,6 +83,47 @@ test('store: tampering with the file on disk fails integrity on load', async () 
   });
 });
 
+test('store: a harness file that names a prototype key is refused, and not called unparseable (WP-3.9 G5)', async () => {
+  await withTempDir(async (dir) => {
+    const store = new HarnessStore(dir);
+    const cfg = mintHarnessConfig({ id: 'victim', roleSet: ROLE_SET, processorBundles: [] });
+    await store.save(cfg);
+    const file = path.join(dir, 'harnesses', `${cfg.sha}.yaml`);
+    // Written as text: an object literal with a `__proto__` key sets the prototype rather than
+    // serializing one, so JSON.stringify could not plant this.
+    const text = await readFile(file, 'utf8');
+    await writeFile(file, `{"__proto__":{"polluted":true},${text.slice(1)}`, 'utf8');
+    await assert.rejects(() => store.load(cfg.sha), (err: unknown) => {
+      assert.ok(err instanceof HarnessIntegrityError);
+      assert.match(err.message, /names a prototype/);
+      assert.match(err.message, /__proto__/);
+      // A refused key is not a syntax failure, and reporting it as one would hide the reason.
+      assert.doesNotMatch(err.message, /is not parseable/);
+      return true;
+    });
+    assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
+  });
+});
+
+test('store: a poisoned index is refused whole, so no id it names resolves (WP-3.9 G5)', async () => {
+  await withTempDir(async (dir) => {
+    const store = new HarnessStore(dir);
+    const cfg = mintHarnessConfig({ id: 'test-v1', roleSet: ROLE_SET, processorBundles: [] });
+    await store.save(cfg);
+    // Anti-vacuity: the fixture resolves by id through its index before the index is poisoned.
+    assert.equal((await store.load('test-v1')).sha, cfg.sha);
+    const index = path.join(dir, 'harnesses', 'index.json');
+    await writeFile(
+      index,
+      `{"__proto__":${JSON.stringify(cfg.sha)},"test-v1":${JSON.stringify(cfg.sha)}}`,
+      'utf8',
+    );
+    await assert.rejects(() => store.load('test-v1'), /No harness found for ref "test-v1"/);
+    // The content is still addressed by its sha: the index is a lookup, and it was the file refused.
+    assert.equal((await store.load(cfg.sha)).sha, cfg.sha);
+  });
+});
+
 test('adoptLegacy: an unchanged role set reuses the stored harness and sets CURRENT', async () => {
   await withTempDir(async (dir) => {
     const store = new HarnessStore(dir);

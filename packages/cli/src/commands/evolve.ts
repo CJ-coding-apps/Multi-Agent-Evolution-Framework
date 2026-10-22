@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { makeRunId } from '@maf/types';
+import { makeRunId, refusePrototypeKey } from '@maf/types';
 import type { PermissionLevel } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -66,7 +66,10 @@ export function registerEvolveCommand(program: Command): void {
         ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
       });
 
-      const corpus: GoldenTask[] = JSON.parse(await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'));
+      // WP-3.9 G5: a corpus file, through the shared reviver like `goldens run` reads it.
+      const corpus: GoldenTask[] = JSON.parse(
+        await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'), refusePrototypeKey,
+      );
 
       const metaGenerate = async (systemPrompt: string, userPrompt: string): Promise<string> => {
         const result = await adapter.invoke({

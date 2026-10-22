@@ -1608,3 +1608,12 @@ export {
  * allowlist. `@maf/adapter-base` and `@maf/tools` both already depend on this package.
  */
 export { TOOL_ENV_ALLOWLIST, toolEnv, backendEnv, isMafVariable } from './childEnv.js';
+
+// WP-3.9 G5 — additive only: a new re-export; no existing export moved or changed.
+/**
+ * The `JSON.parse` reviver every file reader uses. A configuration or record file that names
+ * `__proto__`, `constructor` or `prototype` fails the parse instead of arriving as an object that
+ * a later field-by-field copy turns into a prototype. One implementation for YAML's
+ * `parseYamlDocument` counterpart and for every JSON reader that takes a path from the operator.
+ */
+export { PROTOTYPE_KEYS, PrototypeKeyError, refusePrototypeKey } from './protoKey.js';

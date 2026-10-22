@@ -1,10 +1,12 @@
 import crypto from 'node:crypto';
 import type { RunId, MergeReport, MemoryNodeKind, GraphRow } from '@maf/types';
+import { refusePrototypeKey } from '@maf/types';
 import type { KuzuDriver } from './KuzuDriver.js';
 import { intLiteral } from './cypherText.js';
 
+/** WP-3.9 G5: `.maf/` data, through the shared reviver; a refused blob reads as empty. */
 function tryParse(s: string): Record<string, unknown> {
-  try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; }
+  try { return JSON.parse(s, refusePrototypeKey) as Record<string, unknown>; } catch { return {}; }
 }
 
 export class RunMerger {

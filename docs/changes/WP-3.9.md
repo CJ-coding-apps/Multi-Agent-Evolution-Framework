@@ -170,6 +170,42 @@ states each as implemented.
   registry, loop and gate, with a stand-in stack and adapter — and reads the recorded round: outcome
   `reject`, stage `b-invariants`, the unknown id and the known tools in the note, no critic call.
 
+### Every `.maf/` JSON file is read through one prototype-key reviver
+
+- **`packages/types/src/protoKey.ts`** — `PROTOTYPE_KEYS`, `PrototypeKeyError` and
+  `refusePrototypeKey(key, value)`: the `JSON.parse` reviver that refuses `__proto__`,
+  `constructor` and `prototype` at any depth. It is the JSON counterpart of the rule
+  `parseYamlDocument` already enforces for YAML configuration (F10), and it lives in the package
+  every reader already depends on, so a reader added later reaches the same rule instead of
+  copying it.
+- **Routed through it** — every JSON reader whose path comes from the operator or from `.maf/`:
+  the harness store's `<sha>.yaml` body and its `index.json`; the CLI's harness files (`--harness
+  <file>` and the committed `default-<sha>.json`) and goldens result files; the golden corpus
+  (`corpus.json`) in `GoldenRunner`, `maf evolve` and `maf goldens`, and `scripted.json` in the
+  scripted adapter; a DAG workflow spec read as JSON; an attestation bundle and an in-toto
+  statement; the evolver digester's graph-properties column; and the three memory-graph property
+  readers. A refused document fails as a refusal, not as unparseable input: the store names the
+  key and the file, the bundle says what it refused, and a properties blob is read as empty with
+  the reason printed rather than as an object with one. The store's `readIndex` answers the same
+  way as for an unparseable index — **no id resolves** — while the harness stays reachable by its
+  sha, because the index is a lookup and the content is addressed by the hash.
+- **Explained, not routed** — the remaining `JSON.parse` calls in `packages/*/src` parse what is
+  not a configuration file: the attestation package's own `package.json`; an in-memory statement
+  round-tripped through JSON in `Attestor.signedBytes`; a blackboard **value** read back from the
+  blackboard's own sqlite column; and six inputs that are model output or a target repository's
+  own `package.json` (the planner, the critic, the llm-judge, the security reviewer, the planning
+  agent's plan block, and `test.run`'s runner detection). Each is read field by field and fails
+  closed where the shape is wrong, and none is copied key by key into a prototype. A value or a
+  model answer is data: refusing a document because a *value* names `__proto__` would reject data
+  the run itself wrote.
+- **Proof.** `packages/types/src/__tests__/protoKey.test.ts` pins the reviver for all three keys
+  at depth and leaves an ordinary document alone;
+  `packages/harness-config/src/__tests__/harness-config.test.ts` proves a harness file naming
+  `__proto__` is refused with the key named and is **not** reported as "not parseable", and that a
+  poisoned `index.json` resolves no id. Both were measured as mutants: removing the reviver from
+  the harness-file read fails only the first test, and removing it from the index read fails only
+  the second.
+
 ## Decisions
 
 **D-59 · A candidate that widens a role with a write tool is the operator's decision, not the
@@ -196,6 +232,23 @@ the candidate manifest exists, invariants first. Rejected: "run b4 before the cr
 invariants where they were" — that keeps a malformed candidate on the approval path, and an approval
 for a nonexistent tool is a decision nobody can honour. Rejected: dropping the check after a critic
 revision — a revision can reintroduce either defect, and the check is free.
+
+**One reviver for parsed files, and a refusal is not a syntax error (round 2, G5).** The
+prototype-key refusal was implemented once, in `DagParser`, and every other JSON reader parsed
+its file with a bare `JSON.parse`. That is the shape of rule that survives only until the next
+reader is added: the YAML side already had one implementation, and the JSON side had one copy
+per caller. The reviver now lives in `@maf/types` and every reader that takes a path from the
+operator or from `.maf/` uses it, so `__proto__` cannot enter the harness store, the index, a
+corpus, a bundle, a spec or a graph-properties blob. Two behaviours follow from the ruling and
+are not incidental: a refused key is reported as a refusal and never as "not parseable" — an
+operator reading "not parseable" would edit JSON that was syntactically fine — and a reader that
+fails open on unparseable input (the index, the property blobs) fails open on a refused one too,
+reading nothing rather than a partial object. Rejected: routing only the store. It is the file
+the ruling named, but `maf attest`, `maf goldens` and `maf evolve` each read a file an operator
+hands them, and a rule implemented at one of five call sites is the defect the ruling describes.
+Rejected: routing model output and data values too. Those parsers read one known field and fail
+closed on a wrong shape; refusing a *value* that happens to name `__proto__` would reject data
+the run wrote itself.
 
 **Rejected — keep `reject` and re-scope WP-3.7's live row.** A rejection does not guard the
 decision, it removes it: a role is permanently denied a tool its operator may well have wanted,
