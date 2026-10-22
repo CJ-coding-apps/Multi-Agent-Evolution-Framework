@@ -10,12 +10,16 @@ import type { PolicyEngine } from '@maf/policy-engine';
 import { PatchApplyTool } from '@maf/tools';
 import { executeToolGated } from '../index.js';
 
-// ORACLE: 0.5.1 — a diff header `patch` itself accepts cannot name a file no path rule sees.
+// ORACLE: 0.5.1 — the files a diff writes are the files `git apply` names, and the shipped rules
+// are asked about exactly those names.
 //
-// Asserted against the policy file the repository ships, loaded the way a run loads it, for every
-// header spelling GNU `patch` reads. Before the fix, `+++ b/Cargo.lock<TAB>2026-…` declared the
-// timestamped name (so `protect-lock-files` missed) and an `Index:`-only diff declared nothing at all
-// (so `deny-env-files` missed), and `patch` wrote the file either way.
+// Asserted against the policy file the repository ships, loaded the way a run loads it, through the
+// real gate. The 0.5.0 parser cut the header at the first TAB, so `+++ b/Cargo.lock<TAB>2026-…`
+// declared the timestamped name and `protect-lock-files` missed it; it also read `Index:` names GNU
+// patch honours and git does not. `patch.apply` now reads no header of its own: it asks git
+// (`--numstat -z`) which files the diff names and applies the same bytes with the same `-p`, so a
+// header form git does not follow is a refusal before policy, not a declaration of the parser's
+// choosing. The full spelling-by-spelling table is in `patch-conformance.test.ts`.
 
 // dist/__tests__ → package → packages → repository root.
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
@@ -81,16 +85,18 @@ test('a timestamp-less TAB suffix reaches the same rule', async () => {
   assert.equal(decision['verdict'], 'Escalate');
 });
 
-test('an Index:-only diff reaches deny-env-files for .env', async () => {
-  // `-p0` leaves a bare `Index:` name intact, which is the reported call.
+test('an Index:-only diff is refused before policy: git follows no `Index:` line', async () => {
+  // The 0.5.0 parser read `Index:` as a name GNU patch would honour, so policy was asked about a
+  // string git never writes and the call could be allowed. Now git names no file for this diff, and
+  // a diff whose targets cannot be declared is not an allowed one.
   const diff = 'Index: .env\n@@ -1 +1 @@\n-SAFE=1\n+LEAK=1\n';
   const { decision } = await refused(diff, 0);
   assert.equal(decision['verdict'], 'Deny');
-  assert.equal(decision['ruleId'], 'deny-env-files');
+  assert.equal(decision['ruleId'], 'builtin:declaration');
   await assert.rejects(stat(path.join(projectRoot, '.env')), { code: 'ENOENT' });
 });
 
-test('a context diff reaches deny-env-files through its *** / --- pair', async () => {
+test('a context diff is refused before policy: git applies unified diffs only', async () => {
   const diff = [
     `*** old/.env${STAMP}`,
     `--- new/.env${STAMP}`,
@@ -103,7 +109,8 @@ test('a context diff reaches deny-env-files through its *** / --- pair', async (
   ].join('\n');
   const { decision } = await refused(diff, undefined);
   assert.equal(decision['verdict'], 'Deny');
-  assert.equal(decision['ruleId'], 'deny-env-files');
+  assert.equal(decision['ruleId'], 'builtin:declaration', 'the `***`/`---` pair names no file git writes');
+  await assert.rejects(stat(path.join(projectRoot, '.env')), { code: 'ENOENT' });
 });
 
 test('a diff --git header with a TAB reaches deny-env-files for .env', async () => {

@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolContext, ToolInput, ToolPlugin, PolicyDecision, PolicyEngineHandle, AttestorHandle } from '@maf/types';
-import { makeRunId, makeTaskId, makeAgentId, PathConfinementError } from '@maf/types';
+import { makeRunId, makeTaskId, makeAgentId, PathConfinementError, ToolDeclarationError } from '@maf/types';
 import { FsWriteTool, FsDeleteTool } from '../plugins/fs.js';
 import { PatchApplyTool } from '../plugins/patch.js';
 import {
@@ -92,11 +92,10 @@ function diffTouching(p: string): string {
   return `--- a/${p}\n+++ b/${p}\n@@ -0,0 +1 @@\n+x\n`;
 }
 
-test('fs.write, fs.delete and patch.apply refuse every spelling of a .git path when they declare it — before policy', () => {
+test('fs.write and fs.delete refuse every spelling of a .git path when they declare it — before policy', () => {
   const declares: Array<[string, (p: string) => string[]]> = [
     ['fs.write',    (p) => new FsWriteTool().declaredPaths({ path: p, content: 'gitdir: /elsewhere/.git\n' })],
     ['fs.delete',   (p) => new FsDeleteTool().declaredPaths({ path: p, recursive: true })],
-    ['patch.apply', (p) => new PatchApplyTool().declaredPaths({ diff: diffTouching(p) })],
   ];
   for (const [tool, declare] of declares) {
     for (const p of GIT_DIR_SPELLINGS) {
@@ -112,6 +111,30 @@ test('fs.write, fs.delete and patch.apply refuse every spelling of a .git path w
     }
     for (const p of NOT_GIT_DIR) assert.deepEqual(declare(p), [p], `${tool} ${p} is not git's data`);
   }
+});
+
+test('patch.apply refuses every spelling of a .git path in the diff — before policy, under git\'s own spelling', () => {
+  // git reads the header, not the tool, so the declaration echoes what git reports: `./.git` and
+  // `.git/` come back as `.git`, and `sub/../.git` comes back with the `..` git kept, which the tool
+  // refuses before it names any target. Either way the call ends before the policy is asked.
+  const tool = new PatchApplyTool();
+  const gitSpelling = new Map([['./.git', '.git'], ['.git/', '.git']]);
+  for (const p of GIT_DIR_SPELLINGS) {
+    assert.throws(() => tool.declaredPaths({ diff: diffTouching(p) }), (err: Error) => {
+      assert.ok(err.message.startsWith('patch.apply refuses '), `${p}: the refusal names the tool`);
+      if (p === 'sub/../.git') {
+        assert.ok(err instanceof ToolDeclarationError, `${p}: a parent-relative name`);
+        assert.match(err.message, /contains "\.\."/);
+        return true;
+      }
+      assert.ok(err instanceof PathConfinementError, `${p}: a PathConfinementError`);
+      assert.equal(err.path, gitSpelling.get(p) ?? p);
+      assert.equal(err.reason, 'the path names git\'s own data (.git)');
+      assert.match(err.message, GIT_DIR_REFUSAL, p);
+      return true;
+    }, p);
+  }
+  for (const p of NOT_GIT_DIR) assert.deepEqual(tool.declaredPaths({ diff: diffTouching(p) }), [p], `${p} is not git's data`);
 });
 
 test('a direct execute refuses the same paths: the gitdir rewrite and the delete leave .git as it was', async (t) => {

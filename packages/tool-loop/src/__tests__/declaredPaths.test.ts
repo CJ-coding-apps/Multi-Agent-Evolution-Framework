@@ -204,8 +204,12 @@ test('a path rule denies a multi-path call when any one declared path is outside
   const attestor = new SpyAttestor();
   const ctx = ctxIn(tmpdir(), attestor, engine);
 
+  // Two sections as git separates them (`diff --git`), so the declaration names both files: an
+  // unseparated concatenation is one section to git, which is why a diff is written this way.
   const mixed = [
+    'diff --git a/src/ok.ts b/src/ok.ts',
     '--- a/src/ok.ts', '+++ b/src/ok.ts', '@@ -1 +1 @@', '-a', '+b',
+    'diff --git a/.env b/.env',
     '--- a/.env', '+++ b/.env', '@@ -1 +1 @@', '-SAFE=1', '+LEAKED=1',
     '',
   ].join('\n');
