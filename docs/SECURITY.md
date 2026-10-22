@@ -105,18 +105,20 @@ How a bundle is signed, and what a signature does **not** establish today, state
   bundle's `keySource` is held to the rule above. A 0.2.0 bundle carries no `keySource`, so it verifies
   on its signature alone, and verifying one with the development key proves only that it was signed
   with the development key.
-- **The key is in no child process's environment.** Every process maf starts for an agent is given a
-  policy rather than `process.env` (`packages/types/src/childEnv.ts`). The backend CLIs — `claude`,
-  `codex`, `gemini` — get the environment minus every `MAF_*` variable, so `MAF_SIGNING_KEY` is absent
-  and each provider's own key still reaches the backend that needs it. The tools that start a process —
-  `test.run`, `patch.apply`, `grep` (rg or grep) and the `git.*` tools — get a short allowlist (PATH,
-  HOME, the locale, `TMPDIR`, `TERM`, the Windows path variables) that carries no `MAF_*` variable and
-  no provider token. `test.run` runs project code and the tester role can write that code; it still
-  cannot read the key from its environment. A test proves the absence in a real child
-  (`packages/types/src/__tests__/childEnv.test.ts`). This closes the environment channel, not every
-  channel: a role the policy lets read a file that holds the key can still read it, as can code running
-  in maf's own process. The `git.*` tools never run a hook, even one the agent wrote (see *The agent's
-  git tools* below).
+- **`MAF_*` variables are not passed to processes maf starts for an agent — which is not the same as
+  keeping the key away from agent code.** maf does not pass `MAF_SIGNING_KEY` or other `MAF_*`
+  variables to processes it starts for an agent. Agent code still runs as your user: anything your user
+  can read, including maf's own environment, agent code can read. Isolating the key needs a separate
+  user or sandbox, which maf does not provide. What maf does do is give every process it starts for an
+  agent a policy rather than `process.env` (`packages/types/src/childEnv.ts`): the backend CLIs —
+  `claude`, `codex`, `gemini` — get the environment minus every `MAF_*` variable, so `MAF_SIGNING_KEY`
+  is absent and each provider's own key still reaches the backend that needs it; the tools that start a
+  process — `test.run`, `patch.apply`, `grep` (rg or grep) and the `git.*` tools — get a short allowlist
+  (PATH, HOME, the locale, `TMPDIR`, `TERM`, the Windows path variables) that carries no `MAF_*`
+  variable and no provider token. `test.run` runs project code and the tester role can write that code,
+  so the boundary is what the child is handed, not what it can find. A test proves the absence in a real
+  child (`packages/types/src/__tests__/childEnv.test.ts`). The `git.*` tools never run a hook, even one
+  the agent wrote (see *The agent's git tools* below).
 - **It is signed, not sealed.** Anyone who can write to the bundle's directory can replace it with one
   they signed with the same key.
 
@@ -673,8 +675,9 @@ Four limits bound it, all enforced in the tool rather than left to the runner:
   MAF runs no handler at all, so the groups it started survive it.
 
 It runs with the tool allowlist, not MAF's environment: `MAF_SIGNING_KEY` and every other `MAF_*`
-variable are absent, as are provider tokens (see the key bullet above). It does not hide the key from
-code that reads it from a file.
+variable are absent, as are provider tokens (see the key bullet above). That bounds what the child is
+handed. It does not hide the key from code that reads it from a file, nor from a process running as the
+same user that inspects MAF's own environment.
 
 `test.run` declares no path, so no path rule applies to it; a policy can deny the tool to a role, but it
 cannot see what the tests do. Granting a role `test.run` grants it code execution as the user running

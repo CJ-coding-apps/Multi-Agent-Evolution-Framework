@@ -181,6 +181,18 @@ role (b3), a sensitive manifest (`--approve-sensitive`) — so rejecting a widen
 place where the gate answers a question that was the operator's, and the live row that exists to
 check exactly that would have to be rewritten to describe the weaker behaviour.
 
+**Stated limit — the environment policy bounds what a child is handed, not what agent code can
+find.** maf does not pass `MAF_SIGNING_KEY` or other `MAF_*` variables to processes it starts for an
+agent. Agent code still runs as your user: anything your user can read, including maf's own
+environment, agent code can read. Isolating the key needs a separate user or sandbox, which maf does
+not provide. An earlier draft of this branch's `docs/SECURITY.md` bullet was headed "The key is in no
+child process's environment", which promised more than the mechanism gives: a `test.run` child, or any
+process the agent starts, can inspect the parent's environment with the user's own privileges
+(`/proc/<pid>/environ` on Linux; same-user process inspection on macOS). The policy is still worth
+having — it keeps the key out of what a backend logs, inherits into its own subprocesses, and reports
+in an error — but it is one channel closed, not a boundary. The alternative — running agents under a
+different user — is not in this WP; proposed for Wave 3.
+
 ## Files outside the spec's list, and why
 
 The spec (`docs/BUILD_PLAN.md`, WP-3.9) lists `ProcessSpawner.ts`,
