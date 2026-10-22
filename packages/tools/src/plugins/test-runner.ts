@@ -19,6 +19,18 @@ export const MAX_TEST_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_TEST_TIMEOUT_MS = 120_000;
 
 /**
+ * How long the child's `exit` waits for `close` before the call answers anyway (WP-3.9 G16b).
+ *
+ * `close` fires only when the child has exited *and* its stdio is closed. A suite that leaves a
+ * helper holding the inherited stdout — `vitest run` with a worker, a test that starts a server —
+ * keeps that second half from ever happening, so a passing suite was answered by the timeout: exit
+ * code 124 and a `[TIMEOUT …]` line, for a run that had already finished. The group is killed on
+ * `exit`, which is what closes that stdout, so this grace is only the time the kernel needs to
+ * deliver the follow-up event — not a second budget for the suite.
+ */
+const CLOSE_GRACE_MS = 100;
+
+/**
  * Stop the child and everything it started. The child is spawned `detached` on POSIX, so it is
  * the leader of its own process group and `-pid` names the group; signalling only `pid` is how
  * the old code left a runner's own children (vitest workers, `npm`'s script shell) alive after
@@ -174,13 +186,19 @@ export class TestRunnerTool extends BaseTool<TestInput> {
       // later value discarded) and, now that a call owns a process group, it would also reap a group
       // that is already finished. `settle` answers once and stops tracking the group.
       let settled = false;
+      let grace: NodeJS.Timeout | undefined;
       const settle = (result: ToolResult): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        if (grace !== undefined) clearTimeout(grace);
         live.delete(proc);
         resolve(result);
       };
+      /** The result of this run, with `code` as the runner's own exit status. */
+      const answer = (code: number | null): ToolResult => ({
+        stdout, stderr, exitCode: code ?? 1, duration: performance.now() - t, metadata: { runner, timeoutMs },
+      });
 
       proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
       proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
@@ -202,14 +220,27 @@ export class TestRunnerTool extends BaseTool<TestInput> {
       // Answer it the way WP-2.18 answers a tool that fails while running — with a result.
       proc.on('error', (err: Error) => settle(this.failed(err, t)));
 
-      proc.on('close', (code: number | null) => {
-        // A normal exit is the end of the runner, not necessarily the end of its group (WP-3.9 F9).
-        // `vitest run` that leaves a worker, `npm test` that leaves the script's shell, a test that
-        // starts a server and does not stop it: all of them exit 0 and leave a process behind that
-        // the operator never asked for and MAF no longer tracks. Reaping on every observed exit —
-        // not only the timeout — is what makes "the call ended" mean "the group ended".
+      // A normal exit is the end of the runner, not necessarily the end of its group (WP-3.9 F9).
+      // `vitest run` that leaves a worker, `npm test` that leaves the script's shell, a test that
+      // starts a server and does not stop it: all of them exit 0 and leave a process behind that
+      // the operator never asked for and MAF no longer tracks. Reaping on every observed exit —
+      // not only the timeout — is what makes "the call ended" mean "the group ended".
+      //
+      // `exit` answers the call first (WP-3.9 G16b). It fires when the child is gone; `close` also
+      // waits for the child's stdio, and a helper that inherited stdout keeps that from happening,
+      // so the run was reported as a timeout (124) after it had passed. The group kill here is what
+      // closes the pipe; if `close` follows within the grace, it answers with the same status.
+      proc.on('exit', (code: number | null) => {
         killProcessGroup(proc, 'SIGKILL');
-        settle({ stdout, stderr, exitCode: code ?? 1, duration: performance.now() - t, metadata: { runner, timeoutMs } });
+        // `close` may have answered already, and the timeout may have; a grace scheduled then would
+        // hold the event loop for its whole duration with nothing left to answer.
+        if (settled) return;
+        grace = setTimeout(() => settle(answer(code)), CLOSE_GRACE_MS);
+      });
+
+      proc.on('close', (code: number | null) => {
+        killProcessGroup(proc, 'SIGKILL');
+        settle(answer(code));
       });
     });
   }

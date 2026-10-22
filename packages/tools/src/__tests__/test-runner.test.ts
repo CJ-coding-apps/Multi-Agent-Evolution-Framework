@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -151,6 +151,26 @@ const HANGING_RUNNER = [
   '',
 ].join('\n');
 
+/**
+ * An `npm test` script that passes and leaves a helper holding the inherited stdout (WP-3.9 G16b).
+ *
+ * `npm test`, not `node --test`: node's own runner waits for its file child's stdio, so the hang
+ * happens one level above MAF and no tool-side fix could answer it. npm exits when the script does,
+ * whatever the script left behind — which is the shape a user hits (vitest with a worker, a test
+ * that starts a server and does not stop it).
+ */
+const INHERITING_SUITE = [
+  "const { spawn } = require('node:child_process');",
+  "const { writeFileSync } = require('node:fs');",
+  // `inherit`, not `ignore`: the helper keeps the runner's stdout — the pipe MAF reads — open, so
+  // `close` (child gone AND stdio closed) never fires even though `npm test` has exited 0.
+  "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit' });",
+  "child.unref();",
+  "writeFileSync('grandchild.pid', String(child.pid));",
+  "console.log('suite passed');",
+  '',
+].join('\n');
+
 /** A runner that passes, and leaves the same kind of grandchild behind while it exits 0. */
 const LEAKING_RUNNER = [
   "const test = require('node:test');",
@@ -187,6 +207,44 @@ async function waitForDeath(pid: number, when: string): Promise<void> {
   assert.equal(alive, false, `grandchild ${String(pid)} survived ${when}`);
 }
 
+/**
+ * A real MAF-shaped parent that starts a live `test.run` and then ends itself the way `tail` says.
+ * The runner group belongs to the parent's child, not to the parent, so nothing but the parent's own
+ * exit hooks can reach it — which is what these tests are about.
+ */
+async function parentRunningATest(t: TestContext, root: string, tail: readonly string[]): Promise<ChildProcess> {
+  await writeFile(path.join(root, 'parent.js'), [
+    "const { TestRunnerTool } = require(process.env.MAF_TOOLS_ENTRY);",
+    'const root = process.env.MAF_FIXTURE_ROOT;',
+    'const ctx = {',
+    '  cwd: root, projectRoot: root, runId: "r1", taskId: "t1", agentId: "a1", sessionId: "s1",',
+    '  policy: { async evaluate() { return { verdict: "Allow" }; } },',
+    '  attestor: { async record() {} },',
+    '};',
+    'new TestRunnerTool().execute({ runner: "node", timeout: 60000 }, ctx).then(',
+    '  () => { process.stdout.write("runner finished\\n"); });',
+    ...tail,
+    '',
+  ].join('\n'));
+
+  const parent = spawn(process.execPath, [path.join(root, 'parent.js')], {
+    cwd: root,
+    env: {
+      ...process.env,
+      MAF_TOOLS_ENTRY: path.resolve(__dirname, '..', 'index.js'),
+      MAF_FIXTURE_ROOT: root,
+    },
+    stdio: 'ignore',
+  });
+  t.after(() => parent.kill('SIGKILL'));
+  return parent;
+}
+
+/** The parent's own end, as the OS reported it to this process. */
+function whenExited(parent: ChildProcess): Promise<{ code: number | null; signal: string | null }> {
+  return new Promise((resolve) => { parent.on('exit', (code, signal) => resolve({ code, signal })); });
+}
+
 test('a timeout kills the runner\'s own children, not only the runner', async (t) => {
   if (process.platform === 'win32') return; // no process groups; the POSIX path is under test
   const root = await project(t);
@@ -213,6 +271,26 @@ test('a runner that exits 0 has its leftover children killed too (WP-3.9 F9)', a
   await waitForDeath(await waitForPid(path.join(root, 'grandchild.pid')), 'a normal exit');
 });
 
+// WP-3.9 G16b: a passing suite used to be reported as a timeout. `close` fires only when the child
+// has exited *and* its stdio is closed, and a helper that inherited stdout keeps the second half
+// from ever happening — measured on this fixture before the fix: `npm test` reported EXIT 0 and no
+// CLOSE arrived in 4 s, so the call answered 124 with a `[TIMEOUT]` line for a suite that had
+// finished. The fix answers on `exit`, kills the group there (which is what closes the pipe) and
+// reports the runner's own status.
+test('a passing suite is not reported as a timeout when a helper holds its stdout (WP-3.9 G16b)', async (t) => {
+  if (process.platform === 'win32') return; // the group kill is the mechanism under test
+  const root = await project(t);
+  await writeFile(path.join(root, 'package.json'),
+    JSON.stringify({ name: 't', version: '1.0.0', scripts: { test: 'node leave.js' } }));
+  await writeFile(path.join(root, 'leave.js'), INHERITING_SUITE);
+
+  const result = await new TestRunnerTool().execute({ runner: 'npm', timeout: 8000 }, ctxIn(root));
+  assert.equal(result.exitCode, 0, `a passing suite answered ${String(result.exitCode)}:\n${result.stdout}${result.stderr}`);
+  assert.doesNotMatch(result.stderr, /\[TIMEOUT after/);
+
+  await waitForDeath(await waitForPid(path.join(root, 'grandchild.pid')), 'the normal exit');
+});
+
 // WP-3.9 F9: the other exit MAF does not choose. A tool call is synchronous from the operator's point
 // of view — Ctrl-C at the terminal ends MAF, and the runner it started used to keep running with no
 // parent to answer to. The parent fixture is a real process, because only a process can receive the
@@ -222,38 +300,56 @@ test('SIGINT to MAF reaches the runner it started (WP-3.9 F9)', async (t) => {
   if (process.platform === 'win32') return;
   const root = await project(t);
   await writeFile(path.join(root, 'hang.test.js'), HANGING_RUNNER);
-  await writeFile(path.join(root, 'parent.js'), [
-    "const { TestRunnerTool } = require(process.env.MAF_TOOLS_ENTRY);",
-    'const root = process.env.MAF_FIXTURE_ROOT;',
-    'const ctx = {',
-    '  cwd: root, projectRoot: root, runId: "r1", taskId: "t1", agentId: "a1", sessionId: "s1",',
-    '  policy: { async evaluate() { return { verdict: "Allow" }; } },',
-    '  attestor: { async record() {} },',
-    '};',
-    'new TestRunnerTool().execute({ runner: "node", timeout: 60000 }, ctx).then(',
-    '  () => { process.stdout.write("runner finished\\n"); });',
-    '',
-  ].join('\n'));
-
-  const parent = spawn(process.execPath, [path.join(root, 'parent.js')], {
-    cwd: root,
-    env: {
-      ...process.env,
-      MAF_TOOLS_ENTRY: path.resolve(__dirname, '..', 'index.js'),
-      MAF_FIXTURE_ROOT: root,
-    },
-    stdio: 'ignore',
-  });
-  t.after(() => parent.kill('SIGKILL'));
+  const parent = await parentRunningATest(t, root, []);
+  const exited = whenExited(parent);
 
   const pid = await waitForPid(path.join(root, 'grandchild.pid'));
   parent.kill('SIGINT');
-  const exited = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
-    parent.on('exit', (code, signal) => resolve({ code, signal }));
-  });
   // The hook re-raises the signal rather than swallowing it, so MAF dies with the status it would
   // have had without the hook — a supervisor sees an interrupt, not a clean exit.
-  assert.equal(exited.signal, 'SIGINT');
+  assert.equal((await exited).signal, 'SIGINT');
 
   await waitForDeath(pid, 'the forwarded interrupt');
+});
+
+// WP-3.9 G10: the second signal a supervisor sends. It had a hook but no test, and a hook without
+// a test is a sentence about the code rather than a fact about the process — the same gap that let
+// the normal-exit hook below run with an empty body.
+test('SIGTERM to MAF reaches the runner it started (WP-3.9 G10)', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await project(t);
+  await writeFile(path.join(root, 'hang.test.js'), HANGING_RUNNER);
+  const parent = await parentRunningATest(t, root, []);
+  const exited = whenExited(parent);
+
+  const pid = await waitForPid(path.join(root, 'grandchild.pid'));
+  parent.kill('SIGTERM');
+  assert.equal((await exited).signal, 'SIGTERM');
+
+  await waitForDeath(pid, 'the forwarded termination');
+});
+
+// WP-3.9 G10: the exit MAF chooses — a run that finishes, a CLI that returns, a `process.exit` in
+// any caller. The hook is the only thing that runs then: the event loop is stopped, the tool call
+// never resolves, and the runner's group has no other parent. An empty listener in its place leaves
+// a live `node --test` (and whatever it started) with nothing tracking it.
+test('MAF exiting normally kills the runner it started (WP-3.9 G10)', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await project(t);
+  await writeFile(path.join(root, 'hang.test.js'), HANGING_RUNNER);
+  const parent = await parentRunningATest(t, root, [
+    // Ends its own process once the runner's grandchild is on disk, so the exit hook runs with a
+    // group still in flight — the only state this test is about.
+    'const tick = setInterval(() => {',
+    '  if (require("node:fs").existsSync(root + "/grandchild.pid")) { clearInterval(tick); process.exit(0); }',
+    '}, 20);',
+  ]);
+  const exited = whenExited(parent);
+
+  const pid = await waitForPid(path.join(root, 'grandchild.pid'));
+  // A clean status is the point: the operator's process ended the way it meant to, and the runner it
+  // left behind still has to be reaped.
+  assert.deepEqual(await exited, { code: 0, signal: null });
+
+  await waitForDeath(pid, "MAF's normal exit");
 });

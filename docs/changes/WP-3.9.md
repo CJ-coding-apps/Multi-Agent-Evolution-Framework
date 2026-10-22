@@ -75,12 +75,29 @@ states each as implemented.
   at MAF. The timeout used to be the only path that killed the group, so a runner that exited 0
   left its workers and servers behind, and an interrupted MAF left the runner running (Windows has
   no process group and signals the direct child).
+- The call is answered on the runner's **`exit`**, not only on `close` (G16b). `close` waits for the
+  child to exit *and* its stdio to close, and a passing suite that leaves a helper holding the
+  inherited stdout never reaches the second half — so the call was answered by the timeout: 124 and
+  a `[TIMEOUT]` line for a run that had finished. `exit` kills the group (which is what closes that
+  pipe), then gives `close` `CLOSE_GRACE_MS` (100 ms) before answering with the runner's **own**
+  exit code; whichever event arrives first answers, once. The grace is the time the kernel needs to
+  deliver the follow-up event, not a second budget for the suite.
 - **Proof.** `packages/tools/src/__tests__/test-runner.test.ts` runs a real `node --test` child that
   asserts `MAF_SIGNING_KEY` and `MAF_RUNTIME_STATE` are absent while `PATH` is present; refuses a
   `-` filter and an unknown runner by name; pins each runner's argv; clamps an oversized timeout;
   proves a grandchild written by a timed-out run stops answering `kill(pid, 0)`; proves the same
   grandchild dies when the runner **exits 0**; and spawns a real parent that runs the tool, sends it
   `SIGINT`, and asserts the parent dies **by that signal** and the grandchild dies with it.
+- **Proof, round 2.** The same parent is now sent `SIGTERM` (dies by it, grandchild reaped) and is
+  made to **exit 0** while the runner is live (parent reports `{code: 0, signal: null}`, grandchild
+  reaped) — G10, the two exits the F9 change had a hook for but no test. And a real `npm test` suite
+  that **passes** and leaves a helper spawned with `stdio: 'inherit'` is answered `exitCode === 0`
+  with no `[TIMEOUT` in stderr, and the helper is reaped (G16b). Measured mutants, each killing
+  exactly the named test and nothing else: delete the `exit` handler → 13/14, failing only G16b
+  (the run answers 124 after the full 8 s budget for a 0.4 s suite); give `process.on('exit')` an
+  empty body → 13/14, failing only the normal-exit test; drop `'SIGTERM'` from the hook's signal
+  list → 13/14, failing only the SIGTERM test (on the reaping assertion: without a listener Node's
+  default action still ends the parent by SIGTERM, so the survivor is the observable).
 
 ### A past failure cannot carry a secret into a prompt
 
@@ -266,6 +283,21 @@ now a real graph write read back by id. Rejected: asserting against the recordin
 `addNode` was called, not that a round is on the graph and retrievable, and the loop deliberately
 swallows a recording error (L4), so a stub cannot tell a write from a failure either. Rejected:
 reading the round back by querying its label or outcome — the id is what a consumer gets and holds.
+
+**A passing suite answers on the runner's exit, not on its stdio (round 2, G16b).** The defect was
+not the timeout's length: `close` by definition waits for the child's stdio, and a helper the suite
+started keeps that pipe open for as long as it lives, so no timeout value turns 124 into 0 — it only
+changes how long the operator waits to be told the wrong thing. Measured on the fixture before the
+fix: `npm test` reported its own exit 0, and `close` had not arrived four seconds later. The fix
+answers on `exit`, kills the group there — the kill is what closes the pipe — and reports the
+child's status after a stated 100 ms grace, so the ordinary path is still answered by `close` when
+it comes first. The grace is a constant with its reason in the code and is not a setting: a caller's
+`timeout` is a budget for the suite, and this is not one. Rejected: a longer timeout — it converts a
+pass into a slower pass only if the helper eventually exits, which is the case the defect excludes.
+Rejected: `node --test` as the fixture — measured here, node's own runner waits for its file child's
+stdio and hangs above MAF, so no tool-side fix can answer it; the shape a user hits is a runner that
+exits while its suite's helper survives (`vitest` with a worker, an `npm test` that starts a server),
+which is what the test reproduces.
 
 **Order — invariants first, then b4, and both the moment the manifest exists (round 2, G3/G4).**
 The two checks used to be asked at different moments and neither early enough. `gateWidening` ran
