@@ -60,14 +60,21 @@ type NeedsApproval = Extract<GateDecision, { verdict: 'needs-approval' }>;
 /** A gate context without the evaluation artifacts — what a rule that costs nothing needs. */
 export type GateStaticContext = Omit<GateContext, 'currentScores' | 'candidateScores'>;
 
+/**
+ * What a stage that costs nothing can say: it refuses the candidate, or it asks the operator.
+ * It cannot ship, because shipping is stage e's answer and stage e needs the golden scores.
+ */
+export type GateVeto = Extract<GateDecision, { verdict: 'reject' }> | NeedsApproval;
+
 /** The levels that make an added tool a widening rather than another way to read. */
 const WRITE_LEVELS: ReadonlySet<PermissionLevel> = new Set<PermissionLevel>(['write', 'execute', 'dangerous']);
 
 /**
  * Stage b4, exported (WP-3.9 F7): the widening rule, as a pure function of the manifest and the
  * two harnesses. It costs nothing — no model call, no golden run — so a caller that evaluates a
- * candidate (the loop's smoke test, then the full suite) asks it first, and a manifest that
- * widens a role never spends anything.
+ * candidate asks it before spending anything. The loop reaches it through `gateStatic`, which runs
+ * the invariants first: on its own this function treats a tool the permission map does not name as
+ * `dangerous`, so a caller that skips stage b would turn an unknown id into an approval request.
  *
  * The widening is the candidate's surface minus the current one (WP-3.9 F8), not the manifest's
  * `add` list: `add` is what the model claims, and a tool the role already holds is not something
@@ -97,7 +104,20 @@ export function gateWidening(ctx: GateStaticContext): NeedsApproval | undefined 
   };
 }
 
-export function gateEvaluate(ctx: GateContext): GateDecision {
+/**
+ * Stages b, b2, b3 and b4 — every gate stage that is a pure function of the manifest, the two
+ * harnesses and the registries. Exported (WP-3.9 G3/G4) so the loop runs them the moment a
+ * candidate manifest exists: before the critic call, the smoke test and the golden suite, not
+ * after them. `gateEvaluate` runs the same function, so a candidate the loop waves through cannot
+ * be refused later for a reason this stage would have given, and vice versa.
+ *
+ * The order inside it is the ruling's: **invariants first, then the widening rule**. An unknown
+ * tool id is a malformed candidate, not a widening — `gateWidening` treats a tool the permission
+ * map does not name as `dangerous` and would send it to the operator as an approval request, so
+ * stage b must refuse it before b4 ever sees it, and its refusal names the tools that do exist
+ * (fail closed on the unknown, §1).
+ */
+export function gateStatic(ctx: GateStaticContext): GateVeto | undefined {
   const { manifest, candidate, current } = ctx;
 
   // ── stage b: structural invariants ──
@@ -107,7 +127,11 @@ export function gateEvaluate(ctx: GateContext): GateDecision {
       return { verdict: 'reject', stage: 'b-invariants', reason: `candidate adds unknown role "${role.role}"` };
     for (const t of role.allowedTools) {
       if (!ctx.knownToolIds.has(t))
-        return { verdict: 'reject', stage: 'b-invariants', reason: `role "${role.role}" allows unknown tool "${t}"` };
+        return {
+          verdict: 'reject', stage: 'b-invariants',
+          reason: `role "${role.role}" allows unknown tool "${t}" — refusing a malformed candidate ` +
+            `rather than judging it (known tools: ${[...ctx.knownToolIds].sort().join(', ')})`,
+        };
     }
     if (role.allowedTools.length === 0 && (current.roleSet.roles.find((r) => r.role === role.role)?.allowedTools.length ?? 0) > 0)
       return { verdict: 'reject', stage: 'b-invariants', reason: `role "${role.role}" would lose its entire tool surface` };
@@ -143,10 +167,15 @@ export function gateEvaluate(ctx: GateContext): GateDecision {
   // change the tree or run code is the mutation the evolver may not perform on its own: it may
   // tune a prompt, a budget or a model, but it may not make a reader a writer. The verdict is
   // `needs-approval` rather than `reject` (WP-3.9 F8): the operator may grant the tool, and a
-  // candidate that ships itself still cannot. The rule itself lives in `gateWidening`, so the
-  // loop can apply it before a smoke test spends anything.
-  const widening = gateWidening(ctx);
-  if (widening) return widening;
+  // candidate that ships itself still cannot.
+  return gateWidening(ctx);
+}
+
+export function gateEvaluate(ctx: GateContext): GateDecision {
+  // Every stage that costs nothing, first: the loop already ran these before the critic, and a
+  // caller that only has scores to add gets the same answers in the same order.
+  const veto = gateStatic(ctx);
+  if (veto) return veto;
 
   // ── stage d: seesaw (regression check) — evaluation artifacts were produced by the caller ──
   const seesaw = seesawDecision(ctx.currentScores, ctx.candidateScores);

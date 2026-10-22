@@ -8,7 +8,7 @@ export {
   PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, parsePlannerResponse,
 } from './planner.js';
 export type { MetaGenerate, RoleCatalogEntry } from './planner.js';
-export { gateEvaluate, gateWidening } from './gate.js';
-export type { GateDecision, GateContext, GateStaticContext } from './gate.js';
+export { gateEvaluate, gateStatic, gateWidening } from './gate.js';
+export type { GateDecision, GateContext, GateStaticContext, GateVeto } from './gate.js';
 export { evolve } from './loop.js';
 export type { EvolveOptions, EvolveReport, EvolveRoundRecord } from './loop.js';

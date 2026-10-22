@@ -10,8 +10,8 @@ import {
   PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, parsePlannerResponse,
 } from './planner.js';
 import type { MetaGenerate, RoleCatalogEntry } from './planner.js';
-import { gateEvaluate, gateWidening } from './gate.js';
-import type { GateDecision } from './gate.js';
+import { gateEvaluate, gateStatic } from './gate.js';
+import type { GateDecision, GateVeto } from './gate.js';
 
 export interface EvolveRoundRecord {
   round: number;
@@ -134,6 +134,31 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       }
     };
 
+    // Every gate stage that is free (WP-3.9 G3/G4): the candidate is built and the invariants and
+    // widening rule are asked, with no model call and no evaluation. Called as soon as a manifest
+    // exists and again on the final one, because a critic revision can introduce either defect.
+    const freeCheck = (m: ChangeManifest): { candidate: HarnessConfig } | { veto: GateVeto } => {
+      let candidate: HarnessConfig;
+      try {
+        candidate = applyEdit(base, m.edit, `${base.id}-r${round + 1}`);
+      } catch (err) {
+        // An edit the harness cannot express is a malformed candidate, not a reason to abort the
+        // loop; the invariant stage is where a refusal belongs, and it names what it refused.
+        if (err instanceof ManifestError)
+          return { veto: { verdict: 'reject', stage: 'b-invariants', reason: err.message } };
+        throw err;
+      }
+      const veto = gateStatic({
+        manifest: m, candidate, current: base,
+        knownToolIds: opts.knownToolIds,
+        toolPermissions: opts.toolPermissions,
+        knownProcessorNames: opts.knownProcessorNames,
+        safetyAdjacentRoles: safetyAdjacent,
+        ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
+      });
+      return veto ? { veto } : { candidate };
+    };
+
     // ── 1. Digester ──
     const digest = await digestEvidence(opts.graph);
     if (round === 0) baseline = baselineFromHistory(digest.goldenHistory, base);
@@ -175,6 +200,25 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       continue;
     }
 
+    // ── 3b. The free gate stages, the moment the candidate manifest exists (WP-3.9 G3/G4) ──
+    // The proposal itself is a model call and cannot be avoided; the critic, the smoke test and
+    // the golden suite are three more, and none of them can change this answer. Running the
+    // invariants (an unknown tool id is refused here, naming the tools that exist) and the
+    // widening rule now means a manifest that widens a reader into a writer — or names a tool
+    // that does not exist — costs one model call and nothing else.
+    const proposed = freeCheck(manifest);
+    if ('veto' in proposed) {
+      const veto = proposed.veto;
+      idle++;
+      await record(rec({
+        manifest, gate: veto,
+        outcome: veto.verdict === 'needs-approval' ? 'needs-approval' : 'reject',
+        note: veto.verdict === 'reject' ? `${veto.stage}: ${veto.reason}` : veto.reason,
+      }));
+      if (idle >= patience) { stopReason = 'patience'; break; }
+      continue;
+    }
+
     // ── 4. Critic (one revision allowed) — BEFORE building/smoking a candidate,
     //       so step 5 smoke-tests the FINAL (possibly revised) manifest (L5). ──
     let critic = parseCriticVerdict(await opts.metaGenerate(
@@ -210,26 +254,25 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       continue;
     }
 
-    // ── 5. Evolver: apply the FINAL manifest → candidate → pre-smoke widening check → smoke ──
-    // `applyEdit` is deterministic and free; the widening rule is a pure function of the two
-    // harnesses. Both run before the smoke test, so a manifest that turns a reader into a writer
-    // reaches the operator without a model call or a golden run (WP-3.9 F7). The gate asks the
-    // same question again later — stages are pure, so the answer cannot differ.
+    // ── 5. Evolver: apply the FINAL manifest → candidate → free stages again → smoke ──
+    // The critic may have replaced the manifest, so the invariants and the widening rule are asked
+    // again about what will actually be smoked: a revision can introduce an unknown tool or a
+    // widening the first check never saw. Still no model call and no golden run after the
+    // proposal — the critic's own calls are the only ones between the two checks.
     const finalManifest = manifest;
-    const finalCandidate = applyEdit(base, finalManifest.edit, `${base.id}-r${round + 1}`);
-    const widening = gateWidening({
-      manifest: finalManifest, candidate: finalCandidate, current: base,
-      knownToolIds: opts.knownToolIds,
-      toolPermissions: opts.toolPermissions,
-      knownProcessorNames: opts.knownProcessorNames,
-      safetyAdjacentRoles: safetyAdjacent,
-    });
-    if (widening) {
+    const finalCheck = freeCheck(finalManifest);
+    if ('veto' in finalCheck) {
+      const veto = finalCheck.veto;
       idle++;
-      await record(rec({ manifest: finalManifest, gate: widening, outcome: 'needs-approval', note: widening.reason }));
+      await record(rec({
+        manifest: finalManifest, gate: veto,
+        outcome: veto.verdict === 'needs-approval' ? 'needs-approval' : 'reject',
+        note: veto.verdict === 'reject' ? `${veto.stage}: ${veto.reason}` : veto.reason,
+      }));
       if (idle >= patience) { stopReason = 'patience'; break; }
       continue;
     }
+    const finalCandidate = finalCheck.candidate;
     try {
       const smokeTarget = finalManifest.targetTasks[0];
       if (smokeTarget) await opts.runSmoke(finalCandidate, smokeTarget);

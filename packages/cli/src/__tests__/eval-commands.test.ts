@@ -1,11 +1,14 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
+import type { AdapterInvokeOptions, AdapterInvokeResult, CliAdapter } from '@maf/types';
+import type { MemoryGraph } from '@maf/memory-graph';
 import * as wiring from '../wiring.js';
+import * as AdapterRegistry from '../AdapterRegistry.js';
 import { registerGoldensCommand } from '../commands/goldens.js';
 import { registerEvolveCommand } from '../commands/evolve.js';
 import { messageOf } from './runFixture.js';
@@ -74,6 +77,70 @@ test('goldens run and evolve take --allow-ungoverned to the stack they dispatch 
     await drive(registerEvolveCommand, evolve(root));
     assert.deepEqual(stacks.map((s) => s.allowUngoverned === true), [true, false, true, false]);
     assert.ok(stacks.every((s) => s.headless === true), 'evaluations stay headless');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ORACLE (WP-3.9 round 2, G4): `maf evolve` hands the evolver the registry's tool ids and the
+// permission level of each. A manifest that adds a tool which is not in that registry is a
+// malformed candidate — the invariant stage refuses it, naming the tools that do exist — and it is
+// refused before the critic, the smoke test or a golden run. `gateWidening` alone would have
+// called the unknown id `dangerous` and sent the operator an approval request for a tool that does
+// not exist. The command is driven end to end; only the stack and the adapter stand in, so the
+// registry, the loop and the gate under test are the real ones.
+test('maf evolve refuses an unknown tool id at the invariant stage, naming the known tools', async (t) => {
+  const UNKNOWN = 'nope.bogus';
+  const MANIFEST = '```json\n' + JSON.stringify({
+    edit: { kind: 'adjust_tool_allowlist', role: 'coder', add: [UNKNOWN], remove: [] },
+    expectedImprovement: 'x', targetTasks: ['coder-sum'],
+  }) + '\n```';
+
+  const { root } = await freshClone();
+  try {
+    const calls: string[] = [];
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        calls.push(o.systemPrompt ?? '');
+        return { success: true, output: MANIFEST, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+    t.mock.method(console, 'log', () => {});
+
+    const graph = {
+      run: async () => [], addNode: async () => 'id', addEdge: async () => 'e',
+    } as unknown as MemoryGraph;
+    // The golden runner is real; only the stack it dispatches through stands in. A candidate
+    // refused at the invariant stage never reaches a smoke test, so the baseline is the only run
+    // this test can cause — the assertion is on the refusal and on the absent critic call.
+    t.mock.method(wiring, 'buildRunStack', async () => ({
+      adapter, graph,
+      securityPrompt: '',
+      dispatchTask: async () => 'done',
+      close: () => {},
+    }) as unknown as wiring.RunStack);
+
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
+
+    const reportDir = path.join(root, '.maf', 'evolve');
+    const reports = (await readdir(reportDir)).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1, 'the command wrote one report');
+    const report = JSON.parse(await readFile(path.join(reportDir, reports[0]!), 'utf8')) as {
+      rounds: { outcome: string; note: string; gate?: { verdict: string; stage?: string } }[];
+      ships: number;
+      stopReason: string;
+    };
+    assert.equal(report.ships, 0);
+    assert.equal(report.rounds[0]?.outcome, 'reject');
+    assert.equal(report.rounds[0]?.gate?.stage, 'b-invariants');
+    assert.match(report.rounds[0]?.note ?? '', /unknown tool "nope\.bogus"/);
+    assert.match(report.rounds[0]?.note ?? '', /known tools: .*\bfs\.read\b/, 'the refusal names the registry it checked');
+    assert.equal(calls.filter((s) => s.includes('critic')).length, 0, 'no critic call after the refusal');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

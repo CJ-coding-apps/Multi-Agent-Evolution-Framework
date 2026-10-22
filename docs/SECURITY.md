@@ -696,18 +696,24 @@ ordinary role with a `write`, `execute` or `dangerous` tool returns `needs-appro
 ships the candidate on its own. Adding only `read` tools is not a widening and is considered on its
 merits. The evolver may tune a prompt, a budget or a model; it cannot turn a reader into a writer.
 
-The widening rule costs nothing — it is a pure function of the two harnesses — so the loop applies it
-**before** the smoke test and the golden suite: a manifest that widens a role reaches the operator
-with no model call and no evaluation spend. Its permission map is a required argument of the gate; an
-omitted map used to skip the rule silently, and a tool the map does not name is treated as
-`dangerous`, never as `read`.
+The widening rule and the invariant stage cost nothing — they are pure functions of the manifest and
+the two harnesses — so the loop applies them **the moment a candidate manifest exists**: before the
+critic call, the smoke test and the golden suite. The proposal is the only model call such a
+manifest costs; a manifest that widens a role reaches the operator with no further model call after
+the proposal and no evaluation spend. The gate's permission map is a required argument; an omitted
+map used to skip the rule silently, and a tool the map does not name is treated as `dangerous`,
+never as `read`.
 
 The only route to a write tool is the operator. An edit whose target role is safety-adjacent
 (`security`, `reviewer`) is routed to the operator at stage `b3`, before any evaluation spend, and the
 gate returns `needs-approval` for one that reaches it; the loop records that outcome and does not ship
 the candidate. `--approve-sensitive` decides only whether such an edit is evaluated at all — it is not
 a shipping approval, and `maf evolve` has no interactive prompt. An unknown tool id never reaches the
-widening rule: the earlier invariant stage refuses a candidate that names one.
+widening rule: the invariant stage runs first and refuses the candidate (`reject`, stage
+`b-invariants`), naming the tools the registry does know. An unknown id is a malformed candidate, not
+a widening — the widening rule treats a tool the permission map does not name as `dangerous`, and
+without the invariant stage in front of it that default would ask the operator to approve a tool that
+does not exist.
 
 The permission levels are the registry's — the same `ToolPlugin.permissionLevel` the run builds its
 tool surface from — and `maf evolve` passes the map in from `createDefaultRegistry()`, so the gate

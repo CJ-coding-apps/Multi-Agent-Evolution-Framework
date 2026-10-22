@@ -138,16 +138,23 @@ states each as implemented.
 ### The evolver cannot widen a role into a writer
 
 - **`packages/evolver/src/gate.ts`** — stage `b4-write-tool-widening`, after the safety-adjacent
-  routing at b3, exported as `gateWidening` so the loop can ask it before spending. The widening is
-  the candidate role's allowlist minus the current one, and it is judged by each tool's registry
-  `permissionLevel`: a `write`, `execute` or `dangerous` tool returns `needs-approval` (F8 — the
-  operator may grant it; a candidate never ships itself), naming the tools and the role. Adding only
-  `read` tools is not a widening, and a tool the role already holds is not something the edit
-  granted. `GateContext.toolPermissions` is required (F7) and a tool the map does not name is
-  treated as `dangerous`: an omitted map used to skip the rule silently.
+  routing at b3, exported as `gateWidening`. The widening is the candidate role's allowlist minus
+  the current one, and it is judged by each tool's registry `permissionLevel`: a `write`, `execute`
+  or `dangerous` tool returns `needs-approval` (F8 — the operator may grant it; a candidate never
+  ships itself), naming the tools and the role. Adding only `read` tools is not a widening, and a
+  tool the role already holds is not something the edit granted. `GateContext.toolPermissions` is
+  required (F7) and a tool the map does not name is treated as `dangerous`: an omitted map used to
+  skip the rule silently. The free stages — the invariants at b, screening at b2, routing at b3 and
+  the widening at b4 — are exported together as `gateStatic` (G3/G4), with the invariant stage
+  first: an unknown tool id is a malformed candidate, so it is refused (`reject`, naming the tools
+  the registry does know) before the widening rule can treat it as `dangerous` and ask the operator
+  to approve a tool that does not exist.
 - **`packages/evolver/src/loop.ts`** — `EvolveOptions.toolPermissions` is required and threaded into
-  the gate. The widening check runs after `applyEdit` and **before** the smoke test and the golden
-  suite, so a widening manifest spends nothing.
+  the gate. `gateStatic` runs after `applyEdit`, **the moment the candidate manifest exists**: before
+  the critic call, the smoke test and the golden suite, so a manifest that widens a role or names an
+  unknown tool costs the proposal and nothing else. The check runs again on the final manifest,
+  because a critic revision can introduce either defect; the critic's own calls are the only model
+  calls between the two checks.
 - **`packages/cli/src/commands/evolve.ts`** — passes the permission level of every tool in
   `createDefaultRegistry()`, so the gate judges tools by what they do rather than by their names.
 - **Proof.** `packages/evolver/src/__tests__/evolver.test.ts`: one case per level — `fs.write` and
@@ -155,8 +162,13 @@ states each as implemented.
   returning `needs-approval` with the tool named; a tool the role already holds, or one an `add`
   grants after a `remove`, is judged as candidate-minus-current; an unclassified tool is not assumed
   harmless; the map is a required property (a `@ts-expect-error` call shape); the same edit on a
-  safety-adjacent role returns `needs-approval` at b3; adding a read tool still ships; and a loop
-  case proves a widening manifest runs neither the smoke test nor the golden suite.
+  safety-adjacent role returns `needs-approval` at b3; adding a read tool still ships; a loop case
+  proves a widening manifest runs neither the critic, the smoke test nor the golden suite (the
+  proposal is the only model call recorded); a loop case proves an unknown tool id is refused at
+  `b-invariants`, naming the known tools, with no critic call; and
+  `packages/cli/src/__tests__/eval-commands.test.ts` drives `maf evolve` end to end — the real
+  registry, loop and gate, with a stand-in stack and adapter — and reads the recorded round: outcome
+  `reject`, stage `b-invariants`, the unknown id and the known tools in the note, no critic call.
 
 ## Decisions
 
@@ -172,6 +184,18 @@ role, and moves on without a smoke test or a golden run. No flag grants this par
 not it is set. What changed is who answers the question. WP-3.7's live row holds on this verdict —
 the row is the end-to-end check on what an operator is offered, and it is why this ruling is
 recorded rather than left as an internal detail.
+
+**Order — invariants first, then b4, and both the moment the manifest exists (round 2, G3/G4).**
+The two checks used to be asked at different moments and neither early enough. `gateWidening` ran
+after the critic, so a widening manifest still cost a critic call; and the invariant refusal that
+names an unknown tool lived only inside `gateEvaluate`, which ran after the smoke test and the golden
+suite — the loop's earlier check was the widening rule alone, so an unknown tool id reached it, was
+read as `dangerous` (the rule's fail-closed default for a tool the map does not name), and became an
+approval request for a tool that does not exist. Both now run together as `gateStatic`, the moment
+the candidate manifest exists, invariants first. Rejected: "run b4 before the critic and leave the
+invariants where they were" — that keeps a malformed candidate on the approval path, and an approval
+for a nonexistent tool is a decision nobody can honour. Rejected: dropping the check after a critic
+revision — a revision can reintroduce either defect, and the check is free.
 
 **Rejected — keep `reject` and re-scope WP-3.7's live row.** A rejection does not guard the
 decision, it removes it: a role is permanently denied a tool its operator may well have wanted,

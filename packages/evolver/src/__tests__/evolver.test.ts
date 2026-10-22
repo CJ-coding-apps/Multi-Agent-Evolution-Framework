@@ -370,13 +370,17 @@ test('loop: sensitive-role edit archived unevaluated without approval', async ()
   assert.ok(goldensRan <= 1, 'no evaluation spend on unapproved sensitive edits');
 });
 
-test('loop: a widening is caught BEFORE the smoke test and the golden suite (WP-3.9 F7)', async () => {
+test('loop: a widening is caught BEFORE the critic, the smoke test and the golden suite (WP-3.9 G3)', async () => {
   let smoked = 0;
+  let criticCalls = 0;
   const evaluated: string[] = [];
   const opts = loopOpts({
-    metaGenerate: mockMeta([manifestJson({
-      kind: 'adjust_tool_allowlist', role: 'coder', add: ['test.run'], remove: [],
-    }, ['t2'])]),
+    metaGenerate: async (system: string): Promise<string> => {
+      if (system.includes('critic')) { criticCalls++; return '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+      return manifestJson({
+        kind: 'adjust_tool_allowlist', role: 'coder', add: ['test.run'], remove: [],
+      }, ['t2']);
+    },
     runSmoke: async () => { smoked++; },
     runGoldens: async (h) => { evaluated.push(h.sha); return suite(['t1'], h.sha); },
     patience: 1,
@@ -384,9 +388,37 @@ test('loop: a widening is caught BEFORE the smoke test and the golden suite (WP-
   const report = await evolve(opts);
   assert.equal(report.rounds[0]?.outcome, 'needs-approval');
   assert.match(report.rounds[0]?.note ?? '', /b4-write-tool-widening/);
+  assert.equal(criticCalls, 0, 'the proposal was the only model call: no critic ran');
   assert.equal(smoked, 0, 'no smoke test ran for a manifest that widens a role');
   assert.deepEqual(evaluated, [CURRENT.sha], 'only the baseline was evaluated, never the candidate');
   assert.equal(report.ships, 0);
+});
+
+test('loop: an unknown tool id is refused at b-invariants before the critic (WP-3.9 G4)', async () => {
+  // The candidate is malformed, not a widening: `gateWidening` alone would call the unknown id
+  // `dangerous` and ask the operator to approve a tool that does not exist.
+  let smoked = 0;
+  let criticCalls = 0;
+  const evaluated: string[] = [];
+  const report = await evolve(loopOpts({
+    metaGenerate: async (system: string): Promise<string> => {
+      if (system.includes('critic')) { criticCalls++; return '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+      return manifestJson({
+        kind: 'adjust_tool_allowlist', role: 'coder', add: ['nope.bogus'], remove: [],
+      }, ['t2']);
+    },
+    runSmoke: async () => { smoked++; },
+    runGoldens: async (h) => { evaluated.push(h.sha); return suite(['t1'], h.sha); },
+    patience: 1,
+  }));
+  assert.equal(report.rounds[0]?.outcome, 'reject');
+  assert.match(report.rounds[0]?.note ?? '', /b-invariants/);
+  assert.match(report.rounds[0]?.note ?? '', /unknown tool "nope\.bogus"/);
+  assert.match(report.rounds[0]?.note ?? '', /known tools: .*\bfs\.read\b/,
+    'the refusal names the tools the registry does know');
+  assert.equal(criticCalls, 0, 'refused before any further model call');
+  assert.equal(smoked, 0);
+  assert.deepEqual(evaluated, [CURRENT.sha], 'only the baseline was evaluated');
 });
 
 test('loop (L5): a critic revision is smoke-tested on the REVISED manifest, then ships', async () => {
