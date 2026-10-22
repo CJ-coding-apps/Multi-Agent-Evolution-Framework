@@ -6,7 +6,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolContext, ToolInput, ToolPlugin, PolicyDecision, PolicyEngineHandle, AttestorHandle } from '@maf/types';
-import { describeToolInput, makeAgentId, makeRunId, makeTaskId } from '@maf/types';
+import { describeToolInput, makeAgentId, makeRunId, makeTaskId, ToolDeclarationError } from '@maf/types';
 import {
   createDefaultRegistry, FsReadTool, FsWriteTool, FsDeleteTool, FsStatTool, FsListTool, GrepTool,
   GitAddTool, GitCommitTool, GitDiffTool, GitResetTool, PatchApplyTool,
@@ -134,15 +134,19 @@ test('execute checks only what it cannot run without: an unknown field from a di
   assert.deepEqual(await readdir(root), ['a.txt']);
 });
 
-test('declaredPaths on a malformed input still declares nothing it was not given, and does not throw', () => {
+test('declaredPaths on a malformed input declares nothing it was not given, and does not throw', () => {
   const malformed: ToolInput[] = [{}, { path: 5 }, { path: ['a'] }, { path: null }, { file: 'a.txt' }];
   const fsTools: ToolPlugin[] = [new FsReadTool(), new FsWriteTool(), new FsDeleteTool(), new FsStatTool(), new FsListTool()];
   for (const tool of fsTools) {
     for (const input of malformed) assert.deepEqual(tool.declaredPaths(input), [], `${tool.id} ${JSON.stringify(input)}`);
   }
+  // patch.apply is the exception (WP-3.9 F1): a diff it cannot read is a call no path rule can
+  // cover, so a direct caller gets a refusal rather than an empty declaration. Through the gate the
+  // schema check answers it first; the input the reported bypass used (`{path, patch}`) has no
+  // `diff` at all, and it used to be declared as touching nothing.
   const patch: ToolPlugin = new PatchApplyTool();
   for (const input of [{}, { diff: 5 }, { path: 'hello.js', patch: '--- a/hello.js\n+++ b/hello.js\n' }]) {
-    assert.deepEqual(patch.declaredPaths(input), [], JSON.stringify(input));
+    assert.throws(() => patch.declaredPaths(input), ToolDeclarationError, JSON.stringify(input));
   }
   const add: ToolPlugin = new GitAddTool();
   for (const input of [{}, { paths: 'a.txt' }, { paths: [1, null] }]) assert.deepEqual(add.declaredPaths(input), [], JSON.stringify(input));

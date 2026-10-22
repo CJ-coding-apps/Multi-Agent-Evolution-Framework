@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolContext, PolicyDecision, PolicyEngineHandle, AttestorHandle } from '@maf/types';
-import { makeAgentId, makeRunId, makeTaskId } from '@maf/types';
+import { makeAgentId, makeRunId, makeTaskId, ToolDeclarationError } from '@maf/types';
 import { PatchApplyTool, extractDiffPaths, patchWritePaths } from '../plugins/patch.js';
 
 async function project(t: TestContext): Promise<string> {
@@ -61,8 +62,11 @@ test('extractDiffPaths ignores /dev/null for added/deleted files', () => {
   assert.deepEqual(paths, ['new.ts']);
 });
 
-test('extractDiffPaths returns empty on diff without file headers', () => {
-  assert.deepEqual(extractDiffPaths('just some random text'), []);
+test('extractDiffPaths refuses a diff whose headers name no file', () => {
+  // Fail closed: a diff no path rule can see is a diff nothing can refuse, and the reported case
+  // (`Index:`-only) was allowed and wrote the file it never declared.
+  assert.throws(() => extractDiffPaths('just some random text'), ToolDeclarationError);
+  assert.throws(() => extractDiffPaths('--- /dev/null\n+++ /dev/null\n'), ToolDeclarationError);
 });
 
 test('extractDiffPaths deduplicates --- and +++ for the same file', () => {
@@ -92,8 +96,73 @@ test('strip 0 declares the a/-prefixed path that patch -p0 will open', () => {
   assert.deepEqual(extractDiffPaths(GIT_DIFF, 1), ['src/foo.ts']);
 });
 
-test('strip deeper than the path leaves patch nothing to open, so nothing is declared', () => {
-  assert.deepEqual(extractDiffPaths('--- a/foo\n+++ b/foo\n', 2), []);
+test('strip deeper than the path leaves patch nothing to open, so the call is refused', () => {
+  assert.throws(() => extractDiffPaths('--- a/foo\n+++ b/foo\n', 2), ToolDeclarationError);
+});
+
+// ─── WP-3.9 F1: every header spelling `patch` reads ───────────────────────
+//
+// Each of these was a bypass in released code: the name was kept whole (so no path rule matched
+// the file the command went on to write) or was never read at all (so no rule saw any path).
+
+const STAMP = '\t2026-01-01 00:00:00.000000000 +0000';
+
+test('a unified header is cut at the TAB before the timestamp', () => {
+  const diff = [
+    `--- a/Cargo.lock${STAMP}`,
+    `+++ b/Cargo.lock${STAMP}`,
+    '@@ -1 +1 @@', '-a', '+b', '',
+  ].join('\n');
+  // Without the cut this declared "Cargo.lock\t2026-…", which matches no `**/Cargo.lock` rule.
+  assert.deepEqual(extractDiffPaths(diff), ['Cargo.lock']);
+});
+
+test('a timestamp-less TAB suffix is cut the same way (a role\'s own diff spelling)', () => {
+  const diff = '--- a/src/app.js\tlatest\n+++ b/src/app.js\tlatest\n@@ -1 +1 @@\n-x\n+y\n';
+  // "src/app.js\tlatest" matched a tester rule's `**/*test*` glob and let the write through.
+  assert.deepEqual(extractDiffPaths(diff), ['src/app.js']);
+});
+
+test('a TAB inside a quoted file name is not a timestamp', () => {
+  const diff = `diff --git "a/we\tird.txt" "b/we\tird.txt"
+--- "a/we\tird.txt"
++++ "b/we\tird.txt"
+@@ -1 +1 @@
+-x
++y
+`;
+  assert.deepEqual(extractDiffPaths(diff), ['we\tird.txt']);
+});
+
+test('an Index:-only diff declares the file it names', () => {
+  // The reported bypass: this declared nothing, so every path rule — protect-lock-files,
+  // protect-secrets — was skipped, and patch wrote the file.
+  const diff = 'Index: Cargo.lock\n@@ -1 +1 @@\n-a\n+b\n';
+  // The reported call used `-p0`, which is what leaves a bare name intact.
+  assert.deepEqual(extractDiffPaths(diff, 0), ['Cargo.lock']);
+  assert.deepEqual(extractDiffPaths('Index: .env\n@@ -1 +1 @@\n-SAFE=1\n+LEAK=1\n', 0), ['.env']);
+});
+
+test('a context diff names both files on its *** / --- pair, and skips its hunk separators', () => {
+  const diff = [
+    '*** old/src/foo.txt' + STAMP,
+    '--- new/src/foo.txt' + STAMP,
+    '***************',
+    '*** 1,2 ****',
+    '  same',
+    '- old',
+    '--- 1,2 ----',
+    '  same',
+    '+ new',
+    '',
+  ].join('\n');
+  // `***************` and `1,2 ----` are structural lines, not names; only the pair is.
+  assert.deepEqual(extractDiffPaths(diff), ['src/foo.txt']);
+});
+
+test('a diff --git header names both of a rename\'s paths', () => {
+  const diff = 'diff --git a/old.ts b/new.ts\nsimilarity index 100%\nrename from old.ts\nrename to new.ts\n';
+  assert.deepEqual(extractDiffPaths(diff).sort(), ['new.ts', 'old.ts']);
 });
 
 test('patchWritePaths declares the reject and backup siblings beside each target', () => {
@@ -126,14 +195,15 @@ test('execute writes the temp diff 0600, hands it to patch, and removes it', asy
   if (process.platform === 'win32') return; // shell-script fixture; the mode bits are POSIX
   const root = await project(t);
   const binDir = path.join(root, 'bin');
-  const record = path.join(root, 'record.txt');
+  const record = path.join(root, 'record.json');
   await mkdir(binDir);
   const fake = path.join(binDir, 'patch');
   await writeFile(
     fake,
     `#!/bin/sh\n${process.execPath} -e 'const fs=require("node:fs");` +
     `const i=process.argv.indexOf("-i");const p=process.argv[i+1];` +
-    `fs.writeFileSync(${JSON.stringify(record)}, p+" "+(fs.statSync(p).mode&0o777).toString(8));' -- "$@"\n`,
+    `fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({` +
+    `args: process.argv.slice(2), file: p, mode: (fs.statSync(p).mode&0o777).toString(8)}));' -- "$@"\n`,
   );
   await chmod(fake, 0o755);
   const savedPath = process.env['PATH'];
@@ -143,8 +213,43 @@ test('execute writes the temp diff 0600, hands it to patch, and removes it', asy
   const result = await new PatchApplyTool().execute({ diff: GIT_DIFF }, ctxIn(root));
   assert.equal(result.exitCode, 0, result.stderr);
 
-  const [tmpFile, mode] = (await readFile(record, 'utf8')).split(' ');
+  const { args, file: tmpFile, mode } = JSON.parse(await readFile(record, 'utf8')) as {
+    args: string[]; file: string; mode: string;
+  };
   assert.equal(mode, '600');
+  // The two flags that keep a rejected hunk from leaving `<path>.orig` and `<path>.rej` behind:
+  // both are a copy of the target and a copy of the hunk, and either can be a secret.
+  assert.ok(args.includes('--no-backup-if-mismatch'), `argv was ${args.join(' ')}`);
+  assert.ok(args.includes('--reject-file=-'), `argv was ${args.join(' ')}`);
   // The diff can hold a credential the agent is moving between files; it must not outlive the call.
-  await assert.rejects(stat(tmpFile!), { code: 'ENOENT' });
+  await assert.rejects(stat(tmpFile), { code: 'ENOENT' });
+});
+
+/** `patch` is required for the two tests that exercise the real binary. */
+function patchAvailable(): boolean {
+  try {
+    execFileSync('patch', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test('a hunk that does not apply leaves no .orig and no .rej beside the file', async (t) => {
+  // SPEC-3B backlog P1. Before this, `patch` wrote `<path>.orig` — a copy of the target, which can
+  // be an editor's `.env` — and `<path>.rej`, the rejected hunk text, which can hold a secret.
+  if (process.platform === 'win32' || !patchAvailable()) {
+    t.skip('needs a POSIX `patch` binary');
+    return;
+  }
+  const root = await project(t);
+  await writeFile(path.join(root, 'notes.txt'), 'alpha\n');
+
+  const diff = '--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-not what is on disk\n+replacement\n';
+  const result = await new PatchApplyTool().execute({ diff }, ctxIn(root));
+
+  assert.notEqual(result.exitCode, 0, 'the hunk does not apply, so patch fails');
+  assert.deepEqual((await readdir(root)).sort(), ['notes.txt'], 'nothing else was left behind');
+  assert.equal(await readFile(path.join(root, 'notes.txt'), 'utf8'), 'alpha\n', 'the target is untouched');
+  assert.match(result.stdout, /not what is on disk/, 'the reject was sent to the result, not to a .rej file');
 });
