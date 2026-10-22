@@ -9,6 +9,7 @@ import { registerGoldensCommand } from './commands/goldens.js';
 import { registerEvolveCommand } from './commands/evolve.js';
 import { registerInProcessDemoCommand } from './commands/inprocessDemo.js';
 import { registerAttestCommand } from './commands/attest.js';
+import { registerGraphCommand } from './commands/graph.js';
 import { requireSupportedNode } from './nodeVersion.js';
 
 // `engines` only warns; the code below genuinely needs Node 22. Stop here, before any command reads
@@ -29,6 +30,7 @@ registerGoldensCommand(program);
 registerEvolveCommand(program);
 registerInProcessDemoCommand(program);
 registerAttestCommand(program);
+registerGraphCommand(program);
 
 // ── adapters list ─────────────────────────────────────────────────────────────
 program
