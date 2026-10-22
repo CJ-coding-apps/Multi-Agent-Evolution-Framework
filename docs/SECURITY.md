@@ -578,10 +578,11 @@ what stops a spelling from being confined in one place and not the other. `git.d
 one list (`paths`). `git.add` and `patch.apply` are confined by the policy engine only: it checks the
 resolved form of what they declare, and the tool then hands its own input to git (with literal
 pathspecs, or — for `patch.apply` — the diff itself to `git apply`). For `patch.apply` the declaration and
-the write are git reading the same diff file in one sealed context with the same `-p`, so the two cannot
-disagree by spelling or by directory; but it is not one resolved value, and a direct call
-that skips the policy engine gets no root confinement from MAF beyond the tool's own refusal of absolute
-and `..` names.
+the write are git reading the same diff bytes in sealed contexts with the same `-p` — the gate opens one at
+declaration time and `execute` opens its own — and `execute` compares the two declarations and refuses the
+call if they differ, so the two cannot disagree by spelling or by directory; but it is not one resolved
+value, and a direct call that skips the policy engine gets no root confinement from MAF beyond the tool's
+own refusal of absolute and `..` names.
 
 Three things this does **not** cover, so none is mistaken for it:
 
@@ -595,13 +596,19 @@ Three things this does **not** cover, so none is mistaken for it:
 - It confines paths to the project root (the directory of `ctx.projectRoot`), not to the files a role is
   *allowed* to touch. Which files inside the root are fair game is a policy question — `pathGlob` and
   `allowedPathGlobs`.
-- It applies to the paths a tool **declares** — `ToolPlugin.declaredPaths(input)`, a pure function of the
-  input. For a `cli`-tier role, whose tool calls maf never sees, no path is declared and none is checked.
+- It applies to the paths a tool **declares** — `ToolPlugin.declaredPaths(input, ctx?)`. The paths are a
+  pure function of the input; the optional context only lets the tool's own refusals run against the
+  worktree the apply will use. For a `cli`-tier role, whose tool calls maf never sees, no path is declared
+  and none is checked.
 
 `patch.apply` does not read diff headers. It asks `git apply` which files the diff names — `--numstat -z`
-forward and `-R --numstat -z` reversed — and applies with the same `git apply`, the same diff file, the
-same `-p` and the same environment, so the paths the policy is shown are the paths git writes. Every git
-call runs in one sealed context: a fresh empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree,
+forward and `-R --numstat -z` reversed — and applies with the same `git apply`, the same diff bytes, the
+same `-p` and the same environment, so the paths the policy is shown are the paths git writes. A gated call
+computes that declaration twice: once for the policy, in a sealed context opened at the project root, and
+once inside `execute` in its own. They are separate git invocations on the same bytes, so `execute` compares
+its set with the one the gate approved and refuses the call on any difference (`builtin:declaration`): the
+agreement is a check, not an assumption. Every git call `execute` makes runs in one sealed context: a fresh
+empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree,
 `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CEILING_DIRECTORIES` at the worktree's parent,
 `toolEnv()`, and `-c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null`. No
 filter driver is defined in that directory, so none can run whatever `.gitattributes` an agent writes, and
@@ -615,19 +622,28 @@ A diff git cannot read, one that names no file, and one git only reports in a fo
 describe are refused as a `Deny` under rule id `builtin:declaration` before the policy is asked, because
 an undeclared write is not an allowed one. The forms refused from `--summary` are renames, copies, mode
 changes, symlinks and submodules; a declared path that is already a symlink is refused too, since a plain
-diff rewrites the link in place and the policy would have been asked about its target. Creating a mode
+diff rewrites the link in place and the policy would have been asked about its target. That check runs at
+declaration time, so the gate records the `Deny` rather than allowing a call that then fails, and again
+inside `execute`; every parent component is checked as well, so a diff of `d/x.js` is refused when `d` is a
+link. A path that cannot be checked (a component over the name limit — 256 bytes on APFS — gives
+`ENAMETOOLONG`) is a returned refusal, never a raw throw. Creating a mode
 `100755` file is allowed: whether an agent may write a script at a given path is a policy question, not
 one path declaration can answer. Binary patches are refused from their `-` line counts. Absolute names and
 names containing `..` are refused by name, `--check` runs before the apply so a diff that would fail
 changes nothing, and `--reject` is never passed, so no `.orig` or `.rej` file is left behind. Nothing is
 loosened relative to `git apply` — there is no `--recount` — so a wrong hunk count fails with git's own
-message and the agent retries. Deny and Escalate rules compare NFC-normalized names, and
-case-insensitively on macOS and Windows, whose filesystems resolve `.ENV` to `.env`: a `+++ b/.ENV` header
-is held to the `**/.env*` rule there. `Allow` rules and `allowedPathGlobs` stay exact, so folding never
-makes a verdict more permissive. This is stricter than `patch` — a context diff, an `Index:`-only diff, a
-normal diff, an ed diff or any indented section header is refused rather than applied, because git applies
-unified diffs only and skips an indented section while exiting 0 — and the strictness is the point: a diff
-whose targets cannot be declared is not one whose write may be assumed safe.
+message and the agent retries. On macOS and Windows, whose filesystems resolve `.ENV` to `.env`, the rules
+are asked twice — once exactly, and once with the paths of Deny and Escalate rules case-folded and
+NFC-normalized — and the stricter verdict decides (`Deny` over `Indeterminate` over `Escalate` over
+`Allow`): a `+++ b/.ENV` header is held to the `**/.env*` rule there, and a folded `docs/**` Escalate can no
+longer pre-empt a Deny below it. `Allow` rules and `allowedPathGlobs` stay exact in both passes, so folding
+never makes a verdict more permissive; on Linux nothing is folded and only the exact pass runs. This is
+stricter than `patch` — a context diff, an `Index:`-only diff, a normal diff, an ed diff, or an indented
+section start (an indented `---` line immediately followed by a `+++` line at the same indent, or an
+indented `diff --git`) is refused rather than applied, because git applies unified diffs only and skips an
+indented section while exiting 0. An indented line inside a hunk is content, not a section, so a
+Helm-rendered YAML file whose unchanged lines read ` --- # Source: chart/a.yaml` applies. The strictness is
+the point: a diff whose targets cannot be declared is not one whose write may be assumed safe.
 
 ### `test.run` executes project code
 

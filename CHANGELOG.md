@@ -23,52 +23,76 @@ so every path rule missed, `deny-env-files` included; and five further header fo
 round of fixes (a space before the timestamp, octal escapes, indented sections, `Index:` with no space,
 `//` in the path prefix). Every one of them was a way to write a file under an `Allow`.
 
-There is no third parser. **`patch.apply` no longer reads headers.** Every git call it makes — the
-declaration, its reversal, `--summary`, `--check` and the apply — runs in one sealed context: the same
-worktree directory, the same `-p`, the same 0600 diff file, and an environment with no user, system or
-repository git configuration, no hooks file, no fsmonitor and no `attributesFile`, so a filter driver that
-an agent selects with `.gitattributes` is never defined and cannot run. The declaration is
+There is no third parser. **`patch.apply` no longer reads headers.** Every git call it makes runs in a
+sealed context: a fresh empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree, the worktree as `cwd`, the
+same `-p`, a 0600 diff file, and an environment with no user, system or repository git configuration, no
+hooks file, no fsmonitor and no `attributesFile`, so a filter driver that an agent selects with
+`.gitattributes` is never defined and cannot run. Inside `execute`, the declaration, its reversal,
+`--summary`, `--check` and the apply all run in **one** such context — the same diff file, the same
+directory, the same environment — so the git that names the files is the git that writes them. A call
+through the gate opens **two**: one to declare the paths the policy is asked about, one inside `execute`,
+each with the properties above and the same diff bytes. Because they are two calls, `execute` does not
+assume the second agrees with the first: it declares the paths again in its own sealed context and
+**refuses** the call if the set differs in any way from the set the gate approved, recording a `Deny` under
+`builtin:declaration` and writing nothing. The declaration is
 `git apply --numstat -z` and its reversal is `git apply -R --numstat -z`: git names the old file on the old
 side and the new one on the new side, so a file that disappears is declared as well as the one that
 appears. The declared set is the union of the two; a name that one direction reports and the other does
 not — an implicit rename, with no rename lines to give it away — is refused, because the forward list
 would name only the destination while the apply deletes the protected source. What git cannot describe as
 a list of paths is refused: renames, copies, mode changes, symlinks, submodules and binary patches (from
-`--summary`), any declared path that is already a symlink, and absolute or `..` names. `--check` runs
+`--summary`), absolute or `..` names, and any declared path that is already a symlink or reaches the name
+through one — checked when the paths are declared, so the gate records a `Deny` instead of allowing a call
+that git would then fail, and checked again inside `execute` for a link created in between. A path that
+cannot be checked at all is a returned refusal, not a raw throw: a component over the filesystem's name
+limit (256 bytes on APFS) gives `ENAMETOOLONG` and is refused at declaration. A name below a regular file is
+the other case — there is nothing below a file for the walk to check, so the path is declared and git
+answers the call with its own failure; nothing is written. `--check` runs
 before the apply, `--reject` is never passed, so a failed apply leaves no `.orig` and no `.rej`, and
 nothing is loosened: this is exactly as strict as `git apply`, so a hunk count that does not match fails
 with git's own message and the agent retries with the right one.
 
-Path matching changed for the stricter half only. Deny and Escalate rules compare NFC-normalized names,
-and case-insensitively on macOS and Windows, whose filesystems resolve `.ENV` to `.env`, so a `+++ b/.ENV`
-header is held to the `**/.env*` rule. `Allow` rules and `allowedPathGlobs` stay exact on every platform:
-folding a permit would let a higher-priority `docs/**` match `DOCS/x.env` and never consult the Deny below
-it. No verdict becomes more permissive on any platform, and Linux is unchanged for every `Allow`.
+Path matching changed for the stricter half only. On macOS and Windows, whose filesystems resolve `.ENV` to
+`.env`, the rules are now asked **twice** — once exactly, as on any platform, and once with the path of
+Deny and Escalate rules case-folded and NFC-normalized — and the verdict is the stricter of the two:
+`Deny` above `Indeterminate` above `Escalate` above `Allow`. Two passes are needed because rules are
+first-match by priority: folding alone let a `docs/**` Escalate above a `**/*.env*` Deny match `DOCS/x.env`
+first, so a refusal nobody could lift became one approval away from permitted. Taking the stricter verdict
+keeps the Deny. `Allow` rules and `allowedPathGlobs` are never folded, so a higher-priority `docs/**` Allow
+cannot match `DOCS/x.env` either. On Linux nothing is folded and only the exact pass runs, so Linux is
+unchanged; on macOS and Windows the result is never more permissive than 0.5.0 — the folded pass can only
+add a refusal, or answer a call that was allowed with one of Deny, Escalate or Indeterminate.
 
 This is stricter than `patch`, deliberately: a context diff, an `Index:`-only diff, a normal diff, an ed
-diff, or any indented section header now fails instead of being applied, because git applies unified diffs
+diff, or an indented section start now fails instead of being applied, because git applies unified diffs
 only — and `git apply` skips an indented section and exits 0, so the tool refuses one before git is asked.
-A diff that cannot be declared is refused before the policy is asked, recorded as a `Deny` under
-`builtin:declaration`, and nothing is written.
+A section start is an indented `---` line immediately followed by a `+++` line at the same indent, or an
+indented `diff --git` line; an indented line inside a hunk is content, so a Helm-rendered YAML file whose
+unchanged lines read ` --- # Source: chart/a.yaml` applies. A diff that cannot be declared is refused
+before the policy is asked, recorded as a `Deny` under `builtin:declaration`, and nothing is written.
 
 **API changes.** `extractDiffPaths` is gone from `@maf/tools`: it was the header parser, and nothing
-outside it should keep a second one. `@maf/types` gains `toolEnv()`, the allowlisted environment a child
-that runs project code is given, and drops `backendEnv`, `isMafVariable` and `TOOL_ENV_ALLOWLIST`, none of
-which this release uses: the only child that runs project code in 0.5.1 is `git apply`, and the allowlist is
-now private to `toolEnv`. The backend-CLI environment those two helpers were for arrives in 0.6.0.
-`@maf/policy-engine` gains `caseInsensitiveFilesystem()` plus a
-`platform` option on `PolicyEngineOptions` and `PolicyLoadOptions`. A policy file of the user's own is
-unaffected; a workflow that fed `patch.apply` a non-unified diff has to feed it a unified one. Creating a
-mode `100755` file is allowed — a `mode change` is refused, and creating an executable is not one; whether
-an agent may write a script at a given path is a policy question (`fs.write` and `patch.apply` alike), not
-one this patch answers.
+outside it should keep a second one. `@maf/types` gains `toolEnv()` — the allowlist of environment
+variables a spawned child is given; in 0.5.1 the only child given it is `git apply` — and
+`ToolDeclarationError`, the throw that says a tool cannot name the paths it would touch.
+`ToolPlugin.declaredPaths` gains an optional second parameter, the calling context, so a declaration can
+be computed where the apply will run; and `ToolContext` gains optional `approvedPaths`, the set the gate
+approved, which `patch.apply` compares its own declaration against. `@maf/policy-engine` gains `caseInsensitiveFilesystem()` and the
+`PolicyEngineOptions` type, and `PolicyLoadOptions` gains `caseInsensitivePaths` and `platform`. A policy
+file of the user's own still parses unchanged, and no verdict it produced becomes more permissive: on
+macOS and Windows its Deny and Escalate rules now also match the case and Unicode variants of the path
+they name, and the two-pass rule above returns either the verdict 0.5.0 would have returned or a stricter
+one. A workflow that fed `patch.apply` a non-unified diff has to feed it a unified one. Creating a mode
+`100755` file is allowed — a `mode change` is refused, and creating an executable is not one; whether an
+agent may write a script at a given path is a policy question (`fs.write` and `patch.apply` alike), not one
+this patch answers.
 
 ### Fixed
 
 - **`patch.apply` declares the files `git apply` writes, and refuses what git cannot name** (F1). Every
-  git call runs in one sealed context: `--numstat -z` forward and `-R --numstat -z` reversed, `--summary`,
-  `--check` and the apply, with the same worktree `cwd`, the same `-p`, the same diff file and the same
-  environment — `toolEnv()`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CEILING_DIRECTORIES`
+  git call `execute` makes runs in one sealed context: `--numstat -z` forward and `-R --numstat -z`
+  reversed, `--summary`, `--check` and the apply, with the same worktree `cwd`, the same `-p`, the same
+  diff file and the same environment — `toolEnv()`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CEILING_DIRECTORIES`
   at the worktree's parent, `-c core.hooksPath=/dev/null -c core.fsmonitor=false
   -c core.attributesFile=/dev/null`, and a fresh empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree. So no
   user, system or repository configuration reaches git, and no filter driver, hook or fsmonitor runs even
@@ -80,11 +104,13 @@ one this patch answers.
   fake global config that define a filter, a hook and an fsmonitor (none runs), a `TMPDIR` inside a work
   tree (the declared name is unchanged), a diff on an existing symlink (refused, link untouched), a
   concatenated two-file `diff -u` (applies), and a failing `dryRun` (non-zero, git asked).
-- **Case folding and NFC may only make a verdict stricter** (HS5). `PolicyEngine` folds case and Unicode
-  form for Deny and Escalate rules only; `Allow` rules and `allowedPathGlobs` are exact. A `**/.env*` Deny
-  holds `.ENV` on a case-insensitive volume, and a higher-priority `docs/**` Allow no longer matches
-  `DOCS/x.env`. The platform default is tested for darwin, win32 and linux, and forced on and off through
-  both the engine and the loader.
+- **Case folding and NFC may only make a verdict stricter** (HS5, HS16). `PolicyEngine` folds case and
+  Unicode form for Deny and Escalate rules only, and asks the rules twice — exactly and folded — answering
+  with the stricter verdict, so a folded `docs/**` Escalate can no longer pre-empt a `**/*.env*` Deny for
+  `DOCS/x.env`. `Allow` rules and `allowedPathGlobs` are exact. A `**/.env*` Deny holds `.ENV` on a
+  case-insensitive volume, and a higher-priority `docs/**` Allow no longer matches `DOCS/x.env`. The
+  platform default is tested for darwin, win32 and linux, and forced on and off through both the engine and
+  the loader.
 
 ## [0.5.0] - 2026-10-20
 
