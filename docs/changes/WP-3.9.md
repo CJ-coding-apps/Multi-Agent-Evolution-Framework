@@ -30,6 +30,17 @@ states each as implemented.
   real `node` child and asserts `MAF_SIGNING_KEY` is absent (printing `ABSENT`), and
   `packages/adapters/base/src/__tests__/ProcessSpawner.test.ts` does the same through both
   spawner functions, with a provider key still present where the backend policy keeps it.
+- **Every adapter spawn site, proved at the child (round 2, G6).** The adapter half had one test
+  per backend, and it drove `invoke` only — the cli tier. `sendTurn`, the path every governed role
+  takes, and each `--version`/`--help` probe had no test of the environment they spawn with. A
+  stand-in `claude`/`codex` earlier on PATH now appends the environment it was actually given, and
+  `packages/adapters/{claude,codex}/src/__tests__/backend-env.test.ts` drives `invoke`, `sendTurn`
+  and the `isAvailable` `--version` question through it, while
+  `packages/adapters/claude/src/__tests__/preflight.test.ts` drives both preflight probes. Each
+  test asserts no `MAF_*` name arrived and that `PATH`, `HOME` and the provider key did — so
+  "empty environment" cannot pass as the policy. Measured: six reverted spawn sites (claude
+  `sendTurn`, claude `isAvailable`, claude `preflight`, codex `sendTurn`, codex `isAvailable`,
+  the spawner's default) each failed exactly the one test that names it, and nothing else.
 
 ### `patch.apply` declares what `patch` will open
 
@@ -249,6 +260,17 @@ hands them, and a rule implemented at one of five call sites is the defect the r
 Rejected: routing model output and data values too. Those parsers read one known field and fail
 closed on a wrong shape; refusing a *value* that happens to name `__proto__` would reject data
 the run wrote itself.
+
+**The environment is proved at every spawn site, by the child's own report (round 2, G6).** One
+test per backend proved `invoke` and nothing else, so `sendTurn` — what a governed role actually
+runs — and the probes were free to revert to `{ ...process.env }` without a red test. The new
+stand-ins read their own environment rather than inspecting the options object the adapter built,
+because the two are different claims: calling `backendEnv()` proves the policy was asked for, and
+only the child's report proves what it received. Each spawn site has its own test rather than one
+test driving all six, so a regression names the site instead of the record's length. Rejected: a
+unit test that asserts `backendEnv()` was called. It is the weaker claim — an adapter could call it
+and pass the result nowhere. Rejected: asserting a specific deny-list of variable names. The rule
+is "no `MAF_*`", and a test that names two of them passes the day a third one is added.
 
 **Rejected — keep `reject` and re-scope WP-3.7's live row.** A rejection does not guard the
 decision, it removes it: a role is permanently denied a tool its operator may well have wanted,
