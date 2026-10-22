@@ -291,7 +291,92 @@ states each as implemented.
 
 ## Decisions
 
-**D-59 · A candidate that widens a role with a write tool is the operator's decision, not the
+**D-59 · Child-process environment and runner hardening.** What a child of maf is handed, what a
+test run may be asked and how long it may take, what `patch.apply` declares, and who answers a
+role widening. Each part states what it rejected.
+
+**(1) Two environment policies, because there are two trust boundaries.** A backend CLI (`claude`,
+`codex`, `gemini`) is maf's own agent: it needs the user's toolchain and login state, so it gets
+everything the user has minus every `MAF_*` variable (`backendEnv`; matched case-insensitively on
+Windows, where the environment is). Rejected: an allowlist for backends — a CLI needs whatever the
+user configured (a proxy, a private CA, a wrapper on `PATH`), and an allowlist cannot enumerate that
+without breaking the machines that have one more thing set. Rejected: subtracting only
+`MAF_SIGNING_KEY` — the next `MAF_*` secret is one release away, and the rule that survives a new
+name is the prefix. A tool that runs project or model code (`test.run`, `grep`, `patch.apply`,
+`git.*`) gets an allowlist instead (`toolEnv`): `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `PWD`;
+`TMPDIR`, `TMP`, `TEMP`; `LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `LC_NUMERIC`,
+`LC_TIME`, `TZ`; `TERM`; `NODE_EXTRA_CA_CERTS`; and the Windows set — `SystemRoot`, `windir`,
+`ComSpec`, `PATHEXT`, `OS`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `HOMEDRIVE`, `HOMEPATH`,
+`ProgramData`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramW6432`, `NUMBER_OF_PROCESSORS`,
+`PROCESSOR_ARCHITECTURE`. Rejected: a deny-list here — it has to name every secret and is always one
+release behind the next provider's token (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, a CI token
+somebody exported). Two exclusions are named because they are neither `MAF_*` nor tokens:
+`NODE_OPTIONS` is a code-injection channel into every node child (`--require` runs a module before
+the program), so a project's test run does not get it; `SSH_AUTH_SOCK` would hand a project's tests
+the user's ssh agent, which reporting pass or fail does not need. Both policies are copies — a
+caller may add to the result, and a child cannot mutate `process.env`.
+
+**(2) What the policies do not remove.** Filtering bounds what a child is *handed*, not what agent
+code can *find*: agent code runs as the operator's user, so `/proc/<pid>/environ` on Linux and
+same-user process inspection on macOS reach maf's own environment. `docs/SECURITY.md` says exactly
+that, and so does the recorded limits section here. Rejected: the sentence "the key is in no child
+process's environment" — it promises more than the mechanism gives, and a claim that overstates a
+boundary is itself the defect. A key file or a runner under a different user is Wave 3, not this WP.
+
+**(3) `test.run` is bounded in what it may be asked and how long it may take.** The runner is a
+fixed enum (`auto`, `bun`, `cargo`, `jest`, `node`, `npm`, `pnpm`, `pytest`, `vitest`), and a
+filter beginning with `-` is refused before any argv exists. Each runner gets its filter the way
+*that* runner parses one: after `--` for `bun` and `cargo`, as `--testPathPattern` for `jest` and
+`-k` for `pytest`, and **deliberately not** after `--` for `vitest`, whose cac parser cuts argv at
+`--` and drops the filter into `options['--']`, so `vitest run -- <filter>` silently runs the
+whole suite. Rejected: passing the model's filter straight through — a leading `-` is an option
+to the runner, not a filter, so a "test name" could become `--require` or an output flag;
+rejected: one shared argv shape for every runner — the runners disagree about where a filter
+goes, and the disagreement is silent. `vitest` and `jest` are invoked as `npx --no-install`, so a
+missing runner fails by name instead of being downloaded from the registry — a network fetch and
+code execution selected by a model-authored field. `timeout` defaults to 120 seconds and is clamped to
+`MAX_TEST_TIMEOUT_MS`, fifteen minutes, however large the caller's value: a test command is a tool
+call inside a node's budget, not a background job, and the value is model-supplied, so it is a
+request rather than a bound. Rejected: no ceiling — a hung suite would hold the node and the run
+indefinitely; rejected: honouring the caller's value unbounded — the one number an agent can pick
+must not decide how long the run waits; rejected: a ceiling short enough to catch every hang —
+that is the default, and a default that fires on a slow real suite turns a pass into a timeout.
+Fifteen minutes is the point past which a suite's answer no longer arrives in time for the run to
+use it. **The whole process group is killed on every exit maf observes.** The
+runner is spawned `detached` on POSIX so it leads its own group, and `SIGKILL` goes to `-pid`,
+reaching vitest workers and `npm`'s script shell; the group is killed on timeout, on the runner's
+`exit` (a passing suite can leave a worker or a server behind — G16b), and when maf itself exits or
+receives `SIGINT`/`SIGTERM`, where the hook kills every live group and re-raises the signal. The
+call is answered on the runner's **`exit`**, with a stated 100 ms grace for `close` (G16b, below).
+Rejected: signalling the runner alone — its workers survive; rejected: walking descendants by pid —
+the kernel's group is the accounting, and a pid walk races reuse. Limits, recorded rather than
+implied: a child that calls `setsid()`/`setpgid()` leaves the group and is not reached; Windows has
+no POSIX groups, so only the runner is signalled; a `SIGKILL` to maf runs no handler, so the groups
+it started survive it; and `ToolContext` carries no abort signal (G16a), so a `test.run` a failing
+or abandoned node leaves in flight runs until its own timeout, at most the fifteen-minute ceiling.
+Adding `signal?` to `ToolContext` is WP-3.5's decision.
+
+**(4) `patch.apply` declares what `patch` will open, before policy runs.** `declaredPaths` is a
+pure function of the input: `extractDiffPaths` reads `---`/`+++`, `diff --git` (both sides of a
+rename), context-diff and `Index:` headers, cuts each name at the first unquoted TAB (the normal
+output of `diff -u` is `+++ b/Cargo.lock<TAB>2026-01-01 …`), skips `/dev/null` and a context
+diff's hunk separators, ignores any line it does not recognise, and refuses the diff when no name
+survives the strip; `patchWritePaths` adds each target's `.orig` and `.rej` siblings. The policy
+layer calls it before `execute`, so a Deny rule sees the files the command will write. A diff
+naming `.git` is refused before policy — as `fs.write` does — and a target that resolves into
+`.git` through a link inside the root is refused before the temp file exists. The
+temp diff is written `{ mode: 0o600, flag: 'wx' }` and removed in `finally`; `--no-backup-if-mismatch`
+stops a `.orig` backup, and rejects go to a named `0600` file in the temp dir that is read and
+deleted. Rejected: extracting the paths *inside* `execute` and assigning `input.paths` there — the
+policy engine evaluates before `execute`, so it saw `paths: []` and the shipped `protect-secrets`
+rule was skipped for the one tool it had been extended to cover. Rejected: moving the extraction
+earlier for `patch.apply` alone — it fixes one tool and leaves the next input-mutating tool with
+the same hole; the declaration is an interface member instead. Part A's five HIGH findings are not
+addressed on this branch: they are built on `hotfix/0.5.1` if CJ approves (and reach this branch by
+merge-forward) or built here otherwise. This entry records the design that is here and claims
+nothing about those.
+
+**(5) A candidate that widens a role with a write tool is the operator's decision, not the
 evolver's refusal.** Stage `b4-write-tool-widening` answered `reject`: a candidate that added a
 `write`, `execute` or `dangerous` tool to an ordinary role ended there, after the golden suite had
 already been run. The verdict is now `needs-approval`, the gate outcome that names a decision a
@@ -302,7 +387,8 @@ role, and moves on without a smoke test or a golden run. No flag grants this par
 `--approve-sensitive` covers b3's safety-adjacent routing, and the widening rule runs whether or
 not it is set. What changed is who answers the question. WP-3.7's live row holds on this verdict —
 the row is the end-to-end check on what an operator is offered, and it is why this ruling is
-recorded rather than left as an internal detail.
+recorded rather than left as an internal detail. The order the gate asks in — invariants first,
+then b4, both the moment the manifest exists — is the next entry.
 
 **A round that is only in the report was not archived (round 2, G8).** D-59 says the loop *records*
 `needs-approval`; the graph write that makes the record durable was correct but untested, so a loop
