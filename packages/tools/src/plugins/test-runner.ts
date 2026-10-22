@@ -40,6 +40,45 @@ function killProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
+/**
+ * Every runner still in flight (WP-3.9 F9). A tool call that returns does not necessarily end the
+ * process group it started: the runner exits and leaves its own children behind, and a MAF that is
+ * interrupted leaves the runner behind. Each is a process the operator never sees — a server still
+ * holding a port, a watcher still writing files — so a call removes its group on every exit it can
+ * observe, and the process-level hooks below cover the exits it cannot.
+ */
+const live = new Set<ChildProcess>();
+let exitHooksInstalled = false;
+
+/** Send `signal` to every in-flight group; the callers decide when. */
+function reapAll(signal: NodeJS.Signals): void {
+  for (const proc of live) killProcessGroup(proc, signal);
+}
+
+/**
+ * Cover the exit MAF did not choose. Installed once per process, at the first runner:
+ *
+ * - `exit` covers a normal end — `process.on('exit')` runs with the event loop stopped, and a
+ *   synchronous `kill` still reaches the kernel.
+ * - `SIGINT` / `SIGTERM` cover the terminal and a supervisor. Node runs listeners instead of the
+ *   default action, so the hook kills the groups and then re-raises the signal at itself; `once`
+ *   has already removed the listener, so the re-raise takes the default action and MAF dies with
+ *   the status it would have had without the hook.
+ *
+ * Both are `once`: a second runner must not stack a second listener.
+ */
+function installExitHooks(): void {
+  if (exitHooksInstalled) return;
+  exitHooksInstalled = true;
+  process.on('exit', () => reapAll('SIGKILL'));
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      reapAll('SIGKILL');
+      process.kill(process.pid, signal);
+    });
+  }
+}
+
 /** No `coverage`: it was declared here and read nowhere, so the schema does not offer it. */
 interface TestInput {
   runner?:   TestRunner;
@@ -115,6 +154,7 @@ export class TestRunnerTool extends BaseTool<TestInput> {
       : DEFAULT_TEST_TIMEOUT_MS;
     const timeoutMs = Math.min(requestedMs, MAX_TEST_TIMEOUT_MS);
 
+    installExitHooks();
     return new Promise((resolve) => {
       let stdout = '';
       let stderr = '';
@@ -127,12 +167,27 @@ export class TestRunnerTool extends BaseTool<TestInput> {
         env: toolEnv(),
       });
 
+      live.add(proc);
+
+      // Three paths answer a call — close, error, timeout — and the first one to arrive wins. Losing
+      // the race is not harmless: a timer that fires after `close` used to resolve a second time (the
+      // later value discarded) and, now that a call owns a process group, it would also reap a group
+      // that is already finished. `settle` answers once and stops tracking the group.
+      let settled = false;
+      const settle = (result: ToolResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        live.delete(proc);
+        resolve(result);
+      };
+
       proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
       proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
 
       const timer = setTimeout(() => {
         killProcessGroup(proc, 'SIGKILL');
-        resolve({
+        settle({
           stdout,
           stderr: stderr + `\n[TIMEOUT after ${String(timeoutMs)} ms]`,
           exitCode: 124,
@@ -145,14 +200,16 @@ export class TestRunnerTool extends BaseTool<TestInput> {
       // Node emits `error` for that, and an unhandled `error` on a ChildProcess is fatal to the whole
       // process: one missing binary ended a live run with an attestation-less death, not a failed node.
       // Answer it the way WP-2.18 answers a tool that fails while running — with a result.
-      proc.on('error', (err: Error) => {
-        clearTimeout(timer);
-        resolve(this.failed(err, t));
-      });
+      proc.on('error', (err: Error) => settle(this.failed(err, t)));
 
       proc.on('close', (code: number | null) => {
-        clearTimeout(timer);
-        resolve({ stdout, stderr, exitCode: code ?? 1, duration: performance.now() - t, metadata: { runner, timeoutMs } });
+        // A normal exit is the end of the runner, not necessarily the end of its group (WP-3.9 F9).
+        // `vitest run` that leaves a worker, `npm test` that leaves the script's shell, a test that
+        // starts a server and does not stop it: all of them exit 0 and leave a process behind that
+        // the operator never asked for and MAF no longer tracks. Reaping on every observed exit —
+        // not only the timeout — is what makes "the call ended" mean "the group ended".
+        killProcessGroup(proc, 'SIGKILL');
+        settle({ stdout, stderr, exitCode: code ?? 1, duration: performance.now() - t, metadata: { runner, timeoutMs } });
       });
     });
   }

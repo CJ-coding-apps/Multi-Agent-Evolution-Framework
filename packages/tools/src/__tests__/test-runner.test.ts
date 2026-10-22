@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -137,39 +138,122 @@ test('an oversized timeout is clamped to the ceiling, and the result says so', a
   assert.deepEqual(result.metadata, { runner: 'node', timeoutMs: MAX_TEST_TIMEOUT_MS });
 });
 
+/** A runner that starts a grandchild which never exits, records its pid, then hangs itself. */
+const HANGING_RUNNER = [
+  "const test = require('node:test');",
+  "const { spawn } = require('node:child_process');",
+  "const { writeFileSync } = require('node:fs');",
+  "test('hangs with a child', async () => {",
+  "  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+  "  writeFileSync('grandchild.pid', String(child.pid));",
+  "  await new Promise(() => {});",
+  "});",
+  '',
+].join('\n');
+
+/** A runner that passes, and leaves the same kind of grandchild behind while it exits 0. */
+const LEAKING_RUNNER = [
+  "const test = require('node:test');",
+  "const { spawn } = require('node:child_process');",
+  "const { writeFileSync } = require('node:fs');",
+  "test('passes and leaves a child running', () => {",
+  "  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+  // `unref` is what lets the runner exit 0 with the child still alive: without it the open
+  // ChildProcess handle keeps the runner's event loop alive and the fixture times out instead.
+  "  child.unref();",
+  "  writeFileSync('grandchild.pid', String(child.pid));",
+  "});",
+  '',
+].join('\n');
+
+/** The pid a fixture recorded, waiting until it is on disk. */
+async function waitForPid(file: string): Promise<number> {
+  let pid: number | undefined;
+  for (let i = 0; i < 40 && pid === undefined; i++) {
+    pid = await readFile(file, 'utf8').then((s) => Number(s.trim()) || undefined, () => undefined);
+    if (pid === undefined) await new Promise((r) => setTimeout(r, 50));
+  }
+  if (pid === undefined || !Number.isInteger(pid)) assert.fail('the grandchild recorded its pid');
+  return pid;
+}
+
+/** Wait for the kernel to retire `pid`; SIGKILL is delivered with the group, so allow a moment. */
+async function waitForDeath(pid: number, when: string): Promise<void> {
+  let alive = true;
+  for (let i = 0; i < 40 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 50)); }
+    catch { alive = false; }
+  }
+  assert.equal(alive, false, `grandchild ${String(pid)} survived ${when}`);
+}
+
 test('a timeout kills the runner\'s own children, not only the runner', async (t) => {
   if (process.platform === 'win32') return; // no process groups; the POSIX path is under test
   const root = await project(t);
-  // The runner starts a grandchild that never exits and records its pid, then hangs itself. Signalling
-  // only the runner leaves the grandchild alive — which is what the old code did.
-  await writeFile(path.join(root, 'hang.test.js'), [
-    "const test = require('node:test');",
-    "const { spawn } = require('node:child_process');",
-    "const { writeFileSync } = require('node:fs');",
-    "test('hangs with a child', async () => {",
-    "  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
-    "  writeFileSync('grandchild.pid', String(child.pid));",
-    "  await new Promise(() => {});",
-    "});",
-    '',
-  ].join('\n'));
+  // Signalling only the runner leaves the grandchild alive — which is what the old code did.
+  await writeFile(path.join(root, 'hang.test.js'), HANGING_RUNNER);
 
   const result = await new TestRunnerTool().execute({ runner: 'node', timeout: 2000 }, ctxIn(root));
   assert.equal(result.exitCode, 124, result.stdout + result.stderr);
 
-  const pidFile = path.join(root, 'grandchild.pid');
-  let pid: number | undefined;
-  for (let i = 0; i < 40 && pid === undefined; i++) {
-    pid = await readFile(pidFile, 'utf8').then((s) => Number(s.trim()) || undefined, () => undefined);
-    if (pid === undefined) await new Promise((r) => setTimeout(r, 50));
-  }
-  assert.ok(pid !== undefined && Number.isInteger(pid), 'the grandchild recorded its pid');
+  await waitForDeath(await waitForPid(path.join(root, 'grandchild.pid')), 'the timeout');
+});
 
-  // SIGKILL is delivered with the group; give the kernel a moment to retire the process.
-  let alive = true;
-  for (let i = 0; i < 40 && alive; i++) {
-    try { process.kill(pid!, 0); await new Promise((r) => setTimeout(r, 50)); }
-    catch { alive = false; }
-  }
-  assert.equal(alive, false, `grandchild ${String(pid)} survived the timeout`);
+// WP-3.9 F9: the timeout was the only exit that killed the group. A runner that exits 0 leaves just
+// as much behind — a vitest worker, a server a test started, a watcher — and the old code answered
+// `close` without touching the group, so the leftovers outlived the tool call and the run.
+test('a runner that exits 0 has its leftover children killed too (WP-3.9 F9)', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await project(t);
+  await writeFile(path.join(root, 'leak.test.js'), LEAKING_RUNNER);
+
+  const result = await new TestRunnerTool().execute({ runner: 'node' }, ctxIn(root));
+  assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+
+  await waitForDeath(await waitForPid(path.join(root, 'grandchild.pid')), 'a normal exit');
+});
+
+// WP-3.9 F9: the other exit MAF does not choose. A tool call is synchronous from the operator's point
+// of view — Ctrl-C at the terminal ends MAF, and the runner it started used to keep running with no
+// parent to answer to. The parent fixture is a real process, because only a process can receive the
+// signal and run the hooks; the grandchild is in the runner's group, not the parent's, so only the
+// forwarded kill can reach it.
+test('SIGINT to MAF reaches the runner it started (WP-3.9 F9)', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await project(t);
+  await writeFile(path.join(root, 'hang.test.js'), HANGING_RUNNER);
+  await writeFile(path.join(root, 'parent.js'), [
+    "const { TestRunnerTool } = require(process.env.MAF_TOOLS_ENTRY);",
+    'const root = process.env.MAF_FIXTURE_ROOT;',
+    'const ctx = {',
+    '  cwd: root, projectRoot: root, runId: "r1", taskId: "t1", agentId: "a1", sessionId: "s1",',
+    '  policy: { async evaluate() { return { verdict: "Allow" }; } },',
+    '  attestor: { async record() {} },',
+    '};',
+    'new TestRunnerTool().execute({ runner: "node", timeout: 60000 }, ctx).then(',
+    '  () => { process.stdout.write("runner finished\\n"); });',
+    '',
+  ].join('\n'));
+
+  const parent = spawn(process.execPath, [path.join(root, 'parent.js')], {
+    cwd: root,
+    env: {
+      ...process.env,
+      MAF_TOOLS_ENTRY: path.resolve(__dirname, '..', 'index.js'),
+      MAF_FIXTURE_ROOT: root,
+    },
+    stdio: 'ignore',
+  });
+  t.after(() => parent.kill('SIGKILL'));
+
+  const pid = await waitForPid(path.join(root, 'grandchild.pid'));
+  parent.kill('SIGINT');
+  const exited = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+    parent.on('exit', (code, signal) => resolve({ code, signal }));
+  });
+  // The hook re-raises the signal rather than swallowing it, so MAF dies with the status it would
+  // have had without the hook — a supervisor sees an interrupt, not a clean exit.
+  assert.equal(exited.signal, 'SIGINT');
+
+  await waitForDeath(pid, 'the forwarded interrupt');
 });
