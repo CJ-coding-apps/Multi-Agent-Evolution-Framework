@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { LineCounter, isAlias, isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, visit } from 'yaml';
 import type { GraphQueryRunner, PolicyAction, PolicyPredicate, PolicyRule } from '@maf/types';
 import { makeToolId } from '@maf/types';
-import { PolicyEngine, type PolicySource } from './PolicyEngine.js';
+import { PolicyEngine, type PolicyEngineOptions, type PolicySource } from './PolicyEngine.js';
 
 /** How `resolve` chooses the rules, beyond the path itself (D-49). */
 export interface PolicyLoadOptions {
@@ -21,10 +21,12 @@ export interface PolicyLoadOptions {
    */
   builtInText?: string;
   /**
-   * Match path globs without regard to case; see `PolicyEngineOptions`. Absent, the platform's
-   * filesystem decides (case-insensitive on macOS and Windows).
+   * Match the paths of Deny and Escalate rules without regard to case; see `PolicyEngineOptions`.
+   * Absent, the platform's filesystem decides (case-insensitive on macOS and Windows).
    */
   caseInsensitivePaths?: boolean;
+  /** The platform that default is taken from; `process.platform` unless given. */
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -143,9 +145,11 @@ export class PolicyLoader {
     options: PolicyLoadOptions = {},
   ): Promise<PolicyEngine> {
     // Absent stays absent: `exactOptionalPropertyTypes` distinguishes it from an explicit `undefined`.
-    const engine = options.caseInsensitivePaths === undefined
-      ? new PolicyEngine(graph)
-      : new PolicyEngine(graph, { caseInsensitivePaths: options.caseInsensitivePaths });
+    const engineOptions: PolicyEngineOptions = {
+      ...(options.caseInsensitivePaths === undefined ? {} : { caseInsensitivePaths: options.caseInsensitivePaths }),
+      ...(options.platform === undefined ? {} : { platform: options.platform }),
+    };
+    const engine = new PolicyEngine(graph, engineOptions);
     const { rules, source } = await PolicyLoader.resolve(policyPath, options);
     engine.loadRules(rules, source);
     return engine;
