@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { writeFile, unlink } from 'node:fs/promises';
+import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -171,6 +171,7 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
     if (unusable !== undefined) return unusable;
     await refuseGitDirTargets(this.name, ctx, this.declaredPaths(input));
     const tmpFile = path.join(tmpdir(), `maf-patch-${crypto.randomUUID()}.diff`);
+    const rejectFile = path.join(tmpdir(), `maf-patch-reject-${crypto.randomUUID()}.rej`);
 
     try {
       // `wx` fails rather than following a symlink planted at the path, and 0600 means the diff —
@@ -180,16 +181,34 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
 
       // A rejected hunk must leave nothing beside the file it failed on: `patch` otherwise writes
       // `<path>.orig` (a copy of the file, which can be an editor's `.env`) and `<path>.rej` (the
-      // hunk text, which can hold a secret). `--reject-file=-` sends the rejects to stdout, where
-      // the tool's result already carries them, and `--no-backup-if-mismatch` keeps the backup off.
-      const args = ['-p', String(stripOf(input)), '--no-backup-if-mismatch', '--reject-file=-'];
+      // hunk text, which can hold a secret). The rejects go to a private temp file instead, which
+      // is read into the result and then removed; `--no-backup-if-mismatch` keeps the backup off.
+      //
+      // Not `--reject-file=-`: GNU patch reads `-` as *discard the rejects*, and Apple's patch
+      // writes them to stdout, so the same argv both loses the text (GNU) and passes a test that
+      // expects it (Apple). A named file behaves the same on both.
+      const args = ['-p', String(stripOf(input)), '--no-backup-if-mismatch', `--reject-file=${rejectFile}`];
       if (input.dryRun) args.push('--dry-run');
       args.push('-i', tmpFile);
+
+      // Created 0600 before `patch` opens it: the rejects can quote the diff, which can hold a
+      // secret, and a file `patch` creates itself would carry the caller's umask.
+      await writeFile(rejectFile, '', { encoding: 'utf8', mode: 0o600, flag: 'wx' }).catch(() => undefined);
+      /** What `patch` rejected, read back and removed — never left beside the target or on disk. */
+      const takeRejects = async (): Promise<string> => {
+        try {
+          return await readFile(rejectFile, 'utf8');
+        } catch {
+          return '';
+        } finally {
+          await unlink(rejectFile).catch(() => undefined);
+        }
+      };
 
       try {
         const r = await execFileAsync('patch', args, { cwd: ctx.cwd, env: toolEnv() });
         return {
-          stdout: r.stdout,
+          stdout: r.stdout + await takeRejects(),
           stderr: r.stderr,
           exitCode: 0,
           duration: performance.now() - t,
@@ -198,7 +217,7 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
       } catch (e: unknown) {
         const err = e as { stdout?: string; stderr?: string; code?: number };
         return {
-          stdout: err.stdout ?? '',
+          stdout: (err.stdout ?? '') + await takeRejects(),
           stderr: err.stderr ?? '',
           exitCode: err.code ?? 1,
           duration: performance.now() - t,
@@ -207,6 +226,7 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
       }
     } finally {
       await unlink(tmpFile).catch(() => undefined);
+      await unlink(rejectFile).catch(() => undefined);
     }
   }
 }

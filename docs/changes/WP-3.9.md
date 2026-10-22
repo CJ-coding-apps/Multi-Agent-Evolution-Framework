@@ -40,10 +40,16 @@ states each as implemented.
   refused before policy, resolved siblings included.
 - The temp diff is written `{ mode: 0o600, flag: 'wx' }` and removed in `finally`; `wx` fails
   rather than following a symlink planted at that path.
+- A rejected hunk leaves **nothing** beside the target: `--no-backup-if-mismatch` stops the `.orig`
+  backup, and the rejects go to a named `0600` `--reject-file=<path>` in the temp dir that is read
+  into `stdout` and unlinked. Not `--reject-file=-`, which GNU `patch` reads as *discard the
+  rejects* and Apple's patch as *write them to stdout* — one argv, two behaviours, and the CI run on
+  Linux caught the difference the macOS test suite could not.
 - **Proof.** `packages/tools/src/__tests__/patch.test.ts` covers strip 0 and a strip deeper than
   the path, the `.orig`/`.rej` siblings through `declaredPaths`, the `.git` refusal, and a real
   execution against a fake `patch` on `PATH` that records the mode of the file it was handed
-  (`600`) and whose path is gone after the call.
+  (`600`) and whose path is gone after the call — plus, for the reject file, that it is named, lives
+  outside the project and is gone when the call returns.
 
 ### `test.run` bounds what a model may ask it to run
 

@@ -230,7 +230,17 @@ test('execute writes the temp diff 0600, hands it to patch, and removes it', asy
   // The two flags that keep a rejected hunk from leaving `<path>.orig` and `<path>.rej` behind:
   // both are a copy of the target and a copy of the hunk, and either can be a secret.
   assert.ok(args.includes('--no-backup-if-mismatch'), `argv was ${args.join(' ')}`);
-  assert.ok(args.includes('--reject-file=-'), `argv was ${args.join(' ')}`);
+  // A *named* file, not `--reject-file=-`: GNU patch reads `-` as "discard the rejects" and Apple's
+  // patch writes them to stdout, so the same argv loses the text on Linux and looks correct on macOS.
+  const rejectArg = args.find((a) => a.startsWith('--reject-file='));
+  assert.ok(rejectArg !== undefined, `argv was ${args.join(' ')}`);
+  const rejectFile = rejectArg.slice('--reject-file='.length);
+  assert.notEqual(rejectFile, '-', 'the reject file is named, not the platform-dependent `-`');
+  assert.ok(rejectFile.startsWith(tmpdir() + path.sep), `rejects go to the temp dir, not the project: ${rejectFile}`);
+  assert.ok(!rejectFile.startsWith(root + path.sep), `no .rej is written beside the target: ${rejectFile}`);
+  // It is read into the result and removed; the hunk text — which can hold a secret — does not
+  // outlive the call any more than the diff does.
+  await assert.rejects(stat(rejectFile), { code: 'ENOENT' });
   // The diff can hold a credential the agent is moving between files; it must not outlive the call.
   await assert.rejects(stat(tmpFile), { code: 'ENOENT' });
 });

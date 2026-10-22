@@ -598,12 +598,17 @@ skips the policy engine gets no confinement from MAF.
 look like. It parses the diff's `+++`/`---` and `diff --git` headers and strips exactly the `strip`
 components the call passes to `patch -p` (default 1), so `strip: 0` on an `a/foo` header declares
 `a/foo` — the file `patch -p0` touches — rather than `foo`. Beside each target it declares that
-target's `.orig` and `.rej` siblings, because `patch` leaves them there on a partial or rejected apply,
-and an editor's `.env.orig` is a copy of the same secret. The diff itself is written to a fresh file
-under the system temp directory with mode `0600` and `O_EXCL` (so it neither is readable by other users
-nor follows a symlink planted at the path), passed to `patch` with `-i`, and removed when the call
-returns. The diff can contain a credential an agent is moving between files; it does not outlive the
-call.
+target's `.orig` and `.rej` siblings, the two names `patch` writes on a mismatched or rejected apply,
+because an editor's `.env.orig` is a copy of the same secret. The call keeps those two files from being
+created beside the target at all: `--no-backup-if-mismatch` stops the backup, and the rejects are sent to
+a named file under the system temp directory (`--reject-file=<path>`, mode `0600`, created with `O_EXCL`)
+that is read into the result and removed when the call returns. The argument is deliberately not
+`--reject-file=-`: GNU `patch` reads `-` as *discard the rejects*, while Apple's patch writes them to
+standard output, so the same argv silently loses the hunk text on one platform and appears to keep it on
+the other. The diff itself is written to a fresh file under the system temp directory with mode `0600`
+and `O_EXCL` (so it neither is readable by other users nor follows a symlink planted at the path), passed
+to `patch` with `-i`, and removed when the call returns. The diff, and any hunk `patch` rejects, can
+contain a credential an agent is moving between files; neither outlives the call.
 
 Three things this does **not** cover, so none is mistaken for it:
 
