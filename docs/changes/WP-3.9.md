@@ -411,7 +411,7 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.9) lists `ProcessSpawner.ts`,
 | `packages/planning-agent/src/{RetrievalAugmentedPlanner,FailurePatternDetector}.ts` | Both `<past-failures>` renderers redact again on the way into a prompt. |
 | `packages/evolver/src/{gate,loop,index}.ts` | The widening rule (exported as `gateWidening`), the required permission map, and the pre-spend check. |
 | `packages/cli/src/commands/evolve.ts` | Supplies each tool's `permissionLevel` from `createDefaultRegistry()`. |
-| Tests | `packages/adapters/base/src/__tests__/ProcessSpawner.test.ts`, `packages/adapters/{claude,codex,gemini}/src/__tests__/{backend-env,preflight}.test.ts`, `packages/types/src/__tests__/childEnv.test.ts`, `packages/tools/src/__tests__/{patch,test-runner,git-args,grep-args,worktree-confinement,input-schema}.test.ts`, `packages/git-ops/src/__tests__/SnapshotDiff.test.ts`, `packages/eval-harness/src/__tests__/verifier-env.test.ts`, `packages/cli/src/__tests__/{preflight-wiring,fixture-tests-env,ConfigLoader,approval-gate-stack}.test.ts`, `packages/policy-engine/src/__tests__/parseYamlDocument.test.ts`, `packages/dag-runner/src/__tests__/{spec-keys,failure-recorder}.test.ts`, `packages/roles/src/__tests__/roles-file-loading.test.ts`, `packages/planning-agent/src/__tests__/failure-recall.test.ts`, `packages/tool-loop/src/__tests__/declaredPaths.test.ts`, `packages/evolver/src/__tests__/evolver.test.ts`. |
+| Tests | `packages/adapters/base/src/__tests__/ProcessSpawner.test.ts`, `packages/adapters/{claude,codex,gemini}/src/__tests__/backend-env.test.ts`, `packages/adapters/claude/src/__tests__/preflight.test.ts` (claude only: it is the only adapter with a `preflight`), `packages/types/src/__tests__/childEnv.test.ts`, `packages/tools/src/__tests__/{patch,test-runner,git-args,grep-args,worktree-confinement,input-schema}.test.ts`, `packages/git-ops/src/__tests__/SnapshotDiff.test.ts`, `packages/eval-harness/src/__tests__/verifier-env.test.ts`, `packages/cli/src/__tests__/{preflight-wiring,fixture-tests-env,ConfigLoader,approval-gate-stack}.test.ts`, `packages/policy-engine/src/__tests__/parseYamlDocument.test.ts`, `packages/dag-runner/src/__tests__/{spec-keys,failure-recorder}.test.ts`, `packages/roles/src/__tests__/roles-file-loading.test.ts`, `packages/planning-agent/src/__tests__/failure-recall.test.ts`, `packages/tool-loop/src/__tests__/declaredPaths.test.ts`, `packages/evolver/src/__tests__/evolver.test.ts`. |
 | `docs/SECURITY.md` | States each boundary as implemented, including the three limits on the group kill. |
 | `docs/changes/WP-3.9.md` | This fragment. |
 
@@ -441,8 +441,9 @@ flag-support check was added afterwards.
 
 - `pnpm -r build` and `pnpm -r typecheck` clean, and `grep "error TS"` over the build output = 0.
 - Every package suite: `pnpm -r test` — **1191 tests, 1190 passed, 1 skipped, 0 failed**, measured
-  at `5e17601` (the last commit on this branch that changes code; the commits after it are this
-  fragment and `docs/SECURITY.md`).
+  at `142f725`, the head the count was taken at. (The earlier sentence named `5e17601` as "the last
+  commit that changes code" and said the commits after it were documentation: `9c29b6b` then
+  changed code, so that construction is gone rather than re-worded.)
 - The four repository guards: `check:build-output`, `check:test-scripts`, `check:workspace-deps`,
   `check:doc-refs`.
 
@@ -454,6 +455,10 @@ flag-support check was added afterwards.
   started survive it. `docs/SECURITY.md` states all three rather than implying a guarantee.
 - On Windows there are no POSIX process groups; `test.run` signals the runner alone, and the
   section in `docs/SECURITY.md` says so.
+- An abandoned `test.run` is not cancelled. `ToolContext` carries no abort signal (G16a), so a call
+  left in flight by a failing or abandoned node runs until its own timeout — bounded by the
+  fifteen-minute ceiling, but not by the node. Adding `signal?` to `ToolContext` is WP-3.5's call;
+  `docs/SECURITY.md` states the limit beside the group kill.
 - `patch.apply` is still confined by the policy engine only (the tool does not re-resolve the paths
   it declares), and a direct call that skips the policy layer gets no confinement. `docs/SECURITY.md`
   already states this; the declaration above is what lets a path rule see the files at all.

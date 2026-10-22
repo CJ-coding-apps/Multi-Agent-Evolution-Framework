@@ -673,6 +673,10 @@ Four limits bound it, all enforced in the tool rather than left to the runner:
   that calls `setsid()` or `setpgid()`) is not reached by `-pid`, and neither is a Windows tree,
   where there are no POSIX process groups and only the runner itself is signalled; a `SIGKILL` to
   MAF runs no handler at all, so the groups it started survive it.
+- **The ceiling is the only bound on an abandoned call.** `ToolContext` carries no abort signal
+  (WP-3.9 G16a), so a `test.run` that a failing or abandoned node leaves in flight cannot be
+  cancelled: it runs until its own timeout, at most fifteen minutes, and the node's failure does not
+  by itself end it. Adding `signal?` to `ToolContext` is WP-3.5's decision, not this WP's.
 
 It runs with the tool allowlist, not MAF's environment: `MAF_SIGNING_KEY` and every other `MAF_*`
 variable are absent, as are provider tokens (see the key bullet above). That bounds what the child is
