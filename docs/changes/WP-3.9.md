@@ -155,7 +155,9 @@ states each as implemented.
 
 - **`packages/types/src/index.ts`** — `CliAdapter.preflight?()`, an optional member (F5). Only a
   backend whose argv depends on flags MAF must find has anything to check; an adapter written
-  before this still satisfies the interface unchanged.
+  before this still satisfies the interface unchanged. It may return a `PreflightReport`
+  (`{path, version}`, G15) so a caller can name what was checked without parsing a message; an
+  adapter with nothing to report returns nothing.
 - **`packages/adapters/claude/src/ClaudeAdapter.ts`** — every governed turn and both isolated
   cli-tier sets pass `--tools`. A `claude` that does not know the flag exits 1 on every node, so a
   stale or patched CLI read as a plan full of identical failures. `preflight()` resolves `claude` on
@@ -163,9 +165,13 @@ states each as implemented.
   `--version` then `--help` — both with `backendEnv()`, both bounded at 10 s — and refuses unless
   `--help` lists `--tools`. A failure names the resolved path and the version found, so a stale
   binary is distinguishable from a missing one.
-- **`packages/cli/src/commands/run.ts`** (lines 158–163) — `maf run` calls it exactly once, after
-  the adapter is resolved and before anything is planned: before a worktree, a store or a plan
-  exists.
+- **`packages/cli/src/commands/run.ts`** (lines 155–176) — `maf run` looks the adapter up by name
+  (`lookupAdapter`, a refusal that names only an unknown adapter), calls preflight exactly once, and
+  then plans: before a worktree, a store or a plan exists. Preflight runs *instead of* the
+  availability check for an adapter that has one (G15) — a passing preflight has already proved the
+  binary runs and takes the argv, which is what `isAvailable` was asking — and an adapter without a
+  preflight still gets `resolveAdapter`. A report is said as
+  `[maf] preflight: claude <path> (<version>)`.
 - **Proof.** `packages/adapters/claude/src/__tests__/preflight.test.ts` puts a stand-in `claude` on
   PATH and proves the returned path is the binary rather than the bare name, that both questions
   were asked, and that a `--help` without `--tools` is refused naming path and version; a third
@@ -177,11 +183,21 @@ states each as implemented.
   on PATH whose `--help` has no `--tools`, through `driveRun`, which is the wiring `main.ts`
   registers. It asserts three separate facts: the throw carries the preflight sentence naming the
   binary and version (which `main.ts` turns into `[maf] error: …` and exit 1); the stand-in was
-  asked exactly `--version`, `--version`, `--help` — the availability check and the two probes —
-  so a planner call (`--print …`) was never made; and `.maf/harnesses` and `.maf/worktrees` do not
-  exist, so no store was opened. Measured: swallowing the refusal (`await preflight().catch(() => {})`)
-  fails this test, and moving the call to after the harness is resolved fails it on the
-  never-opened-store assertion.
+  asked exactly `--version`, `--help` — the two probes, with no separate availability check ahead
+  of them (G15) — so a planner call (`--print …`) was never made; and `.maf/harnesses` and
+  `.maf/worktrees` do not exist, so no store was opened. Measured: swallowing the refusal
+  (`await preflight().catch(() => {})`) fails this test, and moving the call to after the harness
+  is resolved fails it on the never-opened-store assertion.
+- **Proof of the two G15 halves.** (a) The same file's first test now returns
+  `{path: '/opt/maf/bin/claude', version: '9.9.9 (stand-in)'}` from the fake and asserts the run
+  said `[maf] preflight: claude /opt/maf/bin/claude (9.9.9 (stand-in))`. (b) A third test runs the
+  real `ClaudeAdapter` with `PATH` set to one empty directory and asserts the refusal is
+  `no executable named "claude" was found on PATH (1 directory searched)` — not the generic
+  `Adapter "claude" is not available on this system`, which named neither binary nor PATH and used
+  to answer first. Measured for (a): dropping the `say` (keeping the preflight call, `void
+  preflight`) fails test 1 and leaves the other two green. Measured for (b): putting
+  `resolveAdapter` back in front fails **both** the G7 test (the sequence becomes `--version`,
+  `--version`, `--help`) and the missing-binary test.
 
 ### The evolver cannot widen a role into a writer
 
@@ -377,7 +393,8 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.9) lists `ProcessSpawner.ts`,
 | File | Why |
 |---|---|
 | `packages/types/src/childEnv.ts` (new) | The two environment policies need one home both `@maf/adapter-base` and `@maf/tools` already depend on. |
-| `packages/types/src/index.ts` | Three additive changes, each marked `// WP-3.9`: the `childEnv` re-export, `ToolDeclarationError`, and the optional `CliAdapter.preflight?()`. Nothing existing changed shape. |
+| `packages/types/src/index.ts` | Four additive changes, each marked `// WP-3.9`: the `childEnv` re-export, `ToolDeclarationError`, the optional `CliAdapter.preflight?()` and its `PreflightReport` result. Nothing existing changed shape. |
+| `packages/cli/src/AdapterRegistry.ts` | `lookupAdapter` is split out of `resolveAdapter` so `maf run` can name an unknown adapter without asking whether its binary exists — preflight answers that better (G15). `resolveAdapter` keeps its behaviour for adapters that have no preflight. |
 | `packages/adapters/{claude,codex,gemini}/src/*Adapter.ts` | Every spawn and every `--version` probe passes `backendEnv()`. |
 | `packages/adapters/claude/src/index.ts` | Re-exports the `ClaudePreflight` result type. |
 | `packages/cli/src/commands/{run,inprocessDemo}.ts` | `run` calls the one preflight; the demo's fixture `npm test` is agent-touched code and gets `toolEnv()`. |

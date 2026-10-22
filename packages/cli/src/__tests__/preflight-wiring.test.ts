@@ -40,7 +40,10 @@ test('run preflights the claude adapter once, before it plans (WP-3.9 F5)', need
     const claude: CliAdapter = {
       ...adapter,
       name: 'claude',
-      preflight: async () => { callsBeforePreflight.push(calls.length); },
+      preflight: async () => {
+        callsBeforePreflight.push(calls.length);
+        return { path: '/opt/maf/bin/claude', version: '9.9.9 (stand-in)' };
+      },
     };
 
     const run = await driveRun([TASK, '--adapter', 'claude', '--dir', repo, '--policy', await lockFilePolicy(root)], {
@@ -52,6 +55,9 @@ test('run preflights the claude adapter once, before it plans (WP-3.9 F5)', need
     assert.deepEqual(callsBeforePreflight, [0], 'asked exactly once, before any adapter call');
     assert.ok(calls.length > 0, 'and the run went on to plan and execute');
     assert.match(run.out, /\[maf\] planning\.\.\./);
+    // A passing preflight used to be silent; the run says which binary and which version (G15).
+    assert.match(run.out, /\[maf\] preflight: claude \/opt\/maf\/bin\/claude \(9\.9\.9 \(stand-in\)\)/,
+      'the run log names the binary the adapter resolved and the version it answered with');
   });
 });
 
@@ -93,15 +99,43 @@ test('a refused preflight stops `maf run` before it plans or opens a store (WP-3
       assert.ok(message.includes(binary), `and it names the binary that answered: ${message}`);
       assert.match(message, /version 0\.1\.0/, 'and the version it found');
 
-      // Only the availability question and the two probes reached the backend: the planner's argv
-      // (`--print …`) never did, so no model call was paid for.
-      assert.deepEqual((await readFile(asked, 'utf8')).trim().split('\n'), ['--version', '--version', '--help'],
-        'exactly the availability check and the two preflight probes — no planner call');
+      // Only the two probes reached the backend: the planner's argv (`--print …`) never did, so no
+      // model call was paid for. Preflight runs instead of the availability check (WP-3.9 G15), so
+      // `--version` appears once — its own probe — and not twice.
+      assert.deepEqual((await readFile(asked, 'utf8')).trim().split('\n'), ['--version', '--help'],
+        'exactly the two preflight probes — no availability check, no planner call');
       // And nothing was opened: the harness store is the first store the run would create.
       await assert.rejects(lstat(path.join(repo, '.maf', 'harnesses')), { code: 'ENOENT' },
         'the harness store was never opened');
       await assert.rejects(lstat(path.join(repo, '.maf', 'worktrees')), { code: 'ENOENT' },
         'and no worktree was made');
+    } finally {
+      process.env['PATH'] = savedPath;
+    }
+  });
+});
+
+test('a `claude` that is nowhere on PATH is refused by name and by PATH (WP-3.9 G15)', async () => {
+  // The sentence a user reads when the CLI is not installed. Before G15 the availability check
+  // answered first — `Adapter "claude" is not available on this system` — which names neither the
+  // binary nor the PATH, so preflight's own sentence could never be the one a user saw.
+  if (process.platform === 'win32') return; // PATH-only resolution, no PATHEXT case here
+  await withRepo(async (root, repo) => {
+    const emptyBin = path.join(root, 'empty-bin');
+    await mkdir(emptyBin);
+    const savedPath = process.env['PATH'];
+    process.env['PATH'] = emptyBin;
+    try {
+      const run = await driveRun([TASK, '--adapter', 'claude', '--dir', repo], {
+        adapters: registryOf(new ClaudeAdapter()), io: headless(),
+      });
+
+      assert.ok(run.error, '`maf run` failed rather than going on');
+      const message = messageOf(run.error);
+      assert.match(message, /no executable named "claude" was found on PATH/, 'it names the binary');
+      assert.match(message, /\(1 directory searched\)/, 'and how far it looked');
+      assert.doesNotMatch(message, /is not available on this system/,
+        'the generic availability refusal never gets to answer first');
     } finally {
       process.env['PATH'] = savedPath;
     }

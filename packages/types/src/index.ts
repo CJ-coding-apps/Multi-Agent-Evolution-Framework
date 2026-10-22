@@ -1316,11 +1316,19 @@ export interface CliAdapter {
   /**
    * An optional one-time check that the backend can take the argv MAF builds for it, asked once
    * before a run plans (WP-3.9 F5). Only a backend whose argv depends on flags MAF must find has
-   * anything to check — today `claude` and its `--tools`. Throws an error that names what it found;
-   * what it returns is the adapter's own (which binary, which version), so the seam stays backend-
-   * neutral.
+   * anything to check — today `claude` and its `--tools`. Throws an error that names what it found.
+   *
+   * What it returns is the adapter's own (which binary, which version) when it has it, so a run can
+   * say `[maf] preflight: claude <path> (<version>)` on success (WP-3.9 G15); an adapter with
+   * nothing to report returns nothing and the seam stays backend-neutral.
    */
-  preflight?(): Promise<unknown>;
+  preflight?(): Promise<PreflightReport | void>;
+}
+
+/** What a preflight learned on success: the binary it resolved and the version it answered with. */
+export interface PreflightReport {
+  path: string;
+  version: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

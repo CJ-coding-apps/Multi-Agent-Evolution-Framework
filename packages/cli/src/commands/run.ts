@@ -22,7 +22,7 @@ import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
 import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterRole, roleSetFromHarness } from '@maf/roles';
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
-import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
+import { createAdapterRegistry, lookupAdapter, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { loadCommandPolicy, resolveRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
@@ -153,14 +153,27 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
   // Everything that can refuse the run without opening a store comes first.
   const adapterRegistry = ctx.adapters?.() ?? createAdapterRegistry();
-  const adapter = await resolveAdapter(cfg.adapter, adapterRegistry);
+  const adapter = lookupAdapter(cfg.adapter, adapterRegistry);
 
   // ── Preflight (WP-3.9 F5): once, before anything is planned. Claude's argv carries `--tools`
   // on every governed turn and on both isolated cli-tier sets, and a binary that does not know
   // the flag exits 1 on every node — so a plan of identical failures was how a stale CLI read.
   // Asking `--version` and `--help` here names the binary and the version found, before a
   // worktree, a store or a plan exists.
-  if (adapter.preflight) await adapter.preflight();
+  //
+  // It runs before `isAvailable` (WP-3.9 G15): the availability check refuses with a sentence that
+  // names no binary and no PATH, so its own "not found on PATH (N directories searched)" branch was
+  // unreachable — the generic refusal always came first. A passing preflight has proved the binary
+  // runs and takes the argv, which is what `isAvailable` was asking anyway; an adapter with no
+  // preflight still gets that check, and it is now the only one.
+  if (adapter.preflight === undefined) {
+    await resolveAdapter(cfg.adapter, adapterRegistry);
+  } else {
+    const preflight = await adapter.preflight();
+    if (preflight !== undefined) {
+      say(`[maf] preflight: ${adapter.name} ${preflight.path} (${preflight.version})`);
+    }
+  }
 
   const baseTools = createDefaultRegistry();
 
