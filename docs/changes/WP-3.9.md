@@ -208,13 +208,15 @@ than claimed as a change to the loader.
 
 ### Overlap with WP-3.2 (#52)
 
-Measured against `wp/3.2-lcm` with `git merge-tree`: seven files are changed by both branches —
-`packages/cli/src/__tests__/approval-gate-stack.test.ts`, `packages/cli/src/commands/{evolve,run,inprocessDemo}.ts`,
+Measured against `wp/3.2-lcm` at `ae45750` with `git merge-tree`: eight files are changed by both
+branches — `packages/cli/src/__tests__/approval-gate-stack.test.ts`,
+`packages/cli/src/__tests__/ConfigLoader.test.ts`, `packages/cli/src/commands/{evolve,run,inprocessDemo}.ts`,
 `packages/git-ops/src/SnapshotDiff.ts`, `packages/tools/src/__tests__/input-schema.test.ts` and
-`packages/types/src/index.ts`. Six auto-merge. The one conflict is
+`packages/types/src/index.ts`. Seven auto-merge. The one conflict is
 `approval-gate-stack.test.ts`, and it is comment-only: both branches added a comment above the same
 `const mafDir` line (this branch saying the directory is created here; WP-3.2 saying the stores do
-not create it). Keeping either comment resolves it; the code either side adds is identical.
+not create it). Keeping either comment resolves it; the rest of what either side adds there —
+including the `mkdir` call and its import — is identical.
 
 ### The `claude` preflight check
 
@@ -225,7 +227,9 @@ flag-support check was added afterwards.
 ## Verification
 
 - `pnpm -r build` and `pnpm -r typecheck` clean, and `grep "error TS"` over the build output = 0.
-- Every package suite: `pnpm -r test` (counts are in the PR body).
+- Every package suite: `pnpm -r test` — **1191 tests, 1190 passed, 1 skipped, 0 failed**, measured
+  at `5e17601` (the last commit on this branch that changes code; the commits after it are this
+  fragment and `docs/SECURITY.md`).
 - The four repository guards: `check:build-output`, `check:test-scripts`, `check:workspace-deps`,
   `check:doc-refs`.
 
