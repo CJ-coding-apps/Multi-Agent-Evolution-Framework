@@ -198,6 +198,15 @@ states each as implemented.
   and `gate` — which is how a later consumer reaches the round. Measured: N3e, the veto path
   pushing to `rounds` and never calling `record`, fails exactly this test and nothing else
   (25/26, on `the needs-approval round was written to the graph`).
+- **Proof the command's permission map is the one the gate reads (round 2, G9).** The map is built
+  in `cli/src/commands/evolve.ts` from `createDefaultRegistry()`, and nothing proved it reached the
+  loop: mapping every tool to `read` at that construction passed the whole cli suite (M23).
+  `packages/cli/src/__tests__/eval-commands.test.ts` now drives `maf evolve` end to end — the real
+  registry, loop and gate; only the stack and adapter stand in — with a meta-model that widens the
+  read-only `analyst` role with `fs.write`. The recorded round is `needs-approval` at
+  `b4-write-tool-widening`, naming `"fs.write"`, with no critic call; under an all-`read` map the
+  edit is not a widening and the manifest reaches the critic. Measured: M23 fails exactly this
+  test (3/4 in that file).
 
 ### Every `.maf/` JSON file is read through one prototype-key reviver
 

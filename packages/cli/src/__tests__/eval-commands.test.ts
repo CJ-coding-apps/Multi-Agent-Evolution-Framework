@@ -146,6 +146,70 @@ test('maf evolve refuses an unknown tool id at the invariant stage, naming the k
   }
 });
 
+// ORACLE (WP-3.9 round 2, G9): the permission map is part of the gate's input, and nothing proved
+// the map `maf evolve` builds reaches the loop — mapping every tool to `read` at the options
+// construction survived the whole cli suite. The command runs end to end here (real registry, loop
+// and gate), with a meta-model that widens the read-only `analyst` role with `fs.write`. The round
+// can only come back `needs-approval` if the map says `fs.write` is a write: under an all-`read`
+// map it is not a widening, and the manifest reaches the critic instead.
+test('maf evolve gives the gate each tool\'s registry permission: fs.write widens analyst into an approval', async (t) => {
+  const MANIFEST = '```json\n' + JSON.stringify({
+    edit: { kind: 'adjust_tool_allowlist', role: 'analyst', add: ['fs.write'], remove: [] },
+    expectedImprovement: 'x', targetTasks: ['coder-sum'],
+  }) + '\n```';
+
+  const { root } = await freshClone();
+  try {
+    const calls: string[] = [];
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        calls.push(o.systemPrompt ?? '');
+        return { success: true, output: MANIFEST, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+    t.mock.method(console, 'log', () => {});
+
+    const graph = {
+      run: async () => [], addNode: async () => 'id', addEdge: async () => 'e',
+    } as unknown as MemoryGraph;
+    t.mock.method(wiring, 'buildRunStack', async () => ({
+      adapter, graph,
+      securityPrompt: '',
+      dispatchTask: async () => 'done',
+      close: () => {},
+    }) as unknown as wiring.RunStack);
+
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
+
+    const reportDir = path.join(root, '.maf', 'evolve');
+    const reports = (await readdir(reportDir)).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1, 'the command wrote one report');
+    const report = JSON.parse(await readFile(path.join(reportDir, reports[0]!), 'utf8')) as {
+      rounds: {
+        outcome: string; note: string;
+        manifest?: { edit: { role: string; add: string[] } };
+        gate?: { verdict: string; reason: string };
+      }[];
+      ships: number;
+    };
+    assert.equal(report.ships, 0);
+    assert.equal(report.rounds[0]?.outcome, 'needs-approval',
+      'the widening reached the gate as one: the map said fs.write is not a read');
+    assert.equal(report.rounds[0]?.manifest?.edit.role, 'analyst');
+    assert.deepEqual(report.rounds[0]?.manifest?.edit.add, ['fs.write']);
+    assert.match(report.rounds[0]?.note ?? '', /b4-write-tool-widening/);
+    assert.match(report.rounds[0]?.gate?.reason ?? '', /"fs\.write"/, 'the refusal names the tool it would have granted');
+    assert.equal(calls.filter((s) => s.includes('critic')).length, 0, 'refused before any further model call');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('on a fresh clone, evolve starts from the harness goldens evaluates: the committed default', async (t) => {
   const { root, defaultSha } = await freshClone();
   try {
