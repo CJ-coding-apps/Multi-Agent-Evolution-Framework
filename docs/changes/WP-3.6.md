@@ -39,6 +39,34 @@ and the run did another. Both builders now apply the same rule.
 Specs are JSON only. `@maf/planning-agent` has no YAML parser and the planner's own output is JSON, so
 reading YAML would mean a new dependency for a format this path does not produce.
 
+## Docs
+
+**A plan can be a file.** `--plan-from <spec>` reads a JSON workflow spec — `{"nodes": [...], "edges": [...]}` — and runs that DAG instead of asking the planner. There is no model call, the same file always yields the same DAG (ids come from its content, not the clock), and the spec is refused before anything runs when it names one node twice, names an edge endpoint the spec does not define, or gives a node an `agentRole` the role set does not define. `edges` are ordering constraints: `a -> b` means `b` starts only after `a` succeeded. The path is resolved against the directory you run `maf` from; specs are JSON only.
+
+This paragraph is the README text the first commit on this branch added. Docs go by fragment, so it
+lives here and the branch's net diff leaves `README.md` unchanged.
+
+### Files outside the spec's list, and why
+
+The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` `--plan-from` flag and
+`DagParser.ts`. Everything else this PR changes:
+
+- **`packages/cli/src/commands/run.ts`** — the `--plan-from <spec>` flag (this is the spec's "run.ts
+  flag") and the branch it selects. Declared because the diff also imports `DagSynthesizer`, resolves
+  the spec path against the working directory, prints the plan line, and applies `config.dag` to the
+  file-read DAG through the same `applyDagSettings` the planned path uses. No other behaviour of the
+  command changes.
+- **`.github/workflows/ci.yml`** — two steps at the end of the e2e job: the two-node `--plan-from` run
+  (the test file the step runs), and a run of the built CLI on a spec naming `n1` twice that must stop
+  with `duplicate node id "n1"`. The acceptance asks the CI e2e job to use the spec for a two-node run.
+  **This file is maintainer-reserved.** The change stands only with CJ's written one-PR exception,
+  which was pending when this commit was written; no other line of the file changes.
+- **`packages/cli/src/__tests__/plan-from.test.ts`** (new), **`packages/dag-runner/src/__tests__/plan-spec.test.ts`**
+  (new), **`packages/planning-agent/src/__tests__/DagSynthesizer.test.ts`** (extended) — the tests for
+  the change.
+- **`README.md`** — the first commit added the paragraph above; this second commit removes it, so the
+  net diff against `wp/phase-3b` does not touch the file.
+
 ## Proof
 
 - `packages/dag-runner/src/__tests__/plan-spec.test.ts` — an edge makes its target depend on its
