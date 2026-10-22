@@ -175,6 +175,73 @@ test('a decomposed name matches a Deny rule written in composed form, and an All
   );
 });
 
+// ─── HS16: two passes, and the stricter verdict decides ────────────────────
+
+test('HS16: a folded Escalate above a Deny does not lift the Deny on macOS or Windows', async () => {
+  // The reported loosening, exactly: `DOCS/x.env` matches the folded `docs/**` Escalate at priority
+  // 200, so a single folded pass answers Escalate and never reaches the Deny below it — a refusal
+  // nobody can lift became one approval away from permitted. The exact pass finds the Deny.
+  const rules = [
+    rule('docs-escalate', 200, { toolId: FS_WRITE, pathGlob: 'docs/**' },
+      { kind: 'Escalate', requiresApproval: true }),
+    rule('deny-dotenv', 100, { toolId: FS_WRITE, pathGlob: '**/*.env*' },
+      { kind: 'Deny', reason: 'dotenv files are never written' }),
+  ];
+
+  for (const platform of ['darwin', 'win32'] as const) {
+    const engine = engineWith(rules, { platform });
+    assert.equal(await verdictFor(engine, 'DOCS/x.env'), 'Deny', `${platform}: the stricter verdict wins`);
+    // The operator's own spelling is still the escalation the operator wrote.
+    assert.equal(await verdictFor(engine, 'docs/x.env'), 'Escalate', platform);
+  }
+
+  // The mutant `take the folded verdict only`: with the Deny removed, one folded pass is all that
+  // is left, and it answers Escalate for `DOCS/x.env`. A one-pass engine returns this verdict.
+  const foldedAlone = engineWith([rules[0]!], { caseInsensitivePaths: true });
+  assert.equal(await verdictFor(foldedAlone, 'DOCS/x.env'), 'Escalate');
+
+  // Linux, unchanged: nothing folds, so the spelled-out Deny still decides and `.ENV` is `.ENV`.
+  const linux = engineWith(rules, { platform: 'linux' });
+  assert.equal(await verdictFor(linux, 'DOCS/x.env'), 'Deny');
+  assert.equal(await verdictFor(linux, '.ENV'), 'Allow');
+});
+
+test('HS16: Indeterminate is stricter than a folded Escalate, so an unaskable rule still refuses', async () => {
+  // `Indeterminate` sits above `Escalate` because an approval lifts an escalation, and there is
+  // nothing a human can approve about a rule that could not be asked. The exact pass reaches the
+  // unaskable rule; the folded pass would stop at the Escalate above it.
+  const broken = new PolicyEngine(
+    { run: async (): Promise<never> => { throw new Error('graph is down'); } } as never,
+    { caseInsensitivePaths: true },
+  );
+  broken.loadRules([
+    rule('docs-escalate', 200, { toolId: FS_WRITE, pathGlob: 'docs/**' },
+      { kind: 'Escalate', requiresApproval: true }),
+    rule('unaskable', 100, {
+      toolId: FS_WRITE,
+      pathGlob: '**/*.env',
+      memoryPattern: { cypher: 'MATCH (n) RETURN n' },
+    }, { kind: 'Deny', reason: 'no' }),
+  ]);
+  assert.equal(await verdictFor(broken, 'DOCS/x.env'), 'Indeterminate');
+});
+
+test('HS16: the HS5 probes give the same verdicts on the two-pass engine', async () => {
+  const rules = [
+    rule('docs-allowed', 200, { toolId: FS_WRITE, pathGlob: 'docs/**' }, { kind: 'Allow' }),
+    rule('deny-env', 100, { toolId: FS_WRITE, pathGlob: '**/.env*' }, { kind: 'Deny', reason: 'no' }),
+    rule('deny-ts', 100, { toolId: FS_WRITE, pathGlob: '**/*.ts' }, { kind: 'Deny', reason: 'no' }),
+  ];
+  for (const platform of ['darwin', 'win32'] as const) {
+    const engine = engineWith(rules, { platform });
+    assert.equal(await verdictFor(engine, 'docs/.env'), 'Allow', `${platform} docs/.env`);
+    assert.equal(await verdictFor(engine, 'docs/a.ts'), 'Allow', `${platform} docs/a.ts`);
+    for (const upper of ['.ENV', 'DOCS/.env', 'DOCS/a.ts']) {
+      assert.equal(await verdictFor(engine, upper), 'Deny', `${platform} ${upper}`);
+    }
+  }
+});
+
 // ─── the option reaches the engine through the loader ──────────────────────
 
 async function withPolicy<T>(body: string, fn: (file: string) => Promise<T>): Promise<T> {
