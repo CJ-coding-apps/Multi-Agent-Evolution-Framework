@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
-import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
+import { makeRunId, makeTaskId, makeAgentId, redactText } from '@maf/types';
 import type { AdapterName, CliAdapter, DagNode, RetryPolicy } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
@@ -354,10 +354,14 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       ...(cfg.model !== undefined ? { modelOverride: cfg.model } : {}),
     });
 
-    // Record run start in memory graph (harness provenance)
+    // Record run start in memory graph (harness provenance). The description is what the user
+    // typed, and this node is recalled by a later run and rendered into its planner prompt, so it
+    // is masked here on the way in (WP-3.9 G1). `GraphAwareInjector` masks again on the way out:
+    // memory also holds nodes this path did not write, and a mask that exists only at one end
+    // stops being true the moment a second writer appears.
     await graph.addNode({
       kind: 'Run', label: runId,
-      properties: { taskDescription, adapter: cfg.adapter, harnessId: harness.id, harness_sha: harness.sha },
+      properties: { taskDescription: redactText(taskDescription), adapter: cfg.adapter, harnessId: harness.id, harness_sha: harness.sha },
       runId,
     });
 
