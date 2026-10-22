@@ -81,6 +81,40 @@ as implemented.
   to an ordinary role is rejected at `b4-write-tool-widening` with the tool named; the same edit
   targeting a safety-adjacent role returns `needs-approval` at b3; adding a read tool still ships.
 
+## Files outside the spec's list, and why
+
+The spec (`docs/BUILD_PLAN.md`, WP-3.9) lists `ProcessSpawner.ts`,
+`packages/tools/src/plugins/{patch,test-runner,grep}.ts`, the config loaders,
+`packages/evolver/src/gate.ts` and `docs/SECURITY.md`. This branch also changes:
+
+| File | Why |
+|---|---|
+| `packages/types/src/childEnv.ts` (new), `packages/types/src/index.ts` | The two environment policies need one home both `@maf/adapter-base` and `@maf/tools` already depend on; `index.ts` re-exports them. |
+| `packages/adapters/{claude,codex,gemini}/src/*Adapter.ts` | Every spawn and every `--version` probe passes `backendEnv()`. |
+| `packages/git-ops/src/SnapshotDiff.ts` | `runIsolatedGit` is a tool child: git's environment is built from `toolEnv()`, not `process.env`. |
+| `packages/tools/src/plugins/git.ts` | The same boundary for the agent's `git.*` tools. |
+| `packages/evolver/src/loop.ts` | Threads `EvolveOptions.toolPermissions` into the gate. |
+| `packages/cli/src/commands/evolve.ts` | Supplies `toolPermissions` from `createDefaultRegistry()`. |
+| `packages/adapters/base/src/__tests__/ProcessSpawner.test.ts`, `packages/types/src/__tests__/childEnv.test.ts`, `packages/tools/src/__tests__/{patch,test-runner,git-args,worktree-confinement}.test.ts`, `packages/evolver/src/__tests__/evolver.test.ts` | Proof for the changes above. |
+| `docs/changes/WP-3.9.md` | This fragment. |
+
+The spec's "config loaders" item needed no production change; that is recorded above rather than
+claimed as a change.
+
+### Overlap with WP-3.2 (#52)
+
+Three files are also changed by `wp/3.2-lcm`: `packages/cli/src/commands/evolve.ts`,
+`packages/git-ops/src/SnapshotDiff.ts` and `packages/types/src/index.ts`. The hunks are disjoint —
+WP-3.2 adds LCM plumbing, this branch adds `toolPermissions`, `toolEnv()` and a re-export — but
+whichever of #52/#53 merges second resolves two textual conflicts by keeping both sides.
+
+### The `claude` preflight check
+
+It is **not** in this branch. The only `claude` probe it touches is the existing
+`ClaudeAdapter.isAvailable()` (`claude --version`), and only to give it `backendEnv()`; no
+flag-support or version gate is added. On this branch "preflight" appears only in two unrelated
+test comments (`init.test.ts`, `run-settings.test.ts`).
+
 ## Verification
 
 - `pnpm -r build` and `pnpm -r typecheck` clean.
