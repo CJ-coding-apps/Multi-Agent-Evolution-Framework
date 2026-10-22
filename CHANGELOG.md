@@ -11,26 +11,44 @@ is entitled to know which of their own code stops compiling.
 
 ## [0.5.1] - 2026-10-22
 
-A patch closing two holes in `patch.apply`'s path declaration. `patch.apply` decides which files a diff
-touches by reading its headers, and the policy engine matches path rules against that list. A header with
-a timestamp — the normal output of plain `diff -u`: a `+++` line reading `+++ b/Cargo.lock`, then a TAB,
-then `2026-01-01 …` — declared the name with the tab and the timestamp still on it, which
-`protect-lock-files` does not match; and an `Index:`-only header declared nothing at all, so every path
-rule missed, `deny-env-files` included. In both cases the call was allowed and `patch` wrote the file.
-Found by the WP-3.9 verifier against the shipped `.maf/policy.yaml`. No API changes; a policy file of the
-user's own is unaffected.
+A patch closing two holes in `patch.apply`'s path declaration, and replacing the design that produced
+them.
+
+`patch.apply` decides which files a diff touches, and the policy engine matches path rules against that
+list. Version 0.5.0 read the diff's headers with its own parser, and the parser was wrong in ways a
+header could choose: a timestamp — the normal output of plain `diff -u`: a `+++` line reading
+`+++ b/Cargo.lock`, then a TAB, then `2026-01-01 …` — declared the name with the tab and the timestamp
+still on it, which `protect-lock-files` does not match; an `Index:`-only header declared nothing at all,
+so every path rule missed, `deny-env-files` included; and five further header forms got past the first
+round of fixes (a space before the timestamp, octal escapes, indented sections, `Index:` with no space,
+`//` in the path prefix). Every one of them was a way to write a file under an `Allow`.
+
+There is no third parser. **`patch.apply` no longer reads headers.** It asks `git apply` which files the
+diff names (`--numstat -z`, on the same temporary file and with the same `-p` the apply is given), so the
+declaration and the write are one program reading one set of bytes. What git cannot describe as a list
+of paths is refused: renames, copies, mode changes, symlinks, submodules and binary patches (from
+`--summary`), and absolute or `..` names. `--check` runs before the apply, `--recount` is the only
+loosening, and `--reject` is never passed, so a failed apply leaves no `.orig` and no `.rej`. Path
+matching is case-insensitive on macOS and Windows, where the filesystem is, so a `+++ b/.ENV` header is
+held to the `**/.env*` rule; paths are NFC-normalized on every platform.
+
+This is stricter than `patch`, deliberately: a context diff, an `Index:`-only diff, a normal diff, an
+ed diff, or a wholly indented section now fails instead of being applied, because git applies unified
+diffs only. A diff that cannot be declared is refused before the policy is asked, recorded as a `Deny`
+under `builtin:declaration`, and nothing is written.
+
+No API changes. A policy file of the user's own is unaffected; a workflow that fed `patch.apply` a
+non-unified diff has to feed it a unified one.
 
 ### Fixed
 
-- **`patch.apply` reads every header form `patch` reads, and refuses a diff whose file names it cannot
-  read** (F1). `extractDiffPaths` now cuts each name at the first TAB outside quotes (so a timestamp is not
-  part of the name), reads `Index:` names and a context diff's `***`/`---` pair (and skips its
-  `*** 1,4 ****` hunk separators), and applies the same `-p` strip it passes to `patch` — so the declared
-  path and the written path are the same. A diff that names no file, or whose names all vanish under the
-  chosen strip, is refused with `ToolDeclarationError` before the policy is asked; the gate records it as
-  a `Deny` under rule id `builtin:declaration`, attested and reported as the refusal it is rather than run
-  as a call policy allowed. Tests cover a timestamped `+++`/`---`, a context diff, an `Index:`-only diff and
-  a `diff --git` header with a TAB, each against the shipped policy and each for `.env`.
+- **`patch.apply` declares the files `git apply` writes, and refuses what git cannot name** (F1). The
+  declaration comes from `git apply --numstat -z` on the same temporary file, with the same `-p`, that
+  the apply is given; `--check` refuses a diff that would not apply before anything is written. git
+  runs with `toolEnv()` and `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, so no repository
+  setting runs a hook or an fsmonitor. Tests cover every row of the conformance table in
+  `VERDICT-Verify2b` — 50 header forms, each asserted against the shipped `.maf/policy.yaml` through the
+  real gate — and its 24 regression cases, plus rename-away, mode change, symlink creation and `.ENV`.
 
 ## [0.5.0] - 2026-10-20
 
