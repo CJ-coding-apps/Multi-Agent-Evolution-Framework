@@ -22,6 +22,28 @@ interface WorkflowSpec {
 }
 
 const DEFAULT_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;
+
+/** A workflow spec that names a prototype key, refused before any field of it is read. */
+class SpecKeyError extends Error {}
+
+/**
+ * The key names that reach a prototype when a spec is copied with a plain assignment — the same
+ * three `parseYamlDocument` refuses for every other configuration file (WP-3.9 F10). A DAG spec
+ * reaches `fromSpec` without passing through the YAML loader when it is read as JSON, so the
+ * refusal is repeated here rather than assumed.
+ */
+const PROTOTYPE_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** `JSON.parse` reviver: a key that names a prototype fails the parse, at any depth. */
+function refusePrototypeKey(key: string, value: unknown): unknown {
+  if (PROTOTYPE_KEYS.has(key)) {
+    throw new SpecKeyError(
+      `DagParser: the workflow-spec key ${JSON.stringify(key)} names a prototype ` +
+      '(__proto__, constructor, prototype), which a spec may not name at any depth.',
+    );
+  }
+  return value;
+}
 const DEFAULT_CONFIG: DagConfig  = { maxConcurrent: 4, retryPolicy: DEFAULT_RETRY, timeoutMs: 600_000, reviewGateNodeIds: [] };
 
 export class DagParser {
@@ -41,8 +63,10 @@ export class DagParser {
   static fromYamlText(text: string, runId: RunId, roles: RoleResolver): Dag {
     let spec: WorkflowSpec;
     try {
-      spec = JSON.parse(text) as WorkflowSpec;
-    } catch {
+      spec = JSON.parse(text, refusePrototypeKey) as WorkflowSpec;
+    } catch (err) {
+      // A refused key is not a syntax failure, and reporting it as one would hide the reason.
+      if (err instanceof SpecKeyError) throw err;
       throw new Error(`DagParser: could not parse workflow spec as JSON. Install "yaml" package for YAML support.`);
     }
     return DagParser.fromSpec(spec, runId, roles);

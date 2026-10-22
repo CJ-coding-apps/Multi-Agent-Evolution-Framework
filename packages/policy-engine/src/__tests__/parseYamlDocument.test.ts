@@ -79,11 +79,20 @@ test('an alias bomb is refused, not expanded', () => {
   assert.match(err.reason, /alias/i);
 });
 
-test('a "__proto__" key is an own key of the value, never its prototype', () => {
-  const { value } = parseYamlDocument('__proto__:\n  polluted: true\nb: 1\n', '/p');
-  assert.ok(typeof value === 'object' && value !== null);
-  assert.equal(Object.getPrototypeOf(value), Object.prototype);
-  assert.ok(Object.keys(value).includes('__proto__'), 'a loader sees the key, so it can refuse it');
+test('a prototype key is refused at parse time, at any depth (WP-3.9 F10)', () => {
+  // `toJS` would make `__proto__` an own key, so the loaded value is not itself poisoned — but a
+  // reader that copies it with a plain assignment turns it into one. Refusing at the one parse
+  // every `.maf/` file goes through makes the safety the loader's, not each reader's to remember.
+  for (const key of ['__proto__', 'constructor', 'prototype']) {
+    const err = syntaxError(`${key}:\n  polluted: true\nb: 1\n`);
+    assert.equal(err.line, 1);
+    assert.ok(err.reason.includes(key), err.reason);
+    assert.match(err.reason, /names a prototype/);
+  }
+  // Nested, inside a flow mapping, and as a value's key rather than the document's own.
+  assert.equal(syntaxError('dag:\n  __proto__:\n    maxConcurrent: 99\n').line, 2);
+  assert.equal(syntaxError('{\n  "a": { "constructor": 1 }\n}\n').line, 2);
+  assert.equal(syntaxError('roles:\n  - role: x\n    prototype: 1\n').line, 3);
   assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
 });
 

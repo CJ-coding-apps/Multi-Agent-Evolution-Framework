@@ -161,7 +161,11 @@ test('the circuit section is not accepted: nothing on the run path reads it', as
   });
 });
 
-test('a "__proto__" key is refused and cannot reach any prototype', async () => {
+test('a prototype key is refused and cannot reach any prototype', async () => {
+  // Since WP-3.9 F10 the refusal happens in `parseYamlDocument`, which every `.maf/` file goes
+  // through, so the loader's own unknown-key check is no longer what catches these — the file is
+  // refused one layer earlier. What this regression pins is unchanged: the file is refused, and
+  // no key reaches a prototype.
   for (const text of [
     '__proto__:\n  worktree: false\n',
     '{ "__proto__": { "worktree": false } }',
@@ -169,7 +173,7 @@ test('a "__proto__" key is refused and cannot reach any prototype', async () => 
     'constructor:\n  prototype:\n    polluted: true\n',
   ]) {
     await withConfig(text, async (file) => {
-      await rejectsWith(ConfigLoader.load(file), /unknown key "(dag\.)?(__proto__|constructor)"/);
+      await rejectsWith(ConfigLoader.load(file), /names a prototype \(__proto__, constructor, prototype\)/);
     });
   }
   assert.equal(({} as Record<string, unknown>)['worktree'], undefined);
