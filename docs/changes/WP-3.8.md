@@ -32,6 +32,10 @@ reported from there — the open names the real reason.
 `catch { /* ignore already-exists */ }`, so a read-only file, a full disk or an unopenable database
 produced a graph that accepted no writes and silently read back nothing. `IF NOT EXISTS` makes the
 expected case a success, so the catch now tolerates only `/already exists/i` and rethrows the rest.
+F2: the distinction is pinned by `schema-setup.test.ts`, which supplies a driver whose DDL fails on
+cue (a real Kùzu cannot be asked to) — the rethrow, the tolerance, and setup running once. Restore
+the swallow-all catch and the first test fails. This is why `MemoryGraph`'s constructor takes an
+optional `GraphDriver`: the failure path has no other way to be exercised.
 
 **Table setup starts with the first query, not the constructor (F15).** The constructor used to
 start the DDL sequence immediately. `buildRunStack` can fail at once after constructing the graph
@@ -64,18 +68,38 @@ rescue tool must not lose the row it exists to carry.
 - `maf graph import <file> [-d <dir>] [--db <path>]` — `--db` must name a fresh database; the
   refusal names the count and suggests `--db`.
 
-**The guard.** Opening a 0.7.x directory now fails with a `GraphOpenError` whose message says what
-happened, names the two commands, and states the case no export can rescue:
+**The guard.** Opening a 0.7.x directory now fails with a `GraphOpenError` whose message names the
+path, says what the graph holds, and gives the one command that keeps it:
 
-> The graph at <path> is a directory written by Kùzu 0.7.x; this maf uses Kùzu 0.11.3, which writes
-> a single file and cannot read the older format (Kùzu changed it before 1.0). Export it with the
-> maf that wrote it — `maf graph export --db <path> --out graph.json` — then import that JSON with
-> this maf: `maf graph import graph.json --db <path>.v11`. If the maf that wrote it predates
-> `graph export`, the graph cannot be migrated; move <path> aside and start a new graph. Original
-> error: …
+> The graph at <path> was written by Kùzu 0.7.x, and this maf uses Kùzu 0.11.3, which cannot read
+> the older format (Kùzu changed it before 1.0). It holds this repository's recall history — the
+> failures and plans earlier runs recorded — and nothing else: your code, branches and attestations
+> live elsewhere and are unaffected, and a new graph simply starts empty. To keep the old one and
+> let maf start a new graph, run:
+>
+>     mv <path> <path>.0.7-backup
+>
+> maf does not move or delete it for you. Original error: …
+
+(U1, the architect's ruling. The message this replaced printed an export-then-import route that no
+installed maf could carry out: no released version has `graph export`, and this Kùzu cannot read
+the format it would have to export. The export step is gone; the refusal is not — maf will not move
+or delete the user's file.)
 
 `maf graph export` on such a database exits non-zero and prints that message on stderr; it does not
 write an empty file.
+
+**The exporter refuses what the importer would refuse (F1).** `exportGraph` checks every row against
+the import's own rules — non-empty `id`, `kind`, `label`, `runId`, `createdAt`, `updatedAt`; a
+non-empty `id`, `fromId`, `toId`, `relation`, `createdAt` and a finite `weight` on an edge — and
+stops on the first bad row with a `GraphTransferError` naming the row and the field. The check runs
+before the export object is returned, so no caller has a file to write: an export the importer would
+reject is not an export.
+
+**A missing database is a failure (F3).** `maf graph export --db <path>` on a path that holds no
+graph exits non-zero with `no graph at <path>` and creates nothing — not the export file, not the
+database, not its parent directory. Opening the path instead would create an empty database and
+write a file that reads like a successful rescue of nothing.
 
 ## Acceptance
 
@@ -83,8 +107,8 @@ write an empty file.
 |---|---|
 | `maf graph export` writes nodes and edges as JSON | `packages/cli/src/__tests__/graph-cli.test.ts` — import → export through the built CLI, then the file's `format`, `formatVersion`, `kuzuVersion`, 4 nodes and 3 edges are asserted |
 | `import` restores them into a fresh database and a query returns the same rows | `packages/memory-graph/src/__tests__/graph-transfer.test.ts` — round trip with a 3-node/2-edge graph (property, timestamp and `0.5` weight equality), and the committed 0.7.1 export imported on 0.11.3 with `recallFailures` by title and by path returning the committed rows |
-| opening a 0.7-format database prints export/upgrade instructions and exits non-zero | `graph-transfer.test.ts` (the `GraphOpenError` and its four clauses) and `graph-cli.test.ts` (exit code, stderr, no output file) |
-| the four real-Kùzu tests pass on 0.11.3 | the existing 24 memory-graph tests pass unchanged on 0.11.3 (`failure-recall`, `graph-parameters`, `native-lifetime`, `query-subgraph`, `no-escaper`); 33/33 with the new file |
+| opening a 0.7-format database names the path, says what it held, gives the `mv` command and exits non-zero | `graph-transfer.test.ts` (each clause of the `GraphOpenError` message, and that no `graph export`/`graph import` appears in it) and `graph-cli.test.ts` (exit code, stderr, no output file, the old graph still in place) |
+| the four real-Kùzu tests pass on 0.11.3 | 37/37 across `failure-recall`, `graph-parameters`, `native-lifetime`, `query-subgraph`, `no-escaper`, `graph-transfer` and `schema-setup` — 32 unchanged, one rewritten in place (the 0.7.x refusal, now the `mv` message), 4 added (three in `schema-setup.test.ts`, one export-invariant test) |
 | `db.close()` is called and does not crash | `graph-transfer.test.ts` — a closed graph is a single file with no `.wal` beside it and reopens with its rows; the existing native-lifetime tests (20 opens, GC child, in-flight close) pass on 0.11.3 |
 
 New tests also pin: a non-empty target is refused before any write; a file from a newer
@@ -108,7 +132,7 @@ reader for the old format in 0.11.3 to shim). **Rejected — a file copy as the 
 storage layout is exactly what changed, and a stale `.wal` beside a restored database replays onto it
 — the D2 rule recorded in the plan).
 
-## Recorded limit — pre-0.6.0 graphs cannot be migrated
+## Ruling — a 0.5.x memory graph is not carried into 0.6.0
 
 The plan's ordering constraint was that `graph export` ship **while maf is on 0.7.x**, so that an
 existing graph could be exported by the version that wrote it. No released maf carries `graph
@@ -117,14 +141,22 @@ same change. The committed `fixtures/kuzu-0.7.1-export.json` was generated by ru
 exporter on 0.7.1 **before** the bump, which proves the artifact, but it cannot retroactively give
 0.5.0 the command.
 
-Consequence: a user who already has a `.maf/memory.kuzu` directory from maf ≤ 0.5.0 has no supported
-maf that can export it. The guard states this in the message ("If the maf that wrote it predates
-`graph export`, the graph cannot be migrated; move <path> aside and start a new graph") rather than
-implying a rescue that does not exist.
+**U1, the maintainer's ruling:** a memory graph from 0.5.x or earlier is **not** carried into
+0.6.0. The graph holds recall history — the failures and plans earlier runs recorded — and nothing
+else; code, branches and attestations live elsewhere and are unaffected. The message above is the
+whole upgrade path: it says the new graph starts empty and gives the one command that sets the old
+one aside. No exporter is added to the old Kùzu: shipping one would be a feature in a patch release.
 
-**For the maintainer:** either accept the fresh-graph requirement in the 0.6.0 release notes, or
-hold the bump back and ship the exporter first. This fragment takes no position; the branch stops at
-the PR.
+0.6.0 release-note line: *"Upgrading from 0.5.x: the memory graph starts empty; maf tells you the
+one command to keep the old one aside."*
+
+## Files outside the WP row's ownership (F5)
+
+`packages/cli/src/main.ts` (+2 lines, to register the `graph` command) and the new command test
+`packages/cli/src/__tests__/graph-cli.test.ts` are not in WP-3.8's file list. Both are required by it:
+the command does not exist for a user until it is registered, and the process-level behaviour (exit
+code, the sentence on stderr, no file written) is not observable from the memory-graph package. No
+other file outside the row's ownership changed.
 
 ## Fixtures
 
