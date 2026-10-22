@@ -59,6 +59,32 @@ test('the planner recalls a recorded failure on a similar task into its prompt',
   assert.match(prompt, /Task "Add rate limiting to the login endpoint" \(coder\) → GateRefused: Security review refused the change from node n1/);
 });
 
+test('a credential already in the graph is redacted on its way into <past-failures> (WP-3.9 F4)', async () => {
+  // Written straight into the graph, the way a record from before the write boundary looks. The
+  // scheduler redacts on the way in, but a graph that outlives the fix still holds what it holds,
+  // and this text becomes part of a model's system prompt: the read side must not trust it either.
+  const awsKey = 'AKIAIOSFODNN7EXAMPLE';
+  await graph.recordFailure({
+    runId:   makeRunId('run-before-the-fix'),
+    nodeId:  makeNodeId('n9'),
+    label:   'rotate',
+    task:    `Rotate the deploy key ${awsKey}`,
+    role:    'coder' as RoleName,
+    reason:  'adapter_failed',
+    message: `the backend rejected ${awsKey}`,
+  });
+
+  const prompt = await systemPromptFor('rotate the deploy key');
+  assert.match(prompt, /<past-failures>/);
+  assert.doesNotMatch(prompt, /AKIAIOSFODNN7EXAMPLE/, 'the key is not replayed to the planner');
+  assert.match(prompt, /\[REDACTED:aws-access-key\]/);
+
+  const detector = new FailurePatternDetector(graph);
+  const rendered = detector.formatAsContext(await detector.detectForTitle('rotate the deploy key'));
+  assert.match(rendered, /<past-failures>/);
+  assert.doesNotMatch(rendered, /AKIAIOSFODNN7EXAMPLE/, 'the other <past-failures> renderer redacts too');
+});
+
 test('every planned node carries the run title, on the JSON plan and on the fallback plan', async () => {
   // F1: the node's `taskDescription` is its own step; the title is what the next plan recalls by.
   const planWith = (planText: string) => new RetrievalAugmentedPlanner({

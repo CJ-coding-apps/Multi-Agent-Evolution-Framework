@@ -4,6 +4,7 @@ import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, AssistantTurn,
   ToolInput, ToolPlugin, TurnAdapter, TurnMessage,
 } from '@maf/types';
+import { refusePrototypeKey } from '@maf/types';
 import type { GoldenTask } from './GoldenTask.js';
 import { JUDGE_SYSTEM_PROMPT, formatJudgeVerdict } from './judge.js';
 
@@ -173,7 +174,9 @@ export async function loadScriptedTasks(corpusRoot: string, corpus: readonly Gol
   const file = path.join(corpusRoot, SCRIPTED_FILE);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(file, 'utf8'));
+    // WP-3.9 G5: a corpus file, read through the shared reviver — a refused key is reported with
+    // the file's path, like any other unreadable script file.
+    parsed = JSON.parse(await readFile(file, 'utf8'), refusePrototypeKey);
   } catch (err) {
     throw new Error(`The scripted adapter reads its scripts from ${file}, which could not be read as JSON: ${err instanceof Error ? err.message : String(err)}`);
   }

@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import type {
   Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
 } from '@maf/types';
-import { makeNodeId, DEFAULT_RETRY_POLICY } from '@maf/types';
+import { makeNodeId, DEFAULT_RETRY_POLICY, PrototypeKeyError, refusePrototypeKey } from '@maf/types';
 
 interface WorkflowSpec {
   id?:   string;
@@ -22,6 +22,11 @@ interface WorkflowSpec {
 }
 
 const DEFAULT_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;
+
+// WP-3.9 G5: the reviver is shared with every other JSON file reader (`@maf/types`). A DAG spec
+// reaches `fromSpec` without passing through the YAML loader when it is read as JSON, so the
+// refusal that `parseYamlDocument` makes for configuration files (WP-3.9 F10) is made here too —
+// from the one implementation, so it cannot drift.
 const DEFAULT_CONFIG: DagConfig  = { maxConcurrent: 4, retryPolicy: DEFAULT_RETRY, timeoutMs: 600_000, reviewGateNodeIds: [] };
 
 export class DagParser {
@@ -41,8 +46,10 @@ export class DagParser {
   static fromYamlText(text: string, runId: RunId, roles: RoleResolver): Dag {
     let spec: WorkflowSpec;
     try {
-      spec = JSON.parse(text) as WorkflowSpec;
-    } catch {
+      spec = JSON.parse(text, refusePrototypeKey) as WorkflowSpec;
+    } catch (err) {
+      // A refused key is not a syntax failure, and reporting it as one would hide the reason.
+      if (err instanceof PrototypeKeyError) throw err;
       throw new Error(`DagParser: could not parse workflow spec as JSON. Install "yaml" package for YAML support.`);
     }
     return DagParser.fromSpec(spec, runId, roles);

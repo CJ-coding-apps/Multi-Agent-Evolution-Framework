@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolInput, ToolResult } from '@maf/types';
 import { BaseTool, closedInput } from '../ToolPlugin.js';
-import { makeToolId } from '@maf/types';
+import { makeToolId, toolEnv } from '@maf/types';
 
 const execFileAsync = promisify(execFile);
 
@@ -101,7 +101,10 @@ const HOST_REPOSITORY_ENV = new Set([
  */
 function isolatedEnv(ceiling?: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
+  // The allowlist is the outer boundary: an agent's `git.add` has no reason to see
+  // `MAF_SIGNING_KEY` or a provider token. The two filters below stay as the second, git-specific
+  // layer (they also cover a variable someone adds to the allowlist later).
+  for (const [key, value] of Object.entries(toolEnv())) {
     if (!HOST_CONFIG_ENV.test(key) && !HOST_REPOSITORY_ENV.has(key)) env[key] = value;
   }
   return {

@@ -348,3 +348,45 @@ test("a repository's own core.fsmonitor does not run during the gate's diff", as
     await rm(repo, { recursive: true, force: true });
   }
 });
+
+// WP-3.9 F6: `runIsolatedGit` is the process that reads the agent's diff, so it must not carry
+// maf's own environment into it. Reverting the host environment to `{ ...process.env }` passed
+// this whole file before: nothing asserted what the child was given.
+
+test('runIsolatedGit gives git the tool allowlist, with no MAF_* variable in it', async (t) => {
+  if (process.platform === 'win32') return; // shell-script fixture
+
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-git-env-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const binDir = path.join(root, 'bin');
+  const record = path.join(root, 'observed.json');
+  await mkdir(binDir);
+
+  const js = 'const fs=require("node:fs");' +
+    `fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({` +
+    'maf: Object.keys(process.env).filter((k) => /^MAF_/i.test(k)),' +
+    'path: process.env.PATH !== undefined,' +
+    'globalConfig: process.env.GIT_CONFIG_GLOBAL ?? null }));';
+  await writeFile(path.join(binDir, 'git'), `#!/bin/sh\n${JSON.stringify(process.execPath)} -e '${js}' >/dev/null\nprintf 'ok\\n'\n`);
+  await chmod(path.join(binDir, 'git'), 0o755);
+
+  const savedPath = process.env['PATH'];
+  const savedKey = process.env['MAF_SIGNING_KEY'];
+  process.env['PATH'] = `${binDir}${path.delimiter}${savedPath ?? ''}`;
+  process.env['MAF_SIGNING_KEY'] = 'test-signing-key';
+  t.after(() => {
+    process.env['PATH'] = savedPath;
+    if (savedKey === undefined) delete process.env['MAF_SIGNING_KEY'];
+    else process.env['MAF_SIGNING_KEY'] = savedKey;
+  });
+
+  const { stdout } = await runIsolatedGit(root, ['status']);
+  assert.equal(stdout.trim(), 'ok');
+
+  const observed = JSON.parse(await readFile(record, 'utf8')) as {
+    maf: string[]; path: boolean; globalConfig: string | null;
+  };
+  assert.deepEqual(observed.maf, [], 'no MAF_* variable reaches git');
+  assert.equal(observed.path, true, 'git still gets PATH (the filter is not "no environment")');
+  assert.equal(observed.globalConfig, '/dev/null', 'the host config is still switched off');
+});

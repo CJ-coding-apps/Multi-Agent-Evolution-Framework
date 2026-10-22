@@ -9,6 +9,7 @@ import type {
   AttributedChange,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
+import { PrototypeKeyError, refusePrototypeKey } from '@maf/types';
 import { jcs } from './jcs.js';
 import { IN_TOTO_STATEMENT_TYPE, makeInTotoStatement } from './InTotoStatement.js';
 import type { InTotoStatement, InTotoSubject } from './InTotoStatement.js';
@@ -126,8 +127,11 @@ export function signBundle(
 export function parseBundle(text: string): AnyBundle {
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    // WP-3.9 G5: a bundle is a file handed to `maf attest`, so it is read through the shared
+    // reviver. A refused key is named as what it is — not reported as malformed JSON.
+    value = JSON.parse(text, refusePrototypeKey);
   } catch (err: unknown) {
+    if (err instanceof PrototypeKeyError) throw new Error(`The bundle is refused: ${err.message}.`);
     throw new Error(`The bundle is not JSON (${err instanceof Error ? err.message : String(err)}).`);
   }
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {

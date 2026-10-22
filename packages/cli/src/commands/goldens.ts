@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { Command } from 'commander';
 import { componentId } from '@maf/attestation';
 import { SecurityReviewGate } from '@maf/git-ops';
-import { makeRunId } from '@maf/types';
+import { makeRunId, refusePrototypeKey } from '@maf/types';
 import type { CliAdapter, RunId, RunStatus } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -116,7 +116,11 @@ async function packagedDefaultHarness(): Promise<{ harness: HarnessConfig; sourc
  */
 export async function resolveGoldensAdapter(name: string, corpusRoot: string): Promise<CliAdapter> {
   if (name !== SCRIPTED_ADAPTER_NAME) return resolveAdapter(name, createAdapterRegistry());
-  const corpus: unknown = JSON.parse(await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'));
+  // WP-3.9 G5: the same corpus file `goldens run` reads, through the same reviver. This was the
+  // reader that did not check — `GoldenRunner` and `maf evolve` both routed theirs.
+  const corpus: unknown = JSON.parse(
+    await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'), refusePrototypeKey,
+  );
   assertGoldenCorpus(corpus);
   return new ScriptedAdapter(await loadScriptedTasks(corpusRoot, corpus));
 }
@@ -290,7 +294,8 @@ async function loadGoldenResult(resultsDir: string, ref: string): Promise<Golden
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(file, 'utf8'));
+    // WP-3.9 G5: a result file is JSON read from disk, so a prototype key refuses it here too.
+    parsed = JSON.parse(await readFile(file, 'utf8'), refusePrototypeKey);
   } catch (err) {
     throw new Error(`goldens compare: ${file} could not be read as a JSON result: ${err instanceof Error ? err.message : String(err)}`);
   }

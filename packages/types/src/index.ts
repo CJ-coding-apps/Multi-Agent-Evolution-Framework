@@ -376,6 +376,22 @@ export class PathConfinementError extends Error {
   }
 }
 
+/**
+ * A tool cannot say which paths it will touch, so no path rule can cover it. Thrown from
+ * `declaredPaths` — `patch.apply` on a diff whose headers name no file, or name one only in a form
+ * it does not read — and turned by the gate into an attested refusal (`builtin:declaration`) that
+ * the model is handed, so nothing runs. Fail-closed: an undeclarable call is not an unjudged one.
+ *
+ * WP-3.9.
+ */
+// WP-3.9 — additive only: a new exported error type; no existing declaration changed shape.
+export class ToolDeclarationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ToolDeclarationError';
+  }
+}
+
 export interface DagNodeExecution {
   nodeId:      NodeId;
   runId:       RunId;
@@ -1295,6 +1311,24 @@ export interface CliAdapter {
   isAvailable(): Promise<boolean>;
   invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult>;
   stream(options: AdapterInvokeOptions): AsyncGenerator<string>;
+  // WP-3.9 — additive only: an optional member, so every adapter written before this still
+  // satisfies `CliAdapter` unchanged.
+  /**
+   * An optional one-time check that the backend can take the argv MAF builds for it, asked once
+   * before a run plans (WP-3.9 F5). Only a backend whose argv depends on flags MAF must find has
+   * anything to check — today `claude` and its `--tools`. Throws an error that names what it found.
+   *
+   * What it returns is the adapter's own (which binary, which version) when it has it, so a run can
+   * say `[maf] preflight: claude <path> (<version>)` on success (WP-3.9 G15); an adapter with
+   * nothing to report returns nothing and the seam stays backend-neutral.
+   */
+  preflight?(): Promise<PreflightReport | void>;
+}
+
+/** What a preflight learned on success: the binary it resolved and the version it answered with. */
+export interface PreflightReport {
+  path: string;
+  version: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1574,3 +1608,20 @@ export {
   redactCredentials, redactSecrets, redactText,
   redactCredentialsRecord, redactRecord,
 } from './redaction.js';
+
+// WP-3.9 — additive only: a new re-export; no existing export moved or changed.
+/**
+ * The environment a child process may inherit. Two policies, one home: backend CLIs get the
+ * user's environment minus maf's own `MAF_*` variables; tools that run project code get an
+ * allowlist. `@maf/adapter-base` and `@maf/tools` both already depend on this package.
+ */
+export { TOOL_ENV_ALLOWLIST, toolEnv, backendEnv, isMafVariable } from './childEnv.js';
+
+// WP-3.9 G5 — additive only: a new re-export; no existing export moved or changed.
+/**
+ * The `JSON.parse` reviver every file reader uses. A configuration or record file that names
+ * `__proto__`, `constructor` or `prototype` fails the parse instead of arriving as an object that
+ * a later field-by-field copy turns into a prototype. One implementation for YAML's
+ * `parseYamlDocument` counterpart and for every JSON reader that takes a path from the operator.
+ */
+export { PROTOTYPE_KEYS, PrototypeKeyError, refusePrototypeKey } from './protoKey.js';

@@ -19,12 +19,22 @@ export function createAdapterRegistry(): Map<AdapterName, CliAdapter> {
   return registry;
 }
 
+/**
+ * The adapter registered for `name`. Refuses only an unknown name: whether the binary behind it
+ * works is the caller's question, because a preflight answers it better than `isAvailable` does
+ * (WP-3.9 G15).
+ */
+export function lookupAdapter(name: AdapterName, registry: Map<AdapterName, CliAdapter>): CliAdapter {
+  const adapter = registry.get(name);
+  if (!adapter) throw new Error(`Unknown adapter: ${name}. Available: ${[...registry.keys()].join(', ')}`);
+  return adapter;
+}
+
 export async function resolveAdapter(
   name: AdapterName,
   registry: Map<AdapterName, CliAdapter>,
 ): Promise<CliAdapter> {
-  const adapter = registry.get(name);
-  if (!adapter) throw new Error(`Unknown adapter: ${name}. Available: ${[...registry.keys()].join(', ')}`);
+  const adapter = lookupAdapter(name, registry);
   const available = await adapter.isAvailable();
   if (!available) throw new Error(`Adapter "${name}" is not available on this system. Check CLI is installed or env vars are set.`);
   return adapter;

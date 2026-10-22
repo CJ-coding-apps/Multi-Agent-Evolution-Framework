@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { GraphQuery } from '@maf/types';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import type { GraphQuery, PermissionLevel } from '@maf/types';
 import { makeRunId } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
-import type { MemoryGraph } from '@maf/memory-graph';
+import { MemoryGraph } from '@maf/memory-graph';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import {
   assertChangeManifest, applyEdit, ManifestError,
@@ -26,7 +29,12 @@ const CURRENT: HarnessConfig = mintHarnessConfig({
   id: 'base', roleSet: { version: 1, defaultRole: 'coder', roles: BASE_ROLES }, processorBundles: [],
 });
 
-const KNOWN_TOOLS = new Set(['fs.read', 'fs.write', 'grep']);
+const KNOWN_TOOLS = new Set(['fs.read', 'fs.write', 'fs.delete', 'test.run', 'shell.exec', 'deploy.prod', 'grep']);
+const TOOL_LEVELS = new Map<string, PermissionLevel>([
+  ['fs.read', 'read'], ['fs.write', 'write'], ['fs.delete', 'write'],
+  ['test.run', 'execute'], ['shell.exec', 'execute'], ['deploy.prod', 'dangerous'],
+  ['grep', 'read'],
+]);
 const KNOWN_PROCESSORS = new Set(['policy-audit', 'secret-redact', 'transcript', 'security-gate']);
 
 /** Graph stub: run returns canned golden history; addNode records. */
@@ -115,6 +123,8 @@ test('screening: injection patterns rejected; honest prompts pass', () => {
 
 const gateBase = {
   knownToolIds: KNOWN_TOOLS, knownProcessorNames: KNOWN_PROCESSORS,
+  // Required since WP-3.9 F7: there is no "gate without the widening rule" any more.
+  toolPermissions: TOOL_LEVELS,
 };
 
 test('gate: injection payload in evolved prompt rejected at b2 without evaluation', () => {
@@ -129,7 +139,7 @@ test('gate: injection payload in evolved prompt rejected at b2 without evaluatio
 });
 
 test('gate: allowlist widening to unknown tool rejected at b', () => {
-  const manifest = { edit: { kind: 'adjust_tool_allowlist' as const, role: 'coder', add: ['shell.exec'], remove: [] }, expectedImprovement: 'x', targetTasks: ['t1'] };
+  const manifest = { edit: { kind: 'adjust_tool_allowlist' as const, role: 'coder', add: ['unknown.tool'], remove: [] }, expectedImprovement: 'x', targetTasks: ['t1'] };
   const cand = applyEdit(CURRENT, manifest.edit, 'c');
   const d = gateEvaluate({
     ...gateBase, manifest, candidate: cand, current: CURRENT,
@@ -168,6 +178,93 @@ test('gate: safety-adjacent role edits need approval', () => {
     currentScores: suite(['t1']), candidateScores: suite(['t1', 't2']),
   });
   assert.equal(d.verdict, 'needs-approval');
+});
+
+/** A harness whose coder already holds the given tools. */
+function harnessWithCoderTools(tools: string[]): HarnessConfig {
+  return mintHarnessConfig({
+    id: 'writer', roleSet: {
+      version: 1, defaultRole: 'coder',
+      roles: [
+        { role: 'coder', systemPrompt: 'be terse', allowedTools: tools },
+        { role: 'security', systemPrompt: 'audit', allowedTools: ['fs.read'] },
+      ],
+    },
+    processorBundles: [],
+  });
+}
+
+/** The widening decision for `add` on a role of `current`, judged by the full gate. */
+function widen(current: HarnessConfig, role: string, add: string[], remove: string[] = []) {
+  const manifest = {
+    edit: { kind: 'adjust_tool_allowlist' as const, role, add, remove },
+    expectedImprovement: 'x', targetTasks: ['t2'],
+  };
+  const cand = applyEdit(current, manifest.edit, 'c');
+  return gateEvaluate({
+    ...gateBase, manifest, candidate: cand, current,
+    currentScores: suite(['t1']), candidateScores: suite(['t1', 't2']),
+  });
+}
+
+test('gate: an ordinary role cannot gain a write, execute or dangerous tool without the operator (b4)', () => {
+  // WP-3.9 F8: this used to be a `reject`; it is now `needs-approval`, so the operator can grant
+  // what the evolver alone may never ship.
+  for (const tool of ['fs.write', 'fs.delete', 'test.run', 'shell.exec', 'deploy.prod']) {
+    const d = widen(CURRENT, 'coder', [tool]);
+    assert.equal(d.verdict, 'needs-approval', `${tool} must not ship itself`);
+    assert.match((d as { reason: string }).reason, /b4-write-tool-widening/, tool);
+    assert.ok((d as { reason: string }).reason.includes(JSON.stringify(tool)), `reason names ${tool}`);
+  }
+});
+
+test('gate: the widening is judged as candidate minus current, not by the manifest\'s add list', () => {
+  // The role already holds the tool: `add` names it, but the edit grants nothing.
+  assert.deepEqual(widen(harnessWithCoderTools(['fs.read', 'fs.write']), 'coder', ['fs.write']),
+    { verdict: 'ship', improvements: ['t2'] });
+  // Nor can a manifest launder an add through `remove`: the candidate still gains the tool.
+  const d = widen(CURRENT, 'coder', ['fs.write'], ['fs.write']);
+  assert.equal(d.verdict, 'needs-approval');
+  assert.match((d as { reason: string }).reason, /"fs\.write"/);
+});
+
+test('gate: a tool the permission map does not name is not assumed harmless (b4)', () => {
+  const partial = new Map(TOOL_LEVELS);
+  partial.delete('test.run');
+  const manifest = {
+    edit: { kind: 'adjust_tool_allowlist' as const, role: 'coder', add: ['test.run'], remove: [] },
+    expectedImprovement: 'x', targetTasks: ['t2'],
+  };
+  const d = gateEvaluate({
+    ...gateBase, toolPermissions: partial, manifest,
+    candidate: applyEdit(CURRENT, manifest.edit, 'c'), current: CURRENT,
+    currentScores: suite(['t1']), candidateScores: suite(['t1', 't2']),
+  });
+  assert.equal(d.verdict, 'needs-approval');
+});
+
+test('gate: toolPermissions is required (WP-3.9 F7) — a caller cannot skip the widening rule', () => {
+  // Before F7 the map was optional and an omitted one skipped b4 silently. At runtime this call
+  // still reaches a verdict (the edit is not an allowlist change), but the shape no longer
+  // type-checks: the omission is the defect, and the compiler now refuses it.
+  const manifest = { edit: { kind: 'retarget_model' as const, role: 'coder', model: 'm' }, expectedImprovement: 'x', targetTasks: [] };
+  // @ts-expect-error — property 'toolPermissions' is missing (WP-3.9 F7 made it required).
+  const d = gateEvaluate({
+    manifest, candidate: applyEdit(CURRENT, manifest.edit, 'c'), current: CURRENT,
+    currentScores: suite(['t1']), candidateScores: suite(['t1', 't2']),
+    knownToolIds: KNOWN_TOOLS, knownProcessorNames: KNOWN_PROCESSORS,
+  });
+  assert.equal(d.verdict, 'ship');
+});
+
+test('gate: the same widening of a safety-adjacent role is routed to the operator at b3', () => {
+  const d = widen(CURRENT, 'security', ['fs.write']);
+  assert.equal(d.verdict, 'needs-approval');
+  assert.match((d as { reason: string }).reason, /safety-adjacent/);
+});
+
+test('gate: adding a read tool is not a widening and still ships', () => {
+  assert.deepEqual(widen(CURRENT, 'coder', ['grep']), { verdict: 'ship', improvements: ['t2'] });
 });
 
 test('gate: llm-judge-only improvement needs human sign-off, never auto-ships', () => {
@@ -211,6 +308,7 @@ function loopOpts(overrides: Partial<EvolveOptions> = {}): EvolveOptions {
     onShip: async () => {},
     roleCatalog: [{ role: 'coder', description: 'writes code', allowedTools: ['fs.read'] }],
     knownToolIds: KNOWN_TOOLS,
+    toolPermissions: TOOL_LEVELS,
     knownProcessorNames: KNOWN_PROCESSORS,
     ...overrides,
   };
@@ -273,6 +371,107 @@ test('loop: sensitive-role edit archived unevaluated without approval', async ()
   const report = await evolve(opts);
   assert.equal(report.rounds[0]?.outcome, 'needs-approval');
   assert.ok(goldensRan <= 1, 'no evaluation spend on unapproved sensitive edits');
+});
+
+test('loop: a widening is caught BEFORE the critic, the smoke test and the golden suite (WP-3.9 G3)', async () => {
+  let smoked = 0;
+  let criticCalls = 0;
+  const evaluated: string[] = [];
+  const opts = loopOpts({
+    metaGenerate: async (system: string): Promise<string> => {
+      if (system.includes('critic')) { criticCalls++; return '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+      return manifestJson({
+        kind: 'adjust_tool_allowlist', role: 'coder', add: ['test.run'], remove: [],
+      }, ['t2']);
+    },
+    runSmoke: async () => { smoked++; },
+    runGoldens: async (h) => { evaluated.push(h.sha); return suite(['t1'], h.sha); },
+    patience: 1,
+  });
+  const report = await evolve(opts);
+  assert.equal(report.rounds[0]?.outcome, 'needs-approval');
+  assert.match(report.rounds[0]?.note ?? '', /b4-write-tool-widening/);
+  assert.equal(criticCalls, 0, 'the proposal was the only model call: no critic ran');
+  assert.equal(smoked, 0, 'no smoke test ran for a manifest that widens a role');
+  assert.deepEqual(evaluated, [CURRENT.sha], 'only the baseline was evaluated, never the candidate');
+  assert.equal(report.ships, 0);
+});
+
+test('loop: a needs-approval round is written to the graph and reads back by id (WP-3.9 G8)', async (t) => {
+  // The round is archived in `report.rounds` AND on the graph. The second half is the one an
+  // operator, a UI or a later run actually reads, and it was unproven: a loop that pushed the round
+  // to the report and never wrote it to the memory graph passed every test. So this drives the
+  // round into a real Kùzu database — not a stub — then finds it the way a consumer would: by id.
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-evolve-graph-'));
+  const graph = new MemoryGraph(path.join(dir, 'memory.kuzu'));
+  t.after(async () => { graph.close(); await rm(dir, { recursive: true, force: true }); });
+
+  const opts = loopOpts({
+    graph,
+    metaGenerate: mockMeta([manifestJson({
+      kind: 'adjust_tool_allowlist', role: 'coder', add: ['test.run'], remove: [],
+    }, ['t2'])]),
+    patience: 1,
+  });
+  const report = await evolve(opts);
+  assert.equal(report.rounds[0]?.outcome, 'needs-approval');
+
+  const found = await graph.run({
+    cypher: 'MATCH (n:MemoryNode) WHERE n.kind = $kind RETURN n.id AS id',
+    params: { kind: 'EvolutionRound' },
+  });
+  assert.equal(found.length, 1, 'the needs-approval round was written to the graph');
+  const id = String(found[0]?.['id'] ?? '');
+  assert.notEqual(id, '', 'the written round carries an id');
+
+  const [node] = await graph.run({
+    cypher: 'MATCH (n:MemoryNode {id: $id}) RETURN n.kind AS kind, n.run_id AS runId, n.properties AS properties',
+    params: { id },
+  });
+  assert.equal(node?.['kind'], 'EvolutionRound', 'the id reads back as the round it named');
+  assert.equal(node?.['runId'], String(opts.runId), 'and it is scoped to the run that asked for it');
+
+  const stored = JSON.parse(String(node?.['properties'])) as {
+    outcome: string;
+    note: string;
+    manifest: { edit: { kind: string; role: string; add: string[] } };
+    gate: { verdict: string; reason: string };
+  };
+  assert.equal(stored.outcome, 'needs-approval');
+  assert.equal(stored.manifest.edit.kind, 'adjust_tool_allowlist');
+  assert.equal(stored.manifest.edit.role, 'coder');
+  assert.deepEqual(stored.manifest.edit.add, ['test.run'],
+    'the manifest the operator is being asked about is stored, not just its outcome');
+  assert.match(stored.note, /b4-write-tool-widening/, 'with the reason it needs approval');
+  assert.equal(stored.gate.verdict, 'needs-approval');
+  assert.match(stored.gate.reason, /b4-write-tool-widening/);
+});
+
+test('loop: an unknown tool id is refused at b-invariants before the critic (WP-3.9 G4)', async () => {
+  // The candidate is malformed, not a widening: `gateWidening` alone would call the unknown id
+  // `dangerous` and ask the operator to approve a tool that does not exist.
+  let smoked = 0;
+  let criticCalls = 0;
+  const evaluated: string[] = [];
+  const report = await evolve(loopOpts({
+    metaGenerate: async (system: string): Promise<string> => {
+      if (system.includes('critic')) { criticCalls++; return '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+      return manifestJson({
+        kind: 'adjust_tool_allowlist', role: 'coder', add: ['nope.bogus'], remove: [],
+      }, ['t2']);
+    },
+    runSmoke: async () => { smoked++; },
+    runGoldens: async (h) => { evaluated.push(h.sha); return suite(['t1'], h.sha); },
+    patience: 1,
+  }));
+  assert.equal(report.rounds[0]?.outcome, 'reject');
+  assert.match(report.rounds[0]?.note ?? '', /b-invariants/);
+  assert.match(report.rounds[0]?.note ?? '', /unknown tool "nope\.bogus"/);
+  assert.match(report.rounds[0]?.note ?? '', /known tools: .*\bfs\.read\b/,
+    'the refusal names the tools the registry does know');
+  assert.equal(criticCalls, 0, 'refused before any further model call');
+  assert.equal(smoked, 0);
+  assert.deepEqual(evaluated, [CURRENT.sha], 'only the baseline was evaluated');
 });
 
 test('loop (L5): a critic revision is smoke-tested on the REVISED manifest, then ships', async () => {

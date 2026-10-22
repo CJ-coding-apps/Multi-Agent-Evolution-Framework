@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { toolEnv } from '@maf/types';
 
 const execFileAsync = promisify(execFile);
 
@@ -51,7 +52,8 @@ export function runIsolatedGit(
   opts: IsolatedGitOptions = {},
 ) {
   const host: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
+  // Same boundary as the agent's git tools: git gets the tool allowlist, never MAF's environment.
+  for (const [key, value] of Object.entries(toolEnv())) {
     if (!HOST_GIT_ENV.has(key) && !HOST_GIT_CONFIG_PAIR.test(key)) host[key] = value;
   }
   return execFileAsync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', ...args], {
