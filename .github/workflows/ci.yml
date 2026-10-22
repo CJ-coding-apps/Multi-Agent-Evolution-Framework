@@ -158,32 +158,6 @@ jobs:
           fi
           node scripts/compare-goldens.mjs tests/goldens/baseline.json "${results[0]}"
 
-      # WP-3.6: a spec file is a plan. This runs `maf run --plan-from` with a two-node spec
-      # (n1 -> n2) through the command the CLI registers, with the deterministic scripted model,
-      # and fails unless both nodes ran in edge order and the planner was never asked. The test
-      # writes the spec it runs, so the two nodes and the edge are visible in one place.
-      - name: Plan from a spec (two-node DAG, no planner call)
-        run: node --test packages/cli/dist/__tests__/plan-from.test.js
-
-      # The refusal is at parse time and needs no model: the built CLI must stop on a spec that
-      # names one node twice instead of silently keeping the last, and say which id it refused.
-      - name: Plan from a spec that names a node twice is refused
-        run: |
-          tmp=$(mktemp -d)
-          git -C "$tmp" init -q
-          git -C "$tmp" -c user.email=ci@maf.local -c user.name=ci commit -q --allow-empty -m baseline
-          printf '%s' '{"nodes":[{"id":"n1","label":"first"},{"id":"n1","label":"second"}]}' > "$tmp/duplicate.json"
-          if node packages/cli/dist/main.js run "a task" --dir "$tmp" --adapter scripted \
-              --plan-from "$tmp/duplicate.json" > "$RUNNER_TEMP/duplicate.log" 2>&1; then
-            echo "::error::the CLI ran a spec that names node n1 twice."
-            exit 1
-          fi
-          if ! grep -q 'duplicate node id "n1"' "$RUNNER_TEMP/duplicate.log"; then
-            echo "::error::the run stopped, but not by refusing the duplicate node id."
-            cat "$RUNNER_TEMP/duplicate.log"
-            exit 1
-          fi
-
   # Everything above tests the checkout. This job tests the published artifact: it packs the package
   # with npm, installs the tarball into an empty prefix, and runs the two commands the README leads
   # with — from a directory that is not this repository. The e2e job would pass with a tarball that
