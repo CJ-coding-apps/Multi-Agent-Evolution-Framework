@@ -55,12 +55,29 @@ export class PolicyViolationError extends VerdictError {
   }
 }
 
+/** What the engine consults besides its rules. */
+export interface PolicyEngineOptions {
+  /**
+   * Match path globs without regard to case. Defaults to the platform's filesystem convention:
+   * APFS and NTFS are case-insensitive by default, so a `+++ b/.ENV` header writes `.env` on
+   * macOS, and a case-sensitive rule for dotenv files would miss the file the write lands in.
+   * A constructor option (not only the platform) so the rule is testable on every platform.
+   */
+  caseInsensitivePaths?: boolean;
+}
+
+/** The default: a filesystem that opens `.ENV` as `.env` (and `FOO` as `foo` on NTFS). */
+const CASE_INSENSITIVE_FILESYSTEM = process.platform === 'darwin' || process.platform === 'win32';
+
 export class PolicyEngine implements PolicyEngineHandle {
   private rules: PolicyRule[] = [];
   private source: PolicySource | undefined;
   private readonly counts: PolicyVerdictCounts = { allow: 0, deny: 0, escalate: 0, indeterminate: 0 };
+  private readonly caseInsensitivePaths: boolean;
 
-  constructor(private readonly graph: GraphQueryRunner) {}
+  constructor(private readonly graph: GraphQueryRunner, options: PolicyEngineOptions = {}) {
+    this.caseInsensitivePaths = options.caseInsensitivePaths ?? CASE_INSENSITIVE_FILESYSTEM;
+  }
 
   // Rules from a file arrive through `PolicyLoader`, which validates them; this takes them as given.
   loadRules(rules: PolicyRule[], source?: PolicySource): void {
@@ -189,7 +206,7 @@ export class PolicyEngine implements PolicyEngineHandle {
     const glob = rule.predicate.pathGlob;
     if (!glob) return true;
     if (declaredPaths.length === 0) return false;
-    return declaredPaths.some((p) => matchesGlob(p, glob));
+    return declaredPaths.some((p) => matchesGlob(p, glob, this.caseInsensitivePaths));
   }
 
   // Rule matches when at least one declared path falls OUTSIDE every allowed glob.
@@ -199,7 +216,7 @@ export class PolicyEngine implements PolicyEngineHandle {
     const allowed = rule.predicate.allowedPathGlobs;
     if (!allowed || allowed.length === 0) return true;
     if (declaredPaths.length === 0) return false;
-    return declaredPaths.some((p) => !allowed.some((g) => matchesGlob(p, g)));
+    return declaredPaths.some((p) => !allowed.some((g) => matchesGlob(p, g, this.caseInsensitivePaths)));
   }
 
   /**
@@ -273,8 +290,12 @@ export class PolicyEngine implements PolicyEngineHandle {
 // `dot: true` because a glob here is a statement about every file it names. Without it `**` and
 // `*` skip any path segment starting with `.`, so `**/secrets/**` did not cover
 // `secrets/.hidden` and a Deny rule had a hole exactly where configuration and credentials live.
-function matchesGlob(relativePath: string, glob: string): boolean {
-  return minimatch(relativePath, glob, { dot: true });
+//
+// `nocase` on the platforms whose filesystems are case-insensitive, and NFC on every platform:
+// the same file can be named two ways, and a rule must match the file it names, not one spelling
+// of it. `+++ b/.ENV` is `.env` on an APFS volume; a decomposed name is the composed name on disk.
+function matchesGlob(relativePath: string, glob: string, caseInsensitive: boolean): boolean {
+  return minimatch(relativePath.normalize('NFC'), glob.normalize('NFC'), { dot: true, nocase: caseInsensitive });
 }
 
 /**

@@ -20,6 +20,11 @@ export interface PolicyLoadOptions {
    * recorded as `sourceKind: "built-in"` with the digest of the shipped text.
    */
   builtInText?: string;
+  /**
+   * Match path globs without regard to case; see `PolicyEngineOptions`. Absent, the platform's
+   * filesystem decides (case-insensitive on macOS and Windows).
+   */
+  caseInsensitivePaths?: boolean;
 }
 
 /**
@@ -137,7 +142,10 @@ export class PolicyLoader {
     graph: GraphQueryRunner,
     options: PolicyLoadOptions = {},
   ): Promise<PolicyEngine> {
-    const engine = new PolicyEngine(graph);
+    // Absent stays absent: `exactOptionalPropertyTypes` distinguishes it from an explicit `undefined`.
+    const engine = options.caseInsensitivePaths === undefined
+      ? new PolicyEngine(graph)
+      : new PolicyEngine(graph, { caseInsensitivePaths: options.caseInsensitivePaths });
     const { rules, source } = await PolicyLoader.resolve(policyPath, options);
     engine.loadRules(rules, source);
     return engine;
