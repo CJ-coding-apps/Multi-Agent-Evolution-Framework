@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeRunId } from '@maf/types';
-import { DagSynthesizer } from '../DagSynthesizer.js';
+import crypto from 'node:crypto';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { makeNodeId, makeRunId } from '@maf/types';
+import type { FailurePattern } from '../FailurePatternDetector.js';
+import { DagSynthesizer, MAX_SPEC_BYTES, MAX_SPEC_NODES } from '../DagSynthesizer.js';
 import { rolesOf } from './roleResolver.js';
 
 // ORACLE (D-07): the synthesizer is the second place a role name
@@ -34,5 +39,232 @@ test('an unknown agentRole refuses the synthesis', () => {
       assert.match(e.message, /coder, reviewer/);
       return true;
     },
+  );
+});
+
+// ── WP-3.6: the spec is a plan, so it is read once and refused in full ──────────────────────────
+
+test('a duplicate node id is refused, not silently collapsed', () => {
+  assert.throws(
+    () => new DagSynthesizer(ROLES).synthesize({
+      nodes: [{ id: 'n1', label: 'first' }, { id: 'n1', label: 'second' }],
+    }, RUN_ID),
+    /duplicate node id "n1"/,
+  );
+});
+
+test('an edge makes its target depend on its source', () => {
+  const dag = new DagSynthesizer(ROLES).synthesize({
+    nodes: [{ id: 'a', label: 'write' }, { id: 'b', label: 'audit', agentRole: 'reviewer' }],
+    edges: [{ from: 'a', to: 'b' }],
+  }, RUN_ID);
+  assert.deepEqual(dag.nodes.get(makeNodeId('b'))?.dependencies, ['a']);
+  assert.deepEqual(dag.nodes.get(makeNodeId('a'))?.dependencies, []);
+});
+
+test('an edge naming a node the spec does not define is refused', () => {
+  assert.throws(
+    () => new DagSynthesizer(ROLES).synthesize({
+      nodes: [{ id: 'a', label: 'write' }],
+      edges: [{ from: 'a', to: 'ghost' }],
+    }, RUN_ID),
+    /DagSynthesizer: edge names unknown node "ghost" \(to\)/,
+  );
+});
+
+test('a spec file yields the same DAG on every read, with no model in the path', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-'));
+  const file = path.join(dir, 'two-node.json');
+  const text = JSON.stringify({
+    id: 'two-node',
+    nodes: [{ id: 'write', label: 'write' }, { id: 'audit', label: 'audit', agentRole: 'reviewer' }],
+    edges: [{ from: 'write', to: 'audit' }],
+  });
+  await writeFile(file, text, 'utf8');
+  const synth = new DagSynthesizer(ROLES);
+  const first = await synth.fromFile(file, RUN_ID);
+  const second = await synth.fromFile(file, RUN_ID);
+  assert.equal(first.dag.id, 'two-node');
+  assert.deepEqual(first.dag.edges.map((e) => e.id), second.dag.edges.map((e) => e.id));
+  assert.deepEqual(first.dag.nodes.get(makeNodeId('audit'))?.dependencies, ['write']);
+  // F4: the digest is of the bytes that were read, so the bundle names the exact text.
+  assert.equal(first.sha256, crypto.createHash('sha256').update(text, 'utf8').digest('hex'));
+});
+
+test('a spec file that is not a workflow spec is refused by name', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-'));
+  const notJson = path.join(dir, 'not.json');
+  await writeFile(notJson, 'nodes: [', 'utf8');
+  await assert.rejects(() => new DagSynthesizer(ROLES).fromFile(notJson, RUN_ID), /could not read .*not\.json as a JSON workflow spec/);
+
+  const noNodes = path.join(dir, 'no-nodes.json');
+  await writeFile(noNodes, '{"id":"x"}', 'utf8');
+  await assert.rejects(() => new DagSynthesizer(ROLES).fromFile(noNodes, RUN_ID), /must contain a JSON object with a "nodes" array/);
+});
+
+// ── F5: a closed schema, refused at parse time ────────────────────────────────────────────────
+
+function refuses(build: () => unknown, pattern: RegExp): void {
+  assert.throws(build, pattern);
+}
+
+test('the container shapes are refused with a sentence, never a raw TypeError', () => {
+  const synth = new DagSynthesizer(ROLES);
+  refuses(() => synth.synthesize(null as never, RUN_ID), /must be a JSON object/);
+  refuses(() => synth.synthesize([] as never, RUN_ID), /must be a JSON object/);
+  refuses(() => synth.synthesize({} as never, RUN_ID), /must contain a JSON object with a "nodes" array/);
+  refuses(() => synth.synthesize({ nodes: 'nope' } as never, RUN_ID), /must contain a JSON object with a "nodes" array/);
+  refuses(() => synth.synthesize({ nodes: [null] } as never, RUN_ID), /node 0 is not an object/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a' }], edges: 'nope' } as never, RUN_ID), /"edges" must be an array/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a' }], edges: [null] } as never, RUN_ID), /edge 0 is not an object/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', metadata: [] }] } as never, RUN_ID), /"metadata" must be an object/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', dependencies: 'b' }] } as never, RUN_ID), /"dependencies" must be an array of node ids/);
+});
+
+test('ids, labels and timeouts are checked for type', () => {
+  const synth = new DagSynthesizer(ROLES);
+  refuses(() => synth.synthesize({ nodes: [] }, RUN_ID), /has no nodes; a plan needs at least one/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 7 as never, label: 'a' }] }, RUN_ID), /needs a non-empty string "id"/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: '' }] }, RUN_ID), /node "a" needs a non-empty string "label"/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: '5s' as never }] }, RUN_ID), /"timeoutMs" must be a positive number/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 0 }] }, RUN_ID), /"timeoutMs" must be a positive number/);
+  refuses(() => synth.synthesize({ id: 1 as never, nodes: [{ id: 'a', label: 'a' }] }, RUN_ID), /the spec's "id" must be a string/);
+});
+
+test('an unknown edge kind is refused, naming the kinds that are accepted', () => {
+  assert.throws(
+    () => new DagSynthesizer(ROLES).synthesize({
+      nodes: [{ id: 'a', label: 'a' }, { id: 'b', label: 'b' }],
+      edges: [{ from: 'a', to: 'b', kind: 'blocks' }],
+    }, RUN_ID),
+    /unknown "kind" "blocks"; accepted kinds are data, control, review/,
+  );
+});
+
+test('a dependency on a node the spec does not define is refused', () => {
+  assert.throws(
+    () => new DagSynthesizer(ROLES).synthesize({ nodes: [{ id: 'a', label: 'a', dependencies: ['ghost'] }] }, RUN_ID),
+    /node "a" depends on unknown node "ghost"/,
+  );
+});
+
+test('a self-edge and a cycle are both refused before an id is minted', () => {
+  const synth = new DagSynthesizer(ROLES);
+  assert.throws(
+    () => synth.synthesize({ nodes: [{ id: 'a', label: 'a' }], edges: [{ from: 'a', to: 'a' }] }, RUN_ID),
+    /edge "a" -> "a" makes a node depend on itself/,
+  );
+  assert.throws(
+    () => synth.synthesize({ nodes: [{ id: 'a', label: 'a', dependencies: ['a'] }] }, RUN_ID),
+    /node "a" depends on itself/,
+  );
+  assert.throws(
+    () => synth.synthesize({
+      nodes: [{ id: 'a', label: 'a' }, { id: 'b', label: 'b' }],
+      edges: [{ from: 'a', to: 'b' }, { from: 'b', to: 'a' }],
+    }, RUN_ID),
+    /dependency cycle among "a", "b"/,
+  );
+});
+
+// ── F6: unknown keys are refused by name ─────────────────────────────────────────────────────
+
+test('an unknown key is refused at node and spec level, naming it', () => {
+  const synth = new DagSynthesizer(ROLES);
+  // The typo that used to be dropped: `agnetRole` silently gave the node the default role.
+  assert.throws(
+    () => synth.synthesize({ nodes: [{ id: 'a', label: 'a', agnetRole: 'reviewer' } as never] }, RUN_ID),
+    /node "a" has unknown key\(s\) "agnetRole"; a spec accepts "id", "label", "agentRole", "dependencies", "timeoutMs", "metadata"/,
+  );
+  assert.throws(
+    () => synth.synthesize({ nodes: [{ id: 'a', label: 'a' }], config: {} } as never, RUN_ID),
+    /the spec has unknown key\(s\) "config"; a spec accepts "id", "nodes", "edges"/,
+  );
+  assert.throws(
+    () => synth.synthesize({ nodes: [{ id: 'a', label: 'a' }], edges: [{ from: 'a', to: 'a', label: 'x' }] } as never, RUN_ID),
+    /edge 0 has unknown key\(s\) "label"/,
+  );
+});
+
+test('a run-config key in a spec is refused, not ignored', () => {
+  const synth = new DagSynthesizer(ROLES);
+  for (const key of ['retry', 'inputs', 'outputs']) {
+    assert.throws(
+      () => synth.synthesize({ nodes: [{ id: 'a', label: 'a', [key]: {} }] } as never, RUN_ID),
+      new RegExp(`node "a" has unknown key\\(s\\) "${key}"`),
+    );
+  }
+});
+
+// ── F7: the run's title rides on every node; recall is the caller's choice ───────────────────
+
+test('every spec node carries the run title, so recall can find its failures', () => {
+  const dag = new DagSynthesizer(ROLES).synthesize(
+    { nodes: [{ id: 'a', label: 'write' }, { id: 'b', label: 'audit' }] },
+    RUN_ID,
+    { runTitle: 'Fix the sum' },
+  );
+  for (const node of dag.nodes.values()) {
+    assert.equal(node.metadata['runTitle'], 'Fix the sum');
+    // The node's own step, not the run's title: `taskDescription` is the prompt the dispatcher
+    // hands the model, so every node in a spec has to keep its own.
+    assert.equal(node.metadata['taskDescription'], node.label);
+  }
+  // An operator who names a node's task explicitly keeps it.
+  const named = new DagSynthesizer(ROLES).synthesize(
+    { nodes: [{ id: 'a', label: 'write', metadata: { taskDescription: 'write the parser' } }] },
+    RUN_ID,
+    { runTitle: 'Fix the sum' },
+  );
+  assert.equal(named.nodes.get(makeNodeId('a'))?.metadata['taskDescription'], 'write the parser');
+});
+
+test('recall inserts a review gate only when the caller passes patterns', () => {
+  const spec = { nodes: [{ id: 'a', label: 'fix the parser' }] };
+  const patterns: FailurePattern[] = [{
+    taskLabel: 'parser', filePaths: ['src/parser.ts'], failureType: 'test', occurrences: 1, lastSeen: '2026-10-01',
+  }];
+  const withRecall = new DagSynthesizer(ROLES).synthesize(spec, RUN_ID, { avoidPatterns: patterns });
+  assert.deepEqual(withRecall.config.reviewGateNodeIds, ['a']);
+  // `--plan-from` passes none: the spec is the operator's plan and recall does not alter it.
+  const withNone = new DagSynthesizer(ROLES).synthesize(spec, RUN_ID);
+  assert.deepEqual(withNone.config.reviewGateNodeIds, []);
+});
+
+// ── F10: a spec that names no id gets one derived from its content ───────────────────────────
+
+test('an unnamed spec gets a sha256 id from its content, stable across reads', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-'));
+  const one = path.join(dir, 'one.json');
+  const two = path.join(dir, 'two.json');
+  await writeFile(one, JSON.stringify({ nodes: [{ id: 'a', label: 'write' }] }), 'utf8');
+  await writeFile(two, JSON.stringify({ nodes: [{ id: 'a', label: 'audit' }] }), 'utf8');
+  const synth = new DagSynthesizer(ROLES);
+  const first = await synth.fromFile(one, RUN_ID);
+  const again = await synth.fromFile(one, RUN_ID);
+  const other = await synth.fromFile(two, RUN_ID);
+  assert.match(first.dag.id, /^[0-9a-f]{64}$/);
+  assert.equal(first.dag.id, again.dag.id, 'the same content mints the same id');
+  assert.notEqual(first.dag.id, other.dag.id, 'different content mints a different id');
+});
+
+// ── F11: the caps ────────────────────────────────────────────────────────────────────────────
+
+test('a spec larger than the byte cap is refused before it is parsed', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-'));
+  const big = path.join(dir, 'big.json');
+  // Not JSON at all: the size is read from the file's metadata, so the cap answers first.
+  await writeFile(big, 'x'.repeat(MAX_SPEC_BYTES + 1), 'utf8');
+  await assert.rejects(
+    () => new DagSynthesizer(ROLES).fromFile(big, RUN_ID),
+    new RegExp(`may be at most ${MAX_SPEC_BYTES}`),
+  );
+});
+
+test('a spec with more nodes than the cap is refused, stating the cap', () => {
+  const nodes = Array.from({ length: MAX_SPEC_NODES + 1 }, (_, i) => ({ id: `n${i}`, label: `node ${i}` }));
+  assert.throws(
+    () => new DagSynthesizer(ROLES).synthesize({ nodes }, RUN_ID),
+    new RegExp(`has ${MAX_SPEC_NODES + 1} nodes; at most ${MAX_SPEC_NODES} are accepted`),
   );
 });
