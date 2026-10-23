@@ -103,7 +103,7 @@ test('a poisoned project graph and an earlier attempt\'s memory never reach the 
     await project.addNode({ kind: 'Failure', label: `${prompt} ${POISON}`, properties: { note: POISON }, runId: makeRunId('past-run') });
     const control = await new GraphAwareInjector({ graph: project, maxNodes: 40, tokenBudget: 4096 }).assemble(prompt, 's', 'coder');
     assert.match(control.systemPromptPrefix, /POISON-7f3a/);
-    project.close();
+    await project.close();
 
     const harness = await loadHarnessFile(await defaultHarnessFile());
     const scripted = new ScriptedAdapter([{
@@ -130,7 +130,7 @@ test('a poisoned project graph and an earlier attempt\'s memory never reach the 
       const rows = await after.run({ cypher: 'MATCH (n:MemoryNode) WHERE n.label CONTAINS $p RETURN n.id AS id', params: { p: 'POISON-7f3a' } });
       assert.equal(rows.length, 1, 'the project graph lost its node: the evaluation dispatched through (and wiped) the project\'s memory');
     } finally {
-      after.close();
+      await after.close();
     }
   } finally {
     await rm(root, { recursive: true, force: true });

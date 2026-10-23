@@ -83,7 +83,8 @@ export interface RunStack {
    */
   recordPolicyInForce(): void;
   dispatchTask(harness: HarnessConfig, role: string, prompt: string, workDir: string, timeoutMs: number, temperature?: number): Promise<string>;
-  close(): void;
+  /** Resolves once the graph's files are released; a caller may remove `mafDir` after awaiting it. */
+  close(): Promise<void>;
 }
 
 export async function buildRunStack(cfg: {
@@ -104,7 +105,9 @@ export async function buildRunStack(cfg: {
   // M1: a setup that fails after this point must not leak the handle. Kùzu keeps files open under
   // `mafDir`, and a caller that removes that directory on the way out — goldens' evaluation
   // directory — then fails with ENOTEMPTY, which would replace the error that caused the removal
-  // (a mistyped `--policy`, in the reported case). Nothing here can use a half-built stack.
+  // (a mistyped `--policy`, in the reported case). The close below is awaited: `close()` now
+  // resolves only after the database is released, so the removal that follows it cannot race the
+  // native writes (WP-3.8 follow-up). Nothing here can use a half-built stack.
   let lcm: LcmEngine | undefined;
   try {
     const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
@@ -177,15 +180,15 @@ export async function buildRunStack(cfg: {
         const value = out['output'];
         return value && value.kind === 'string' ? value.value : '';
       },
-      close() {
-        graph.close();
+      async close() {
+        await graph.close();
         engine.close();
       },
     };
     return stack;
   } catch (err) {
     lcm?.close();
-    graph.close();
+    await graph.close();
     throw err;
   }
 }

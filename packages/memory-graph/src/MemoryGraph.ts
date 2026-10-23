@@ -16,7 +16,8 @@ import { intLiteral, idListParams } from './cypherText.js';
  */
 export interface GraphDriver {
   run(query: GraphQuery): Promise<GraphRow[]>;
-  close(): void;
+  /** Resolves once the backend has released everything; a caller may remove its files after it. */
+  close(): Promise<void>;
 }
 
 export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
@@ -26,16 +27,23 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
    * constructor. Starting it eagerly let `close()` run in the middle of the DDL sequence: the
    * driver released the database between two statements, the next one threw, and the caller then
    * removed a directory whose handles were still open (`ENOTEMPTY` in the M1 stack-cleanup test,
-   * measured at 1 in 20). A graph that is opened and closed without a query now runs no DDL at
-   * all, so that close is deterministic.
+   * measured at 1 in 20). A graph that is opened and closed without a query runs no DDL at all.
+   *
+   * `close()` awaits this before releasing the driver, which is what makes the mid-sequence case
+   * safe even for a graph that *has* queried: the sequence has idle gaps between statements, so
+   * the driver's in-flight count passes through zero between two of them, and releasing on that
+   * count alone would let the next statement reach a closed database.
    */
   private schemaReady: Promise<void> | undefined;
+  /** Set by `close()`; a query issued after it is refused rather than starting a schema run. */
+  private closed = false;
 
   constructor(dbPath: string, bufferPoolSizeBytes = 128 * 1024 * 1024, driver?: GraphDriver) {
     this.driver = driver ?? new KuzuDriver(dbPath, bufferPoolSizeBytes);
   }
 
-  private ensureSchema(): Promise<void> {
+  private async ensureSchema(): Promise<void> {
+    if (this.closed) throw new Error('This memory graph is closed; a query was issued after close().');
     this.schemaReady ??= this.initSchema();
     return this.schemaReady;
   }
@@ -212,7 +220,21 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
     return { nodesCreated, edgesCreated, conflictsFound: conflicts, mergedAt: new Date() };
   }
 
-  close(): void { this.driver.close(); }
+  /**
+   * Closes the graph. Resolves only once the driver has released the database, so a caller may
+   * remove the directory — or open another graph there — after awaiting it (WP-3.8 follow-up).
+   *
+   * The schema sequence is awaited first, and only then the driver: every public method funnels
+   * through `ensureSchema`, so a query in flight that has passed that point is already tracked by
+   * the driver, and one that has not is refused by the `closed` flag.
+   */
+  async close(): Promise<void> {
+    this.closed = true;
+    // A setup that failed has already handed its rejection to the query that started it; it must
+    // not turn the close into a second failure with nothing left to release.
+    await this.schemaReady?.catch(() => undefined);
+    await this.driver.close();
+  }
 }
 
 /** What `recallFailures` matches. Every filter given must hold; with none, the latest failures. */

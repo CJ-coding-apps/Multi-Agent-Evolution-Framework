@@ -832,6 +832,9 @@ export interface MemoryGraphApi extends GraphQueryRunner {
   addEdge(e: Omit<MemoryEdge, 'id' | 'createdAt'>): Promise<string>;
   querySubgraph(taskContext: string, maxNodes: number): Promise<MemorySubgraph>;
   mergeRuns(sourceRunIds: RunId[], targetRunId: RunId): Promise<MergeReport>;
+  // WP-3.8 follow-up: resolves only after the backend has released the graph's files, so a
+  // caller that removes or reopens them does so after awaiting it rather than racing the release.
+  close(): Promise<void>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
