@@ -60,8 +60,10 @@ single unqualified sentence about "the spec format" would be false for one of th
   call to make and nothing to fall back to. DAG settings (`--config`'s `dag`) still apply, through the
   same `applyDagSettings` the planned path uses.
 - **`packages/planning-agent/src/DagSynthesizer.ts`** — `fromFile` stats the file first (size is
-  checked before the bytes are read), reads it as JSON, and refuses, by name, a file that is not JSON
-  or has no `nodes` array. `synthesize` validates the whole spec first (closed schema, caps, duplicate
+  checked before the bytes are read, and again on the bytes actually loaded), reads it **as a
+  Buffer**, digests those bytes, and only then decodes them strictly as UTF-8 — so the digest the run
+  records names the file the operator wrote, not a lossy re-encoding of it (R4). It refuses, by
+  name, a file that is not UTF-8, is not JSON, or has no `nodes` array. `synthesize` validates the whole spec first (closed schema, caps, duplicate
   ids, unknown dependencies, self-edges, cycles) and turns each edge into the target's dependency. Ids
   are derived from content, not the clock: `spec.id` when given, otherwise `sha256(JSON.stringify(spec))`;
   an edge id is `e<i>:from->to:kind`. The same file therefore yields the same DAG on every read.
@@ -82,7 +84,10 @@ Every one of these is raised before anything is created (F1):
   `MAX_TIMER_MS` in `@maf/types` with `.maf/config.yaml`'s loader. Above it a Node timer fires after
   1 ms, so a larger timeout means "at once" — the opposite of what the spec asks for;
 - a file over 1 MiB: *it is N bytes; a spec may be at most 1048576* — read from `stat`, so the file is
-  not loaded to find out;
+  not loaded to find out, and checked again on the bytes that were loaded;
+- a file that is not UTF-8: *<path> is not valid UTF-8; a JSON workflow spec must be UTF-8 text* —
+  the bytes are hashed before they are decoded, and the decode is strict, so a lossy read cannot
+  digest a re-encoding and cannot turn bad bytes into a confusing JSON parse error;
 - a duplicate node id: `duplicate node id "n1"` (a `Map` would silently keep the last);
 - an edge naming a node the spec does not define, in either direction:
   `edge names unknown node "ghost" (from|to)`;
@@ -174,8 +179,9 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
     times (it throws if it is), no `invoke`/`task` exchange (the planner was never asked), both files on
     `maf/<runId>`, and `planSource = {kind:'spec', path, sha256}` in the bundle, the transcript entry
     and the Run node.
-  - **the refusal sweeps (F1, R1):** seven refusals — unknown node key, unknown spec key, duplicate
-    id, unknown edge endpoint, cycle, no nodes, missing file — each asserting the message. They run
+  - **the refusal sweeps (F1, R1, R3, R4):** every refusal case — unknown node key, unknown spec key,
+    duplicate id, unknown edge endpoint, cycle, the two `timeoutMs` bounds, a file that is not UTF-8,
+    no nodes, missing file — each asserting the message. They run
     twice. In a repository maf has **never run in** (no `.maf/`), every path and its bytes — `.git/`
     included — and `git status` are identical afterwards, and `.maf/` still does not exist. In a
     repository `maf init` has run in, `.maf/` is unchanged. Neither test pre-saves a harness or seeds

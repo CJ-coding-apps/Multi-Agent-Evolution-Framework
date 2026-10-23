@@ -167,18 +167,36 @@ export class DagSynthesizer {
    * Returns the digest of the bytes it read, which the run records as the plan's source (F4).
    */
   async fromFile(filePath: string, runId: RunId, opts: SynthesisOptions = {}): Promise<SynthesisFile> {
-    let text: string;
+    let bytes: Buffer;
     try {
       const info = await stat(filePath);
       if (!info.isFile()) throw new Error('it is not a regular file');
       if (info.size > MAX_SPEC_BYTES) {
         throw new Error(`it is ${info.size} bytes; a spec may be at most ${MAX_SPEC_BYTES}`);
       }
-      text = await readFile(filePath, 'utf8');
+      bytes = await readFile(filePath);
+      // The `stat` refuses a large file before loading it; this refuses one that grew after it. The
+      // cap belongs on the bytes that are parsed, and these are they.
+      if (bytes.length > MAX_SPEC_BYTES) {
+        throw new Error(`it is ${bytes.length} bytes; a spec may be at most ${MAX_SPEC_BYTES}`);
+      }
     } catch (err) {
       throw new Error(
         `DagSynthesizer: could not read ${filePath} as a JSON workflow spec ` +
         `(${err instanceof Error ? err.message : String(err)}).`,
+      );
+    }
+    // Read as bytes, hash the bytes, and decode strictly (R4). `readFile(path, 'utf8')` replaces each
+    // invalid sequence with U+FFFD, so hashing the resulting string would digest a re-encoding the
+    // file never contained — and a digest that does not name the bytes the operator wrote is not a
+    // record of the plan's source. Decoding strictly turns invalid UTF-8 into a refusal naming the
+    // file, instead of a JSON parse error pointing at a replacement character.
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error(
+        `DagSynthesizer: ${filePath} is not valid UTF-8; a JSON workflow spec must be UTF-8 text.`,
       );
     }
     let parsed: unknown;
@@ -195,7 +213,7 @@ export class DagSynthesizer {
     }
     return {
       dag:    this.synthesize(parsed as SynthesisSpec, runId, opts),
-      sha256: crypto.createHash('sha256').update(text, 'utf8').digest('hex'),
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
     };
   }
 

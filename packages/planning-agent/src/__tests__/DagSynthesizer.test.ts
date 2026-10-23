@@ -91,6 +91,30 @@ test('a spec file yields the same DAG on every read, with no model in the path',
   assert.equal(first.sha256, crypto.createHash('sha256').update(text, 'utf8').digest('hex'));
 });
 
+test('the recorded digest is the file bytes, and invalid UTF-8 is refused by name (R4)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-bytes-'));
+  // A valid spec behind a UTF-8 BOM: decoding drops the BOM, so hashing the decoded string re-encoded
+  // digests something the file does not contain. This is the case that tells the two apart.
+  const body = Buffer.from('{"nodes":[{"id":"a","label":"café"}]}', 'utf8');
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]);
+  const bomFile = path.join(dir, 'bom.json');
+  await writeFile(bomFile, bom);
+  const read = await new DagSynthesizer(ROLES).fromFile(bomFile, RUN_ID);
+  assert.equal(read.sha256, crypto.createHash('sha256').update(bom).digest('hex'), 'the digest names the bytes on disk');
+  assert.notEqual(read.sha256, crypto.createHash('sha256').update(body).digest('hex'),
+    'it is not the digest of the decoded text — the BOM is in the file');
+  assert.equal([...read.dag.nodes.values()][0]?.label, 'café');
+
+  // Bytes that are not UTF-8 at all are refused as such, naming the file — not reported as a JSON
+  // parse error caused by a replacement character.
+  const badFile = path.join(dir, 'latin1.json');
+  await writeFile(badFile, Buffer.from([0x7b, 0x22, 0x6e, 0xff, 0x7d]));
+  await assert.rejects(
+    () => new DagSynthesizer(ROLES).fromFile(badFile, RUN_ID),
+    /latin1\.json is not valid UTF-8; a JSON workflow spec must be UTF-8 text/,
+  );
+});
+
 test('a spec file that is not a workflow spec is refused by name', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-'));
   const notJson = path.join(dir, 'not.json');

@@ -309,12 +309,13 @@ async function exists(target: string): Promise<boolean> {
 }
 
 /** Every refusal case, run against `repo` with a spec written outside it. */
-const SPEC_REFUSALS: ReadonlyArray<{ name: string; body: string | undefined; expected: RegExp }> = [
+const SPEC_REFUSALS: ReadonlyArray<{ name: string; body: string | Buffer | undefined; expected: RegExp }> = [
   { name: 'unknown-node-key', body: '{"nodes":[{"id":"a","label":"a","agnetRole":"reviewer"}]}', expected: /unknown key\(s\) "agnetRole"/ },
   { name: 'unknown-spec-key', body: '{"nodes":[{"id":"a","label":"a"}],"config":{}}', expected: /unknown key\(s\) "config"/ },
   { name: 'duplicate-id', body: '{"nodes":[{"id":"a","label":"a"},{"id":"a","label":"b"}]}', expected: /duplicate node id "a"/ },
   { name: 'unknown-endpoint', body: '{"nodes":[{"id":"a","label":"a"}],"edges":[{"from":"a","to":"ghost"}]}', expected: /edge names unknown node "ghost"/ },
   { name: 'cycle', body: '{"nodes":[{"id":"a","label":"a"},{"id":"b","label":"b"}],"edges":[{"from":"a","to":"b"},{"from":"b","to":"a"}]}', expected: /dependency cycle/ },
+  { name: 'bad-utf8', body: Buffer.from([0x7b, 0x22, 0x6e, 0xff, 0x7d]), expected: /is not valid UTF-8; a JSON workflow spec must be UTF-8 text/ },
   { name: 'timeout-zero', body: '{"nodes":[{"id":"a","label":"a","timeoutMs":0}]}', expected: /from 1 to 2147483647/ },
   { name: 'timeout-too-large', body: '{"nodes":[{"id":"a","label":"a","timeoutMs":2147483648}]}', expected: /from 1 to 2147483647/ },
   { name: 'no-nodes', body: '{"nodes":[]}', expected: /has no nodes/ },
@@ -324,7 +325,7 @@ const SPEC_REFUSALS: ReadonlyArray<{ name: string; body: string | undefined; exp
 async function refuseEverySpec(repo: string, root: string, envKey: string): Promise<void> {
   for (const { name, body, expected } of SPEC_REFUSALS) {
     const spec = path.join(root, `${name}.json`);
-    if (body !== undefined) await writeFile(spec, body, 'utf8');
+    if (body !== undefined) await writeFile(spec, body);
     // No `--harness`: the run mints the legacy harness from the roles file, which is the write a
     // refusal must be able to skip. A pre-saved harness would hide exactly the defect under test.
     const scripted = new ScriptedAdapter([]);
