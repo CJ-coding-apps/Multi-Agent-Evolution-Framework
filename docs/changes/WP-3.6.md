@@ -189,9 +189,14 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
     repository `maf init` has run in, `.maf/` is unchanged. Neither test pre-saves a harness or seeds
     a `.gitignore`: those were what hid the defect, because the resolution used to adopt a harness
     before the spec was read.
-  - **the failure is recallable (F7):** a strict harness makes the node fail; the Task record's label
-    is the node's own description and its `runTitle` is the run title, and `recallFailures` for that
-    title finds the run.
+  - **the failure is recallable (F7, R9):** a strict harness makes the node fail; the Task record's
+    label is the node's own description and its `runTitle` is the run title, and `recallFailures`
+    for that title finds the run. The same spec then runs a **second** time with that title now in
+    memory, and is still the one node the operator wrote — memory does not rewrite a human's plan.
+    A gate that recall inserted would be a node (visible in the count) or a `reviewGateNodeIds`
+    entry (which no command prints), so the second observable is read where the CLI reads it:
+    `fromFile` with the run title and nothing else yields no gate, and the same call passed the
+    recorded failure does flag the node — the empty list is a decision, not an unmatched label.
   - **the planner path still records itself (F4):** a planner-planned run records
     `planSource = {kind:'planner'}` in the same three places, with the factory called once — the seam
     is wired to the real `RetrievalAugmentedPlanner`, so the spec test's zero is not vacuous.

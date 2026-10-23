@@ -10,7 +10,9 @@ import { promisify } from 'node:util';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import { MemoryGraph, recallFailures } from '@maf/memory-graph';
-import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
+import { DagSynthesizer, RetrievalAugmentedPlanner } from '@maf/planning-agent';
+import { makeRunId, makeToolId } from '@maf/types';
+import { RoleRegistry, defineRoleName } from '@maf/roles';
 import { runIsolatedGit } from '@maf/git-ops';
 import { runInit } from '../commands/init.js';
 import {
@@ -196,6 +198,38 @@ test('a spec node failure is recorded under the run title, so recall finds it (F
     } finally {
       graph.close();
     }
+
+    // R9: that failure is now in the graph under this exact title, which is the state a planner
+    // reads before it decides to insert review gates. The same spec, run again with the same title,
+    // is still exactly the one node the operator wrote — memory must not rewrite a human's plan.
+    const again = await driveRun(
+      [FIRST, '--dir', repo, '--adapter', 'scripted', '--harness', 'strict', '--policy', policy, '--plan-from', spec],
+      { adapters: registryOf(scripted), io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: 'plan-recall-key-2' } } },
+    );
+    assert.match(again.out, /\[maf\] running DAG with 1 node\(s\)/, `a review gate was inserted\n${again.out}`);
+    assert.match(again.out, /\[maf\] ← node n1 Failed/, again.out);
+
+    // A gate that recall inserted would also be a field on the DAG, and no command prints that
+    // field — so the node count above cannot see one. The read is made here, with the same entry
+    // point and the same options `run.ts` gives it (`fromFile` with the run title and nothing
+    // else), and both ways round: passed this failure, recall flags the node; passed nothing, as
+    // the spec path does, it does not. A synthesizer that invented a default pattern would flag it
+    // in the first read, and one that ignored recall entirely would not flag it in the second.
+    const synth = new DagSynthesizer(RoleRegistry.fromSet({
+      version: 1, defaultRole: defineRoleName('coder'),
+      roles: [{
+        role: defineRoleName('coder'), systemPrompt: 'Fix the code.',
+        allowedTools: [makeToolId('fs.read'), makeToolId('fs.write')], execution: 'in-process',
+      }],
+    }, path.join(repo, '.maf')));
+    const noRecall = await synth.fromFile(spec, makeRunId('plan-recall-check'), { runTitle: FIRST });
+    assert.deepEqual(noRecall.dag.config.reviewGateNodeIds, [], 'the spec path inserts no review gate');
+    const withRecall = await synth.fromFile(spec, makeRunId('plan-recall-check'), {
+      runTitle: FIRST,
+      avoidPatterns: [{ taskLabel: FIRST, filePaths: ['sum.js'], failureType: 'test', occurrences: 1, lastSeen: '2026-10-01' }],
+    });
+    assert.deepEqual(withRecall.dag.config.reviewGateNodeIds, ['n1'],
+      'the empty list above is a decision, not a label that could never match: this failure does flag it');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
