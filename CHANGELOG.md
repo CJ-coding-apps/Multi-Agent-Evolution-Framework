@@ -23,8 +23,8 @@ so every path rule missed, `deny-env-files` included; and five further header fo
 round of fixes (a space before the timestamp, octal escapes, indented sections, `Index:` with no space,
 `//` in the path prefix). Every one of them was a way to write a file under an `Allow`.
 
-There is no third parser. **`patch.apply` no longer reads headers.** Every git call it makes runs in a
-sealed context: a fresh empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree, the worktree as `cwd`, the
+There is no third parser. **`patch.apply` no longer reads headers.** Every git call a gated call makes runs
+in a sealed context: a fresh empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree, the worktree as `cwd`, the
 same `-p`, a 0600 diff file, and an environment with no user, system or repository git configuration, no
 hooks file, no fsmonitor and no `attributesFile`, so a filter driver that an agent selects with
 `.gitattributes` is never defined and cannot run. Inside `execute`, the declaration, its reversal,
@@ -33,8 +33,10 @@ directory, the same environment — so the git that names the files is the git t
 through the gate opens **two**: one to declare the paths the policy is asked about, one inside `execute`,
 each with the properties above and the same diff bytes. Because they are two calls, `execute` does not
 assume the second agrees with the first: it declares the paths again in its own sealed context and
-**refuses** the call if the set differs in any way from the set the gate approved, recording a `Deny` under
-`builtin:declaration` and writing nothing. The declaration is
+**refuses** the call if the set differs in any way from the set the gate approved — or if the call arrives
+with no approved set at all, which means it did not come through the gate — recording a `Deny` under
+`builtin:declaration` and writing nothing. The gate hands `execute` a frozen copy of the approved set. The
+declaration is
 `git apply --numstat -z` and its reversal is `git apply -R --numstat -z`: git names the old file on the old
 side and the new one on the new side, so a file that disappears is declared as well as the one that
 appears. The declared set is the union of the two; a name that one direction reports and the other does
@@ -45,9 +47,10 @@ a list of paths is refused: renames, copies, mode changes, symlinks, submodules 
 through one — checked when the paths are declared, so the gate records a `Deny` instead of allowing a call
 that git would then fail, and checked again inside `execute` for a link created in between. A path that
 cannot be checked at all is a returned refusal, not a raw throw: a component over the filesystem's name
-limit (256 bytes on APFS) gives `ENAMETOOLONG` and is refused at declaration. A name below a regular file is
-the other case — there is nothing below a file for the walk to check, so the path is declared and git
-answers the call with its own failure; nothing is written. `--check` runs
+limit (256 bytes on APFS) gives `ENAMETOOLONG` and is refused at declaration. A name below an existing
+regular file is refused too: `README/x` passes `git apply --check` and then fails partway through the apply,
+after an earlier file in the same diff has already been written, so a declared path with a parent component
+that exists and is not a directory is refused at declaration, and nothing is written. `--check` runs
 before the apply, `--reject` is never passed, so a failed apply leaves no `.orig` and no `.rej`, and
 nothing is loosened: this is exactly as strict as `git apply`, so a hunk count that does not match fails
 with git's own message and the agent retries with the right one.
@@ -64,12 +67,19 @@ unchanged; on macOS and Windows the result is never more permissive than 0.5.0 �
 add a refusal, or answer a call that was allowed with one of Deny, Escalate or Indeterminate.
 
 This is stricter than `patch`, deliberately: a context diff, an `Index:`-only diff, a normal diff, an ed
-diff, or an indented section start now fails instead of being applied, because git applies unified diffs
-only — and `git apply` skips an indented section and exits 0, so the tool refuses one before git is asked.
-A section start is an indented `---` line immediately followed by a `+++` line at the same indent, or an
-indented `diff --git` line; an indented line inside a hunk is content, so a Helm-rendered YAML file whose
-unchanged lines read ` --- # Source: chart/a.yaml` applies. A diff that cannot be declared is refused
-before the policy is asked, recorded as a `Deny` under `builtin:declaration`, and nothing is written.
+diff, or a section start git skips now fails instead of being applied, because git applies unified diffs
+only — and `git apply` skips what it does not read and exits 0, so the tool refuses a diff it cannot read
+to its end before git is asked. The rule is the diff's line grammar, not a list of known-bad patterns.
+Every line must be a section header (`diff --git`, `---`, `+++`, a git extended header, `Index:`), a hunk
+header, a hunk body line (` `, `+`, `-` or `\`), or a blank line between files; any other line is refused
+naming its number, as is a hunk body line past the point its header's counts run out. A hunk that ends
+before its counts are reached is left to git, which refuses the diff as corrupt. Inside a
+hunk the counts decide what is content, so a Helm-rendered YAML file whose unchanged lines read
+` --- # Source: chart/a.yaml` applies, as does any other line the hunk header counts. This closes the eight
+measured shapes in which the hunk header or the whole diff is indented or otherwise prefixed — with a
+space, a TAB, a non-breaking space or a carriage return — where git applies the first section, silently
+skips the rest and exits 0. A diff that cannot be declared is refused before the policy is asked, recorded
+as a `Deny` under `builtin:declaration`, and nothing is written.
 
 **API changes.** `extractDiffPaths` is gone from `@maf/tools`: it was the header parser, and nothing
 outside it should keep a second one. `@maf/types` gains `toolEnv()` — the allowlist of environment
@@ -104,6 +114,19 @@ this patch answers.
   fake global config that define a filter, a hook and an fsmonitor (none runs), a `TMPDIR` inside a work
   tree (the declared name is unchanged), a diff on an existing symlink (refused, link untouched), a
   concatenated two-file `diff -u` (applies), and a failing `dryRun` (non-zero, git asked).
+- **A patch that cannot apply in full is refused before anything is written** (HS24, L1–L4). Two cases git
+  does not stop at `--check`: a declared path below an existing regular file (`README/x`), which passes
+  `--check` and then fails partway through the apply, after an earlier file in the same diff is already
+  written; and a diff line git silently skips (an indented hunk header, or a wholly indented diff — eight
+  measured shapes, with a space, a TAB, a non-breaking space or a carriage return), which git applies in
+  part and exits 0. Both are refused at declaration and recorded as a `Deny` under `builtin:declaration`,
+  nothing written: the first by checking that every parent component of a declared path is a directory, the
+  second by validating the diff's line grammar and naming the offending line. `execute` also refuses a call
+  that arrives with no approved path set — it did not come through the gate — and the gate hands `execute`
+  a frozen copy of the set, so neither the tool nor anything else holding a handle can widen what was
+  approved. A gate-level test proves a write through a link to `Cargo.lock` is refused at declaration and
+  that no approver is asked. Two conformance rows changed outcome: a `===` line and a `Prereq:` line are
+  now refused, where round 1 accepted diffs git applies only in part.
 - **Case folding and NFC may only make a verdict stricter** (HS5, HS16). `PolicyEngine` folds case and
   Unicode form for Deny and Escalate rules only, and asks the rules twice — exactly and folded — answering
   with the stricter verdict, so a folded `docs/**` Escalate can no longer pre-empt a `**/*.env*` Deny for

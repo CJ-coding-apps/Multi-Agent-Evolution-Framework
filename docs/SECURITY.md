@@ -626,7 +626,10 @@ diff rewrites the link in place and the policy would have been asked about its t
 declaration time, so the gate records the `Deny` rather than allowing a call that then fails, and again
 inside `execute`; every parent component is checked as well, so a diff of `d/x.js` is refused when `d` is a
 link. A path that cannot be checked (a component over the name limit — 256 bytes on APFS — gives
-`ENAMETOOLONG`) is a returned refusal, never a raw throw. Creating a mode
+`ENAMETOOLONG`) is a returned refusal, never a raw throw. A declared path below an existing regular file is
+refused too: `README/x` passes `git apply --check` and then fails partway through the apply, after an
+earlier file in the diff has been written, so a parent component that exists and is not a directory is a
+refusal at declaration and nothing is written. Creating a mode
 `100755` file is allowed: whether an agent may write a script at a given path is a policy question, not
 one path declaration can answer. Binary patches are refused from their `-` line counts. Absolute names and
 names containing `..` are refused by name, `--check` runs before the apply so a diff that would fail
@@ -638,12 +641,14 @@ NFC-normalized — and the stricter verdict decides (`Deny` over `Indeterminate`
 `Allow`): a `+++ b/.ENV` header is held to the `**/.env*` rule there, and a folded `docs/**` Escalate can no
 longer pre-empt a Deny below it. `Allow` rules and `allowedPathGlobs` stay exact in both passes, so folding
 never makes a verdict more permissive; on Linux nothing is folded and only the exact pass runs. This is
-stricter than `patch` — a context diff, an `Index:`-only diff, a normal diff, an ed diff, or an indented
-section start (an indented `---` line immediately followed by a `+++` line at the same indent, or an
-indented `diff --git`) is refused rather than applied, because git applies unified diffs only and skips an
-indented section while exiting 0. An indented line inside a hunk is content, not a section, so a
-Helm-rendered YAML file whose unchanged lines read ` --- # Source: chart/a.yaml` applies. The strictness is
-the point: a diff whose targets cannot be declared is not one whose write may be assumed safe.
+stricter than `patch` — a context diff, an `Index:`-only diff, a normal diff, an ed diff, or a section
+start git skips is refused rather than applied, because git applies unified diffs only and skips what it
+does not read while exiting 0. The rule is the diff's line grammar rather than a list of bad patterns:
+every line must be a section header, a hunk header, a hunk body line (` `, `+`, `-` or `\`), or a blank
+line between files, and any other line is refused naming its number. Inside a hunk the header's counts
+decide what is content, so a Helm-rendered YAML file whose unchanged lines read
+` --- # Source: chart/a.yaml` applies. The strictness is the point: a diff whose targets cannot be
+declared is not one whose write may be assumed safe.
 
 ### `test.run` executes project code
 

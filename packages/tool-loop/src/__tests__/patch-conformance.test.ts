@@ -218,8 +218,10 @@ const ROWS: Row[] = [
   { n: 16, name: 'Index: my file.lock (space in name), -p0', strip: 0, diff: 'Index: my file.lock\n@@ -1 +1 @@\n-m\n+n\n',
     expect: { declared: 'REFUSED' } },
   { n: 17, name: 'Index: + === + unified on README, -p0', strip: 0, diff: 'Index: Cargo.lock\n===\n--- README\n+++ README\n@@ -1 +1 @@\n-r\n+s\n',
-    expect: { declared: ['README'], verdict: 'Allow' },
-    note: 'git follows the `---`/`+++` pair; the `Index:` line names no file git writes.' },
+    expect: { declared: 'REFUSED' },
+    note: 'round 4 (L2): `===` is a line git skips rather than reads, and a diff it does not read to '
+      + 'its end is refused at line 2. The round-1 expectation (`declared: [README]`) accepted a diff '
+      + 'git applies only in part.' },
   { n: 18, name: 'context diff, TAB timestamps', diff: `*** a/Cargo.lock${STAMP}\n--- b/Cargo.lock${STAMP}\n***************\n*** 1 ****\n- lock1\n--- 1 ----\n+ lock2\n`,
     expect: { declared: 'REFUSED' } },
   { n: 19, name: 'diff --git a/ b/', diff: `diff --git a/Cargo.lock b/Cargo.lock\n${unified('a/Cargo.lock', 'b/Cargo.lock')}`,
@@ -292,8 +294,10 @@ const ROWS: Row[] = [
   { n: 47, name: 'absolute /tmp/zz-abs.lock at -p0', strip: 0, diff: unified('/tmp/zz-abs.lock', '/tmp/zz-abs.lock'),
     expect: { declared: 'REFUSED' } },
   { n: 48, name: 'Prereq: line', diff: 'Prereq: 1.0\n' + unified('a/Cargo.lock', 'b/Cargo.lock'),
-    expect: { declared: ['Cargo.lock'], verdict: 'Escalate', ruleId: 'protect-lock-files' },
-    note: 'git ignores the non-header line and names the file the unified section touches.' },
+    expect: { declared: 'REFUSED' },
+    note: 'round 4 (L2): git would ignore the non-header line and name the file the unified section '
+      + 'touches, but a line git skips is refused at line 1 — the same rule that refuses the eight '
+      + 'shapes git applies in part.' },
   { n: 49, name: '---<TAB> / +++<TAB> (no space after the marker)', diff: '---\tCargo.lock\n+++\tCargo.lock\n@@ -1 +1 @@\n-lock1\n+lock2\n',
     expect: { declared: 'REFUSED' } },
   { n: 50, name: 'hunk body line beginning `--- `', diff: '--- a/n.txt\n+++ b/n.txt\n@@ -1 +1 @@\n--- a/Cargo.lock\n+replaced\n',
@@ -484,10 +488,14 @@ test('R9 — a rename with an octal target is refused for being a rename', async
   assert.match(o.declared.message, /rename notes => Cargo\.lock2/);
 });
 
+// Round 4 (L2) replaced the indented-header pattern with the line grammar: the refuse is the same
+// refusal, and it now names the offending line.
+const NOT_A_LINE_GIT_READS = /line \d+ is .*, and that is neither a section header, a hunk header nor a hunk line/;
+
 test('R10 — a space-indented .env section after README is refused, and `.env` is untouched', async () => {
   const o = await runRow(35);
   assert.ok(o.declared instanceof ToolDeclarationError);
-  assert.match(o.declared.message, /indented section header/);
+  assert.match(o.declared.message, NOT_A_LINE_GIT_READS);
   assert.deepEqual(o.changed, []);
   assert.equal(readFileSync(path.join(projectRoot, '.env'), 'utf8'), 'SAFE=1\n');
 });
@@ -496,7 +504,7 @@ test('R11 — TAB- and X-prefixed sections are refused: git would apply only the
   for (const n of [36, 37]) {
     const o = await runRow(n);
     assert.ok(o.declared instanceof ToolDeclarationError, `row ${n}: ${JSON.stringify(o.declared)}`);
-    assert.match(o.declared.message, /indented section header/, `row ${n}`);
+    assert.match(o.declared.message, NOT_A_LINE_GIT_READS, `row ${n}`);
     assert.deepEqual(o.changed, [], `row ${n}: nothing is written, README included`);
     assert.equal(readFileSync(path.join(projectRoot, 'README'), 'utf8'), 'r\n', `row ${n}`);
     assert.equal(readFileSync(path.join(projectRoot, 'Cargo.lock'), 'utf8'), 'lock1\n', `row ${n}`);
@@ -506,7 +514,7 @@ test('R11 — TAB- and X-prefixed sections are refused: git would apply only the
 test('R12 — a wholly indented diff is refused', async () => {
   const o = await runRow(34);
   assert.ok(o.declared instanceof ToolDeclarationError);
-  assert.match(o.declared.message, /indented section header/);
+  assert.match(o.declared.message, NOT_A_LINE_GIT_READS);
 });
 
 test('R13 — `Index:.env` and `Index:<TAB>.env` after a section are refused with the whole diff', async () => {
