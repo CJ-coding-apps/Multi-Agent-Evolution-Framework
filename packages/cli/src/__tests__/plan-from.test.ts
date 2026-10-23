@@ -315,6 +315,8 @@ const SPEC_REFUSALS: ReadonlyArray<{ name: string; body: string | undefined; exp
   { name: 'duplicate-id', body: '{"nodes":[{"id":"a","label":"a"},{"id":"a","label":"b"}]}', expected: /duplicate node id "a"/ },
   { name: 'unknown-endpoint', body: '{"nodes":[{"id":"a","label":"a"}],"edges":[{"from":"a","to":"ghost"}]}', expected: /edge names unknown node "ghost"/ },
   { name: 'cycle', body: '{"nodes":[{"id":"a","label":"a"},{"id":"b","label":"b"}],"edges":[{"from":"a","to":"b"},{"from":"b","to":"a"}]}', expected: /dependency cycle/ },
+  { name: 'timeout-zero', body: '{"nodes":[{"id":"a","label":"a","timeoutMs":0}]}', expected: /from 1 to 2147483647/ },
+  { name: 'timeout-too-large', body: '{"nodes":[{"id":"a","label":"a","timeoutMs":2147483648}]}', expected: /from 1 to 2147483647/ },
   { name: 'no-nodes', body: '{"nodes":[]}', expected: /has no nodes/ },
   { name: 'missing-file', body: undefined, expected: /could not read .*missing-file\.json/ },
 ];

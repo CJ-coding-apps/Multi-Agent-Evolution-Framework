@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import type {
   Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
 } from '@maf/types';
-import { makeNodeId, DEFAULT_RETRY_POLICY } from '@maf/types';
+import { makeNodeId, DEFAULT_RETRY_POLICY, MAX_TIMER_MS } from '@maf/types';
 import type { FailurePattern } from './FailurePatternDetector.js';
 
 const DEFAULT_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;
@@ -263,8 +263,14 @@ function validateSpec(raw: unknown, who: string): SynthesisSpec {
       }
     }
     const timeout = node['timeoutMs'];
-    if (timeout !== undefined && (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0)) {
-      throw new Error(`${who}: ${where} "timeoutMs" must be a positive number of milliseconds.`);
+    // The same bound `.maf/config.yaml` uses, and the same reason (R3): Node fires any delay above
+    // `MAX_TIMER_MS` after 1 ms, so a larger timeout would mean "at once" rather than "never". Above
+    // it the spec asks for the opposite of what it says, so it is refused rather than clamped.
+    if (timeout !== undefined
+      && (typeof timeout !== 'number' || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > MAX_TIMER_MS)) {
+      throw new Error(
+        `${who}: ${where} "timeoutMs" must be a whole number of milliseconds from 1 to ${MAX_TIMER_MS}.`,
+      );
     }
     const metadata = node['metadata'];
     if (metadata !== undefined && (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata))) {

@@ -126,9 +126,20 @@ test('ids, labels and timeouts are checked for type', () => {
   refuses(() => synth.synthesize({ nodes: [] }, RUN_ID), /has no nodes; a plan needs at least one/);
   refuses(() => synth.synthesize({ nodes: [{ id: 7 as never, label: 'a' }] }, RUN_ID), /needs a non-empty string "id"/);
   refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: '' }] }, RUN_ID), /node "a" needs a non-empty string "label"/);
-  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: '5s' as never }] }, RUN_ID), /"timeoutMs" must be a positive number/);
-  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 0 }] }, RUN_ID), /"timeoutMs" must be a positive number/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: '5s' as never }] }, RUN_ID), /"timeoutMs" must be a whole number of milliseconds from 1 to 2147483647/);
   refuses(() => synth.synthesize({ id: 1 as never, nodes: [{ id: 'a', label: 'a' }] }, RUN_ID), /the spec's "id" must be a string/);
+});
+
+test('timeoutMs is bounded by the timer ceiling, and the ceiling itself is allowed (R3)', () => {
+  const synth = new DagSynthesizer(ROLES);
+  // The literal, not `MAX_TIMER_MS`: a test that imports the constant agrees with any value of it,
+  // including a wrong one. Node fires any delay above 2147483647 after 1 ms, so a spec asking for
+  // more asks for "at once" — the opposite of what it says.
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 0 }] }, RUN_ID), /from 1 to 2147483647/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: -1 }] }, RUN_ID), /from 1 to 2147483647/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 2147483648 }] }, RUN_ID), /from 1 to 2147483647/);
+  const accepted = synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 2147483647 }] }, RUN_ID);
+  assert.equal([...accepted.nodes.values()][0]?.timeoutMs, 2147483647, 'the ceiling is a valid timeout');
 });
 
 test('an unknown edge kind is refused, naming the kinds that are accepted', () => {

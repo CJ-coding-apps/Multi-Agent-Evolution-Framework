@@ -78,6 +78,9 @@ Every one of these is raised before anything is created (F1):
   "nodes" array*;
 - no nodes: *the spec has no nodes; a plan needs at least one*;
 - more than 200 nodes / 2000 edges: the count and the cap are named;
+- a `timeoutMs` below 1 or above 2147483647: the ceiling every millisecond field uses, shared as
+  `MAX_TIMER_MS` in `@maf/types` with `.maf/config.yaml`'s loader. Above it a Node timer fires after
+  1 ms, so a larger timeout means "at once" — the opposite of what the spec asks for;
 - a file over 1 MiB: *it is N bytes; a spec may be at most 1048576* — read from `stat`, so the file is
   not loaded to find out;
 - a duplicate node id: `duplicate node id "n1"` (a `Map` would silently keep the last);
