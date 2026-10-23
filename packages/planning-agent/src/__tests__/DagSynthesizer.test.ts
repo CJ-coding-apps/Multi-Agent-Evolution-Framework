@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { makeNodeId, makeRunId } from '@maf/types';
 import type { FailurePattern } from '../FailurePatternDetector.js';
-import { DagSynthesizer, MAX_SPEC_BYTES, MAX_SPEC_NODES } from '../DagSynthesizer.js';
+import { DagSynthesizer, MAX_SPEC_BYTES, MAX_SPEC_NODES, MAX_SPEC_EDGES } from '../DagSynthesizer.js';
 import { rolesOf } from './roleResolver.js';
 
 // ORACLE (D-07): the synthesizer is the second place a role name
@@ -285,21 +285,47 @@ test('an unnamed spec gets a sha256 id from its content, stable across reads', a
 
 // ── F11: the caps ────────────────────────────────────────────────────────────────────────────
 
+// The caps are checked against literal numbers, not the exported constants (R7): a test that reads
+// the constant it is checking agrees with any value of it, including one the documentation would
+// not recognise. `1048576` is 1 MiB, `200` nodes and `2000` edges are what the fragment states.
+test('the caps are the numbers the documentation states (R7)', () => {
+  assert.equal(MAX_SPEC_BYTES, 1048576);
+  assert.equal(MAX_SPEC_NODES, 200);
+  assert.equal(MAX_SPEC_EDGES, 2000);
+});
+
 test('a spec larger than the byte cap is refused before it is parsed', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-'));
   const big = path.join(dir, 'big.json');
   // Not JSON at all: the size is read from the file's metadata, so the cap answers first.
-  await writeFile(big, 'x'.repeat(MAX_SPEC_BYTES + 1), 'utf8');
+  await writeFile(big, 'x'.repeat(1048577), 'utf8');
   await assert.rejects(
     () => new DagSynthesizer(ROLES).fromFile(big, RUN_ID),
-    new RegExp(`may be at most ${MAX_SPEC_BYTES}`),
+    /may be at most 1048576/,
   );
+  // The cap itself is a size a spec may have.
+  const exact = path.join(dir, 'exact.json');
+  const json = JSON.stringify({ nodes: [{ id: 'a', label: 'a' }] });
+  await writeFile(exact, json + ' '.repeat(1048576 - json.length), 'utf8');
+  assert.equal((await new DagSynthesizer(ROLES).fromFile(exact, RUN_ID)).dag.nodes.size, 1);
 });
 
 test('a spec with more nodes than the cap is refused, stating the cap', () => {
-  const nodes = Array.from({ length: MAX_SPEC_NODES + 1 }, (_, i) => ({ id: `n${i}`, label: `node ${i}` }));
+  const nodes = Array.from({ length: 201 }, (_, i) => ({ id: `n${i}`, label: `node ${i}` }));
   assert.throws(
     () => new DagSynthesizer(ROLES).synthesize({ nodes }, RUN_ID),
-    new RegExp(`has ${MAX_SPEC_NODES + 1} nodes; at most ${MAX_SPEC_NODES} are accepted`),
+    /has 201 nodes; at most 200 are accepted/,
   );
+  // The cap itself is a plan the synthesizer accepts — the bound is not off by one.
+  assert.equal(new DagSynthesizer(ROLES).synthesize({ nodes: nodes.slice(0, 200) }, RUN_ID).nodes.size, 200);
+});
+
+test('a spec with more edges than the cap is refused, stating the cap (R7)', () => {
+  const nodes = [{ id: 'a', label: 'a' }, { id: 'b', label: 'b' }];
+  const edges = Array.from({ length: 2001 }, () => ({ from: 'a', to: 'b' }));
+  assert.throws(
+    () => new DagSynthesizer(ROLES).synthesize({ nodes, edges }, RUN_ID),
+    /has 2001 edges; at most 2000 are accepted/,
+  );
+  assert.equal(new DagSynthesizer(ROLES).synthesize({ nodes, edges: edges.slice(0, 2000) }, RUN_ID).edges.length, 2000);
 });

@@ -204,7 +204,10 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
 - `packages/planning-agent/src/__tests__/DagSynthesizer.test.ts` — the closed schema (every container
   shape refused with a sentence, never a raw `TypeError`), ids/labels/timeouts, unknown `kind`, unknown
   keys at spec/node/edge level including `retry`/`inputs`/`outputs`, duplicate ids, unknown
-  dependencies, self-edges and cycles, the byte/node caps, content ids (F10), roles, the edge rule, and
+  dependencies, self-edges and cycles, the byte/node/edge caps — asserted against the literal
+  `1048576`, `200` and `2000`, since a test that read the exported constants would agree with any
+  value of them, and each cap's boundary is accepted while one past it is refused — content ids
+  (F10), roles, the edge rule, and
   the metadata rule: every node carries the run title, keeps its own label as `taskDescription` unless
   the operator named one, and recall inserts a review gate only when patterns are passed.
 - `packages/dag-runner/src/__tests__/plan-spec.test.ts` — an edge makes its target depend on its
