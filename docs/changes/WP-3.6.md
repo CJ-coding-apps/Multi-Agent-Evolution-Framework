@@ -180,9 +180,10 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
     times (it throws if it is), no `invoke`/`task` exchange (the planner was never asked), both files on
     `maf/<runId>`, and `planSource = {kind:'spec', path, sha256}` in the bundle, the transcript entry
     and the Run node.
-  - **the refusal sweeps (F1, R1, R3, R4):** every refusal case — unknown node key, unknown spec key,
-    duplicate id, unknown edge endpoint, cycle, the two `timeoutMs` bounds, a file that is not UTF-8,
-    no nodes, missing file — each asserting the message. They run
+  - **the refusal sweeps (F1, R1, R3, R4, R8):** every refusal case — unknown node key, unknown spec
+    key, duplicate id, unknown edge endpoint, cycle, the two `timeoutMs` bounds, a file that is not
+    UTF-8, a file that is not JSON, an unknown `agentRole`, no nodes, missing file — each asserting
+    the message. They run
     twice. In a repository maf has **never run in** (no `.maf/`), every path and its bytes — `.git/`
     included — and `git status` are identical afterwards, and `.maf/` still does not exist. In a
     repository `maf init` has run in, `.maf/` is unchanged. Neither test pre-saves a harness or seeds

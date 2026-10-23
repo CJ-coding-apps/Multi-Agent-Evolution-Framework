@@ -166,6 +166,17 @@ test('timeoutMs is bounded by the timer ceiling, and the ceiling itself is allow
   assert.equal([...accepted.nodes.values()][0]?.timeoutMs, 2147483647, 'the ceiling is a valid timeout');
 });
 
+test('Infinity, a non-string agentRole and an empty edge endpoint are each refused (R8)', () => {
+  const synth = new DagSynthesizer(ROLES);
+  // `1e999` parses to Infinity: a number, and positive, so only the ceiling refuses it.
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 1e999 }] }, RUN_ID), /from 1 to 2147483647/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', agentRole: 7 as never }] }, RUN_ID), /"agentRole" must be a string/);
+  refuses(
+    () => synth.synthesize({ nodes: [{ id: 'a', label: 'a' }], edges: [{ from: 'a', to: '' }] }, RUN_ID),
+    /edge 0 needs a non-empty string "to"/,
+  );
+});
+
 test('an unknown edge kind is refused, naming the kinds that are accepted', () => {
   assert.throws(
     () => new DagSynthesizer(ROLES).synthesize({

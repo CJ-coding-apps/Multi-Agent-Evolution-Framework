@@ -353,6 +353,8 @@ const SPEC_REFUSALS: ReadonlyArray<{ name: string; body: string | Buffer | undef
   { name: 'unknown-endpoint', body: '{"nodes":[{"id":"a","label":"a"}],"edges":[{"from":"a","to":"ghost"}]}', expected: /edge names unknown node "ghost"/ },
   { name: 'cycle', body: '{"nodes":[{"id":"a","label":"a"},{"id":"b","label":"b"}],"edges":[{"from":"a","to":"b"},{"from":"b","to":"a"}]}', expected: /dependency cycle/ },
   { name: 'bad-utf8', body: Buffer.from([0x7b, 0x22, 0x6e, 0xff, 0x7d]), expected: /is not valid UTF-8; a JSON workflow spec must be UTF-8 text/ },
+  { name: 'not-json', body: 'nodes: [', expected: /could not read .*not-json\.json as a JSON workflow spec/ },
+  { name: 'unknown-role', body: '{"nodes":[{"id":"a","label":"a","agentRole":"ghost"}]}', expected: /asks for unknown agentRole "ghost"/ },
   { name: 'timeout-zero', body: '{"nodes":[{"id":"a","label":"a","timeoutMs":0}]}', expected: /from 1 to 2147483647/ },
   { name: 'timeout-too-large', body: '{"nodes":[{"id":"a","label":"a","timeoutMs":2147483648}]}', expected: /from 1 to 2147483647/ },
   { name: 'no-nodes', body: '{"nodes":[]}', expected: /has no nodes/ },
