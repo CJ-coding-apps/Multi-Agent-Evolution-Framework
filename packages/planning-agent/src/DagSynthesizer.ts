@@ -186,11 +186,14 @@ export class DagSynthesizer {
         `(${err instanceof Error ? err.message : String(err)}).`,
       );
     }
-    // Read as bytes, hash the bytes, and decode strictly (R4). `readFile(path, 'utf8')` replaces each
-    // invalid sequence with U+FFFD, so hashing the resulting string would digest a re-encoding the
-    // file never contained — and a digest that does not name the bytes the operator wrote is not a
-    // record of the plan's source. Decoding strictly turns invalid UTF-8 into a refusal naming the
-    // file, instead of a JSON parse error pointing at a replacement character.
+    // Read as bytes, digest the bytes, and only then decode strictly (R4). `readFile(path, 'utf8')`
+    // replaces each invalid sequence with U+FFFD, so hashing the resulting string would digest a
+    // re-encoding the file never contained — and a digest that does not name the bytes the operator
+    // wrote is not a record of the plan's source. The digest is therefore taken here, from the
+    // buffer as read, before the decode below can touch it; decoding strictly turns invalid UTF-8
+    // into a refusal naming the file, instead of a JSON parse error pointing at a replacement
+    // character.
+    const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
     let text: string;
     try {
       text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -213,7 +216,7 @@ export class DagSynthesizer {
     }
     return {
       dag:    this.synthesize(parsed as SynthesisSpec, runId, opts),
-      sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      sha256,
     };
   }
 
