@@ -267,6 +267,43 @@ test('a relative spec path is resolved against --dir, not the working directory 
   }
 });
 
+test('the built maf binary reads a spec, and refuses a malformed one (R5)', async () => {
+  const runRoot = await mkdtemp(path.join(tmpdir(), 'maf-plan-built-'));
+  const refuseRoot = await mkdtemp(path.join(tmpdir(), 'maf-plan-built-refuse-'));
+  try {
+    // `packages/cli/dist/main.js` is what `npm i -g maf` runs. The scripted adapter the binary builds
+    // for itself carries no scripts, so the first node fails at the adapter once the DAG reaches it;
+    // that is the adapter, not the spec. What this proves is the path from argv to a scheduled DAG
+    // with no model in it — the seam the in-process tests reach through `driveRun` instead.
+    const repo = await dirtyUserRepo(runRoot);
+    const spec = path.join(repo, 'two-node.json');
+    await writeFile(spec, JSON.stringify({
+      nodes: [{ id: 'n1', label: FIRST }, { id: 'n2', label: SECOND }],
+      edges: [{ from: 'n1', to: 'n2' }],
+    }), 'utf8');
+    const ran = await mafCli(['run', FIRST, '--dir', repo, '--adapter', 'scripted', '--plan-from', spec], repo);
+    assert.match(ran.out, new RegExp(`\\[maf\\] plan: ${escapeRe(spec)} \\(read from spec, no model call\\)`), ran.out);
+    assert.match(ran.out, /\[maf\] running DAG with 2 node\(s\)/, ran.out);
+    assert.match(ran.out, /\[maf\] → node n1 started/, ran.out);
+    assert.match(ran.out, /\[maf\] ← node n1 Failed/, 'the node fails at the scriptless adapter');
+    assert.doesNotMatch(ran.out, /\[maf\] planning/, 'no model plan was asked for');
+    assert.notEqual(ran.code, 0, 'a failed node fails the run');
+
+    // A spec the schema refuses stops the binary before anything is written, in a repository maf has
+    // never run in: no `.maf/`, and the refusal is the message the in-process test sees.
+    const fresh = await dirtyUserRepo(refuseRoot);
+    const bad = path.join(refuseRoot, 'malformed.json');
+    await writeFile(bad, '{"nodes":[{"id":"a","label":"a","agnetRole":"reviewer"}]}', 'utf8');
+    const refused = await mafCli(['run', FIRST, '--dir', fresh, '--adapter', 'scripted', '--plan-from', bad], fresh);
+    assert.notEqual(refused.code, 0, `${refused.out}${refused.err}`);
+    assert.match(refused.err, /\[maf\] error: .*unknown key\(s\) "agnetRole"/, refused.err);
+    assert.equal(await exists(path.join(fresh, '.maf')), false, 'the refusal created nothing');
+  } finally {
+    await rm(runRoot, { recursive: true, force: true });
+    await rm(refuseRoot, { recursive: true, force: true });
+  }
+});
+
 // ── helpers ───────────────────────────────────────────────────────────────────────────────────
 
 const MAIN = path.resolve(__dirname, '..', 'main.js');

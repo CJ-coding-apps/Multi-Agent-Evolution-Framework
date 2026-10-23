@@ -1,6 +1,7 @@
 # WP-3.6 — the DAG from a spec, with no model call
 
-Branch: `wp/3.6-dag-from-spec` → `wp/phase-3b`
+Branch: `wp/3.6-dag-from-spec` → `wp/phase-3b` (#54, merged), then round 2 on `wp/3.6-round2` →
+`wp/phase-3b`
 
 ## What this changes
 
@@ -54,9 +55,9 @@ single unqualified sentence about "the spec format" would be false for one of th
 ### Reading a plan instead of asking for one
 
 - **`packages/cli/src/commands/run.ts`** — `--plan-from <path>` (`RunOptions.planFrom`, line 105
-  option / 52 type). The spec is synthesized at 201–209, before `checkForRun` at 269; the plan branch
-  prints `[maf] plan: <path> (read from spec, no model call)` at 386. The planner is **not
-  constructed** on that path — its factory lives only in the `else` branch at 388–401 — so there is no
+  option / 52 type). The spec is synthesized at 200–209, before `checkForRun` at 273; the plan branch
+  prints `[maf] plan: <path> (read from spec, no model call)` at 390. The planner is **not
+  constructed** on that path — its factory lives only in the `else` branch at 392–405 — so there is no
   call to make and nothing to fall back to. DAG settings (`--config`'s `dag`) still apply, through the
   same `applyDagSettings` the planned path uses.
 - **`packages/planning-agent/src/DagSynthesizer.ts`** — `fromFile` stats the file first (size is
@@ -103,9 +104,9 @@ Every one of these is raised before anything is created (F1):
 
 `planSource` says where the plan came from — `{ kind: 'spec', path, sha256 }` (the digest of the bytes
 that were read) or `{ kind: 'planner' }` — and is recorded in three places: the attestation bundle's
-invocation parameters (`run.ts:435`), one transcript line (`plan source: spec <path> (sha256 <hex>)` /
-`plan source: the planner`, `run.ts:317`, built at 508), and the Run node's properties
-(`run.ts:376`). Without it, a run planned by a model and a run read from a file differ only in a line
+invocation parameters (`run.ts:439`), one transcript line (`plan source: spec <path> (sha256 <hex>)` /
+`plan source: the planner`, `run.ts:321`, built at 512), and the Run node's properties
+(`run.ts:380`). Without it, a run planned by a model and a run read from a file differ only in a line
 of stdout that is not part of the signed record.
 
 ## Decisions
@@ -165,14 +166,14 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
 |---|---|
 | `packages/cli/src/commands/run.ts` | The spec's "run.ts flag", plus what the flag needs: the `DagSynthesizer` import, the spec branch (deliberately before `.maf/` exists and before `checkForRun`), the plan line, `planSource` on the Run node / transcript / bundle, and the planner factory confined to the `else` branch so it cannot be constructed on this path. |
 | `packages/types/src/index.ts` | Additive: the `PlanSource` union the bundle, transcript and Run node share. Nothing existing changed shape. |
-| `.github/workflows/ci.yml` | **Withheld pending the maintainer's ruling (F8).** `ece3ba2` added two e2e steps (a two-node `--plan-from` run and a duplicate-id refusal). This branch removes them, returning the file byte-for-byte to `wp/phase-3b`'s version, because F8's ruling has not been granted. The two steps belong in `ci.yml` when it is. |
+| `.github/workflows/ci.yml` | **Unchanged by this WP: the e2e step moves to WP-3.12 (R5).** `ece3ba2` added two e2e steps (a two-node `--plan-from` run and a duplicate-id refusal). A CI step is not the right home for the only proof that the *built* binary implements `--plan-from` — the normal suite can run it on every platform, and does: `plan-from.test.ts` spawns `packages/cli/dist/main.js` on a two-node spec and on a malformed one. WP-3.12 owns the CI e2e lane; the file here is byte-for-byte `wp/phase-3b`'s version. |
 | `packages/cli/src/__tests__/plan-from.test.ts` | The end-to-end tests (see Proof). |
 | `packages/planning-agent/src/__tests__/DagSynthesizer.test.ts` | The unit tests for the schema, caps, roles and metadata. |
 | `packages/dag-runner/src/__tests__/plan-spec.test.ts` | The edge rule and content ids, on the parser side. |
 
 ## Proof
 
-- `packages/cli/src/__tests__/plan-from.test.ts`, five tests:
+- `packages/cli/src/__tests__/plan-from.test.ts`, seven tests:
   - **the two-node run (F2, F3, F4):** the spec lists `n2` first and `n1` second, with edge `n1 -> n2`;
     a scripted model does the work. Asserts `n1` ends before `n2` starts (only the edge can cause
     that), the plan line, `running DAG with 2 node(s)`, that the planner factory was called **zero**
@@ -193,6 +194,13 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
   - **the planner path still records itself (F4):** a planner-planned run records
     `planSource = {kind:'planner'}` in the same three places, with the factory called once — the seam
     is wired to the real `RetrievalAugmentedPlanner`, so the spec test's zero is not vacuous.
+  - **`--dir` decides where a relative spec is (R2):** run from a different working directory, a spec
+    under `--dir` is found and planned, and one that exists only under the working directory is not
+    found — the refusal names the path under `--dir`.
+  - **the built binary (R5):** `packages/cli/dist/main.js`, spawned as the installed command runs,
+    reads a two-node spec and starts a two-node DAG with no model plan (the scriptless scripted
+    adapter then fails node `n1`, which is the adapter, not the spec), and refuses a malformed spec
+    in a repository maf has never run in without creating `.maf/`.
 - `packages/planning-agent/src/__tests__/DagSynthesizer.test.ts` — the closed schema (every container
   shape refused with a sentence, never a raw `TypeError`), ids/labels/timeouts, unknown `kind`, unknown
   keys at spec/node/edge level including `retry`/`inputs`/`outputs`, duplicate ids, unknown
