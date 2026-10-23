@@ -7,10 +7,11 @@ Branch: `wp/3.6-dag-from-spec` → `wp/phase-3b`
 A JSON workflow spec is now a plan `maf run` can execute: `--plan-from <spec>` reads the DAG from the
 file, never asks the planner, and refuses a spec it cannot read in full — one that names a node twice,
 names an edge endpoint the spec does not define, contains a cycle, or carries a key the format does not
-define. The spec is read and validated **before** `checkForRun` creates a `maf/<runId>` branch, before
-the worktree and before the run's own stores open, so every refusal leaves the repository and `.maf/`
-exactly as it found them. (The harness store is resolved earlier, because the spec's roles come from
-it; the refusal test pre-saves its harness for that reason.)
+define. The spec is read, schema-checked and synthesized **before anything is written**: before `.maf/`
+is created, before the harness the run dispatches is minted or imported, before `checkForRun` creates a
+`maf/<runId>` branch, before the worktree, and before the run's own stores open. So every refusal
+leaves the repository and `.maf/` byte for byte as it found them (R1: harness resolution is read-only
+and its one write is deferred behind `persist()` until the spec is accepted).
 
 A spec's `edges` were previously kept beside the DAG and never read — the scheduler reads
 `node.dependencies` — so `a -> b` ran `a` and `b` concurrently: a plan read from a file said one thing
@@ -153,7 +154,7 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
 
 | File | Why |
 |---|---|
-| `packages/cli/src/commands/run.ts` | The spec's "run.ts flag", plus what the flag needs: the `DagSynthesizer` import, the spec branch at 201–209 (deliberately before `checkForRun`), the plan line, `planSource` on the Run node / transcript / bundle, and the planner factory confined to the `else` branch so it cannot be constructed on this path. |
+| `packages/cli/src/commands/run.ts` | The spec's "run.ts flag", plus what the flag needs: the `DagSynthesizer` import, the spec branch (deliberately before `.maf/` exists and before `checkForRun`), the plan line, `planSource` on the Run node / transcript / bundle, and the planner factory confined to the `else` branch so it cannot be constructed on this path. |
 | `packages/types/src/index.ts` | Additive: the `PlanSource` union the bundle, transcript and Run node share. Nothing existing changed shape. |
 | `.github/workflows/ci.yml` | **Withheld pending the maintainer's ruling (F8).** `ece3ba2` added two e2e steps (a two-node `--plan-from` run and a duplicate-id refusal). This branch removes them, returning the file byte-for-byte to `wp/phase-3b`'s version, because F8's ruling has not been granted. The two steps belong in `ci.yml` when it is. |
 | `packages/cli/src/__tests__/plan-from.test.ts` | The end-to-end tests (see Proof). |
@@ -162,18 +163,20 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
 
 ## Proof
 
-- `packages/cli/src/__tests__/plan-from.test.ts`, four tests:
+- `packages/cli/src/__tests__/plan-from.test.ts`, five tests:
   - **the two-node run (F2, F3, F4):** the spec lists `n2` first and `n1` second, with edge `n1 -> n2`;
     a scripted model does the work. Asserts `n1` ends before `n2` starts (only the edge can cause
     that), the plan line, `running DAG with 2 node(s)`, that the planner factory was called **zero**
     times (it throws if it is), no `invoke`/`task` exchange (the planner was never asked), both files on
     `maf/<runId>`, and `planSource = {kind:'spec', path, sha256}` in the bundle, the transcript entry
     and the Run node.
-  - **the refusal sweep (F1):** seven refusals — unknown node key, unknown spec key, duplicate id,
-    unknown edge endpoint, cycle, no nodes, missing file — each asserting the message, then that no
-    `maf/*` branch exists, the `.maf` tree is byte-identical and the user's checkout is unchanged. The
-    harness is pre-saved and `.maf/.gitignore` pre-seeded, so the snapshot can only change through a
-    store this run would open.
+  - **the refusal sweeps (F1, R1):** seven refusals — unknown node key, unknown spec key, duplicate
+    id, unknown edge endpoint, cycle, no nodes, missing file — each asserting the message. They run
+    twice. In a repository maf has **never run in** (no `.maf/`), every path and its bytes — `.git/`
+    included — and `git status` are identical afterwards, and `.maf/` still does not exist. In a
+    repository `maf init` has run in, `.maf/` is unchanged. Neither test pre-saves a harness or seeds
+    a `.gitignore`: those were what hid the defect, because the resolution used to adopt a harness
+    before the spec was read.
   - **the failure is recallable (F7):** a strict harness makes the node fail; the Task record's label
     is the node's own description and its `runTitle` is the run title, and `recallFailures` for that
     title finds the run.

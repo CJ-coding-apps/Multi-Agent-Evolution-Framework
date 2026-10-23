@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
@@ -10,6 +10,7 @@ import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import { MemoryGraph, recallFailures } from '@maf/memory-graph';
 import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
 import { runIsolatedGit } from '@maf/git-ops';
+import { runInit } from '../commands/init.js';
 import {
   driveRun, dirtyUserRepo, FIXED_SUM, lockFilePolicy, messageOf, needsLcm, onePlannedNode, registryOf, userState,
 } from './runFixture.js';
@@ -101,50 +102,42 @@ test('maf run --plan-from: a two-node spec runs both nodes in edge order, with n
   }
 });
 
-test('every spec refusal leaves no branch, no worktree and no store (F1)', needsLcm, async () => {
+test('a refused spec leaves a repository maf has never run in exactly as it found it (F1)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-plan-refuse-fresh-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    // The claim is about a repository maf has never touched: no `.maf/`, nothing in it.
+    assert.equal(await exists(path.join(repo, '.maf')), false, 'the fixture starts with no .maf/');
+    // Every path and its bytes, `.git/` included, plus git's own view of the working tree. A name
+    // list would miss a rewritten file; a digest would miss a new empty one.
+    const tree = await treeDigest(repo);
+    const state = await userState(repo);
+
+    await refuseEverySpec(repo, root, 'plan-refuse-fresh-key');
+
+    assert.deepEqual(await treeDigest(repo), tree, 'no file was created, rewritten or removed');
+    assert.deepEqual(await userState(repo), state, "the user's checkout is untouched");
+    assert.equal(await exists(path.join(repo, '.maf')), false, 'no .maf/ was created — not its directory, not its .gitignore, not a harness');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a refused spec leaves a repository maf has run in as it was (F1)', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-plan-refuse-'));
   try {
     const repo = await dirtyUserRepo(root);
-    // A stored harness, so the run does not mint one into `.maf/harnesses` before it refuses: the
-    // snapshot below must only be able to change through a store this run opens.
-    await new HarnessStore(path.join(repo, '.maf')).save(mintHarnessConfig({
-      id: 'plain', processorBundles: [], reviewGate: { required: false },
-      roleSet: { version: 1, defaultRole: 'coder', roles: [{
-        role: 'coder', systemPrompt: 'Fix the code.', allowedTools: ['fs.read', 'fs.write'], execution: 'in-process',
-      }] },
-    }));
-    // `ensureMafDir` writes `.maf/.gitignore` on every run, before the spec is read, and leaves one
-    // that is already there as it is. Seed it so the snapshot below can only change through a store.
-    await writeFile(path.join(repo, '.maf', '.gitignore'), '# seeded by the test\n', 'utf8');
-    const before = await userState(repo);
-    const mafTree = await listTree(path.join(repo, '.maf'));
+    // A repository maf has run in: `.maf/` holds the shipped policy, roles, config, prompts and
+    // the committed default harness. The refusal must not add to it, and must not rewrite what is
+    // there — the `.gitignore` `ensureMafDir` writes included.
+    await runInit({ dir: repo, out: { write: () => {} } });
+    const mafTree = await treeDigest(path.join(repo, '.maf'));
+    const state = await userState(repo);
 
-    const cases: Array<{ name: string; body: string | undefined; expected: RegExp }> = [
-      { name: 'unknown-node-key', body: '{"nodes":[{"id":"a","label":"a","agnetRole":"reviewer"}]}', expected: /unknown key\(s\) "agnetRole"/ },
-      { name: 'unknown-spec-key', body: '{"nodes":[{"id":"a","label":"a"}],"config":{}}', expected: /unknown key\(s\) "config"/ },
-      { name: 'duplicate-id', body: '{"nodes":[{"id":"a","label":"a"},{"id":"a","label":"b"}]}', expected: /duplicate node id "a"/ },
-      { name: 'unknown-endpoint', body: '{"nodes":[{"id":"a","label":"a"}],"edges":[{"from":"a","to":"ghost"}]}', expected: /edge names unknown node "ghost"/ },
-      { name: 'cycle', body: '{"nodes":[{"id":"a","label":"a"},{"id":"b","label":"b"}],"edges":[{"from":"a","to":"b"},{"from":"b","to":"a"}]}', expected: /dependency cycle/ },
-      { name: 'no-nodes', body: '{"nodes":[]}', expected: /has no nodes/ },
-      { name: 'missing-file', body: undefined, expected: /could not read .*missing-file\.json/ },
-    ];
+    await refuseEverySpec(repo, root, 'plan-refuse-key');
 
-    for (const { name, body, expected } of cases) {
-      const spec = path.join(root, `${name}.json`);
-      if (body !== undefined) await writeFile(spec, body, 'utf8');
-      const scripted = new ScriptedAdapter([]);
-      const run = await driveRun([FIRST, '--dir', repo, '--adapter', 'scripted', '--harness', 'plain', '--plan-from', spec], {
-        adapters: registryOf(scripted),
-        io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: 'plan-refuse-key' } },
-      });
-      assert.ok(run.error !== undefined, `${name}: the run was expected to refuse\n${run.out}${run.err}`);
-      assert.match(messageOf(run.error), expected, name);
-      assert.doesNotMatch(run.out, /\[maf\] planning/, `${name}: the planner was not reached`);
-    }
-
-    assert.equal((await runIsolatedGit(repo, ['branch', '--list', 'maf/*'])).stdout.trim(), '', 'no `maf/*` branch was created');
-    assert.deepEqual(await listTree(path.join(repo, '.maf')), mafTree, '.maf gained no store');
-    assert.deepEqual(await userState(repo), before, "the user's checkout is untouched");
+    assert.deepEqual(await treeDigest(path.join(repo, '.maf')), mafTree, '.maf/ was not written to');
+    assert.deepEqual(await userState(repo), state, "the user's checkout is untouched");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -243,21 +236,56 @@ test('a run the planner planned records that the planner made the plan (F4)', ne
 
 // ── helpers ───────────────────────────────────────────────────────────────────────────────────
 
-/** Every path under `dir`, relative. A store this run opened shows up as a new entry. */
-async function listTree(dir: string, rel = ''): Promise<string[]> {
-  const out: string[] = [];
-  let entries;
-  try {
-    entries = await readdir(path.join(dir, rel), { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
+/**
+ * Every path under `dir` with the sha256 of its bytes — `.git/` included. A refusal that created a
+ * file shows up as a new key, one that rewrote a file as a changed digest, and one that created an
+ * empty directory as a new `dir` entry.
+ */
+async function treeDigest(dir: string, rel = ''): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const entry of await readdir(path.join(dir, rel), { withFileTypes: true })) {
     const child = rel === '' ? entry.name : path.join(rel, entry.name);
-    out.push(child);
-    if (entry.isDirectory()) out.push(...await listTree(dir, child));
+    if (entry.isDirectory()) {
+      out[child] = 'dir';
+      Object.assign(out, await treeDigest(dir, child));
+    } else {
+      out[child] = crypto.createHash('sha256').update(await readFile(path.join(dir, child))).digest('hex');
+    }
   }
-  return out.sort();
+  return out;
+}
+
+async function exists(target: string): Promise<boolean> {
+  return access(target).then(() => true, () => false);
+}
+
+/** Every refusal case, run against `repo` with a spec written outside it. */
+const SPEC_REFUSALS: ReadonlyArray<{ name: string; body: string | undefined; expected: RegExp }> = [
+  { name: 'unknown-node-key', body: '{"nodes":[{"id":"a","label":"a","agnetRole":"reviewer"}]}', expected: /unknown key\(s\) "agnetRole"/ },
+  { name: 'unknown-spec-key', body: '{"nodes":[{"id":"a","label":"a"}],"config":{}}', expected: /unknown key\(s\) "config"/ },
+  { name: 'duplicate-id', body: '{"nodes":[{"id":"a","label":"a"},{"id":"a","label":"b"}]}', expected: /duplicate node id "a"/ },
+  { name: 'unknown-endpoint', body: '{"nodes":[{"id":"a","label":"a"}],"edges":[{"from":"a","to":"ghost"}]}', expected: /edge names unknown node "ghost"/ },
+  { name: 'cycle', body: '{"nodes":[{"id":"a","label":"a"},{"id":"b","label":"b"}],"edges":[{"from":"a","to":"b"},{"from":"b","to":"a"}]}', expected: /dependency cycle/ },
+  { name: 'no-nodes', body: '{"nodes":[]}', expected: /has no nodes/ },
+  { name: 'missing-file', body: undefined, expected: /could not read .*missing-file\.json/ },
+];
+
+async function refuseEverySpec(repo: string, root: string, envKey: string): Promise<void> {
+  for (const { name, body, expected } of SPEC_REFUSALS) {
+    const spec = path.join(root, `${name}.json`);
+    if (body !== undefined) await writeFile(spec, body, 'utf8');
+    // No `--harness`: the run mints the legacy harness from the roles file, which is the write a
+    // refusal must be able to skip. A pre-saved harness would hide exactly the defect under test.
+    const scripted = new ScriptedAdapter([]);
+    const run = await driveRun([FIRST, '--dir', repo, '--adapter', 'scripted', '--plan-from', spec], {
+      adapters: registryOf(scripted),
+      io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: envKey } },
+    });
+    assert.ok(run.error !== undefined, `${name}: the run was expected to refuse\n${run.out}${run.err}`);
+    assert.match(messageOf(run.error), expected, name);
+    assert.doesNotMatch(run.out, /\[maf\] planning/, `${name}: the planner was not reached`);
+  }
+  assert.equal((await runIsolatedGit(repo, ['branch', '--list', 'maf/*'])).stdout.trim(), '', 'no `maf/*` branch was created');
 }
 
 /** The transcript entry that says where the plan came from. */

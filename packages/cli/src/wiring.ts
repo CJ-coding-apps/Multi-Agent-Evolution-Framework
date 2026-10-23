@@ -17,7 +17,7 @@ import { TranscriptLogger } from '@maf/transcript';
 import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
 import { RoleDispatcher, RoleRegistry, harnessRoleSetFromRegistry, roleSetFromHarness } from '@maf/roles';
-import { LEGACY_DEFAULT_ID, resolveHarnessRef } from '@maf/harness-config';
+import { LEGACY_DEFAULT_ID, assertPromptsCarried, resolveHarnessRef, shortSha } from '@maf/harness-config';
 import type { HarnessConfig, HarnessStore, ResolvedHarness } from '@maf/harness-config';
 import type { TaskDispatcher } from '@maf/eval-harness';
 import { importHarness, locateStoredHarness } from './commands/harness.js';
@@ -203,25 +203,58 @@ export interface RunHarnessOptions {
   baseTools: ToolRegistry;
 }
 
+/** The harness a command dispatches, plus the write that makes it storable (WP-3.6, R1). */
+export interface PlannedRunHarness {
+  harness: HarnessConfig;
+  source:  ResolvedHarness['source'];
+  /** Stores what the resolution needed written — nothing when it needed no write. */
+  persist: () => Promise<void>;
+}
+
 /**
- * The harness a command dispatches, by the one path `run` takes (WP-2.9, WP-2.7). A stored ref — an
- * id, a sha or a unique sha prefix — or a committed `default-<sha>.json`, imported into the store on
- * the way because an attestation can only name a stored harness, is resolved to its full sha; then
- * `resolveHarnessRef` loads it, else an operator-set CURRENT, else `legacy-default` minted from the
- * roles file now — never a stale snapshot of it, and never a harness whose prompts live outside its sha.
+ * The harness a command dispatches, resolved without writing anything (WP-2.9, WP-2.7, WP-3.6 R1).
+ * A stored ref — an id, a sha or a unique sha prefix — or a committed `default-<sha>.json`, resolved
+ * to its full sha; then `resolveHarnessRef` loads it, else an operator-set CURRENT, else
+ * `legacy-default` minted from the roles file now — never a stale snapshot of it, and never a
+ * harness whose prompts live outside its sha.
+ *
+ * Two writes can be needed to make that harness storable: importing a committed default into the
+ * store (an attestation can only name a stored harness), and adopting a freshly minted legacy one.
+ * Both are deferred to `persist`, because `run --plan-from` resolves the harness to get the role set
+ * its spec is validated against, and a spec it refuses must leave the repository and `.maf/` as it
+ * found them. Every other command calls `resolveRunHarness`, which is this plus `persist()`.
  */
-export async function resolveRunHarness(o: RunHarnessOptions): Promise<ResolvedHarness> {
+export async function planRunHarness(o: RunHarnessOptions): Promise<PlannedRunHarness> {
   let ref = o.ref;
   if (ref !== undefined && !RESOLVER_REFS.has(ref)) {
     const found = await locateStoredHarness(o.store, ref);
-    if (found.source !== path.join(o.store.dir, `${found.harness.sha}.yaml`)) await importHarness(o.store, found.source);
+    if (found.source !== path.join(o.store.dir, `${found.harness.sha}.yaml`)) {
+      assertPromptsCarried(found.harness.roleSet,
+        `Harness ${JSON.stringify(found.harness.id)} (${shortSha(found.harness.sha)})`,
+        'Re-mint it from the roles file (a plain run, or --harness legacy-default), which inlines the text.');
+      const source = found.source;
+      return {
+        harness: found.harness,
+        source:  'flag',
+        persist: async () => { await importHarness(o.store, source); },
+      };
+    }
     ref = found.harness.sha;
   }
-  return resolveHarnessRef({
+  const resolved = await resolveHarnessRef({
     harness: ref,
     legacyRoleSet: async () => harnessRoleSetFromRegistry(
       await RoleRegistry.fromYamlOrDefault(o.rolesPath, o.mafDir, o.baseTools)),
+    persist: false,
   }, o.store);
+  return { harness: resolved.harness, source: resolved.source, persist: resolved.persist ?? (async () => {}) };
+}
+
+/** `planRunHarness` and the write: the harness is in the store when this resolves. */
+export async function resolveRunHarness(o: RunHarnessOptions): Promise<ResolvedHarness> {
+  const { harness, source, persist } = await planRunHarness(o);
+  await persist();
+  return { harness, source };
 }
 
 /**

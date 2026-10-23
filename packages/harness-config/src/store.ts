@@ -321,12 +321,24 @@ export interface HarnessRefOptions {
    * (`harnessRoleSetFromRegistry` in @maf/roles). Called only when that is the harness that runs.
    */
   legacyRoleSet: () => Promise<HarnessRoleSet>;
+  /**
+   * Whether this resolution may write. `false` is for a caller that must refuse the run on a check
+   * that runs *after* it needs the roles — `run --plan-from` validates its spec there — so that a
+   * refusal leaves the store as it found it. The legacy harness is then minted in memory and
+   * `ResolvedHarness.persist` performs `adoptLegacy` once the run is known to go ahead.
+   */
+  persist?: boolean;
 }
 
 export interface ResolvedHarness {
   harness: HarnessConfig;
   /** `flag`: `--harness` named it. `current`: the operator's CURRENT. `legacy`: minted from the roles file. */
   source:  'flag' | 'current' | 'legacy';
+  /**
+   * Present only when `persist: false` deferred a write: stores the legacy harness this resolution
+   * minted. `adoptLegacy` re-mints the same role set, so the stored content is `harness`.
+   */
+  persist?: () => Promise<void>;
 }
 
 /**
@@ -355,7 +367,17 @@ export async function resolveHarnessRef(
     const roleSet = await opts.legacyRoleSet();
     assertPromptsCarried(roleSet, 'The legacy role set',
       'Build it with harnessRoleSetFromRegistry (@maf/roles), which inlines the text.');
-    resolved = { harness: await store.adoptLegacy(roleSet), source: 'legacy' };
+    if (opts.persist === false) {
+      // Minted, not adopted: the same content `adoptLegacy` would write, so `harness.sha` names
+      // what `persist()` later stores.
+      resolved = {
+        harness: store.mint(roleSet, LEGACY_DEFAULT_ID),
+        source:  'legacy',
+        persist: async () => { await store.adoptLegacy(roleSet); },
+      };
+    } else {
+      resolved = { harness: await store.adoptLegacy(roleSet), source: 'legacy' };
+    }
   }
   const { harness, source } = resolved;
   const named = `${JSON.stringify(harness.id)} (${shortSha(harness.sha)})`;
@@ -374,8 +396,9 @@ export async function resolveHarnessRef(
 /**
  * A role that names a prompt file must carry the file's text as `systemPrompt`, which is what
  * dispatch reads first; otherwise the prompt is read from disk at dispatch, outside the sha.
+ * Exported for the caller that resolves a committed default without importing it first.
  */
-function assertPromptsCarried(roleSet: HarnessRoleSet, what: string, remedy: string): void {
+export function assertPromptsCarried(roleSet: HarnessRoleSet, what: string, remedy: string): void {
   for (const r of roleSet.roles) {
     if (r.promptFile !== undefined && r.systemPrompt === undefined)
       throw new HarnessConfigError(
