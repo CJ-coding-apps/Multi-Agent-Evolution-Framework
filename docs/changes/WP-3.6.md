@@ -137,6 +137,14 @@ Two bounds and one resolution rule go with these (F11): a spec may be 1 MiB, 200
 bounds on what one operator file can make the scheduler do — and the path is resolved against `--dir`,
 as `--roles` and `--policy` are, so a spec is found where the run's other files are.
 
+The edge loop guards each push with `target.dependencies.includes(edge.from)`, and the caps make a
+`Set` unnecessary (R10). The bound is measured rather than assumed, and it comes from the byte cap
+rather than the node cap: a node may name the same dependency more than once, so a target's list is
+bounded by the 1 MiB file, not by 199. A spec at that boundary — an 844 KB file whose target lists
+one dependency 200 000 times, with 2000 edges naming a different source — synthesises in 1053 ms on
+this machine. The 2000-edge cap bounds the number of scans; the byte cap bounds each scan; the
+product is what one file can cost, and it is a second, not minutes.
+
 **Rejected — accept `DagParser`'s wider spec, so one format serves both readers.** That form carries
 `config`, per-node `retry`, `inputs` and `outputs`. Honouring them under `--plan-from` would make the
 file a run configuration, silently competing with the run's own `--config`; accepting and ignoring them
