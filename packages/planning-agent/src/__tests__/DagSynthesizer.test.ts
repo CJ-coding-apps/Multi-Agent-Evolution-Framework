@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { makeNodeId, makeRunId } from '@maf/types';
 import type { FailurePattern } from '../FailurePatternDetector.js';
-import { DagSynthesizer, MAX_SPEC_BYTES, MAX_SPEC_NODES } from '../DagSynthesizer.js';
+import { DagSynthesizer, MAX_SPEC_BYTES, MAX_SPEC_NODES, MAX_SPEC_EDGES } from '../DagSynthesizer.js';
 import { rolesOf } from './roleResolver.js';
 
 // ORACLE (D-07): the synthesizer is the second place a role name
@@ -91,6 +91,30 @@ test('a spec file yields the same DAG on every read, with no model in the path',
   assert.equal(first.sha256, crypto.createHash('sha256').update(text, 'utf8').digest('hex'));
 });
 
+test('the recorded digest is the file bytes, and invalid UTF-8 is refused by name (R4)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-bytes-'));
+  // A valid spec behind a UTF-8 BOM: decoding drops the BOM, so hashing the decoded string re-encoded
+  // digests something the file does not contain. This is the case that tells the two apart.
+  const body = Buffer.from('{"nodes":[{"id":"a","label":"café"}]}', 'utf8');
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]);
+  const bomFile = path.join(dir, 'bom.json');
+  await writeFile(bomFile, bom);
+  const read = await new DagSynthesizer(ROLES).fromFile(bomFile, RUN_ID);
+  assert.equal(read.sha256, crypto.createHash('sha256').update(bom).digest('hex'), 'the digest names the bytes on disk');
+  assert.notEqual(read.sha256, crypto.createHash('sha256').update(body).digest('hex'),
+    'it is not the digest of the decoded text — the BOM is in the file');
+  assert.equal([...read.dag.nodes.values()][0]?.label, 'café');
+
+  // Bytes that are not UTF-8 at all are refused as such, naming the file — not reported as a JSON
+  // parse error caused by a replacement character.
+  const badFile = path.join(dir, 'latin1.json');
+  await writeFile(badFile, Buffer.from([0x7b, 0x22, 0x6e, 0xff, 0x7d]));
+  await assert.rejects(
+    () => new DagSynthesizer(ROLES).fromFile(badFile, RUN_ID),
+    /latin1\.json is not valid UTF-8; a JSON workflow spec must be UTF-8 text/,
+  );
+});
+
 test('a spec file that is not a workflow spec is refused by name', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-'));
   const notJson = path.join(dir, 'not.json');
@@ -126,9 +150,31 @@ test('ids, labels and timeouts are checked for type', () => {
   refuses(() => synth.synthesize({ nodes: [] }, RUN_ID), /has no nodes; a plan needs at least one/);
   refuses(() => synth.synthesize({ nodes: [{ id: 7 as never, label: 'a' }] }, RUN_ID), /needs a non-empty string "id"/);
   refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: '' }] }, RUN_ID), /node "a" needs a non-empty string "label"/);
-  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: '5s' as never }] }, RUN_ID), /"timeoutMs" must be a positive number/);
-  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 0 }] }, RUN_ID), /"timeoutMs" must be a positive number/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: '5s' as never }] }, RUN_ID), /"timeoutMs" must be a whole number of milliseconds from 1 to 2147483647/);
   refuses(() => synth.synthesize({ id: 1 as never, nodes: [{ id: 'a', label: 'a' }] }, RUN_ID), /the spec's "id" must be a string/);
+});
+
+test('timeoutMs is bounded by the timer ceiling, and the ceiling itself is allowed (R3)', () => {
+  const synth = new DagSynthesizer(ROLES);
+  // The literal, not `MAX_TIMER_MS`: a test that imports the constant agrees with any value of it,
+  // including a wrong one. Node fires any delay above 2147483647 after 1 ms, so a spec asking for
+  // more asks for "at once" — the opposite of what it says.
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 0 }] }, RUN_ID), /from 1 to 2147483647/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: -1 }] }, RUN_ID), /from 1 to 2147483647/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 2147483648 }] }, RUN_ID), /from 1 to 2147483647/);
+  const accepted = synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 2147483647 }] }, RUN_ID);
+  assert.equal([...accepted.nodes.values()][0]?.timeoutMs, 2147483647, 'the ceiling is a valid timeout');
+});
+
+test('Infinity, a non-string agentRole and an empty edge endpoint are each refused (R8)', () => {
+  const synth = new DagSynthesizer(ROLES);
+  // `1e999` parses to Infinity: a number, and positive, so only the ceiling refuses it.
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 1e999 }] }, RUN_ID), /from 1 to 2147483647/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', agentRole: 7 as never }] }, RUN_ID), /"agentRole" must be a string/);
+  refuses(
+    () => synth.synthesize({ nodes: [{ id: 'a', label: 'a' }], edges: [{ from: 'a', to: '' }] }, RUN_ID),
+    /edge 0 needs a non-empty string "to"/,
+  );
 });
 
 test('an unknown edge kind is refused, naming the kinds that are accepted', () => {
@@ -250,21 +296,47 @@ test('an unnamed spec gets a sha256 id from its content, stable across reads', a
 
 // ── F11: the caps ────────────────────────────────────────────────────────────────────────────
 
+// The caps are checked against literal numbers, not the exported constants (R7): a test that reads
+// the constant it is checking agrees with any value of it, including one the documentation would
+// not recognise. `1048576` is 1 MiB, `200` nodes and `2000` edges are what the fragment states.
+test('the caps are the numbers the documentation states (R7)', () => {
+  assert.equal(MAX_SPEC_BYTES, 1048576);
+  assert.equal(MAX_SPEC_NODES, 200);
+  assert.equal(MAX_SPEC_EDGES, 2000);
+});
+
 test('a spec larger than the byte cap is refused before it is parsed', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-'));
   const big = path.join(dir, 'big.json');
   // Not JSON at all: the size is read from the file's metadata, so the cap answers first.
-  await writeFile(big, 'x'.repeat(MAX_SPEC_BYTES + 1), 'utf8');
+  await writeFile(big, 'x'.repeat(1048577), 'utf8');
   await assert.rejects(
     () => new DagSynthesizer(ROLES).fromFile(big, RUN_ID),
-    new RegExp(`may be at most ${MAX_SPEC_BYTES}`),
+    /may be at most 1048576/,
   );
+  // The cap itself is a size a spec may have.
+  const exact = path.join(dir, 'exact.json');
+  const json = JSON.stringify({ nodes: [{ id: 'a', label: 'a' }] });
+  await writeFile(exact, json + ' '.repeat(1048576 - json.length), 'utf8');
+  assert.equal((await new DagSynthesizer(ROLES).fromFile(exact, RUN_ID)).dag.nodes.size, 1);
 });
 
 test('a spec with more nodes than the cap is refused, stating the cap', () => {
-  const nodes = Array.from({ length: MAX_SPEC_NODES + 1 }, (_, i) => ({ id: `n${i}`, label: `node ${i}` }));
+  const nodes = Array.from({ length: 201 }, (_, i) => ({ id: `n${i}`, label: `node ${i}` }));
   assert.throws(
     () => new DagSynthesizer(ROLES).synthesize({ nodes }, RUN_ID),
-    new RegExp(`has ${MAX_SPEC_NODES + 1} nodes; at most ${MAX_SPEC_NODES} are accepted`),
+    /has 201 nodes; at most 200 are accepted/,
   );
+  // The cap itself is a plan the synthesizer accepts — the bound is not off by one.
+  assert.equal(new DagSynthesizer(ROLES).synthesize({ nodes: nodes.slice(0, 200) }, RUN_ID).nodes.size, 200);
+});
+
+test('a spec with more edges than the cap is refused, stating the cap (R7)', () => {
+  const nodes = [{ id: 'a', label: 'a' }, { id: 'b', label: 'b' }];
+  const edges = Array.from({ length: 2001 }, () => ({ from: 'a', to: 'b' }));
+  assert.throws(
+    () => new DagSynthesizer(ROLES).synthesize({ nodes, edges }, RUN_ID),
+    /has 2001 edges; at most 2000 are accepted/,
+  );
+  assert.equal(new DagSynthesizer(ROLES).synthesize({ nodes, edges: edges.slice(0, 2000) }, RUN_ID).edges.length, 2000);
 });

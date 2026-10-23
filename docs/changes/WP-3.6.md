@@ -1,16 +1,18 @@
 # WP-3.6 — the DAG from a spec, with no model call
 
-Branch: `wp/3.6-dag-from-spec` → `wp/phase-3b`
+Branch: `wp/3.6-dag-from-spec` → `wp/phase-3b` (#54, merged), then round 2 on `wp/3.6-round2` →
+`wp/phase-3b`
 
 ## What this changes
 
 A JSON workflow spec is now a plan `maf run` can execute: `--plan-from <spec>` reads the DAG from the
 file, never asks the planner, and refuses a spec it cannot read in full — one that names a node twice,
 names an edge endpoint the spec does not define, contains a cycle, or carries a key the format does not
-define. The spec is read and validated **before** `checkForRun` creates a `maf/<runId>` branch, before
-the worktree and before the run's own stores open, so every refusal leaves the repository and `.maf/`
-exactly as it found them. (The harness store is resolved earlier, because the spec's roles come from
-it; the refusal test pre-saves its harness for that reason.)
+define. The spec is read, schema-checked and synthesized **before anything is written**: before `.maf/`
+is created, before the harness the run dispatches is minted or imported, before `checkForRun` creates a
+`maf/<runId>` branch, before the worktree, and before the run's own stores open. So every refusal
+leaves the repository and `.maf/` byte for byte as it found them (R1: harness resolution is read-only
+and its one write is deferred behind `persist()` until the spec is accepted).
 
 A spec's `edges` were previously kept beside the DAG and never read — the scheduler reads
 `node.dependencies` — so `a -> b` ran `a` and `b` concurrently: a plan read from a file said one thing
@@ -53,14 +55,16 @@ single unqualified sentence about "the spec format" would be false for one of th
 ### Reading a plan instead of asking for one
 
 - **`packages/cli/src/commands/run.ts`** — `--plan-from <path>` (`RunOptions.planFrom`, line 105
-  option / 52 type). The spec is synthesized at 201–209, before `checkForRun` at 269; the plan branch
-  prints `[maf] plan: <path> (read from spec, no model call)` at 386. The planner is **not
-  constructed** on that path — its factory lives only in the `else` branch at 388–401 — so there is no
+  option / 52 type). The spec is synthesized at 200–209, before `checkForRun` at 273; the plan branch
+  prints `[maf] plan: <path> (read from spec, no model call)` at 390. The planner is **not
+  constructed** on that path — its factory lives only in the `else` branch at 392–405 — so there is no
   call to make and nothing to fall back to. DAG settings (`--config`'s `dag`) still apply, through the
   same `applyDagSettings` the planned path uses.
 - **`packages/planning-agent/src/DagSynthesizer.ts`** — `fromFile` stats the file first (size is
-  checked before the bytes are read), reads it as JSON, and refuses, by name, a file that is not JSON
-  or has no `nodes` array. `synthesize` validates the whole spec first (closed schema, caps, duplicate
+  checked before the bytes are read, and again on the bytes actually loaded), reads it **as a
+  Buffer**, digests those bytes, and only then decodes them strictly as UTF-8 — so the digest the run
+  records names the file the operator wrote, not a lossy re-encoding of it (R4). It refuses, by
+  name, a file that is not UTF-8, is not JSON, or has no `nodes` array. `synthesize` validates the whole spec first (closed schema, caps, duplicate
   ids, unknown dependencies, self-edges, cycles) and turns each edge into the target's dependency. Ids
   are derived from content, not the clock: `spec.id` when given, otherwise `sha256(JSON.stringify(spec))`;
   an edge id is `e<i>:from->to:kind`. The same file therefore yields the same DAG on every read.
@@ -77,8 +81,14 @@ Every one of these is raised before anything is created (F1):
   "nodes" array*;
 - no nodes: *the spec has no nodes; a plan needs at least one*;
 - more than 200 nodes / 2000 edges: the count and the cap are named;
+- a `timeoutMs` below 1 or above 2147483647: the ceiling every millisecond field uses, shared as
+  `MAX_TIMER_MS` in `@maf/types` with `.maf/config.yaml`'s loader. Above it a Node timer fires after
+  1 ms, so a larger timeout means "at once" — the opposite of what the spec asks for;
 - a file over 1 MiB: *it is N bytes; a spec may be at most 1048576* — read from `stat`, so the file is
-  not loaded to find out;
+  not loaded to find out, and checked again on the bytes that were loaded;
+- a file that is not UTF-8: *<path> is not valid UTF-8; a JSON workflow spec must be UTF-8 text* —
+  the bytes are hashed before they are decoded, and the decode is strict, so a lossy read cannot
+  digest a re-encoding and cannot turn bad bytes into a confusing JSON parse error;
 - a duplicate node id: `duplicate node id "n1"` (a `Map` would silently keep the last);
 - an edge naming a node the spec does not define, in either direction:
   `edge names unknown node "ghost" (from|to)`;
@@ -94,9 +104,9 @@ Every one of these is raised before anything is created (F1):
 
 `planSource` says where the plan came from — `{ kind: 'spec', path, sha256 }` (the digest of the bytes
 that were read) or `{ kind: 'planner' }` — and is recorded in three places: the attestation bundle's
-invocation parameters (`run.ts:435`), one transcript line (`plan source: spec <path> (sha256 <hex>)` /
-`plan source: the planner`, `run.ts:317`, built at 508), and the Run node's properties
-(`run.ts:376`). Without it, a run planned by a model and a run read from a file differ only in a line
+invocation parameters (`run.ts:439`), one transcript line (`plan source: spec <path> (sha256 <hex>)` /
+`plan source: the planner`, `run.ts:321`, built at 512), and the Run node's properties
+(`run.ts:380`). Without it, a run planned by a model and a run read from a file differ only in a line
 of stdout that is not part of the signed record.
 
 ## Decisions
@@ -127,6 +137,14 @@ Two bounds and one resolution rule go with these (F11): a spec may be 1 MiB, 200
 bounds on what one operator file can make the scheduler do — and the path is resolved against `--dir`,
 as `--roles` and `--policy` are, so a spec is found where the run's other files are.
 
+The edge loop guards each push with `target.dependencies.includes(edge.from)`, and the caps make a
+`Set` unnecessary (R10). The bound is measured rather than assumed, and it comes from the byte cap
+rather than the node cap: a node may name the same dependency more than once, so a target's list is
+bounded by the 1 MiB file, not by 199. A spec at that boundary — an 844 KB file whose target lists
+one dependency 200 000 times, with 2000 edges naming a different source — synthesises in 1053 ms on
+this machine. The 2000-edge cap bounds the number of scans; the byte cap bounds each scan; the
+product is what one file can cost, and it is a second, not minutes.
+
 **Rejected — accept `DagParser`'s wider spec, so one format serves both readers.** That form carries
 `config`, per-node `retry`, `inputs` and `outputs`. Honouring them under `--plan-from` would make the
 file a run configuration, silently competing with the run's own `--config`; accepting and ignoring them
@@ -141,7 +159,8 @@ call, the same file always yields the same DAG (ids come from its content, not t
 is refused before anything runs when it names one node twice, names an edge endpoint the spec does not
 define, contains a cycle, or carries a key the format does not define. `edges` are ordering constraints:
 `a -> b` means `b` starts only after `a` succeeded. A spec may be at most 1 MiB, 200 nodes and 2000
-edges. The path is resolved against the directory you run `maf` from; specs are JSON only.
+edges. A relative path is resolved against `--dir`, as `--roles` and `--policy` are — not against the
+directory you happen to run `maf` from; specs are JSON only.
 
 This paragraph was the README text `ece3ba2` added. `ce2a401` moved it here — docs go by fragment — so
 the branch's net diff leaves `README.md` unchanged.
@@ -153,37 +172,56 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
 
 | File | Why |
 |---|---|
-| `packages/cli/src/commands/run.ts` | The spec's "run.ts flag", plus what the flag needs: the `DagSynthesizer` import, the spec branch at 201–209 (deliberately before `checkForRun`), the plan line, `planSource` on the Run node / transcript / bundle, and the planner factory confined to the `else` branch so it cannot be constructed on this path. |
+| `packages/cli/src/commands/run.ts` | The spec's "run.ts flag", plus what the flag needs: the `DagSynthesizer` import, the spec branch (deliberately before `.maf/` exists and before `checkForRun`), the plan line, `planSource` on the Run node / transcript / bundle, and the planner factory confined to the `else` branch so it cannot be constructed on this path. |
 | `packages/types/src/index.ts` | Additive: the `PlanSource` union the bundle, transcript and Run node share. Nothing existing changed shape. |
-| `.github/workflows/ci.yml` | **Withheld pending the maintainer's ruling (F8).** `ece3ba2` added two e2e steps (a two-node `--plan-from` run and a duplicate-id refusal). This branch removes them, returning the file byte-for-byte to `wp/phase-3b`'s version, because F8's ruling has not been granted. The two steps belong in `ci.yml` when it is. |
+| `.github/workflows/ci.yml` | **Unchanged by this WP: the e2e step moves to WP-3.12 (R5).** `ece3ba2` added two e2e steps (a two-node `--plan-from` run and a duplicate-id refusal). A CI step is not the right home for the only proof that the *built* binary implements `--plan-from` — the normal suite can run it on every platform, and does: `plan-from.test.ts` spawns `packages/cli/dist/main.js` on a two-node spec and on a malformed one. WP-3.12 owns the CI e2e lane; the file here is byte-for-byte `wp/phase-3b`'s version. |
 | `packages/cli/src/__tests__/plan-from.test.ts` | The end-to-end tests (see Proof). |
 | `packages/planning-agent/src/__tests__/DagSynthesizer.test.ts` | The unit tests for the schema, caps, roles and metadata. |
 | `packages/dag-runner/src/__tests__/plan-spec.test.ts` | The edge rule and content ids, on the parser side. |
 
 ## Proof
 
-- `packages/cli/src/__tests__/plan-from.test.ts`, four tests:
+- `packages/cli/src/__tests__/plan-from.test.ts`, seven tests:
   - **the two-node run (F2, F3, F4):** the spec lists `n2` first and `n1` second, with edge `n1 -> n2`;
     a scripted model does the work. Asserts `n1` ends before `n2` starts (only the edge can cause
     that), the plan line, `running DAG with 2 node(s)`, that the planner factory was called **zero**
     times (it throws if it is), no `invoke`/`task` exchange (the planner was never asked), both files on
     `maf/<runId>`, and `planSource = {kind:'spec', path, sha256}` in the bundle, the transcript entry
     and the Run node.
-  - **the refusal sweep (F1):** seven refusals — unknown node key, unknown spec key, duplicate id,
-    unknown edge endpoint, cycle, no nodes, missing file — each asserting the message, then that no
-    `maf/*` branch exists, the `.maf` tree is byte-identical and the user's checkout is unchanged. The
-    harness is pre-saved and `.maf/.gitignore` pre-seeded, so the snapshot can only change through a
-    store this run would open.
-  - **the failure is recallable (F7):** a strict harness makes the node fail; the Task record's label
-    is the node's own description and its `runTitle` is the run title, and `recallFailures` for that
-    title finds the run.
+  - **the refusal sweeps (F1, R1, R3, R4, R8):** every refusal case — unknown node key, unknown spec
+    key, duplicate id, unknown edge endpoint, cycle, the two `timeoutMs` bounds, a file that is not
+    UTF-8, a file that is not JSON, an unknown `agentRole`, no nodes, missing file — each asserting
+    the message. They run
+    twice. In a repository maf has **never run in** (no `.maf/`), every path and its bytes — `.git/`
+    included — and `git status` are identical afterwards, and `.maf/` still does not exist. In a
+    repository `maf init` has run in, `.maf/` is unchanged. Neither test pre-saves a harness or seeds
+    a `.gitignore`: those were what hid the defect, because the resolution used to adopt a harness
+    before the spec was read.
+  - **the failure is recallable (F7, R9):** a strict harness makes the node fail; the Task record's
+    label is the node's own description and its `runTitle` is the run title, and `recallFailures`
+    for that title finds the run. The same spec then runs a **second** time with that title now in
+    memory, and is still the one node the operator wrote — memory does not rewrite a human's plan.
+    A gate that recall inserted would be a node (visible in the count) or a `reviewGateNodeIds`
+    entry (which no command prints), so the second observable is read where the CLI reads it:
+    `fromFile` with the run title and nothing else yields no gate, and the same call passed the
+    recorded failure does flag the node — the empty list is a decision, not an unmatched label.
   - **the planner path still records itself (F4):** a planner-planned run records
     `planSource = {kind:'planner'}` in the same three places, with the factory called once — the seam
     is wired to the real `RetrievalAugmentedPlanner`, so the spec test's zero is not vacuous.
+  - **`--dir` decides where a relative spec is (R2):** run from a different working directory, a spec
+    under `--dir` is found and planned, and one that exists only under the working directory is not
+    found — the refusal names the path under `--dir`.
+  - **the built binary (R5):** `packages/cli/dist/main.js`, spawned as the installed command runs,
+    reads a two-node spec and starts a two-node DAG with no model plan (the scriptless scripted
+    adapter then fails node `n1`, which is the adapter, not the spec), and refuses a malformed spec
+    in a repository maf has never run in without creating `.maf/`.
 - `packages/planning-agent/src/__tests__/DagSynthesizer.test.ts` — the closed schema (every container
   shape refused with a sentence, never a raw `TypeError`), ids/labels/timeouts, unknown `kind`, unknown
   keys at spec/node/edge level including `retry`/`inputs`/`outputs`, duplicate ids, unknown
-  dependencies, self-edges and cycles, the byte/node caps, content ids (F10), roles, the edge rule, and
+  dependencies, self-edges and cycles, the byte/node/edge caps — asserted against the literal
+  `1048576`, `200` and `2000`, since a test that read the exported constants would agree with any
+  value of them, and each cap's boundary is accepted while one past it is refused — content ids
+  (F10), roles, the edge rule, and
   the metadata rule: every node carries the run title, keeps its own label as `taskDescription` unless
   the operator named one, and recall inserts a review gate only when patterns are passed.
 - `packages/dag-runner/src/__tests__/plan-spec.test.ts` — an edge makes its target depend on its

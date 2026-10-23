@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import type {
   Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
 } from '@maf/types';
-import { makeNodeId, DEFAULT_RETRY_POLICY } from '@maf/types';
+import { makeNodeId, DEFAULT_RETRY_POLICY, MAX_TIMER_MS } from '@maf/types';
 import type { FailurePattern } from './FailurePatternDetector.js';
 
 const DEFAULT_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;
@@ -167,18 +167,39 @@ export class DagSynthesizer {
    * Returns the digest of the bytes it read, which the run records as the plan's source (F4).
    */
   async fromFile(filePath: string, runId: RunId, opts: SynthesisOptions = {}): Promise<SynthesisFile> {
-    let text: string;
+    let bytes: Buffer;
     try {
       const info = await stat(filePath);
       if (!info.isFile()) throw new Error('it is not a regular file');
       if (info.size > MAX_SPEC_BYTES) {
         throw new Error(`it is ${info.size} bytes; a spec may be at most ${MAX_SPEC_BYTES}`);
       }
-      text = await readFile(filePath, 'utf8');
+      bytes = await readFile(filePath);
+      // The `stat` refuses a large file before loading it; this refuses one that grew after it. The
+      // cap belongs on the bytes that are parsed, and these are they.
+      if (bytes.length > MAX_SPEC_BYTES) {
+        throw new Error(`it is ${bytes.length} bytes; a spec may be at most ${MAX_SPEC_BYTES}`);
+      }
     } catch (err) {
       throw new Error(
         `DagSynthesizer: could not read ${filePath} as a JSON workflow spec ` +
         `(${err instanceof Error ? err.message : String(err)}).`,
+      );
+    }
+    // Read as bytes, digest the bytes, and only then decode strictly (R4). `readFile(path, 'utf8')`
+    // replaces each invalid sequence with U+FFFD, so hashing the resulting string would digest a
+    // re-encoding the file never contained — and a digest that does not name the bytes the operator
+    // wrote is not a record of the plan's source. The digest is therefore taken here, from the
+    // buffer as read, before the decode below can touch it; decoding strictly turns invalid UTF-8
+    // into a refusal naming the file, instead of a JSON parse error pointing at a replacement
+    // character.
+    const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error(
+        `DagSynthesizer: ${filePath} is not valid UTF-8; a JSON workflow spec must be UTF-8 text.`,
       );
     }
     let parsed: unknown;
@@ -195,7 +216,7 @@ export class DagSynthesizer {
     }
     return {
       dag:    this.synthesize(parsed as SynthesisSpec, runId, opts),
-      sha256: crypto.createHash('sha256').update(text, 'utf8').digest('hex'),
+      sha256,
     };
   }
 
@@ -263,8 +284,14 @@ function validateSpec(raw: unknown, who: string): SynthesisSpec {
       }
     }
     const timeout = node['timeoutMs'];
-    if (timeout !== undefined && (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0)) {
-      throw new Error(`${who}: ${where} "timeoutMs" must be a positive number of milliseconds.`);
+    // The same bound `.maf/config.yaml` uses, and the same reason (R3): Node fires any delay above
+    // `MAX_TIMER_MS` after 1 ms, so a larger timeout would mean "at once" rather than "never". Above
+    // it the spec asks for the opposite of what it says, so it is refused rather than clamped.
+    if (timeout !== undefined
+      && (typeof timeout !== 'number' || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > MAX_TIMER_MS)) {
+      throw new Error(
+        `${who}: ${where} "timeoutMs" must be a whole number of milliseconds from 1 to ${MAX_TIMER_MS}.`,
+      );
     }
     const metadata = node['metadata'];
     if (metadata !== undefined && (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata))) {

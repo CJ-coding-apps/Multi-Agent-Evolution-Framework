@@ -1,6 +1,6 @@
 import { lstat, readFile } from 'node:fs/promises';
 import type { Dag, DagNode, LcmMode, NodeId, RetryPolicy } from '@maf/types';
-import { DEFAULT_RETRY_POLICY } from '@maf/types';
+import { DEFAULT_RETRY_POLICY, MAX_TIMER_MS } from '@maf/types';
 import type { YamlDocument } from '@maf/policy-engine';
 import { parseYamlDocument, YamlSyntaxError } from '@maf/policy-engine';
 
@@ -176,8 +176,9 @@ const LCM_FIELDS:      Section<'lcm'>      = { mode: true, contextThreshold: tru
 const DAG_FIELDS:      Section<'dag'>      = { maxConcurrent: true, retry: true };
 const RETRY_FIELDS:    Record<keyof RetryPolicy, true> = { maxAttempts: true, backoffMs: true, backoffFactor: true, jitterMs: true };
 const TIMEOUTS_FIELDS: Section<'timeouts'> = { planMs: true, securityReviewMs: true };
-// Node's timers fire after 1 ms for any delay above this, so a larger timeout or backoff would mean "at once".
-const MAX_TIMER_MS = 2 ** 31 - 1;
+// `MAX_TIMER_MS` comes from @maf/types: Node's timers fire after 1 ms for any delay above it, so a
+// larger timeout or backoff would mean "at once". It lives there because the `--plan-from` spec's
+// `timeoutMs` needs the same bound, and two copies of a ceiling can drift apart (WP-3.6, R3).
 
 interface Problem { at: string[]; message: string }
 type Mapping = Record<string, unknown>;

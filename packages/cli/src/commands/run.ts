@@ -24,7 +24,7 @@ import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterR
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { loadCommandPolicy, resolveRunHarness } from '../wiring.js';
+import { loadCommandPolicy, planRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
 import type { MafConfig } from '../config/ConfigLoader.js';
@@ -130,8 +130,6 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   // there. Agents work in `cwd`, which is the run's own worktree unless --no-worktree (D-03).
   const dir         = path.resolve(opts.dir);
   const mafDir      = path.join(dir, '.maf');
-  // The stores below open files inside .maf/ and do not create it; a repo maf never ran in has none.
-  await ensureMafDir(mafDir);
 
   // flag > config.yaml > built-in default, per key (WP-2.5). Only a flag the user typed is a flag:
   // commander's `--no-worktree` always sets `worktree`, so its source says whether it was typed.
@@ -167,15 +165,17 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   const baseTools = createDefaultRegistry();
 
   // ── Harness (WP-2.9): --harness, else an operator-set CURRENT, else legacy-default minted from
-  // the roles file now. A typed --roles means that file, so it must not lose to CURRENT.
+  // the roles file now. A typed --roles means that file, so it must not lose to CURRENT. Resolved
+  // without writing: `persist()` below runs once the spec, if there is one, has been accepted (R1).
   const harnessStore = new HarnessStore(mafDir);
-  const { harness, source: harnessSource } = await resolveRunHarness({
+  const harnessPlan = await planRunHarness({
     store:     harnessStore,
     ref:       opts.harness ?? (ctx.given('roles') ? LEGACY_DEFAULT_ID : undefined),
     rolesPath: path.resolve(dir, opts.roles),
     mafDir,
     baseTools,
   });
+  const { harness, source: harnessSource } = harnessPlan;
   // Dispatched FROM the harness, so the sha the attestation names is the content that ran.
   const roles = RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), mafDir, baseTools);
   say(`[maf] harness: ${harness.id} (${shortSha(harness.sha)}) [${harnessSource}]`);
@@ -191,13 +191,11 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   }
 
   // ── The plan, when the operator wrote one (WP-3.6, F1): read, validate and synthesize it here —
-  // after the role set, and before `checkForRun` creates a `maf/<runId>` branch, before the
-  // worktree, and before the run's own stores (memory, transcript, LCM) open — so every spec
-  // refusal leaves the repository and `.maf/` as it found them. The harness store is the one
-  // exception: it is resolved above, because the spec's roles come from it, which is why the
-  // refusal test pre-saves its harness. Recall is not applied: a spec is the operator's plan, and
-  // memory must not alter it (F7). The path is resolved against `--dir`, as `--roles` and
-  // `--policy` are (F11).
+  // after the role set, and before anything is written: `.maf/` itself, the harness the role set
+  // came from, `checkForRun`'s `maf/<runId>` branch, the worktree, and the run's own stores
+  // (memory, transcript, LCM). So a refused spec leaves the repository and `.maf/` byte for byte as
+  // it found them (R1). Recall is not applied: a spec is the operator's plan, and memory must not
+  // alter it (F7). A relative path is resolved against `--dir`, as `--roles` and `--policy` are (R2).
   let specPlan: { dag: Dag; source: { kind: 'spec'; path: string; sha256: string } } | undefined;
   if (opts.planFrom !== undefined) {
     const specPath = path.resolve(dir, opts.planFrom);
@@ -207,6 +205,12 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       source: { kind: 'spec', path: specPath, sha256: read.sha256 },
     };
   }
+
+  // ── Nothing above wrote; from here the run is going ahead. The stores below open files inside
+  // .maf/ and do not create it, so a repo maf never ran in gets its directory and its .gitignore
+  // now, and then the harness the resolution above needed stored.
+  await ensureMafDir(mafDir);
+  await harnessPlan.persist();
   // Where the plan came from, recorded on the Run node, in the bundle and in the transcript (F4).
   const planSource: PlanSource = specPlan?.source ?? { kind: 'planner' };
 
