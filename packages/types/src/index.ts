@@ -131,8 +131,13 @@ export interface ToolContext {
    * `executeToolGated` sets it on the context it hands `execute` and nowhere else, so the policy
    * and the approval gate see the caller's own context. A tool whose declaration can be recomputed
    * where it acts must compare the two and refuse when they differ: an approval is of a set of
-   * paths, and a call that would write a different set was never approved. Absent on a direct call
-   * to `execute` (a test, or a caller that is not the gate), where there is nothing to compare.
+   * paths, and a call that would write a different set was never approved. The set is frozen, so no
+   * holder of a handle to it can change what was approved.
+   *
+   * Absent means the call did not come through the gate — a caller that is not the gate, or a test
+   * calling `execute` directly — and a write is refused: there is no approved set to compare with,
+   * and a write nothing approved is not an allowed one. A direct call that is meant to write names
+   * the paths it was approved for; the tests do.
    */
   approvedPaths?: readonly string[];
 }

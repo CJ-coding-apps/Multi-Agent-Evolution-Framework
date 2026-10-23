@@ -110,9 +110,13 @@ export async function executeToolGated(
   // The approved set travels with the call, on a copy of the context, so a tool that can recompute
   // its declaration where it acts can refuse when the two differ. The policy and the approval gate
   // were asked about the caller's context, and a tool must not be able to change what they saw.
+  // The array itself is frozen (on a copy, so the caller's own array is untouched): it is the record
+  // of what was approved, and a policy, an approval gate or a tool that kept a handle to it must not
+  // be able to change that record by writing to the array.
+  const approvedPaths: readonly string[] = Object.freeze([...declaredPaths]);
   let rawResult: ToolResult;
   try {
-    rawResult = await tool.execute(input, { ...ctx, approvedPaths: declaredPaths });
+    rawResult = await tool.execute(input, { ...ctx, approvedPaths });
   } catch (err: unknown) {
     const deny = builtinRefusal(err);
     if (deny !== undefined) return refuse(deny, undefined, tool, input, ctx, deps, invokedAt, start);

@@ -198,6 +198,35 @@ test('a tool that rewrites its own input fails, instead of choosing its paths af
   assert.deepEqual(attestor.records.map((r) => r.input), [{ path: 'safe.txt' }]);
 });
 
+test('the approved set is frozen on a copy where the gate creates it (L4)', async () => {
+  // The array is the record of what the policy approved. A tool — or a policy, or a gate — that kept
+  // a handle to it and pushed onto it after the decision would be editing that record. The gate hands
+  // `execute` a frozen copy, so the push throws, and the array the declaration returned is untouched.
+  const attestor = new SpyAttestor();
+  const ctx = ctxIn(tmpdir(), attestor, ALLOW);
+  const mine = ['safe.txt'];
+  let handed: readonly string[] | undefined;
+  const tool: ToolPlugin = {
+    id: makeToolId('freeze-check') as ToolId,
+    name: 'freeze-check',
+    description: 'tries to widen its own approved set',
+    permissionLevel: 'write',
+    declaredPaths(): string[] { return mine; },
+    async execute(_input, inner): Promise<ToolResult> {
+      handed = inner.approvedPaths;
+      const widened = inner.approvedPaths as string[];
+      assert.equal(Object.isFrozen(widened), true, 'the set `execute` is handed is frozen');
+      assert.throws(() => widened.push('/etc/passwd'), TypeError, 'a write to it throws');
+      return { stdout: '', stderr: '', exitCode: 0, duration: 0, metadata: {} };
+    },
+  };
+  const result = await executeToolGated(tool, {}, ctx, { policy: ALLOW, attestor });
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.deepEqual(handed, ['safe.txt']);
+  assert.equal(Object.isFrozen(mine), false, 'the declaration\'s own array is not the one frozen');
+  assert.deepEqual(mine, ['safe.txt'], 'and it still holds what it held');
+});
+
 test('a path rule denies a multi-path call when any one declared path is outside', async () => {
   const engine = new PolicyEngine({} as never);
   engine.loadRules([PROTECT_SECRETS]);

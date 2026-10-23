@@ -168,7 +168,10 @@ test('a link inside the root that leads into .git is refused on its resolved pat
   );
   await assert.rejects(() => new FsDeleteTool().execute({ path: 'innocent', recursive: true }, ctxIn(root)), /it resolves to "\.git"/);
   await assert.rejects(
-    () => new PatchApplyTool().execute({ diff: diffTouching('innocent/config') }, ctxIn(root)),
+    () => new PatchApplyTool().execute(
+      { diff: diffTouching('innocent/config') },
+      { ...ctxIn(root), approvedPaths: ['innocent/config'] },
+    ),
     /patch\.apply refuses "innocent\/config": it resolves to "\.git\/config"/,
   );
   assert.equal(await readFile(path.join(root, '.git', 'config'), 'utf8'), '[core]\n');
@@ -191,7 +194,10 @@ test('patch.apply refuses a diff into .git before it writes a temp file or runs 
   const root = await tmp(t, 'maf-gitdir-patch-');
   await mkdir(path.join(root, '.git'));
   const diff = `diff --git a/.git/config b/.git/config\n--- a/.git/config\n+++ b/.git/config\n@@ -0,0 +1 @@\n+[core]\n`;
-  await assert.rejects(() => new PatchApplyTool().execute({ diff }, ctxIn(root)), GIT_DIR_REFUSAL);
+  await assert.rejects(
+    () => new PatchApplyTool().execute({ diff }, { ...ctxIn(root), approvedPaths: ['.git/config'] }),
+    GIT_DIR_REFUSAL,
+  );
   assert.ok(!existsSync(path.join(root, '.git', 'config')), 'nothing was written into .git');
 });
 

@@ -1,9 +1,11 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { ToolContext, ToolCallRecord, AttestorHandle } from '@maf/types';
+import type {
+  ToolContext, ToolCallRecord, AttestorHandle, ApprovalAsk, ApprovalOutcome, PolicyEngineHandle,
+} from '@maf/types';
 import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
 import { PolicyLoader } from '@maf/policy-engine';
 import type { PolicyEngine } from '@maf/policy-engine';
@@ -135,4 +137,55 @@ test('a diff whose headers name no file is refused before policy, as builtin:dec
   assert.equal(decision['ruleId'], 'builtin:declaration');
   assert.equal(record.result.metadata?.['ruleId'], 'builtin:declaration');
   assert.equal(record.result.metadata?.['refused'], true);
+});
+
+test('a write through a link to Cargo.lock is refused at declaration, and no approver is asked (L3)', async () => {
+  // The link resolves to a file `protect-lock-files` escalates on, but the policy would be shown the
+  // link's own name, which no rule matches. git rewrites a link in place, so an Allow on `link` would
+  // land in `Cargo.lock`. The declaration refuses the write before policy is consulted at all — the
+  // refusal and its `builtin:declaration` record are the whole outcome, and no human is asked.
+  const lock = path.join(projectRoot, 'Cargo.lock');
+  const link = path.join(projectRoot, 'link');
+  await writeFile(lock, 'lock1\n', 'utf8');
+  await symlink('Cargo.lock', link);
+  try {
+    const asked: ApprovalAsk[] = [];
+    const evaluated: string[] = [];
+    const policy: PolicyEngineHandle = {
+      async evaluate(toolId, input, ctx, declaredPaths) {
+        evaluated.push(String(toolId));
+        return engine.evaluate(toolId, input, ctx, declaredPaths);
+      },
+    };
+    const approvalGate = {
+      async decide(ask: ApprovalAsk): Promise<ApprovalOutcome> {
+        asked.push(ask);
+        return {
+          approved: true, status: 'Approved',
+          requestId: ask.request.id, requestHash: '', reason: 'approved by the test',
+        };
+      },
+    };
+    const attestor = new SpyAttestor();
+    const diff = '--- a/link\n+++ b/link\n@@ -1 +1 @@\n-lock1\n+lock2\n';
+    await assert.rejects(
+      () => executeToolGated(
+        new PatchApplyTool(), { diff }, ctxIn(attestor), { policy, attestor, approvalGate },
+      ),
+      /Policy violation/,
+    );
+    const record = attestor.records[0]!;
+    const decision = record.policyDecision as unknown as Record<string, unknown>;
+    assert.equal(decision['verdict'], 'Deny');
+    assert.equal(decision['ruleId'], 'builtin:declaration');
+    assert.match(String(decision['reason']), /"link", which is a symbolic link/);
+    assert.equal(record.result.metadata?.['refused'], true, 'the call is recorded as a refusal');
+    assert.deepEqual(evaluated, [], 'the policy was never asked');
+    assert.deepEqual(asked, [], 'no approver was asked');
+    assert.equal(await readFile(lock, 'utf8'), 'lock1\n', 'the lock file is unchanged');
+    assert.equal(await readlink(link), 'Cargo.lock', 'the link still points where it did');
+  } finally {
+    await rm(link, { force: true });
+    await rm(lock, { force: true });
+  }
 });
