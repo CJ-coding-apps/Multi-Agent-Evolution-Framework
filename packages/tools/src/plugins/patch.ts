@@ -277,29 +277,87 @@ function refuseSummaryForms(sealed: SealedGit): void {
 }
 
 /**
- * A section header git does not read is a section git does not apply — and `git apply` exits 0
- * having skipped it, so the agent is told its whole diff applied.
+ * The diff's line grammar, checked before git is asked.
  *
- * Only what can *be* a section start is refused: an indented `--- ` line immediately followed by a
- * `+++ ` line at the same indent, or an indented `diff --git ` line. The first pattern used to refuse
- * any indented `--- `/`+++ `/`diff --git ` line anywhere, and a hunk body is a space followed by the
- * file's own text — so a YAML file whose unchanged lines are ` --- # Source: chart/a.yaml` (what
- * `helm template` emits) could not be patched at all. A context pair that quotes a diff's own
- * `---`/`+++` lines is still refused, because those bytes are identical to an indented section.
+ * `git apply` reads the sections it understands and silently skips the rest, exiting 0 — an indented
+ * `---`/`+++` pair, a line of preamble where a header belongs, a context diff's `***` header — so the
+ * patch "applies" and the agent is told its whole diff landed. Every such shape used to need its own
+ * pattern, and a pattern is only a list of the shapes someone thought of. This is the other
+ * direction: every line must be one git reads, and one that is not refuses the call and names itself.
  *
- * The pattern only ever refuses; it never names a file. It is deliberately matched anywhere in the
- * diff, because where a section starts is exactly what the parser was wrong about before.
+ * A hunk is read by its counts, as git reads one. That is what keeps a content line that looks like a
+ * header from being mistaken for one: `--- a/Cargo.lock` inside a hunk is a removed line whose text
+ * begins `-- `, and it is a body line exactly because the hunk still expects one. Between hunks a line
+ * must be a section header, a git extended header, a hunk header, or blank; inside a hunk, a body line,
+ * with `\ No newline at end of file` allowed after the last of them.
+ *
+ * A binary patch's payload is not line-structured, so it is passed through by its marker and refused
+ * by `--numstat` instead (a `-` count), which names that reason.
+ *
+ * Only git's own output is read: a commit-message preamble or a context diff is refused, not
+ * interpreted. The tool promises a unified diff.
  */
-const INDENTED_SECTION = /^([ \tX]+)--- [^\n]*\n\1\+\+\+ |^[ \tX]+diff --git /m;
+const SECTION_HEADER =
+  /^(?:diff --git |--- |\+\+\+ |Index: |index |old mode |new mode |deleted file mode |new file mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |Binary files )/;
+const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+const HUNK_BODY = /^[ +\-\\]/;
+const BINARY_MARKER = 'GIT binary patch';
 
-function refuseIndentedSection(diff: string): void {
-  const match = INDENTED_SECTION.exec(diff);
-  if (match !== null) {
-    throw refusal(
-      `it has an indented section header (${JSON.stringify(match[0].trim())}). git applies the `
-      + 'unindented part of a diff and silently ignores an indented one, so the call would apply some '
-      + 'of what the diff names and report success. Every section must start at the beginning of a line.',
-    );
+/** The line as the refusal shows it, short enough that a whole file's worth is not one message. */
+function shownLine(line: string): string {
+  return JSON.stringify(line.length > 60 ? `${line.slice(0, 60)}…` : line);
+}
+
+function refuseBrokenGrammar(diff: string): void {
+  const lines = diff.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();          // the final newline is not a line
+
+  let state: 'header' | 'hunk' | 'tail' | 'binary' = 'header';
+  let oldLeft = 0;
+  let newLeft = 0;
+  const broken = (n: number, line: string, why: string): never => {
+    throw refusal(`it is not a diff git reads in full: line ${n} is ${shownLine(line)}, ${why}. git `
+      + 'applies the parts of a diff it understands and silently skips the rest, exiting 0, so a diff '
+      + 'this tool could not read to its end would be reported as applied in full. Every line of the '
+      + 'diff must be one git reads.');
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const n = i + 1;
+
+    if (state === 'binary') {
+      if (!line.startsWith('diff --git ')) continue;          // a binary payload line
+      state = 'header';
+    }
+
+    if (state === 'hunk') {
+      if (line.startsWith('\\')) continue;                    // "\ No newline at end of file"
+      if (!HUNK_BODY.test(line)) broken(n, line, 'and a hunk expects a body line where it still counts lines');
+      const marker = line[0];
+      if (marker === ' ' || marker === '-') oldLeft--;
+      if (marker === ' ' || marker === '+') newLeft--;
+      if (oldLeft < 0 || newLeft < 0) broken(n, line, 'and that is more lines than its hunk header counts');
+      if (oldLeft === 0 && newLeft === 0) state = 'tail';
+      continue;
+    }
+
+    if (state === 'tail') {
+      if (line.startsWith('\\')) continue;                    // the marker may follow the last body line
+      state = 'header';                                       // anything else ends the hunk
+    }
+
+    if (line === '') continue;                                // a blank line between files
+    if (line === BINARY_MARKER) { state = 'binary'; continue; }
+    const hunk = HUNK_HEADER.exec(line);
+    if (hunk !== null) {
+      oldLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      newLeft = hunk[4] === undefined ? 1 : Number(hunk[4]);
+      state = oldLeft === 0 && newLeft === 0 ? 'tail' : 'hunk';
+      continue;
+    }
+    if (SECTION_HEADER.test(line)) continue;
+    broken(n, line, 'and that is neither a section header, a hunk header nor a hunk line');
   }
 }
 
@@ -318,7 +376,7 @@ function refuseIndentedSection(diff: string): void {
  * Nothing here writes: `--numstat` and `--summary` parse the patch and do not touch the tree.
  */
 function declaredFromGit(sealed: SealedGit, diff: string): string[] {
-  refuseIndentedSection(diff);
+  refuseBrokenGrammar(diff);
   refuseSummaryForms(sealed);
   const forward = numstatPaths(sealed, false);
   const reverse = numstatPaths(sealed, true);
@@ -351,21 +409,21 @@ function stripOf(input: PatchInput): number {
 }
 
 /**
- * `lstat`, with the two "there is nothing here" errors read as no entry: `ENOENT` (the name does not
- * exist) and `ENOTDIR` (a prefix is a regular file, so nothing can exist below it — git fails on that
- * with its own message). Any other error is a refusal naming it: a path that cannot be checked for a
- * symbolic link is not one this tool will write through. A component over the name limit (256 bytes
- * on APFS) gives `ENAMETOOLONG`, which used to escape `execute` as a raw `Error`.
+ * `lstat`, with "there is nothing here" — `ENOENT`, the name does not exist — read as no entry.
+ * `ENOTDIR` is a refusal, not an absence: it means a component above the name is a regular file, and
+ * that is a patch git cannot apply in full (see `refuseSymlinkTargets`). Any other error is a
+ * refusal naming it too: a path that cannot be checked for a symbolic link is not one this tool will
+ * write through. A component over the name limit (256 bytes on APFS) gives `ENAMETOOLONG`, which used
+ * to escape `execute` as a raw `Error`.
  */
 function lstatOrRefuse(target: string, declared: string): Stats | undefined {
   try {
     return lstatSync(target, { throwIfNoEntry: false });
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOTDIR') return undefined;
     const detail = err instanceof Error ? err.message : String(err);
     throw refusal(
       `it would write ${JSON.stringify(declared)}, and checking that path failed (${detail}). A path `
-      + 'that cannot be checked for a symbolic link is refused rather than assumed safe.',
+      + 'that cannot be checked is refused rather than assumed writable.',
     );
   }
 }
@@ -380,6 +438,13 @@ function lstatOrRefuse(target: string, declared: string): Stats | undefined {
  * Every prefix is checked, not just the last component: `d -> src` makes `d/x.js` a write through a
  * link, and git's "affected file is beyond a symbolic link" refused it only after the policy had
  * allowed it. `cfg -> .maf` and `out -> <outside the root>` are the same shape.
+ *
+ * The same walk refuses a parent that exists and is *not* a directory — `README/x` where `README` is
+ * a regular file. `--check` passes on it, because the diff parses; the apply then fails partway
+ * through, after a multi-file patch has already changed or deleted the files before it (measured: the
+ * other file deleted, exit 128). A patch that cannot apply in full is refused before anything is
+ * written, which is what the docs promise. The declared path itself may be a regular file: that is an
+ * ordinary write to it.
  *
  * It runs at declaration time (where `ctx` is given) and again in `execute`: the gate records a
  * `Deny` rather than an Allow that the call then fails under, and the second pass covers a link
@@ -400,7 +465,15 @@ function refuseSymlinkTargets(root: string, paths: readonly string[]): void {
           + 'the policy was shown. Remove the link, or patch the file it points at by that file\'s own name.',
         );
       }
-      if (!stat.isDirectory()) break;                // a regular file has nothing below it
+      if (i === segments.length) break;              // the declared name itself, whatever it is
+      if (!stat.isDirectory()) {
+        throw refusal(
+          `it would write ${JSON.stringify(p)}, and ${JSON.stringify(prefix)} is a regular file rather `
+          + 'than a directory above it. git passes --check on that and then fails partway through the '
+          + 'apply, after the files before it have been written, so a patch that cannot apply in full '
+          + 'is refused here and nothing is written.',
+        );
+      }
     }
   }
 }
@@ -416,12 +489,25 @@ function refuseSymlinkTargets(root: string, paths: readonly string[]): void {
  * approved. Compared as sorted lists, so a difference in order is not a difference, and a repeated
  * name is.
  *
+ * A call that arrives with no approved set at all is refused too. It did not come from
+ * `executeToolGated` — a caller that is not the gate, or a test calling `execute` directly — and a
+ * write nothing approved is not an allowed one. `approvedPaths` is what the gate sets on the context
+ * it hands `execute`, so its absence is a call to write on a path the gate never opened.
+ *
  * Raised as a `ToolDeclarationError` like every other declaration refusal — `executeToolGated`
  * records it as a `Deny` under `builtin:declaration` — but not through `refusal()`: that helper says
- * the policy was never asked, which is false here. It was asked, about a different set.
+ * the policy was never asked, which is false when the two sets differ. It was asked, about a
+ * different set.
  */
 function refuseApprovedDifference(approved: readonly string[] | undefined, declared: readonly string[]): void {
-  if (approved === undefined) return;
+  if (approved === undefined) {
+    throw new ToolDeclarationError(
+      'patch.apply refused this call: it arrived without the paths the policy approved, so there is '
+      + `nothing to compare the ${declared.length} path(s) this apply would write against. A write is `
+      + 'made through the gate, on the paths the gate approved; a call that names no approved set is '
+      + 'refused, and nothing was written.',
+    );
+  }
   const left = [...approved].sort();
   const right = [...declared].sort();
   if (left.length === right.length && left.every((p, i) => p === right[i])) return;

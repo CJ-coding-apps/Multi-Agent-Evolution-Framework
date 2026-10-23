@@ -101,6 +101,19 @@ function ctxIn(overrides: Partial<ToolContext> = {}): ToolContext {
 
 const tool = new PatchApplyTool();
 
+/**
+ * The context a gated call arrives in: the gate's declaration travels on it as `approvedPaths`
+ * (L1). A call that reaches `execute` without one is refused, so every apply test goes through here.
+ */
+function gatedCtx(input: { diff: string; strip?: number }, overrides: Partial<ToolContext> = {}): ToolContext {
+  return ctxIn({ approvedPaths: tool.declaredPaths(input, ctxIn()), ...overrides });
+}
+
+/** `execute`, with the context a gated call would have given it. */
+function executeGated(input: { diff: string; strip?: number; dryRun?: boolean }, overrides: Partial<ToolContext> = {}): Promise<ToolResult> {
+  return tool.execute(input, gatedCtx(input, overrides));
+}
+
 /** `/`-joined, NFC-normalised, case-folded where the filesystem is: the same key both sides of the comparison. */
 function pathKey(p: string): string {
   const normal = p.normalize('NFC');
@@ -284,7 +297,7 @@ test('a call with no diff declares nothing and is refused', () => {
 test('execute applies the diff and names the result', async () => {
   resetRepo();
   const before = snapshot(repo);
-  const result = await tool.execute({ diff: UNIFIED_LOCK }, ctxIn());
+  const result = await executeGated({ diff: UNIFIED_LOCK });
   assert.equal(result.exitCode, 0, result.stderr);
   // The expectation goes through `pathKey` too: on Linux the file is `Cargo.lock`, and a literal
   // lower-case name here is a Mac-only count (HP2/HS2).
@@ -296,7 +309,7 @@ test('execute applies the diff and names the result', async () => {
 test('dryRun checks the diff and changes nothing', async () => {
   resetRepo();
   const before = snapshot(repo);
-  const result = await tool.execute({ diff: UNIFIED_LOCK, dryRun: true }, ctxIn());
+  const result = await executeGated({ diff: UNIFIED_LOCK, dryRun: true });
   assert.equal(result.exitCode, 0, result.stderr);
   assert.equal(result.stdout, 'checked 1 file(s)');
   assert.deepEqual(changedSince(before), []);
@@ -310,7 +323,7 @@ test('a multi-file diff that fails one file changes neither', async () => {
     'diff --git a/README b/README', '--- a/README', '+++ b/README', '@@ -1 +1 @@', '-r', '+s',
     'diff --git a/Cargo.lock b/Cargo.lock', '--- a/Cargo.lock', '+++ b/Cargo.lock', '@@ -1 +1 @@', '-nope', '+lock2', '',
   ].join('\n');
-  const result = await tool.execute({ diff }, ctxIn());
+  const result = await executeGated({ diff });
   assert.notEqual(result.exitCode, 0);
   assert.deepEqual(changedSince(before), []);
   assert.equal(readFileSync(path.join(repo, 'README'), 'utf8'), 'r\n');
@@ -327,9 +340,9 @@ test('a failed apply leaves no .orig, no .rej and no temp file behind', async ()
   process.env['TMPDIR'] = ownTmp;
   let leftovers: string[] = [];
   try {
-    const result = await tool.execute({
+    const result = await executeGated({
       diff: '--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-nope\n+lock2\n',
-    }, ctxIn());
+    });
     assert.notEqual(result.exitCode, 0);
     assert.deepEqual(changedSince(before), []);
     leftovers = readdirSync(repo, { recursive: true })
@@ -396,7 +409,9 @@ test('a patch to a path that is currently a symlink is refused, and the link is 
     // HS23: refused at declaration time too, so the gate records a Deny rather than an Allow the
     // call then fails under.
     assert.throws(() => tool.declaredPaths({ diff }, ctxIn()), /symbolic link/);
-    await assert.rejects(() => tool.execute({ diff }, ctxIn()), /symbolic link/);
+    // The gate would have refused before `execute`; the approved set is named here so the second
+    // pass is what runs, and it reaches the link walk.
+    await assert.rejects(() => tool.execute({ diff }, ctxIn({ approvedPaths: ['linked.lock'] })), /symbolic link/);
     assert.equal(readlinkSync(link), '.env');
     assert.equal(readFileSync(path.join(repo, '.env'), 'utf8'), 'SAFE=1\n');
   } finally {
@@ -408,7 +423,7 @@ test('two files concatenated by diff -u apply as one patch, without --recount (H
   resetRepo();
   const before = snapshot(repo);
   const diff = UNIFIED_LOCK + '--- a/README\n+++ b/README\n@@ -1 +1 @@\n-r\n+s\n';
-  const result = await tool.execute({ diff }, ctxIn());
+  const result = await executeGated({ diff });
   assert.equal(result.exitCode, 0, result.stderr);
   assert.deepEqual(changedSince(before), [pathKey('Cargo.lock'), pathKey('README')].sort());
   assert.equal(readFileSync(path.join(repo, 'Cargo.lock'), 'utf8'), 'lock2\n');
@@ -425,8 +440,14 @@ test('an indented section header is refused rather than silently skipped (HP6)',
     ' diff --git a/Cargo.lock b/Cargo.lock', '--- a/Cargo.lock', '+++ b/Cargo.lock',
     '@@ -1 +1 @@', '-lock1', '+lock2', '',
   ].join('\n');
-  for (const diff of [whole, second]) {
-    assert.throws(() => tool.declaredPaths({ diff }), /indented section header/, JSON.stringify(diff));
+  // The line named is the first line git skips: line 1 when the whole diff is indented, line 6
+  // when only the second section is.
+  for (const [diff, line] of [[whole, 1], [second, 6]] as const) {
+    assert.throws(
+      () => tool.declaredPaths({ diff }),
+      new RegExp(`line ${line} is .*, and that is neither a section header`),
+      JSON.stringify(diff),
+    );
   }
 });
 
@@ -452,7 +473,7 @@ test('no filter, hook or fsmonitor named in repository configuration can run (HP
   writeFileSync(fakeGlobal, `[filter "evil"]\n\tclean = sh -c 'echo GLOBAL >> ${marker}; cat'\n`);
   process.env['GIT_CONFIG_GLOBAL'] = fakeGlobal;
   try {
-    const result = await tool.execute({ diff: UNIFIED_LOCK }, ctxIn());
+    const result = await executeGated({ diff: UNIFIED_LOCK });
     assert.equal(result.exitCode, 0, result.stderr);
   } finally {
     if (savedGlobal === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
@@ -481,7 +502,7 @@ test('a TMPDIR inside a repository does not change the path declared or written 
     // `.maf/policy.yaml` — a Deny rule on the real name never fired.
     const diff = '--- a/.maf/policy.yaml\n+++ b/.maf/policy.yaml\n@@ -1 +1 @@\n-policy\n+changed\n';
     assert.deepEqual(tool.declaredPaths({ diff }), ['.maf/policy.yaml']);
-    const result = await tool.execute({ diff }, ctxIn());
+    const result = await executeGated({ diff });
     assert.equal(result.exitCode, 0, result.stderr);
     assert.equal(readFileSync(path.join(repo, '.maf/policy.yaml'), 'utf8'), 'changed\n');
     assert.equal(existsSync(path.join(nested, '.maf')), false, 'nothing was written relative to TMPDIR');
@@ -495,12 +516,12 @@ test('a TMPDIR inside a repository does not change the path declared or written 
 test('dryRun where the diff does not apply fails non-zero, and git was asked (HP8)', async () => {
   resetRepo();
   const before = snapshot(repo);
+  // Declared before the shim is on PATH: the record holds the apply's calls only.
+  const input = { diff: '--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-nope\n+lock2\n', dryRun: true };
+  const approved = tool.declaredPaths(input, ctxIn());
   const shim = gitShim();
   try {
-    const result = await tool.execute({
-      diff: '--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-nope\n+lock2\n',
-      dryRun: true,
-    }, ctxIn());
+    const result = await tool.execute(input, ctxIn({ approvedPaths: approved }));
     assert.notEqual(result.exitCode, 0, 'a dry run that would fail must not answer success');
   } finally {
     shim.restore();
@@ -564,13 +585,14 @@ function callField(call: string, name: string): string {
 test('every git call shares one sealed context, one diff file, and no --recount', async () => {
   // Before the shim is on PATH, so the record holds the tool's calls and nothing else's.
   resetRepo();
+  const approved = tool.declaredPaths({ diff: UNIFIED_LOCK }, ctxIn());
   const shim = gitShim();
   const saved = { gitDir: process.env['GIT_DIR'], token: process.env['MAF_TOKEN'] };
   // Both are in the parent's environment and neither may reach the child `toolEnv()` builds.
   process.env['GIT_DIR'] = path.join(scratch, 'not-the-repo');
   process.env['MAF_TOKEN'] = 'shh';
   try {
-    const result = await tool.execute({ diff: UNIFIED_LOCK }, ctxIn());
+    const result = await tool.execute({ diff: UNIFIED_LOCK }, ctxIn({ approvedPaths: approved }));
     assert.equal(result.exitCode, 0, result.stderr);
   } finally {
     shim.restore();
@@ -636,9 +658,9 @@ test('a declarable diff that does not apply answers with a numeric exit code', a
   // `exitCode` is a number — never a string errno (G-F3c).
   resetRepo();
   const before = snapshot(repo);
-  const result: ToolResult = await tool.execute({
+  const result: ToolResult = await executeGated({
     diff: '--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1 +1 @@\n-nope\n+lock2\n',
-  }, ctxIn());
+  });
   assert.equal(typeof result.exitCode, 'number');
   assert.notEqual(result.exitCode, 0);
   assert.deepEqual(changedSince(before), []);
@@ -659,7 +681,7 @@ test('a YAML context line that reads like a section header no longer refuses the
   ].join('\n');
 
   assert.deepEqual(tool.declaredPaths({ diff }), ['k.yaml'], 'the context line is not a section');
-  const result = await tool.execute({ diff }, ctxIn());
+  const result = await executeGated({ diff });
   assert.equal(result.exitCode, 0, result.stderr);
   assert.deepEqual(changedSince(before), [pathKey('k.yaml')]);
   assert.equal(readFileSync(path.join(repo, 'k.yaml'), 'utf8'), '--- # Source: chart/a.yaml\nkind: A\nx: 2\n');
@@ -667,13 +689,13 @@ test('a YAML context line that reads like a section header no longer refuses the
 });
 
 test('an indented ---/+++ pair is still refused, with no diff --git line (R2-M1)', () => {
-  // Narrowing the pattern must not lose the case it was written for: an indented `---` immediately
-  // followed by an indented `+++` at the same indent is a section git silently skips.
+  // The line grammar must not lose the case the pattern was written for: an indented `---`
+  // immediately followed by an indented `+++` at the same indent is a section git silently skips.
   const pair = [
     '--- a/README', '+++ b/README', '@@ -1 +1 @@', '-r', '+s',
     ' --- a/Cargo.lock', ' +++ b/Cargo.lock', ' @@ -1 +1 @@', ' -lock1', ' +lock2', '',
   ].join('\n');
-  assert.throws(() => tool.declaredPaths({ diff: pair }), /indented section header/);
+  assert.throws(() => tool.declaredPaths({ diff: pair }), /line 6 is " --- a\/Cargo.lock"/);
 });
 
 test('a git that cannot answer --numstat is refused even when --summary passed (HS22)', () => {
@@ -700,16 +722,49 @@ test('a path whose name is too long to check is refused, not thrown raw (R2-L1)'
   );
 });
 
-test('a write below a path that is a regular file is a returned failure, not a raw throw (R2-L1)', async () => {
-  // `ENOTDIR` is "there is nothing here": nothing can exist below a file, so there is no link to
-  // refuse. The declaration names the path and git answers the call with its own failure.
+test('a write below a path that is a regular file is refused at declaration, before anything is written (HS24)', () => {
+  // `README/x` passes `git apply --check` — the diff parses — and the apply then fails partway
+  // through, after a multi-file patch has already written the files before it. A parent component
+  // that exists and is not a directory is refused at declaration, so the call never runs.
   resetRepo();
   const diff = '--- /dev/null\n+++ b/README/x\n@@ -0,0 +1 @@\n+new\n';
-  assert.deepEqual(tool.declaredPaths({ diff }, ctxIn()), ['README/x']);
-  const result = await tool.execute({ diff }, ctxIn());
-  assert.equal(typeof result.exitCode, 'number');
-  assert.notEqual(result.exitCode, 0, 'git refuses to create a file below a regular file');
-  assert.equal(readFileSync(path.join(repo, 'README'), 'utf8'), 'r\n');
+  assert.throws(
+    () => tool.declaredPaths({ diff }, ctxIn()),
+    (err: unknown) => err instanceof ToolDeclarationError
+      && /"README" is a regular file rather than a directory/.test(err.message),
+  );
+});
+
+test('a two-file diff with a path below a regular file is refused in either order, and the tree is byte-identical (HS24)', async () => {
+  // The measured harm: `README/x` alone fails cleanly, but with a good file beside it the apply
+  // writes the first file and *then* fails on the second (exit 128), so the tree is left half
+  // changed under a call the policy allowed. Both orders are tested because the order decides which
+  // harm was measured — the good file first (a partial write) and the bad file first.
+  const good = ['diff --git a/notes b/notes', '--- a/notes', '+++ b/notes', '@@ -1 +1 @@', '-n', '+changed'];
+  const bad = ['diff --git a/README b/README/x', 'new file mode 100644', '--- /dev/null', '+++ b/README/x',
+    '@@ -0,0 +1 @@', '+new'];
+  for (const [name, lines] of [['good first', [...good, ...bad]], ['bad first', [...bad, ...good]]] as const) {
+    resetRepo();
+    const before = snapshot(repo);
+    const diff = `${lines.join('\n')}\n`;
+    assert.throws(
+      () => tool.declaredPaths({ diff }, ctxIn()),
+      (err: unknown) => err instanceof ToolDeclarationError
+        && /"README" is a regular file rather than a directory/.test(err.message),
+      `${name}: the declaration refuses it`,
+    );
+    await assert.rejects(
+      // The declaration the gate would have produced, named literally: the gate itself refuses this
+      // diff, so this exercises `execute`'s own walk with an approved set that matches.
+      () => tool.execute({ diff }, ctxIn({ approvedPaths: ['README/x', 'notes'] })),
+      (err: unknown) => err instanceof ToolDeclarationError
+        && /"README" is a regular file rather than a directory/.test(err.message),
+      `${name}: execute refuses it too`,
+    );
+    assert.deepEqual(changedSince(before), [], `${name}: nothing was written`);
+    assert.equal(readFileSync(path.join(repo, 'README'), 'utf8'), 'r\n', `${name}: README is untouched`);
+    assert.equal(readFileSync(path.join(repo, 'notes'), 'utf8'), 'n\n', `${name}: notes is untouched`);
+  }
 });
 
 test('a write through a symlinked parent directory is refused at declaration time, naming the link (R2-L2)', async () => {
@@ -726,7 +781,7 @@ test('a write through a symlinked parent directory is refused at declaration tim
       () => tool.declaredPaths({ diff }, ctxIn()),
       /through "d", which is a symbolic link/,
     );
-    await assert.rejects(() => tool.execute({ diff }, ctxIn()), /symbolic link/);
+    await assert.rejects(() => tool.execute({ diff }, ctxIn({ approvedPaths: ['d/new.js'] })), /symbolic link/);
     assert.equal(existsSync(path.join(repo, 'src', 'new.js')), false, 'nothing was written through the link');
   } finally {
     rmSync(link, { force: true });
@@ -779,4 +834,98 @@ test('the paths the gate declares are the paths the apply writes, for every diff
   } finally {
     resetRepo();
   }
+});
+
+// ─── round 4: L1, L2 ────────────────────────────────────────────────────────
+
+test('execute refuses a call that arrives without the approved set (L1)', async () => {
+  // A write is made through the gate, on the paths the gate approved. A direct call that names no
+  // approved set has nothing to check itself against, so it is refused rather than trusted.
+  resetRepo();
+  const before = snapshot(repo);
+  await assert.rejects(
+    () => tool.execute({ diff: UNIFIED_LOCK }, ctxIn()),
+    (err: unknown) => err instanceof ToolDeclarationError
+      && /arrived without the paths the policy approved/.test(err.message),
+  );
+  assert.deepEqual(changedSince(before), [], 'a refused call writes nothing');
+});
+
+test('the eight shapes git applies in part and exits 0 are refused, naming the line (L2)', async () => {
+  // git's apply reads as much of a diff as it understands and silently skips the rest, exiting 0.
+  // A section whose hunk header or body is moved a character out of column one is skipped whole —
+  // measured below against git itself — so the apply would report a file it never touched. Every
+  // line must be one git reads, and a line that is not is named.
+  const good = ['--- a/README', '+++ b/README', '@@ -1 +1 @@', '-r', '+s'];
+  const env = ['--- a/.env', '+++ b/.env', '@@ -1 +1 @@', '-SAFE=1', '+LEAK=1'];
+  const marked = (mark: string, at: readonly number[]): string[] =>
+    env.map((line, i) => (at.includes(i) ? mark + line : line));
+  const shapes: Array<[string, string[]]> = [
+    ['a space before the hunk header', marked(' ', [2])],
+    ['a space before every line', marked(' ', [0, 1, 2, 3, 4])],
+    ['a space before the headers and the hunk header', marked(' ', [0, 1, 2])],
+    ['a tab before the hunk header', marked('\t', [2])],
+    ['a tab before every line', marked('\t', [0, 1, 2, 3, 4])],
+    ['a no-break space before the hunk header', marked('\u00a0', [2])],
+    ['a no-break space before every line', marked('\u00a0', [0, 1, 2, 3, 4])],
+    ['a carriage return before every line', marked('\r', [0, 1, 2, 3, 4])],
+  ];
+  resetRepo();
+  const before = snapshot(repo);
+  for (const [name, second] of shapes) {
+    const diff = `${[...good, ...second].join('\n')}\n`;
+    // The behaviour this refuses: git checks and applies the first section, skips the second whole,
+    // and exits 0 — so `--numstat` names only README and `.env` would be reported untouchable
+    // while nothing says so.
+    const checked = spawnSync('git', ['apply', '--check', '-'], { cwd: repo, input: diff, encoding: 'utf8' });
+    assert.equal(checked.status, 0, `${name}: git accepts this diff (${checked.stderr})`);
+    assert.throws(
+      () => tool.declaredPaths({ diff }, ctxIn()),
+      (err: unknown) => err instanceof ToolDeclarationError && /line \d+ is /.test(err.message),
+      name,
+    );
+    await assert.rejects(() => tool.execute({ diff }, ctxIn({ approvedPaths: [] })), /line \d+ is /, name);
+    assert.deepEqual(changedSince(before), [], `${name}: nothing is written`);
+  }
+});
+
+test('real git output, diff -u output and Helm YAML still apply (L2)', async () => {
+  // The grammar is a refusal of lines git would skip, not of diff syntax it reads: the three
+  // producers a user's workflow hands this tool must all go through.
+  resetRepo();
+  writeFileSync(path.join(repo, 'README'), 'r2\n', 'utf8');
+  const ordinary = git(repo, ['diff', '--', 'README']);
+  assert.equal(ordinary.status, 0);
+  assert.match(ordinary.stdout, /^diff --git /m);
+  resetRepo();
+  const fromGit = await executeGated({ diff: ordinary.stdout });
+  assert.equal(fromGit.exitCode, 0, fromGit.stderr);
+  assert.equal(readFileSync(path.join(repo, 'README'), 'utf8'), 'r2\n');
+
+  const oldFile = path.join(scratch, 'old.txt');
+  const newFile = path.join(scratch, 'new.txt');
+  writeFileSync(oldFile, 'one\ntwo\n', 'utf8');
+  writeFileSync(newFile, 'one\nTWO\n', 'utf8');
+  const unified = spawnSync('diff', ['-u', '-L', 'a/README', '-L', 'b/README', oldFile, newFile], { encoding: 'utf8' });
+  assert.equal(unified.status, 1, 'diff exits 1 when the files differ');
+  resetRepo();
+  writeFileSync(path.join(repo, 'README'), 'one\ntwo\n', 'utf8');   // the old side the diff names
+  const fromDiff = await executeGated({ diff: unified.stdout });
+  assert.equal(fromDiff.exitCode, 0, fromDiff.stderr);
+  assert.equal(readFileSync(path.join(repo, 'README'), 'utf8'), 'one\nTWO\n');
+
+  // `helm template` emits `--- # Source: chart/a.yaml` as a document separator; in a diff it is a
+  // context line, so it arrives as one space followed by a `--- ` that is content.
+  resetRepo();
+  const oldYaml = path.join(scratch, 'a.yaml');
+  const newYaml = path.join(scratch, 'b.yaml');
+  writeFileSync(oldYaml, '--- # Source: chart/a.yaml\nkind: A\nx: 1\n', 'utf8');
+  writeFileSync(newYaml, '--- # Source: chart/a.yaml\nkind: A\nx: 2\n', 'utf8');
+  const helm = spawnSync('diff', ['-u', '-L', 'a/k.yaml', '-L', 'b/k.yaml', oldYaml, newYaml], { encoding: 'utf8' });
+  assert.equal(helm.status, 1);
+  assert.match(helm.stdout, /\n --- # Source: chart\/a\.yaml/);
+  writeFileSync(path.join(repo, 'k.yaml'), '--- # Source: chart/a.yaml\nkind: A\nx: 1\n', 'utf8');   // the old side
+  const fromHelm = await executeGated({ diff: helm.stdout });
+  assert.equal(fromHelm.exitCode, 0, fromHelm.stderr);
+  assert.equal(readFileSync(path.join(repo, 'k.yaml'), 'utf8'), '--- # Source: chart/a.yaml\nkind: A\nx: 2\n');
 });
