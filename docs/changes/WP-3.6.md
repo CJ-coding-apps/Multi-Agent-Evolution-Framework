@@ -142,7 +142,8 @@ call, the same file always yields the same DAG (ids come from its content, not t
 is refused before anything runs when it names one node twice, names an edge endpoint the spec does not
 define, contains a cycle, or carries a key the format does not define. `edges` are ordering constraints:
 `a -> b` means `b` starts only after `a` succeeded. A spec may be at most 1 MiB, 200 nodes and 2000
-edges. The path is resolved against the directory you run `maf` from; specs are JSON only.
+edges. A relative path is resolved against `--dir`, as `--roles` and `--policy` are — not against the
+directory you happen to run `maf` from; specs are JSON only.
 
 This paragraph was the README text `ece3ba2` added. `ce2a401` moved it here — docs go by fragment — so
 the branch's net diff leaves `README.md` unchanged.

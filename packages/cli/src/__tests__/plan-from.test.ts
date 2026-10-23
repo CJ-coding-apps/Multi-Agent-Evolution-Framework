@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
-import { access, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import { MemoryGraph, recallFailures } from '@maf/memory-graph';
@@ -234,7 +236,54 @@ test('a run the planner planned records that the planner made the plan (F4)', ne
   }
 });
 
+test('a relative spec path is resolved against --dir, not the working directory (R2)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-plan-dir-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const elsewhere = path.join(root, 'elsewhere');
+    await mkdir(elsewhere);
+    const spec = path.join(repo, 'two-node.json');
+    await writeFile(spec, JSON.stringify({
+      nodes: [{ id: 'n1', label: FIRST }, { id: 'n2', label: SECOND }],
+      edges: [{ from: 'n1', to: 'n2' }],
+    }), 'utf8');
+
+    // Under --dir and not under the working directory, so a reader that resolves against the
+    // working directory cannot find it. The plan line names the file that was read.
+    const found = await mafCli(
+      ['run', FIRST, '--dir', repo, '--adapter', 'scripted', '--plan-from', 'two-node.json'], elsewhere);
+    assert.match(found.out, new RegExp(`\\[maf\\] plan: ${escapeRe(spec)} \\(read from spec, no model call\\)`));
+
+    // A spec that exists only in the working directory is not found, and the refusal names the path
+    // under --dir — the file it looked for.
+    await writeFile(path.join(elsewhere, 'only-in-cwd.json'),
+      JSON.stringify({ nodes: [{ id: 'n1', label: FIRST }] }), 'utf8');
+    const missing = await mafCli(
+      ['run', FIRST, '--dir', repo, '--adapter', 'scripted', '--plan-from', 'only-in-cwd.json'], elsewhere);
+    assert.notEqual(missing.code, 0, `the run refused\n${missing.out}${missing.err}`);
+    assert.match(missing.err, new RegExp(`could not read ${escapeRe(path.join(repo, 'only-in-cwd.json'))}`));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // ── helpers ───────────────────────────────────────────────────────────────────────────────────
+
+const MAIN = path.resolve(__dirname, '..', 'main.js');
+const execFileAsync = promisify(execFile);
+
+interface CliRun { code: number; out: string; err: string }
+
+/** `maf <args>` as the built binary runs it, from `cwd` — the only way to vary the working directory. */
+async function mafCli(args: readonly string[], cwd: string): Promise<CliRun> {
+  try {
+    const { stdout, stderr } = await execFileAsync(process.execPath, [MAIN, ...args], { cwd, timeout: 240_000 });
+    return { code: 0, out: stdout, err: stderr };
+  } catch (err: unknown) {
+    const failed = err as { code?: unknown; stdout?: string; stderr?: string };
+    return { code: typeof failed.code === 'number' ? failed.code : 1, out: failed.stdout ?? '', err: failed.stderr ?? '' };
+  }
+}
 
 /**
  * Every path under `dir` with the sha256 of its bytes — `.git/` included. A refusal that created a
