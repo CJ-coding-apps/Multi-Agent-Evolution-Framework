@@ -114,18 +114,28 @@ this patch answers.
   fake global config that define a filter, a hook and an fsmonitor (none runs), a `TMPDIR` inside a work
   tree (the declared name is unchanged), a diff on an existing symlink (refused, link untouched), a
   concatenated two-file `diff -u` (applies), and a failing `dryRun` (non-zero, git asked).
-- **A patch that cannot apply in full is refused before anything is written** (HS24, L1–L4). Two cases git
-  does not stop at `--check`: a declared path below an existing regular file (`README/x`), which passes
-  `--check` and then fails partway through the apply, after an earlier file in the same diff is already
-  written; and a diff line git silently skips (an indented hunk header, or a wholly indented diff — eight
-  measured shapes, with a space, a TAB, a non-breaking space or a carriage return), which git applies in
-  part and exits 0. Both are refused at declaration and recorded as a `Deny` under `builtin:declaration`,
-  nothing written: the first by checking that every parent component of a declared path is a directory, the
-  second by validating the diff's line grammar and naming the offending line. `execute` also refuses a call
-  that arrives with no approved path set — it did not come through the gate — and the gate hands `execute`
-  a frozen copy of the set, so neither the tool nor anything else holding a handle can widen what was
-  approved. A gate-level test proves a write through a link to `Cargo.lock` is refused at declaration and
-  that no approver is asked. Two conformance rows changed outcome: a `===` line and a `Prereq:` line are
+- **Every path a patch writes is a path the policy saw** (HS24, L1–L4, R4). A patch that git rejects
+  outright writes nothing. In a few structural conflicts (a diff that creates both `x` and `x/y`, or writes
+  a file where a directory exists), git can write some files before failing. Every such file was declared
+  and allowed by policy. maf 0.6.0 restores them on failure. The guarantee this restores is that the
+  declared set equals the written set, not atomicity. The checks that hold it: a declared path below an
+  existing regular file (`README/x`) is refused, because it passes `--check` and then fails partway through
+  a multi-file apply after an earlier file is already written; a diff line git silently skips (an indented
+  hunk header, or a wholly indented diff — eight measured shapes, with a space, a TAB, a non-breaking space
+  or a carriage return) is refused by the diff's line grammar, which names the offending line, because git
+  applies such a diff in part and exits 0; and a hunk aimed at an existing directory is refused, because
+  `git apply --check` passes and the apply exits 0 having written nothing, so the agent would be told the
+  hunk landed when the tree is unchanged (R4-H1). The line grammar accepts what git applies in full: an
+  empty line inside a hunk is blank context, a `diff <options> <a> <b>` command line (as `diff -ruN` writes)
+  is a header that names nothing, and a lone carriage return between files in a CRLF diff is the blank
+  separator (R4-M1). A `GIT binary patch` marker is refused wherever it appears, so a binary section cannot
+  hide the lines after it from the grammar (R4-H2). A file the same diff deletes before writing beneath it —
+  `x` deleted while `x/y` is created — applies in full and is allowed. All refusals are recorded as a `Deny`
+  under `builtin:declaration`, nothing written. `execute` also refuses a call that arrives with no approved
+  path set, whether the field is absent or `null` — it did not come through the gate — and the gate hands
+  `execute` a frozen copy of the set, so neither the tool nor anything else holding a handle can widen what
+  was approved. A gate-level test proves a write through a link to `Cargo.lock` is refused at declaration
+  and that no approver is asked. Two conformance rows changed outcome: a `===` line and a `Prereq:` line are
   now refused, where round 1 accepted diffs git applies only in part.
 - **Case folding and NFC may only make a verdict stricter** (HS5, HS16). `PolicyEngine` folds case and
   Unicode form for Deny and Escalate rules only, and asks the rules twice — exactly and folded — answering

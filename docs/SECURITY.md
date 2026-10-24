@@ -629,9 +629,19 @@ link. A path that cannot be checked (a component over the name limit — 256 byt
 `ENAMETOOLONG`) is a returned refusal, never a raw throw. A declared path below an existing regular file is
 refused too: `README/x` passes `git apply --check` and then fails partway through the apply, after an
 earlier file in the diff has been written, so a parent component that exists and is not a directory is a
-refusal at declaration and nothing is written. Creating a mode
+refusal at declaration and nothing is written. The exception is a prefix the *same diff deletes* — `x`
+deleted while `x/y` is created: git removes `x` first, then writes beneath it, and the whole patch applies,
+so a deleted prefix is skipped and the walk stops there. A declared name that is itself an existing
+directory, and that the diff neither creates nor deletes, is refused: a hunk aimed at a directory passes
+`git apply --check` and the apply exits 0 having written nothing, so the agent would be told the hunk landed
+when the tree is unchanged. Creating a mode
 `100755` file is allowed: whether an agent may write a script at a given path is a policy question, not
-one path declaration can answer. Binary patches are refused from their `-` line counts. Absolute names and
+one path declaration can answer. Binary patches are refused from their `-` line counts, and a
+`GIT binary patch` marker line is refused wherever it appears, so a binary section's payload cannot hide the
+lines after it from the grammar. What the guarantee is: every path a patch writes is a path the policy saw,
+not atomicity. A patch git rejects outright writes nothing; in a few structural conflicts (`x` and `x/y`
+both created, or a file where a directory exists) git can write some declared, allowed files before failing,
+and maf 0.6.0 restores the declared paths on failure. Absolute names and
 names containing `..` are refused by name, `--check` runs before the apply so a diff that would fail
 changes nothing, and `--reject` is never passed, so no `.orig` or `.rej` file is left behind. Nothing is
 loosened relative to `git apply` — there is no `--recount` — so a wrong hunk count fails with git's own
@@ -644,10 +654,15 @@ never makes a verdict more permissive; on Linux nothing is folded and only the e
 stricter than `patch` — a context diff, an `Index:`-only diff, a normal diff, an ed diff, or a section
 start git skips is refused rather than applied, because git applies unified diffs only and skips what it
 does not read while exiting 0. The rule is the diff's line grammar rather than a list of bad patterns:
-every line must be a section header, a hunk header, a hunk body line (` `, `+`, `-` or `\`), or a blank
-line between files, and any other line is refused naming its number. Inside a hunk the header's counts
-decide what is content, so a Helm-rendered YAML file whose unchanged lines read
-` --- # Source: chart/a.yaml` applies. The strictness is the point: a diff whose targets cannot be
+every line must be a section header (any `diff ` command line, the `---`/`+++` pair, or a git extended
+header), a hunk header, a hunk body line (` `, `+`, `-` or `\`), or a blank line between files, and any
+other line is refused naming its number. The grammar accepts exactly what `git apply` applies in full: an
+empty line inside a hunk is the blank context git reads it as; a `diff <options> <a> <b>` command line (the
+first line of `diff -ruN` output) is a header that names nothing, so the names still come from the
+`---`/`+++` pair; and a lone carriage return between files is the blank separator a CRLF diff writes. Inside
+a hunk the header's counts decide what is content, so a Helm-rendered YAML file whose unchanged lines read
+` --- # Source: chart/a.yaml` applies, and a hunk with more body lines than its counts is refused rather
+than read past its end. The strictness is the point: a diff whose targets cannot be
 declared is not one whose write may be assumed safe.
 
 ### `test.run` executes project code

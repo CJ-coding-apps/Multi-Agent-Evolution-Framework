@@ -61,6 +61,9 @@ const SEED: Record<string, string> = {
   'n.txt':            '-- a/Cargo.lock\n',
   'copy.txt':         'c\n',
   'q"x.lock':         'q\n',
+  'blank.txt':        'one\n\nthree\n',   // round 5 (R4-M1): a file with a genuine blank line
+  'crlf1':            'x1\r\n',           // round 5 (R4-M1): two CRLF files for the inter-file blank
+  'crlf2':            'y1\r\n',
 };
 
 let projectRoot = '';
@@ -323,6 +326,26 @@ const ROWS: Row[] = [
     expect: { declared: 'REFUSED' },
     note: 'at -p0 the prefix is not stripped, so git names `a/README` and `b/README` — two different '
       + 'files — and the section is a rename it was not told about.' },
+
+  // Round 5 — the grammar accepts what git applies in full (R4-M1), the binary marker is refused
+  // wherever it appears (R4-H2), and a hunk aimed at an existing directory is refused (R4-H1).
+  { n: 56, name: 'empty line inside a hunk is blank context (R4-M1)', diff: '--- a/blank.txt\n+++ b/blank.txt\n@@ -1,3 +1,3 @@\n-one\n+ONE\n\n three\n',
+    expect: { declared: ['blank.txt'], verdict: 'Allow' },
+    note: 'git reads the empty line as a blank context line and applies the hunk; round 4 refused it.' },
+  { n: 57, name: '`diff -ruN` command line names nothing (R4-M1)', diff: 'diff -ruN a/blank.txt b/blank.txt\n--- a/blank.txt\t2020-01-01 00:00:00\n+++ b/blank.txt\t2020-01-01 00:00:01\n@@ -1,3 +1,3 @@\n-one\n+ONE\n\n three\n',
+    expect: { declared: ['blank.txt'], verdict: 'Allow' },
+    note: 'the `diff` command line is a header; the names come from the `---`/`+++` pair, so it declares `blank.txt`.' },
+  { n: 58, name: 'lone CR between files in a CRLF diff (R4-M1)', diff: '--- a/crlf1\r\n+++ b/crlf1\r\n@@ -1 +1 @@\r\n-x1\r\n+X1\r\n\r\n--- a/crlf2\r\n+++ b/crlf2\r\n@@ -1 +1 @@\r\n-y1\r\n+Y1\r\n',
+    expect: { declared: ['crlf1', 'crlf2'], verdict: 'Allow' },
+    note: 'the blank separator a CRLF diff writes is a lone carriage return; it is accepted between files.' },
+  { n: 59, name: 'README hunk then a GIT binary patch line hiding a .env section (R4-H2)', diff: readmeSection() + 'GIT binary patch\n--- a/.env\n+++ b/.env\n' + envHunk,
+    expect: { declared: 'REFUSED' },
+    note: 'the binary marker is refused by its own line, so the `.env` section hidden below its payload '
+      + 'cannot pass unseen.' },
+  { n: 60, name: 'hunk aimed at the existing directory src (R4-H1)', diff: '--- a/src\n+++ b/src\n@@ -1 +1 @@\n-x\n+y\n',
+    expect: { declared: 'REFUSED' },
+    note: 'git apply --check passes and the apply exits 0 writing nothing (a directory cannot be a file '
+      + 'target), so the hunk is refused rather than reported as applied.' },
 ];
 
 // ─── the runner every row and every regression test uses ────────────────────

@@ -889,6 +889,145 @@ test('the eight shapes git applies in part and exits 0 are refused, naming the l
   }
 });
 
+test('a hunk with more body lines than its header counts is refused, naming the overflow (L2)', () => {
+  // The surviving mutant was the `oldLeft < 0 || newLeft < 0` guard: without it an extra removed
+  // line past the hunk's count is read as a body line, and the next real header is read as more body.
+  // git corrupts on it (`corrupt patch at line 7`); the grammar names the line instead.
+  const diff = '--- a/README\n+++ b/README\n@@ -1 +1 @@\n-r\n-extra\n+s\n';
+  assert.throws(
+    () => tool.declaredPaths({ diff }, ctxIn()),
+    (err: unknown) => err instanceof ToolDeclarationError
+      && /more lines than its hunk header counts/.test(err.message),
+  );
+});
+
+test('the grammar accepts what git applies in full: empty-line context, a `diff` command line, a CRLF blank (R4-M1)', async () => {
+  // Three shapes git reads to the end and applies, which the round-4 grammar refused. Each is run
+  // through the real gate end to end, and git's own `--check` is asserted to pass on it first, so the
+  // test proves the grammar accepts exactly what git applies — not a shape this tool happens to like.
+  const cases: ReadonlyArray<{ name: string; seed: Record<string, string>; diff: string; wrote: string[] }> = [
+    {
+      name: 'an empty line inside a hunk is blank context',
+      // `blank.txt` holds `one\n\nthree\n`; the context line for the blank is written empty, no space.
+      seed: { 'blank.txt': 'one\n\nthree\n' },
+      diff: '--- a/blank.txt\n+++ b/blank.txt\n@@ -1,3 +1,3 @@\n-one\n+ONE\n\n three\n',
+      wrote: ['blank.txt'],
+    },
+    {
+      name: 'a `diff -ruN` command line is a header that names nothing',
+      seed: { 'f.txt': 'one\ntwo\nthree\n' },
+      diff: 'diff -ruN a/f.txt b/f.txt\n--- a/f.txt\t2020-01-01 00:00:00\n+++ b/f.txt\t2020-01-01 00:00:01\n@@ -1,3 +1,3 @@\n-one\n+ONE\n two\n three\n',
+      wrote: ['f.txt'],
+    },
+    {
+      name: 'a lone CR between files in a CRLF diff is the blank separator',
+      seed: { 'c1.txt': 'x1\r\n', 'c2.txt': 'y1\r\n' },
+      diff: '--- a/c1.txt\r\n+++ b/c1.txt\r\n@@ -1 +1 @@\r\n-x1\r\n+X1\r\n\r\n--- a/c2.txt\r\n+++ b/c2.txt\r\n@@ -1 +1 @@\r\n-y1\r\n+Y1\r\n',
+      wrote: ['c1.txt', 'c2.txt'],
+    },
+  ];
+  for (const { name, seed, diff, wrote } of cases) {
+    const dir = mkdtempSync(path.join(scratch, 'r4m1-'));
+    for (const [n, b] of Object.entries(seed)) writeFileSync(path.join(dir, n), b);
+    assert.equal(git(dir, ['init', '-q', '.']).status, 0, name);
+    assert.equal(git(dir, ['add', '-A']).status, 0, name);
+    assert.equal(git(dir, [
+      '-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 's',
+    ]).status, 0, name);
+    // git itself applies this diff in full.
+    const checked = spawnSync('git', ['apply', '--check', '-'], { cwd: dir, input: diff, encoding: 'utf8' });
+    assert.equal(checked.status, 0, `${name}: git accepts it (${checked.stderr})`);
+
+    const ctx = ctxIn({ cwd: dir, projectRoot: dir });
+    const declared = tool.declaredPaths({ diff }, ctx);
+    assert.deepEqual([...declared].sort(), [...wrote].sort(), name);
+    const result = await tool.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+    assert.equal(result.exitCode, 0, `${name}: the apply succeeds (${result.stderr})`);
+  }
+});
+
+test('a `GIT binary patch` line is refused wherever it appears, and the tree is unchanged (R4-H2)', async () => {
+  // Binary patches are already refused from `--numstat`'s `-` counts, but a lone marker line after a
+  // text hunk let the grammar read a text section and then stop checking at the marker — so a hidden
+  // `.env` section below it would never be seen. The marker is refused by its own line now.
+  resetRepo();
+  const before = snapshot(repo);
+  const diff = '--- a/README\n+++ b/README\n@@ -1 +1 @@\n-r\n+s\nGIT binary patch\n--- a/.env\n+++ b/.env\n@@ -1 +1 @@\n-SAFE=1\n+LEAK=1\n';
+  assert.throws(
+    () => tool.declaredPaths({ diff }, ctxIn()),
+    (err: unknown) => err instanceof ToolDeclarationError && /"GIT binary patch" marker/.test(err.message),
+  );
+  await assert.rejects(
+    () => tool.execute({ diff }, ctxIn({ approvedPaths: [] })),
+    (err: unknown) => err instanceof ToolDeclarationError && /"GIT binary patch" marker/.test(err.message),
+  );
+  assert.deepEqual(changedSince(before), [], 'nothing is written, README included');
+  assert.equal(readFileSync(path.join(repo, 'README'), 'utf8'), 'r\n');
+  assert.equal(readFileSync(path.join(repo, '.env'), 'utf8'), 'SAFE=1\n');
+});
+
+test('a hunk aimed at an existing directory is refused: git exits 0 having written nothing (R4-H1)', async () => {
+  // `git apply --check` passes on `--- a/dir / +++ b/dir`, and the apply exits 0 with
+  // `warning: unable to rmdir 'dir'` having changed nothing — so the agent would be told the hunk
+  // landed. The declaration refuses the directory name.
+  const dir = mkdtempSync(path.join(scratch, 'dirtarget-'));
+  mkdirSync(path.join(dir, 'sub'));
+  writeFileSync(path.join(dir, 'sub', 'a.txt'), 'inside\n');
+  assert.equal(git(dir, ['init', '-q', '.']).status, 0);
+  assert.equal(git(dir, ['add', '-A']).status, 0);
+  assert.equal(git(dir, [
+    '-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 's',
+  ]).status, 0);
+  const ctx = ctxIn({ cwd: dir, projectRoot: dir });
+  const diff = '--- a/sub\n+++ b/sub\n@@ -1 +1 @@\n-inside\n+changed\n';
+  // git accepts the check and exits 0 writing nothing — the false "applied" this refusal closes.
+  assert.equal(spawnSync('git', ['apply', '--check', '-'], { cwd: dir, input: diff, encoding: 'utf8' }).status, 0);
+  assert.throws(
+    () => tool.declaredPaths({ diff }, ctx),
+    (err: unknown) => err instanceof ToolDeclarationError && /which is an existing directory/.test(err.message),
+  );
+  await assert.rejects(
+    () => tool.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: ['sub'] })),
+    (err: unknown) => err instanceof ToolDeclarationError && /which is an existing directory/.test(err.message),
+  );
+});
+
+test('a file replaced by a directory in one diff is allowed: git deletes the file, then writes beneath it (R4-H1 LOW)', async () => {
+  // `x` is a regular file; the diff deletes `x` and creates `x/y`. git removes `x` first, then writes
+  // `x/y`, and the whole patch applies (measured: exit 0, `x` becomes a directory). A deleted prefix
+  // must not be treated as a regular-file parent to refuse under.
+  const dir = mkdtempSync(path.join(scratch, 'filetodir-'));
+  writeFileSync(path.join(dir, 'x'), 'filex\n');
+  writeFileSync(path.join(dir, 'README'), 'r\n');
+  assert.equal(git(dir, ['init', '-q', '.']).status, 0);
+  assert.equal(git(dir, ['add', '-A']).status, 0);
+  assert.equal(git(dir, [
+    '-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 's',
+  ]).status, 0);
+  const ctx = ctxIn({ cwd: dir, projectRoot: dir });
+  const diff = 'diff --git a/x b/x\ndeleted file mode 100644\n--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-filex\n'
+    + 'diff --git a/x/y b/x/y\nnew file mode 100644\n--- /dev/null\n+++ b/x/y\n@@ -0,0 +1 @@\n+ynew\n';
+  const declared = tool.declaredPaths({ diff }, ctx);
+  assert.deepEqual([...declared].sort(), ['x', 'x/y'], 'both the deleted file and the created one are declared');
+  const result = await tool.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+  assert.equal(result.exitCode, 0, `the apply succeeds (${result.stderr})`);
+  assert.equal(lstatSync(path.join(dir, 'x')).isDirectory(), true, '`x` is now a directory');
+  assert.equal(readFileSync(path.join(dir, 'x', 'y'), 'utf8'), 'ynew\n');
+});
+
+test('execute refuses a call whose approved set is null, not just absent (L)', async () => {
+  // `approvedPaths: null` is "no approved set" the same as a missing field; spreading it would be a
+  // raw TypeError rather than the declaration refusal the gate records.
+  resetRepo();
+  const before = snapshot(repo);
+  await assert.rejects(
+    () => tool.execute({ diff: UNIFIED_LOCK }, ctxIn({ approvedPaths: null as unknown as readonly string[] })),
+    (err: unknown) => err instanceof ToolDeclarationError
+      && /arrived without the paths the policy approved/.test(err.message),
+  );
+  assert.deepEqual(changedSince(before), [], 'a refused call writes nothing');
+});
+
 test('real git output, diff -u output and Helm YAML still apply (L2)', async () => {
   // The grammar is a refusal of lines git would skip, not of diff syntax it reads: the three
   // producers a user's workflow hands this tool must all go through.

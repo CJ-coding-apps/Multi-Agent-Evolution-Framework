@@ -250,8 +250,15 @@ function numstatPaths(sealed: SealedGit, reverse: boolean): string[] {
   return entries.map(numstatPath);
 }
 
+/** Which declared files a diff creates and which it deletes, as `--summary` classifies them. */
+interface SummaryKinds {
+  readonly created: ReadonlySet<string>;
+  readonly deleted: ReadonlySet<string>;
+}
+
 /**
- * The forms `--summary` names that a path list cannot describe, refused by their own name.
+ * The forms `--summary` names that a path list cannot describe, refused by their own name; and, for
+ * the forms it allows, which files are created and which deleted.
  *
  * `--numstat` gives only the new name for a rename, so a protected file could be renamed away while
  * the policy was asked about its destination. Copies, mode changes and symlink or submodule creation
@@ -259,21 +266,35 @@ function numstatPaths(sealed: SealedGit, reverse: boolean): string[] {
  * with the executable bit (`create mode 100755 run.sh`) — is not one of them: it is a path write, and
  * the file list is the whole story. Creating an executable is allowed on purpose; an agent that
  * writes a script writes a script.
+ *
+ * `-z` turns off git's path quoting, so a `create`/`delete` line names the file exactly as `--numstat
+ * -z` does — the same bytes, the same `-p` — and the two sets key against the declared names. They are
+ * what tells a creation that replaces a directory (git empties it, then writes) from a modification
+ * aimed at a directory (a silent no-op), and a prefix a diff deletes before it writes beneath it.
  */
-function refuseSummaryForms(sealed: SealedGit): void {
-  const summary = runGitApply(sealed, ['--summary']);
+function summaryForms(sealed: SealedGit): SummaryKinds {
+  const summary = runGitApply(sealed, ['--summary', '-z']);
   if (summary.status !== 0) {
     throw refusal(`git apply --summary could not read it (${gitFailure(summary)}).`);
   }
-  for (const line of summary.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')) {
-    if (/^(rename|copy|mode change)\b/.test(line) || /\bmode (120000|160000)\b/.test(line)) {
+  const created = new Set<string>();
+  const deleted = new Set<string>();
+  // git indents each summary line with one leading space; the filename runs to the end of the line,
+  // so it is captured without trimming the tail (a trailing space is part of the name, not padding).
+  for (const line of summary.stdout.split('\n').filter((l) => l !== '')) {
+    if (/^\s*(rename|copy|mode change)\b/.test(line) || /\bmode (120000|160000)\b/.test(line)) {
       throw refusal(
-        `git reports ${JSON.stringify(line)}. patch.apply refuses renames, copies, mode changes, `
+        `git reports ${JSON.stringify(line.trim())}. patch.apply refuses renames, copies, mode changes, `
         + 'symlinks and submodules: the file list git reports for them does not describe everything '
         + 'the apply changes. Use fs.move for a rename, and a diff for content.',
       );
     }
+    const kind = /^\s*create mode \S+ (.+)$/.exec(line);
+    if (kind !== null) { created.add(safePath(kind[1]!)); continue; }
+    const gone = /^\s*delete mode \S+ (.+)$/.exec(line);
+    if (gone !== null) deleted.add(safePath(gone[1]!));
   }
+  return { created, deleted };
 }
 
 /**
@@ -289,16 +310,23 @@ function refuseSummaryForms(sealed: SealedGit): void {
  * header from being mistaken for one: `--- a/Cargo.lock` inside a hunk is a removed line whose text
  * begins `-- `, and it is a body line exactly because the hunk still expects one. Between hunks a line
  * must be a section header, a git extended header, a hunk header, or blank; inside a hunk, a body line,
- * with `\ No newline at end of file` allowed after the last of them.
+ * with `\ No newline at end of file` allowed after the last of them. An empty line inside a hunk is the
+ * blank context git reads it as — a context line with no content — and counts against both sides. A
+ * lone carriage return between files is the blank separator a CRLF diff writes, and is accepted there.
  *
- * A binary patch's payload is not line-structured, so it is passed through by its marker and refused
- * by `--numstat` instead (a `-` count), which names that reason.
+ * The grammar must accept what git applies in full, so a `diff <options> <a> <b>` command line (as
+ * `diff -ruN` writes) is a header that names nothing — the names come from the `---`/`+++` pair — and
+ * every `diff ` header is read, not only `diff --git`.
+ *
+ * A `GIT binary patch` marker is refused wherever it appears (R4-H2). Its payload is not
+ * line-structured, so letting it through would let a binary section hide any lines that follow it from
+ * the grammar; a binary patch has no readable hunks and no line counts to describe in any case.
  *
  * Only git's own output is read: a commit-message preamble or a context diff is refused, not
  * interpreted. The tool promises a unified diff.
  */
 const SECTION_HEADER =
-  /^(?:diff --git |--- |\+\+\+ |Index: |index |old mode |new mode |deleted file mode |new file mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |Binary files )/;
+  /^(?:diff |--- |\+\+\+ |Index: |index |old mode |new mode |deleted file mode |new file mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |Binary files )/;
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 const HUNK_BODY = /^[ +\-\\]/;
 const BINARY_MARKER = 'GIT binary patch';
@@ -312,7 +340,7 @@ function refuseBrokenGrammar(diff: string): void {
   const lines = diff.split('\n');
   if (lines[lines.length - 1] === '') lines.pop();          // the final newline is not a line
 
-  let state: 'header' | 'hunk' | 'tail' | 'binary' = 'header';
+  let state: 'header' | 'hunk' | 'tail' = 'header';
   let oldLeft = 0;
   let newLeft = 0;
   const broken = (n: number, line: string, why: string): never => {
@@ -326,17 +354,25 @@ function refuseBrokenGrammar(diff: string): void {
     const line = lines[i]!;
     const n = i + 1;
 
-    if (state === 'binary') {
-      if (!line.startsWith('diff --git ')) continue;          // a binary payload line
-      state = 'header';
+    // A binary marker is refused wherever it appears: its payload is not line-structured, so a
+    // binary section left to pass through could hide every line after it from this grammar.
+    if (line === BINARY_MARKER) {
+      throw refusal(`line ${n} is a ${JSON.stringify(BINARY_MARKER)} marker. A binary patch has no `
+        + 'readable hunks and no line counts to describe, and letting its payload through would hide the '
+        + 'lines after it from this check, so the marker is refused wherever it appears.');
     }
 
     if (state === 'hunk') {
       if (line.startsWith('\\')) continue;                    // "\ No newline at end of file"
-      if (!HUNK_BODY.test(line)) broken(n, line, 'and a hunk expects a body line where it still counts lines');
-      const marker = line[0];
-      if (marker === ' ' || marker === '-') oldLeft--;
-      if (marker === ' ' || marker === '+') newLeft--;
+      if (line === '') {                                      // git reads an empty line as blank context
+        oldLeft--; newLeft--;
+      } else if (HUNK_BODY.test(line)) {
+        const marker = line[0];
+        if (marker === ' ' || marker === '-') oldLeft--;
+        if (marker === ' ' || marker === '+') newLeft--;
+      } else {
+        broken(n, line, 'and a hunk expects a body line where it still counts lines');
+      }
       if (oldLeft < 0 || newLeft < 0) broken(n, line, 'and that is more lines than its hunk header counts');
       if (oldLeft === 0 && newLeft === 0) state = 'tail';
       continue;
@@ -347,8 +383,7 @@ function refuseBrokenGrammar(diff: string): void {
       state = 'header';                                       // anything else ends the hunk
     }
 
-    if (line === '') continue;                                // a blank line between files
-    if (line === BINARY_MARKER) { state = 'binary'; continue; }
+    if (line === '' || line === '\r') continue;               // a blank line between files (CRLF: a lone CR)
     const hunk = HUNK_HEADER.exec(line);
     if (hunk !== null) {
       oldLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
@@ -374,10 +409,19 @@ function refuseBrokenGrammar(diff: string): void {
  * or a copy that did not say so, and it is refused.
  *
  * Nothing here writes: `--numstat` and `--summary` parse the patch and do not touch the tree.
+ *
+ * The result carries the `--summary` creation/deletion sets alongside the declared paths, because the
+ * symlink-and-parent walk needs them: a prefix the diff deletes is not a parent to refuse under, and a
+ * declared name that is an existing directory is a silent no-op git exits 0 on.
  */
-function declaredFromGit(sealed: SealedGit, diff: string): string[] {
+interface Declaration {
+  readonly paths: string[];
+  readonly kinds: SummaryKinds;
+}
+
+function declaredFromGit(sealed: SealedGit, diff: string): Declaration {
   refuseBrokenGrammar(diff);
-  refuseSummaryForms(sealed);
+  const kinds = summaryForms(sealed);
   const forward = numstatPaths(sealed, false);
   const reverse = numstatPaths(sealed, true);
   // Compared as sets, not by position: `-R` reports the sections of a multi-file patch in its own
@@ -400,7 +444,7 @@ function declaredFromGit(sealed: SealedGit, diff: string): string[] {
   }
   // The union, so the declaration is every name either direction reported, whatever a rename
   // header might have said. For an ordinary diff the two lists are the same list.
-  return [...new Set([...forward, ...reverse])];
+  return { paths: [...new Set([...forward, ...reverse])], kinds };
 }
 
 /** The strip the command will be given, one value for both the declaration and the argv. */
@@ -444,19 +488,30 @@ function lstatOrRefuse(target: string, declared: string): Stats | undefined {
  * through, after a multi-file patch has already changed or deleted the files before it (measured: the
  * other file deleted, exit 128). A patch that cannot apply in full is refused before anything is
  * written, which is what the docs promise. The declared path itself may be a regular file: that is an
- * ordinary write to it.
+ * ordinary write to it. The exception is a prefix the *same diff deletes* — `x` (a file) deleted while
+ * `x/y` is created: git removes `x` first, then writes beneath it, and the whole patch applies
+ * (measured: exit 0, `x` becomes a directory). A deleted prefix is skipped and the walk stops there,
+ * because git recreates everything below it fresh.
+ *
+ * It also refuses a declared name that is itself an existing directory and is neither created nor
+ * deleted by the diff — a hunk aimed at a directory. `git apply --check` passes, and the apply exits
+ * 0 having written nothing (measured: `warning: unable to rmdir`, exit 0), so the agent is told the
+ * hunk landed when the tree is unchanged. A creation whose name is a directory is left to git, which
+ * either applies in full (the directory's whole contents are deleted in the same diff) or fails with a
+ * non-zero exit (a sibling remains) — not a silent success either way.
  *
  * It runs at declaration time (where `ctx` is given) and again in `execute`: the gate records a
  * `Deny` rather than an Allow that the call then fails under, and the second pass covers a link
  * created between the two.
  */
-function refuseSymlinkTargets(root: string, paths: readonly string[]): void {
+function refuseSymlinkTargets(root: string, paths: readonly string[], kinds: SummaryKinds): void {
   for (const p of paths) {
     const segments = p.split('/');
     for (let i = 1; i <= segments.length; i++) {
       const prefix = segments.slice(0, i).join('/');
       const stat = lstatOrRefuse(path.join(root, prefix), p);
       if (stat === undefined) break;                 // nothing here, so nothing below it either
+      if (i < segments.length && kinds.deleted.has(prefix)) break;   // git deletes it, then writes beneath
       if (stat.isSymbolicLink()) {
         const through = prefix === p ? '' : ` through ${JSON.stringify(prefix)}`;
         throw refusal(
@@ -465,7 +520,16 @@ function refuseSymlinkTargets(root: string, paths: readonly string[]): void {
           + 'the policy was shown. Remove the link, or patch the file it points at by that file\'s own name.',
         );
       }
-      if (i === segments.length) break;              // the declared name itself, whatever it is
+      if (i === segments.length) {                   // the declared name itself
+        if (stat.isDirectory() && !kinds.created.has(p) && !kinds.deleted.has(p)) {
+          throw refusal(
+            `it would write ${JSON.stringify(p)}, which is an existing directory. A hunk aimed at a `
+            + 'directory passes git apply --check and then exits 0 having written nothing, so the apply '
+            + 'would be reported as landed while the tree is unchanged. Name the file inside the directory.',
+          );
+        }
+        break;                                       // a regular file here is an ordinary write
+      }
       if (!stat.isDirectory()) {
         throw refusal(
           `it would write ${JSON.stringify(p)}, and ${JSON.stringify(prefix)} is a regular file rather `
@@ -500,7 +564,10 @@ function refuseSymlinkTargets(root: string, paths: readonly string[]): void {
  * different set.
  */
 function refuseApprovedDifference(approved: readonly string[] | undefined, declared: readonly string[]): void {
-  if (approved === undefined) {
+  // `== null` covers both `undefined` (no field) and a literal `null` (a caller that set the field to
+  // nothing): either is "no approved set", and spreading it would be a raw TypeError rather than the
+  // refusal the gate records.
+  if (approved == null) {
     throw new ToolDeclarationError(
       'patch.apply refused this call: it arrived without the paths the policy approved, so there is '
       + `nothing to compare the ${declared.length} path(s) this apply would write against. A write is `
@@ -566,10 +633,10 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
       );
     }
     const worktree = ctx === undefined ? null : ctx.projectRoot;
-    const paths = withSealedDiff(input.diff, stripOf(input), worktree, (sealed) => declaredFromGit(sealed, input.diff));
+    const { paths, kinds } = withSealedDiff(input.diff, stripOf(input), worktree, (sealed) => declaredFromGit(sealed, input.diff));
     // Before policy, as fs.write does: a diff that touches .git is refused whatever the rules say.
     refuseGitDirPaths(this.name, paths);
-    if (ctx !== undefined) refuseSymlinkTargets(ctx.projectRoot, paths);
+    if (ctx !== undefined) refuseSymlinkTargets(ctx.projectRoot, paths, kinds);
     return paths;
   }
 
@@ -584,11 +651,11 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
     // context — the same diff file, the same directory, the same environment — so the git that names
     // the files is the git that writes them.
     const outcome = await withSealedDiffAsync(input.diff, stripOf(input), ctx.projectRoot, async (sealed) => {
-      const declared = declaredFromGit(sealed, input.diff);
+      const { paths: declared, kinds } = declaredFromGit(sealed, input.diff);
       refuseApprovedDifference(ctx.approvedPaths, declared);
       refuseGitDirPaths(this.name, declared);
       await refuseGitDirTargets(this.name, ctx, declared);
-      refuseSymlinkTargets(ctx.projectRoot, declared);
+      refuseSymlinkTargets(ctx.projectRoot, declared, kinds);
 
       // Check first, and apply only what passed: a multi-file diff that fails one file changes
       // nothing. git apply is all-or-nothing without `--reject`, and no `--reject` is passed.
