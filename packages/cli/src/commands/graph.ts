@@ -48,7 +48,7 @@ export async function runGraphExport(dbPath: string, outFile: string): Promise<G
       edges: exported.edges.length,
     };
   } finally {
-    graph.close();
+    await graph.close();
   }
 }
 
@@ -74,7 +74,7 @@ export async function runGraphImport(file: string, dbPath: string): Promise<Grap
       edges: report.edgesCreated,
     };
   } finally {
-    graph.close();
+    await graph.close();
   }
 }
 

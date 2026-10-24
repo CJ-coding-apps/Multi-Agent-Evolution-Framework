@@ -80,7 +80,7 @@ test('the demo fails on any line of its result block that did not hold, the reda
 
 test('a bundle that cannot be written fails the demo, and the stack is closed either way', async () => {
   let closed = 0;
-  const stack = { close: () => { closed++; } };
+  const stack = { close: async () => { closed++; } };
   const unwritable = async (): Promise<never> => { throw new Error('EACCES: permission denied, open attestations/run.bundle.json'); };
 
   await assert.rejects(() => attestAndClose(stack, unwritable), /EACCES/);

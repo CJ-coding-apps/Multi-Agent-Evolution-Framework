@@ -457,7 +457,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   } finally {
     // Reached by a failure or a throw as well, so the worktree is always reported. Never removed.
     if (isolated && run) refusal = await finishWorktree(worktrees, run, succeeded, say, warn);
-    graph?.close();
+    await graph?.close();
     lcm?.close();
   }
   // Only a run that succeeded gets a reason here: its hand-over was refused or could not be finished.

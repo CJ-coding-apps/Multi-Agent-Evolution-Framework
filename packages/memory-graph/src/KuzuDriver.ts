@@ -17,9 +17,10 @@
 // manager: a segfault, or a heap corrupted for a later, unrelated `malloc` to abort on. That was
 // the crash in a process that drops a graph and keeps running, and it was also why
 // `Database.close()` "segfaulted": it freed the buffer manager under results still waiting for GC.
-// So every result is closed as soon as it has been read, and `close()` then closes the connection
-// and the database in that order, once no query is in flight, so nothing outlives what it points
-// into and the database's address-space reservation is returned when the graph is closed.
+// So every result is closed as soon as it has been read, and `close()` — which returns a promise —
+// closes the connection and then the database once no work is in flight, so nothing outlives what
+// it points into, the database's address-space reservation is returned before that promise
+// resolves, and a caller may delete the directory immediately after awaiting it.
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Connection, Database, KuzuModule } from 'kuzu';
@@ -67,7 +68,10 @@ export class KuzuDriver {
   /** Native work not yet settled: the connection's initialisation, then each `run`. */
   private inFlight = 0;
   private closed = false;
-  private released = false;
+  /** Resolves the waiters of `whenSettled`, once `inFlight` has reached zero. */
+  private idleWaiters: Array<() => void> = [];
+  /** The one release this driver runs; a second `close()` hands back the same promise. */
+  private closePromise: Promise<void> | undefined;
 
   constructor(private readonly dbPath: string, bufferPoolSizeBytes = 128 * 1024 * 1024) {
     const kuzu = loadKuzu();
@@ -87,8 +91,8 @@ export class KuzuDriver {
     // Both 0.7.1 and 0.11.3 expose the same async `init()`. It used to reach through the
     // undocumented `_getConnection`, which 0.11.3 no longer has.
     this.ready = this.track(this.conn.init()).catch((err) => { throw openFailure(this.dbPath, err); });
-    // The rejection is still delivered to `run`/`close`; this only stops Node reporting it as
-    // unhandled when a caller constructs a graph and never queries it.
+    // The rejection is still delivered to every `run` that awaits `ready`; this only stops Node
+    // reporting it as unhandled when a caller constructs a graph and never queries it.
     this.ready.catch(() => undefined);
   }
 
@@ -115,15 +119,30 @@ export class KuzuDriver {
   }
 
   /**
-   * Closes the graph: later queries are refused, and the connection and database are released as
-   * soon as no query is in flight — at once when the graph is idle, which is how every caller
-   * closes it, so the database is checkpointed before the caller goes on (to delete its directory,
-   * say). One in flight finishes first rather than having its database freed under it.
+   * Closes the graph. A later query is refused at once, and the returned promise resolves only
+   * after the connection and then the database have been closed — so a caller that removes the
+   * directory, or opens another graph, may do so after awaiting it (WP-3.8 follow-up).
+   *
+   * Waiting, not checking, is what makes that true. `init()` is in flight for every graph whose
+   * constructor has just returned, and a query may be in flight too; the old `close()` released
+   * only when `inFlight` happened to be zero at that instant, and otherwise returned while the
+   * release was still pending. The release now waits for `ready` and then for the counter to reach
+   * zero, and a second `close()` returns the same promise.
+   *
+   * A native close that fails rejects this promise rather than resolving it: a caller in a
+   * `finally` must not remove the directory of a database that did not close. The one exception is
+   * a connection whose `init()` failed — there is nothing native to free, and that error was
+   * already delivered through `ready`.
+   *
+   * Known property, not a defect: there is no deadline. A native query that never settles keeps
+   * `close()` pending, and every `finally { await graph.close() }` in the CLI waits with it. A
+   * deadline was refused because the only thing it can do at expiry is free handles under live
+   * work — the crash this file exists to prevent.
    */
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    if (this.inFlight === 0) this.release();
+  close(): Promise<void> {
+    this.closed = true; // from here on, `run` refuses at once
+    this.closePromise ??= this.release();
+    return this.closePromise;
   }
 
   private async track<T>(work: Promise<T>): Promise<T> {
@@ -132,19 +151,57 @@ export class KuzuDriver {
       return await work;
     } finally {
       this.inFlight--;
-      if (this.closed && this.inFlight === 0) this.release();
+      if (this.inFlight === 0) {
+        const waiting = this.idleWaiters;
+        this.idleWaiters = [];
+        for (const resolve of waiting) resolve();
+      }
     }
   }
 
-  private release(): void {
-    if (this.released) return;
-    this.released = true;
-    // Connection before database. Both are initialised here (nothing is in flight, and `ready`
-    // has settled), so each native close happens synchronously inside the call; the promises only
-    // carry a failed initialisation, which leaves nothing native to free.
-    this.conn.close().catch(() => undefined);
-    this.db.close().catch(() => undefined);
+  /** Resolves the next time `inFlight` reaches zero. Called only with work already in flight. */
+  private whenSettled(): Promise<void> {
+    return new Promise<void>((resolve) => { this.idleWaiters.push(resolve); });
   }
+
+  private async release(): Promise<void> {
+    // `ready` is the connection's `init()`, tracked like a query. It may reject — a database that
+    // failed to open has nothing native to free — and that rejection has already been handed to
+    // every `run` that awaited it, so it is swallowed here rather than replacing the close. What
+    // it does change is the meaning of the closes below, which is why it is recorded.
+    let initFailed = false;
+    await this.ready.catch(() => { initFailed = true; });
+    while (this.inFlight > 0) await this.whenSettled();
+    // Connection before database on every path: no result is waiting on the buffer manager, the
+    // database's address-space reservation is returned before this promise resolves, and a
+    // connection is never left pointing at a freed database. Both are attempted even when the
+    // first fails. A `conn.close()` after a failed `init()` re-awaits the retained rejected
+    // `_initPromise` and throws before it would have closed the native connection; the attempt is
+    // still made, so the connection object is not simply abandoned.
+    const failures: Array<{ part: 'connection' | 'database'; error: unknown }> = [];
+    try { await this.conn.close(); } catch (error) { failures.push({ part: 'connection', error }); }
+    try { await this.db.close(); }   catch (error) { failures.push({ part: 'database',   error }); }
+    // A failed initialisation leaves nothing native to free: both errors are consequences of the
+    // one already reported through `ready`. Any other failure means handles may still be open, so
+    // the close rejects — a caller never treats a failed release as a successful one.
+    if (initFailed || failures.length === 0) return;
+    throw releaseFailure(this.dbPath, failures);
+  }
+}
+
+/**
+ * The rejection a caller gets when the native release failed after a successful initialisation:
+ * which handle would not close, and why. The first underlying error rides along as `cause`.
+ */
+function releaseFailure(
+  dbPath: string,
+  failures: Array<{ part: 'connection' | 'database'; error: unknown }>,
+): Error {
+  const detail = failures.map(({ part, error }) => {
+    const message = error instanceof Error ? error.message : String(error);
+    return `kuzu's ${part} close failed: ${message}`;
+  }).join('; ');
+  return new Error(`The graph at ${dbPath} was not released: ${detail}`, { cause: failures[0]?.error });
 }
 
 /**
