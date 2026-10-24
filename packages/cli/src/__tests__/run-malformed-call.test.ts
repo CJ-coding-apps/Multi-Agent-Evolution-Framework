@@ -80,7 +80,10 @@ test('maf run, the live failures replayed: a missing hello.js and a {path, patch
     assert.match(second.lastToolResult ?? '', /^fs\.read failed: ENOENT: no such file or directory, open '.*hello\.js'$/,
       'the missing file was answered, not thrown');
     assert.equal(third.lastToolResult, ANSWER, 'the malformed call was answered, naming "diff"');
-    assert.match(fourth.lastToolResult ?? '', /patching file sum\.js/);
+    // `git apply` says nothing when it applies — GNU `patch` printed `patching file sum.js`, and
+    // `patch.apply` no longer runs it. The change is the confirmation, and it is asserted above on
+    // the run's branch; the bundle below records exit code 0 for this call.
+    assert.equal(fourth.lastToolResult, '');
 
     // ── the bundle: the failed read, run and allowed; both patch calls, the first not run and why ──
     const text = await readFile(path.join(repo, '.maf', 'attestations', `${runId}.bundle.json`), 'utf8');
