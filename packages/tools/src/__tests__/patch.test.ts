@@ -1015,6 +1015,37 @@ test('a file replaced by a directory in one diff is allowed: git deletes the fil
   assert.equal(readFileSync(path.join(dir, 'x', 'y'), 'utf8'), 'ynew\n');
 });
 
+test('deleting an unrelated file does not exempt a regular-file parent (R5-L1)', async () => {
+  // The exemption is scoped to the prefix the same diff deletes: `x` deleted → `x/y` allowed. It must
+  // not generalise to "the diff deletes *something*, so any regular-file parent is fine". Here the
+  // diff deletes `other` (unrelated) and writes `README/x`, where `README` stays a regular file; git
+  // would pass --check and then fail the apply partway (after deleting `other`). The parent refusal
+  // must still fire. The widen-the-exemption mutant — breaking the walk on any deletion rather than
+  // on this prefix's — makes this call pass, so it dies here.
+  const dir = mkdtempSync(path.join(scratch, 'unrelated-del-'));
+  writeFileSync(path.join(dir, 'README'), 'r\n');
+  writeFileSync(path.join(dir, 'other'), 'o\n');
+  assert.equal(git(dir, ['init', '-q', '.']).status, 0);
+  assert.equal(git(dir, ['add', '-A']).status, 0);
+  assert.equal(git(dir, [
+    '-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 's',
+  ]).status, 0);
+  const ctx = ctxIn({ cwd: dir, projectRoot: dir });
+  const diff = 'diff --git a/other b/other\ndeleted file mode 100644\n--- a/other\n+++ /dev/null\n@@ -1 +0,0 @@\n-o\n'
+    + 'diff --git a/README/x b/README/x\nnew file mode 100644\n--- /dev/null\n+++ b/README/x\n@@ -0,0 +1 @@\n+new\n';
+  // git itself passes --check and then fails mid-apply — the shape the parent refusal exists to catch.
+  assert.equal(spawnSync('git', ['apply', '--check', '-'], { cwd: dir, input: diff, encoding: 'utf8' }).status, 0,
+    'git passes --check on this diff');
+  assert.throws(
+    () => tool.declaredPaths({ diff }, ctx),
+    (err: unknown) => err instanceof ToolDeclarationError
+      && /"README" is a regular file rather than a directory/.test(err.message),
+    'the unrelated deletion of `other` does not exempt the `README` parent',
+  );
+  // `other` is still on disk: the refusal is at declaration, before the apply that would have removed it.
+  assert.equal(existsSync(path.join(dir, 'other')), true, 'nothing was written or deleted');
+});
+
 test('execute refuses a call whose approved set is null, not just absent (L)', async () => {
   // `approvedPaths: null` is "no approved set" the same as a missing field; spreading it would be a
   // raw TypeError rather than the declaration refusal the gate records.

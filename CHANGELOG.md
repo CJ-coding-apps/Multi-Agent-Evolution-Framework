@@ -70,9 +70,11 @@ This is stricter than `patch`, deliberately: a context diff, an `Index:`-only di
 diff, or a section start git skips now fails instead of being applied, because git applies unified diffs
 only — and `git apply` skips what it does not read and exits 0, so the tool refuses a diff it cannot read
 to its end before git is asked. The rule is the diff's line grammar, not a list of known-bad patterns.
-Every line must be a section header (`diff --git`, `---`, `+++`, a git extended header, `Index:`), a hunk
-header, a hunk body line (` `, `+`, `-` or `\`), or a blank line between files; any other line is refused
-naming its number, as is a hunk body line past the point its header's counts run out. A hunk that ends
+Every line must be a section header (any `diff ` command line, the `---`/`+++` pair, a git extended header,
+`Index:`), a hunk header, a hunk body line (` `, `+`, `-` or `\`; an empty line inside a hunk is blank
+context), or a blank line between files (a lone CR in a CRLF diff); any other line, and a `GIT binary patch`
+line anywhere, is refused naming its number, as is a hunk body line past the point its header's counts run
+out. A hunk that ends
 before its counts are reached is left to git, which refuses the diff as corrupt. Inside a
 hunk the counts decide what is content, so a Helm-rendered YAML file whose unchanged lines read
 ` --- # Source: chart/a.yaml` applies, as does any other line the hunk header counts. This closes the eight

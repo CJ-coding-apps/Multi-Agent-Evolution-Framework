@@ -642,7 +642,7 @@ lines after it from the grammar. What the guarantee is: every path a patch write
 not atomicity. A patch git rejects outright writes nothing; in a few structural conflicts (`x` and `x/y`
 both created, or a file where a directory exists) git can write some declared, allowed files before failing,
 and maf 0.6.0 restores the declared paths on failure. Absolute names and
-names containing `..` are refused by name, `--check` runs before the apply so a diff that would fail
+names containing `..` are refused by name, `--check` runs before the apply, so a diff git rejects there
 changes nothing, and `--reject` is never passed, so no `.orig` or `.rej` file is left behind. Nothing is
 loosened relative to `git apply` — there is no `--recount` — so a wrong hunk count fails with git's own
 message and the agent retries. On macOS and Windows, whose filesystems resolve `.ENV` to `.env`, the rules

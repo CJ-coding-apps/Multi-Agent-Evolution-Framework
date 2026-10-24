@@ -486,8 +486,9 @@ function lstatOrRefuse(target: string, declared: string): Stats | undefined {
  * The same walk refuses a parent that exists and is *not* a directory — `README/x` where `README` is
  * a regular file. `--check` passes on it, because the diff parses; the apply then fails partway
  * through, after a multi-file patch has already changed or deleted the files before it (measured: the
- * other file deleted, exit 128). A patch that cannot apply in full is refused before anything is
- * written, which is what the docs promise. The declared path itself may be a regular file: that is an
+ * other file deleted, exit 128). This is refused here — one of the shapes this walk can see that git
+ * would otherwise fail partway after `--check`; the guarantee is the declared set, not atomicity, and
+ * a structural conflict git only fails mid-apply is restored in 0.6.0 (WP-3.9, #53). The declared path itself may be a regular file: that is an
  * ordinary write to it. The exception is a prefix the *same diff deletes* — `x` (a file) deleted while
  * `x/y` is created: git removes `x` first, then writes beneath it, and the whole patch applies
  * (measured: exit 0, `x` becomes a directory). A deleted prefix is skipped and the walk stops there,
@@ -657,8 +658,10 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
       await refuseGitDirTargets(this.name, ctx, declared);
       refuseSymlinkTargets(ctx.projectRoot, declared, kinds);
 
-      // Check first, and apply only what passed: a multi-file diff that fails one file changes
-      // nothing. git apply is all-or-nothing without `--reject`, and no `--reject` is passed.
+      // Check first, and apply only what passed: all-or-nothing for everything `--check` verifies,
+      // since no `--reject` is passed. A structural conflict git accepts at `--check` and only fails
+      // mid-apply (the `x`/`x/y` shape) can still write some declared, allowed files; 0.6.0 restores
+      // the declared paths on failure (WP-3.9, #53).
       const check = runGitApply(sealed, ['--check']);
       if (check.status !== 0) return { declared, result: check };
       if (input.dryRun) {
