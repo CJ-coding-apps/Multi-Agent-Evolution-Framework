@@ -128,6 +128,16 @@ export class KuzuDriver {
    * only when `inFlight` happened to be zero at that instant, and otherwise returned while the
    * release was still pending. The release now waits for `ready` and then for the counter to reach
    * zero, and a second `close()` returns the same promise.
+   *
+   * A native close that fails rejects this promise rather than resolving it: a caller in a
+   * `finally` must not remove the directory of a database that did not close. The one exception is
+   * a connection whose `init()` failed — there is nothing native to free, and that error was
+   * already delivered through `ready`.
+   *
+   * Known property, not a defect: there is no deadline. A native query that never settles keeps
+   * `close()` pending, and every `finally { await graph.close() }` in the CLI waits with it. A
+   * deadline was refused because the only thing it can do at expiry is free handles under live
+   * work — the crash this file exists to prevent.
    */
   close(): Promise<void> {
     this.closed = true; // from here on, `run` refuses at once
@@ -157,14 +167,41 @@ export class KuzuDriver {
   private async release(): Promise<void> {
     // `ready` is the connection's `init()`, tracked like a query. It may reject — a database that
     // failed to open has nothing native to free — and that rejection has already been handed to
-    // every `run` that awaited it, so it is swallowed here rather than replacing the close.
-    await this.ready.catch(() => undefined);
+    // every `run` that awaited it, so it is swallowed here rather than replacing the close. What
+    // it does change is the meaning of the closes below, which is why it is recorded.
+    let initFailed = false;
+    await this.ready.catch(() => { initFailed = true; });
     while (this.inFlight > 0) await this.whenSettled();
-    // Connection before database, both now: no result is waiting on the buffer manager, and the
-    // database's address-space reservation is returned before this promise resolves.
-    try { await this.conn.close(); } catch { /* a failed initialisation leaves nothing to free */ }
-    try { await this.db.close(); }   catch { /* as above */ }
+    // Connection before database on every path: no result is waiting on the buffer manager, the
+    // database's address-space reservation is returned before this promise resolves, and a
+    // connection is never left pointing at a freed database. Both are attempted even when the
+    // first fails. A `conn.close()` after a failed `init()` re-awaits the retained rejected
+    // `_initPromise` and throws before it would have closed the native connection; the attempt is
+    // still made, so the connection object is not simply abandoned.
+    const failures: Array<{ part: 'connection' | 'database'; error: unknown }> = [];
+    try { await this.conn.close(); } catch (error) { failures.push({ part: 'connection', error }); }
+    try { await this.db.close(); }   catch (error) { failures.push({ part: 'database',   error }); }
+    // A failed initialisation leaves nothing native to free: both errors are consequences of the
+    // one already reported through `ready`. Any other failure means handles may still be open, so
+    // the close rejects — a caller never treats a failed release as a successful one.
+    if (initFailed || failures.length === 0) return;
+    throw releaseFailure(this.dbPath, failures);
   }
+}
+
+/**
+ * The rejection a caller gets when the native release failed after a successful initialisation:
+ * which handle would not close, and why. The first underlying error rides along as `cause`.
+ */
+function releaseFailure(
+  dbPath: string,
+  failures: Array<{ part: 'connection' | 'database'; error: unknown }>,
+): Error {
+  const detail = failures.map(({ part, error }) => {
+    const message = error instanceof Error ? error.message : String(error);
+    return `kuzu's ${part} close failed: ${message}`;
+  }).join('; ');
+  return new Error(`The graph at ${dbPath} was not released: ${detail}`, { cause: failures[0]?.error });
 }
 
 /**

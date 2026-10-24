@@ -8,8 +8,10 @@ import { promisify } from 'node:util';
 import * as kuzu from 'kuzu';
 import type { Connection, Database, KuzuParameter, PreparedStatement, QueryResult } from 'kuzu';
 import { makeRunId } from '@maf/types';
+import type { GraphQuery } from '@maf/types';
 import { KuzuDriver } from '../KuzuDriver.js';
 import { MemoryGraph } from '../MemoryGraph.js';
+import type { GraphDriver } from '../MemoryGraph.js';
 
 // ORACLE (WP-2.15): CI's goldens-offline tests aborted on most runs with `malloc(): unsorted double
 // linked list corrupted`. The driver never closed a kuzu QueryResult, whose rows live in its
@@ -21,9 +23,11 @@ import { MemoryGraph } from '../MemoryGraph.js';
 // ORACLE (WP-3.8 follow-up): the driver's `close()` was synchronous and returned at once. When
 // anything was in flight — the connection's `init()` that every constructor starts, a query, a
 // schema statement — the release was deferred, so a caller that removed the directory next raced
-// the native writes and failed with `ENOTEMPTY`: 3 of 10 processes at 10 processes × 60 cycles,
-// 0 of 600 run one at a time. `close()` now returns a promise that resolves only after the
-// release; the four tests at the end of this file pin that, without wall-clock budgets.
+// the native writes. Under Kùzu 0.7.x that race failed with `ENOTEMPTY` (3 of 10 processes at
+// 10 processes × 60 cycles, 0 of 600 run one at a time); the database was a directory then.
+// `close()` now returns a promise that resolves only after the release. Tests 5–7 pin that by
+// ordering, without wall-clock budgets; test 13 is the M1 shape as a smoke test, because at
+// 0.11.3 the race no longer has an observable symptom (see its comment).
 
 const execFileAsync = promisify(execFile);
 const ENTRY = path.resolve(__dirname, '../index.js');
@@ -35,6 +39,15 @@ async function tempDir(): Promise<string> {
 /** Drains the microtask and `setImmediate` queues: "let everything that can run, run". */
 async function drain(): Promise<void> {
   for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+/** Waits for a condition that depends on native work, with a bound so a wrong path fails loudly. */
+async function waitFor(predicate: () => boolean, what: string, ms = 60_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > deadline) assert.fail(`timed out after ${ms} ms waiting for ${what}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 test('twenty graphs opened, used and closed in turn in one process all work: close() returns the database', async () => {
@@ -312,10 +325,182 @@ test('MemoryGraph.close() waits for a schema sequence that is between two statem
   }
 });
 
+// ── WP-3.8 follow-up round 2: `MemoryGraph` counts its own work ────────────────────────────────
+//
+// The driver's count cannot see a query that has passed the `closed` check but is still awaiting
+// schema setup, and it cannot see the mapping work after the last driver call. Both are the
+// caller's own work, so `MemoryGraph` counts them. These tests hold one statement of a real
+// operation open and close in the middle of it.
+
+/** Wraps a driver, holding the first `run` whose query `matches` until `release()` is called. */
+function holdQuery(inner: GraphDriver, matches: (query: GraphQuery) => boolean): {
+  release(): void;
+  entered(): boolean;
+  driver: GraphDriver;
+} {
+  let release!: () => void;
+  let armed = true;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  return {
+    release,
+    entered: () => !armed,
+    driver: {
+      run(query: GraphQuery) {
+        if (armed && matches(query)) {
+          armed = false;
+          return held.then(() => inner.run(query));
+        }
+        return inner.run(query);
+      },
+      close: () => inner.close(),
+    },
+  };
+}
+
+test('MemoryGraph.close() lets a query issued just before it finish with its real rows, and refuses the next one (C2)', async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, 'run-then-close.kuzu');
+  try {
+    const graph = new MemoryGraph(file);
+    await graph.addNode({ kind: 'Task', label: 'already written', properties: {}, runId: makeRunId('c2-run') });
+
+    // Schema setup is done, so this query is past the `closed` check and waiting on the driver's
+    // `run` when `close()` runs. A close that waited only on the driver released the database
+    // here, and the query was refused instead of returning its row.
+    const query = graph.run({ cypher: 'MATCH (n:MemoryNode) RETURN n.label AS label', params: {} });
+    const closing = graph.close();
+    assert.deepEqual(
+      await query,
+      [{ label: 'already written' }],
+      'the query issued before close() completed and returned the real rows',
+    );
+    await closing;
+
+    // A call made after `close()` is still refused at once.
+    await assert.rejects(
+      () => graph.run({ cypher: 'MATCH (n:MemoryNode) RETURN n', params: {} }),
+      /This memory graph is closed; a query was issued after close\(\)\./,
+    );
+    await assert.rejects(
+      () => graph.addNode({ kind: 'Task', label: 'after close', properties: {}, runId: makeRunId('c2-after') }),
+      /This memory graph is closed; a query was issued after close\(\)\./,
+    );
+    assert.equal(graph.close(), closing, 'a second close hands back the same promise');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('MemoryGraph.close() waits for a querySubgraph between its node and edge queries, so the edges are real (C2)', async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, 'subgraph.kuzu');
+  try {
+    const inner = new KuzuDriver(file);
+    const held = holdQuery(inner, (q) => q.cypher.includes('MATCH (a:MemoryNode)-[e:MemoryEdge]'));
+    const graph = new MemoryGraph(file, undefined, held.driver);
+    try {
+      const from = await graph.addNode({ kind: 'Task', label: 'alpha one', properties: {}, runId: makeRunId('c2-edge') });
+      const to   = await graph.addNode({ kind: 'Task', label: 'alpha two', properties: {}, runId: makeRunId('c2-edge') });
+      await graph.addEdge({ fromId: from, toId: to, relation: 'DEPENDS_ON', weight: 1, metadata: {} });
+
+      const subgraph = graph.querySubgraph('alpha', 10);
+      await waitFor(() => held.entered(), 'the edge query to be issued');
+
+      const closing = graph.close();
+      await drain(); // let close() reach its wait, so the release cannot be what the query waits on
+      held.release();
+      const result = await subgraph;
+      assert.equal(result.nodes.length, 2, 'both nodes were found before close()');
+      assert.equal(result.edges.length, 1, 'the edge query issued before close() returned its edge, not 0');
+      await closing;
+    } finally {
+      held.release();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── WP-3.8 follow-up round 2: a failed release is not a successful one (C4) ────────────────────
+
+test('a native database close that throws rejects close(), and the connection is still released first (C4)', async () => {
+  const dir = await tempDir();
+  const events: string[] = [];
+  const originalConn = kuzu.Connection.prototype.close;
+  const originalDb   = kuzu.Database.prototype.close;
+  kuzu.Connection.prototype.close = async function (this: Connection): Promise<void> {
+    events.push('connection');
+    await originalConn.call(this);
+  };
+  // The throw stands in for a native failure (a checkpoint that fails); the underlying close is
+  // still run so the test process does not carry an unclosed database into the next test.
+  kuzu.Database.prototype.close = async function (this: Database): Promise<void> {
+    events.push('database');
+    await originalDb.call(this);
+    throw new Error('checkpoint failed');
+  };
+  try {
+    const driver = new KuzuDriver(path.join(dir, 'failed-close.kuzu'));
+    await driver.run({ cypher: 'CREATE NODE TABLE T(id STRING, PRIMARY KEY(id))', params: {} });
+    await assert.rejects(
+      () => driver.close(),
+      /^Error: The graph at .*failed-close\.kuzu was not released: kuzu's database close failed: checkpoint failed$/,
+    );
+    assert.deepEqual(events, ['connection', 'database'], 'the connection is released before the database even when the database close fails');
+  } finally {
+    kuzu.Connection.prototype.close = originalConn;
+    kuzu.Database.prototype.close = originalDb;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a connection whose init() failed still releases in order, and close() resolves (C4)', async () => {
+  const dir = await tempDir();
+  const events: string[] = [];
+  const originalInit = kuzu.Connection.prototype.init;
+  const originalConn = kuzu.Connection.prototype.close;
+  const originalDb   = kuzu.Database.prototype.close;
+  kuzu.Connection.prototype.init = async function (): Promise<void> {
+    throw new Error('init refused');
+  };
+  kuzu.Connection.prototype.close = async function (this: Connection): Promise<void> {
+    events.push('connection');
+    await originalConn.call(this);
+  };
+  kuzu.Database.prototype.close = async function (this: Database): Promise<void> {
+    events.push('database');
+    await originalDb.call(this);
+  };
+  try {
+    const driver = new KuzuDriver(path.join(dir, 'failed-init.kuzu'));
+    await assert.rejects(
+      () => driver.run({ cypher: 'RETURN 1 AS one', params: {} }),
+      /init refused/,
+      'the failure is delivered through ready to the caller that awaited it',
+    );
+    // Nothing native was initialised, so there is nothing left to report: close() resolves, and
+    // the connection is still attempted before the database rather than abandoned behind it.
+    await driver.close();
+    assert.deepEqual(events, ['connection', 'database']);
+  } finally {
+    kuzu.Connection.prototype.init  = originalInit;
+    kuzu.Connection.prototype.close = originalConn;
+    kuzu.Database.prototype.close   = originalDb;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('four processes closing and removing graphs at once, thirty cycles each, leave no ENOTEMPTY', async () => {
-  // The measurement that found the defect: 10 processes × 60 cycles failed in 3 of 10. Four
-  // processes × 30 cycles is contended enough to have failed and small enough for CI. The child
-  // removes its directory straight after an awaited `close()`, which is the race.
+  // The shape that raced: open → close → rm with **no query**, so the connection's `init()` is
+  // still in flight when `close()` is called. The earlier form wrote a node first, which settled
+  // `init()` and left nothing in flight — it passed on the old code, so it could not pin anything.
+  //
+  // Measured on base `60e93e5` with Kùzu 0.11.3: it **passes**, on macOS and on Linux (the logs
+  // are in the PR body). `ENOTEMPTY` was a 0.7.x property, when the database was a directory: the
+  // release re-created an entry after `rm` had emptied the directory. 0.11.3 writes a single file,
+  // and both platforms unlink an open file successfully, so the same race now leaves no residue and
+  // no error. This test is therefore a smoke test of the M1 shape, not a regression pin; the
+  // regression itself is pinned by tests 5–7, which fail on an early-resolving `close()`.
   const child = `
     const { MemoryGraph } = require(${JSON.stringify(ENTRY)});
     const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
@@ -323,7 +508,6 @@ test('four processes closing and removing graphs at once, thirty cycles each, le
       for (let i = 0; i < 30; i++) {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'maf-contend-'));
         const graph = new MemoryGraph(path.join(dir, 'memory.kuzu'));
-        await graph.addNode({ kind: 'Task', label: 'cycle ' + i, properties: {}, runId: 'r' });
         await graph.close();
         fs.rmSync(dir, { recursive: true, force: true });
       }
@@ -338,7 +522,7 @@ test('four processes closing and removing graphs at once, thirty cycles each, le
   assert.deepEqual(
     failed.map((r) => r.stderr),
     [],
-    `${failed.length} of 4 processes failed (ENOTEMPTY is the race this fixes)`,
+    `${failed.length} of 4 processes failed while closing and removing graphs`,
   );
   for (const run of runs) assert.match(run.ok ? run.stdout : '', /cycles done/);
 });
