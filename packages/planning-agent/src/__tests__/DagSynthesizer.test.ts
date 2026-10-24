@@ -166,6 +166,22 @@ test('timeoutMs is bounded by the timer ceiling, and the ceiling itself is allow
   assert.equal([...accepted.nodes.values()][0]?.timeoutMs, 2147483647, 'the ceiling is a valid timeout');
 });
 
+test('a fractional timeoutMs is refused: it is a number and in range, but not a whole millisecond (S4)', () => {
+  const synth = new DagSynthesizer(ROLES);
+  // `1.5` passes `typeof === 'number'`, `>= 1` and `<= MAX_TIMER_MS`; only the `Number.isSafeInteger`
+  // guard refuses it. Without that guard a fractional timeout would reach the scheduler, where a
+  // timer takes a whole number of milliseconds anyway — so the spec would ask for something it cannot
+  // get. 0.5 (below 1 as an integer, but a positive fraction) is the lower companion.
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 1.5 }] }, RUN_ID), /from 1 to 2147483647/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 0.5 }] }, RUN_ID), /from 1 to 2147483647/);
+  refuses(() => synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: NaN }] }, RUN_ID), /from 1 to 2147483647/);
+  // A whole number in range is still accepted — the fraction, not the magnitude, is what this refuses.
+  assert.equal(
+    [...synth.synthesize({ nodes: [{ id: 'a', label: 'a', timeoutMs: 1500 }] }, RUN_ID).nodes.values()][0]?.timeoutMs,
+    1500,
+  );
+});
+
 test('Infinity, a non-string agentRole and an empty edge endpoint are each refused (R8)', () => {
   const synth = new DagSynthesizer(ROLES);
   // `1e999` parses to Infinity: a number, and positive, so only the ceiling refuses it.
@@ -319,6 +335,46 @@ test('a spec larger than the byte cap is refused before it is parsed', async () 
   const json = JSON.stringify({ nodes: [{ id: 'a', label: 'a' }] });
   await writeFile(exact, json + ' '.repeat(1048576 - json.length), 'utf8');
   assert.equal((await new DagSynthesizer(ROLES).fromFile(exact, RUN_ID)).dag.nodes.size, 1);
+});
+
+test('the oversize refusal reads the size from stat, not from the loaded bytes (S4)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-stat-'));
+  const big = path.join(dir, 'oversize.json');
+  // One byte past the cap, and valid-JSON-shaped so that a reader which loaded and parsed it first
+  // would raise a *parse* error, not a size one. The refusal instead names the exact on-disk byte
+  // count — `it is 1048577 bytes` — which can only come from `stat`, before the bytes are read. So
+  // the cap answers from metadata, and a file far past a plan's size is never loaded.
+  const size = MAX_SPEC_BYTES + 1;
+  const prefix = '{"nodes":[{"id":"a","label":"';
+  const body = prefix + 'x'.repeat(size - prefix.length - 4) + '"}]}';
+  assert.equal(Buffer.byteLength(body, 'utf8'), size, 'the fixture is exactly one byte over the cap');
+  await writeFile(big, body, 'utf8');
+  await assert.rejects(
+    () => new DagSynthesizer(ROLES).fromFile(big, RUN_ID),
+    (e: Error) => {
+      assert.match(e.message, new RegExp(`it is ${size} bytes; a spec may be at most ${MAX_SPEC_BYTES}`));
+      return true;
+    },
+  );
+});
+
+test('a UTF-8 byte-order mark is accepted and stripped, and the digest is over the bytes BOM included (S3)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-bom-'));
+  const spec = path.join(dir, 'bom.json');
+  const body = Buffer.from(JSON.stringify({ nodes: [{ id: 'n1', label: 'Fix it' }] }), 'utf8');
+  const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]);
+  await writeFile(spec, withBom);
+  const read = await new DagSynthesizer(ROLES).fromFile(spec, RUN_ID);
+  // Accepted: the BOM did not make the JSON parse fail, and the node was read.
+  assert.equal([...read.dag.nodes.keys()][0], 'n1');
+  // Stripped: the first node's label is exactly "Fix it", not a label behind a U+FEFF, and the DAG
+  // id (content-derived, no spec id) is the sha256 of the BOM-less object — the BOM is not content.
+  assert.equal([...read.dag.nodes.values()][0]?.label, 'Fix it');
+  // The recorded digest is over the file's bytes, BOM included — the record names what is on disk.
+  assert.equal(read.sha256, crypto.createHash('sha256').update(withBom).digest('hex'),
+    'the digest is over the file bytes, BOM included');
+  assert.notEqual(read.sha256, crypto.createHash('sha256').update(body).digest('hex'),
+    'it is not the digest of the BOM-stripped bytes');
 });
 
 test('a spec with more nodes than the cap is refused, stating the cap', () => {

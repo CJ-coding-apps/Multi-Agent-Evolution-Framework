@@ -63,7 +63,10 @@ single unqualified sentence about "the spec format" would be false for one of th
 - **`packages/planning-agent/src/DagSynthesizer.ts`** — `fromFile` stats the file first (size is
   checked before the bytes are read, and again on the bytes actually loaded), reads it **as a
   Buffer**, digests those bytes, and only then decodes them strictly as UTF-8 — so the digest the run
-  records names the file the operator wrote, not a lossy re-encoding of it (R4). It refuses, by
+  records names the file the operator wrote, not a lossy re-encoding of it (R4). A UTF-8 byte-order
+  mark is accepted and stripped — `TextDecoder` drops a leading BOM, so the JSON parses — and the
+  recorded sha256 is over the file's bytes, BOM included, so the digest still names what is on disk
+  (S3). It refuses, by
   name, a file that is not UTF-8, is not JSON, or has no `nodes` array. `synthesize` validates the whole spec first (closed schema, caps, duplicate
   ids, unknown dependencies, self-edges, cycles) and turns each edge into the target's dependency. Ids
   are derived from content, not the clock: `spec.id` when given, otherwise `sha256(JSON.stringify(spec))`;
@@ -172,12 +175,30 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
 
 | File | Why |
 |---|---|
-| `packages/cli/src/commands/run.ts` | The spec's "run.ts flag", plus what the flag needs: the `DagSynthesizer` import, the spec branch (deliberately before `.maf/` exists and before `checkForRun`), the plan line, `planSource` on the Run node / transcript / bundle, and the planner factory confined to the `else` branch so it cannot be constructed on this path. |
-| `packages/types/src/index.ts` | Additive: the `PlanSource` union the bundle, transcript and Run node share. Nothing existing changed shape. |
+| `packages/cli/src/commands/run.ts` | The spec's "run.ts flag", plus what the flag needs: the `DagSynthesizer` import, the spec branch (deliberately before `.maf/` exists and before `checkForRun`), the plan line, `planSource` on the Run node / transcript / bundle, and the planner factory confined to the `else` branch so it cannot be constructed on this path. The round-3 change (S2): `run` now resolves its harness through `planRunHarness` (line 171), reads the role set the spec is validated against, and performs the harness write only once the spec is accepted (`harnessPlan.persist()`, line 213) — the deferral that makes a refused spec leave `.maf/` untouched (R1). WP-3.11 owns the broader `run.ts` shape. |
+| `packages/cli/src/wiring.ts` | **S2.** Split `resolveRunHarness` into `planRunHarness` (resolve, no write; lines 207–252: the `PlannedRunHarness` type and the function) and `resolveRunHarness` (plan **then** `persist()`; lines 253–257). The two writes a resolution can need — importing a committed default, adopting a freshly minted legacy harness — move behind `persist`, so `run --plan-from` can resolve the role set, refuse a bad spec, and leave the store as it found it. WP-3.11 owns `wiring.ts`. |
+| `packages/harness-config/src/store.ts` | **S2.** `resolveHarnessRef` takes `persist?: boolean`; with `persist: false` it `mint`s the legacy harness in memory (the same content `adoptLegacy` would write, so `harness.sha` names what `persist()` later stores) and returns a `persist` thunk instead of writing. `assertPromptsCarried` is exported for the committed-default path, which checks prompts before importing. |
+| `packages/harness-config/src/index.ts` | **S2.** Re-exports `assertPromptsCarried` so `wiring.ts` can run the prompt check on a committed default before importing it. |
+| `packages/cli/src/config/ConfigLoader.ts` | **S2.** The `.maf/config.yaml` loader's local `MAX_TIMER_MS = 2 ** 31 - 1` is replaced by the import from `@maf/types`, so the config loader and the `--plan-from` spec bound `timeoutMs` by the one constant and cannot drift (R3, S5). Behaviour unchanged — same value, one source. |
+| `packages/types/src/index.ts` | Additive: the `PlanSource` union the bundle, transcript and Run node share, and `MAX_TIMER_MS` now carries a `// WP-3.6` header (S5) as the shared timer ceiling. Nothing existing changed shape. |
 | `.github/workflows/ci.yml` | **Unchanged by this WP: the e2e step moves to WP-3.12 (R5).** `ece3ba2` added two e2e steps (a two-node `--plan-from` run and a duplicate-id refusal). A CI step is not the right home for the only proof that the *built* binary implements `--plan-from` — the normal suite can run it on every platform, and does: `plan-from.test.ts` spawns `packages/cli/dist/main.js` on a two-node spec and on a malformed one. WP-3.12 owns the CI e2e lane; the file here is byte-for-byte `wp/phase-3b`'s version. |
 | `packages/cli/src/__tests__/plan-from.test.ts` | The end-to-end tests (see Proof). |
 | `packages/planning-agent/src/__tests__/DagSynthesizer.test.ts` | The unit tests for the schema, caps, roles and metadata. |
 | `packages/dag-runner/src/__tests__/plan-spec.test.ts` | The edge rule and content ids, on the parser side. |
+
+**The harness-resolution split, and what it does to `goldens` and `evolve` (S2).** `run` is the only
+command that defers the write: it calls `planRunHarness` and performs `harnessPlan.persist()` after the spec
+is accepted, so a refused `--plan-from` spec writes nothing. `goldens` and `evolve` are **unchanged in
+behaviour**: both go through `resolveRunHarness` (goldens directly, `goldens.ts:90`; evolve through
+`resolveGoldensHarness`), which is exactly `planRunHarness` **followed immediately by `persist()`** — the
+same resolve-then-write it did before the split, so for them the harness is in the store when resolution
+returns, as it always was. The guarantee the split adds is strictly to `run --plan-from`'s refusal path; no
+other command's write timing changes. Covered by the existing harness-resolution tests, which run the same
+path: `goldens-offline.test.ts`, `goldens-outcome.test.ts`, `eval-commands.test.ts`,
+`evolve-smoke.test.ts`, `harness-set-current.test.ts` and `adapter-registry.test.ts` (legacy-mint,
+committed-default import and CURRENT all resolve and run); and the refusal-side deferral is pinned by
+`plan-from.test.ts`'s two "a refused spec leaves a repository … as it found it" tests (F1), which assert
+`.maf/` is byte-identical — the write that `persist()` now gates.
 
 ## Proof
 
@@ -211,10 +232,16 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.6) lists `DagSynthesizer.ts`, the `run.ts` 
   - **`--dir` decides where a relative spec is (R2):** run from a different working directory, a spec
     under `--dir` is found and planned, and one that exists only under the working directory is not
     found — the refusal names the path under `--dir`.
-  - **the built binary (R5):** `packages/cli/dist/main.js`, spawned as the installed command runs,
-    reads a two-node spec and starts a two-node DAG with no model plan (the scriptless scripted
-    adapter then fails node `n1`, which is the adapter, not the spec), and refuses a malformed spec
-    in a repository maf has never run in without creating `.maf/`.
+  - **the built binary, and its edge order by what did not run (R5, S1):** `packages/cli/dist/main.js`,
+    spawned as the installed command runs, reads a two-node spec and runs its edge order. A successful
+    run is not available here — the scriptless scripted adapter the binary builds for itself fails the
+    first node to run — so the order is proved the way the binary makes it observable: the spec lists
+    `n2` first and `n1` second with the edge `n1 -> n2`, so the writer lock alone would start `n2`
+    first; instead `n1` is dispatched, fails, and `n2` **never starts** — the run reports
+    `failed: [n1], never ran: [n2]`. Dropping the edge rule makes `n2` independent, so the lock starts
+    it first and it runs; the edge-rule mutation makes this test fail at *"n2 never started"* (verified
+    against the compiled synthesizer). The binary also refuses a malformed spec in a repository maf has
+    never run in without creating `.maf/`.
 - `packages/planning-agent/src/__tests__/DagSynthesizer.test.ts` — the closed schema (every container
   shape refused with a sentence, never a raw `TypeError`), ids/labels/timeouts, unknown `kind`, unknown
   keys at spec/node/edge level including `retry`/`inputs`/`outputs`, duplicate ids, unknown

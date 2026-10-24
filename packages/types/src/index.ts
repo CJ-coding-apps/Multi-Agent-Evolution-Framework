@@ -267,6 +267,7 @@ export type PlanSource =
  * `.maf/config.yaml` loader and the `--plan-from` spec's `timeoutMs` — bound it by this one value,
  * so the two cannot disagree about what a valid timeout is (WP-3.6, R3).
  */
+// WP-3.6: shared timer ceiling — the `.maf/config.yaml` loader and the `--plan-from` `timeoutMs` bound.
 export const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** 'Unschedulable' is a real verdict: the DAG was valid but never ran to completion. */

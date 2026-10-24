@@ -301,25 +301,34 @@ test('a relative spec path is resolved against --dir, not the working directory 
   }
 });
 
-test('the built maf binary reads a spec, and refuses a malformed one (R5)', async () => {
+test('the built maf binary reads a spec, runs its edge order, and refuses a malformed one (R5, S1)', async () => {
   const runRoot = await mkdtemp(path.join(tmpdir(), 'maf-plan-built-'));
   const refuseRoot = await mkdtemp(path.join(tmpdir(), 'maf-plan-built-refuse-'));
   try {
     // `packages/cli/dist/main.js` is what `npm i -g maf` runs. The scripted adapter the binary builds
-    // for itself carries no scripts, so the first node fails at the adapter once the DAG reaches it;
-    // that is the adapter, not the spec. What this proves is the path from argv to a scheduled DAG
-    // with no model in it — the seam the in-process tests reach through `driveRun` instead.
+    // for itself carries no scripts, so the first node to run fails at the adapter; that is the
+    // adapter, not the spec. A successful run is therefore not available here — so this proves the
+    // edge order the way the binary makes it observable: by what did *not* run. The spec lists `n2`
+    // first and `n1` second, with the edge `n1 -> n2` (S1). Both nodes are writers, so the writer lock
+    // serializes them in listed order — which alone would start `n2` first. Only the edge can make
+    // `n2` wait for `n1`, so when `n1` fails, `n2` must never run: the run reports `failed: [n1],
+    // never ran: [n2]`. Drop the edge rule and `n2` is independent — it starts first (listed first)
+    // and runs — which is exactly what the edge-rule mutation makes this test catch.
     const repo = await dirtyUserRepo(runRoot);
     const spec = path.join(repo, 'two-node.json');
     await writeFile(spec, JSON.stringify({
-      nodes: [{ id: 'n1', label: FIRST }, { id: 'n2', label: SECOND }],
+      nodes: [{ id: 'n2', label: SECOND }, { id: 'n1', label: FIRST }],
       edges: [{ from: 'n1', to: 'n2' }],
     }), 'utf8');
     const ran = await mafCli(['run', FIRST, '--dir', repo, '--adapter', 'scripted', '--plan-from', spec], repo);
     assert.match(ran.out, new RegExp(`\\[maf\\] plan: ${escapeRe(spec)} \\(read from spec, no model call\\)`), ran.out);
     assert.match(ran.out, /\[maf\] running DAG with 2 node\(s\)/, ran.out);
-    assert.match(ran.out, /\[maf\] → node n1 started/, ran.out);
-    assert.match(ran.out, /\[maf\] ← node n1 Failed/, 'the node fails at the scriptless adapter');
+    assert.match(ran.out, /\[maf\] → node n1 started/, 'n1 is dispatched');
+    assert.match(ran.out, /\[maf\] ← node n1 Failed/, 'n1 fails at the scriptless adapter');
+    // The edge is the whole claim: n1 failed, so n2 — listed first — never ran. Without the edge rule
+    // n2 is independent and the writer lock starts it first, so it would run; it does not.
+    assert.doesNotMatch(ran.out, /\[maf\] → node n2 started/, 'n2 never started: the edge made it wait for n1, which failed');
+    assert.match(ran.err, /run did not succeed \(Failed\) — failed: \[n1\], never ran: \[n2\]/, ran.err);
     assert.doesNotMatch(ran.out, /\[maf\] planning/, 'no model plan was asked for');
     assert.notEqual(ran.code, 0, 'a failed node fails the run');
 
