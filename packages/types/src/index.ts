@@ -124,6 +124,22 @@ export interface ToolContext {
   agentRole?:    string;
   policy:        PolicyEngineHandle;
   attestor:      AttestorHandle;
+
+  /**
+   * The declaration the policy approved for this call, when it was approved.
+   *
+   * `executeToolGated` sets it on the context it hands `execute` and nowhere else, so the policy
+   * and the approval gate see the caller's own context. A tool whose declaration can be recomputed
+   * where it acts must compare the two and refuse when they differ: an approval is of a set of
+   * paths, and a call that would write a different set was never approved. The set is frozen, so no
+   * holder of a handle to it can change what was approved.
+   *
+   * Absent means the call did not come through the gate — a caller that is not the gate, or a test
+   * calling `execute` directly — and a write is refused: there is no approved set to compare with,
+   * and a write nothing approved is not an allowed one. A direct call that is meant to write names
+   * the paths it was approved for; the tests do.
+   */
+  approvedPaths?: readonly string[];
 }
 
 export interface ToolPlugin<I extends ToolInput = ToolInput> {
@@ -136,11 +152,17 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
   /**
    * The filesystem paths this call will touch, as the tool itself declares them.
    *
-   * MUST be a pure function of `input`: the policy layer calls it before any rule and
-   * before `execute`, so a tool that only reveals its paths while running (patch.apply
-   * derived them inside `execute` and wrote them back onto the input) is invisible to
-   * path rules — the shipped `protect-secrets` Deny matched `fs.write ".env"` and skipped
-   * `patch.apply` on the same file.
+   * MUST be a pure function of `input` and, where given, `ctx`: the same input and the same
+   * context must always give the same declaration. The policy layer calls it before any rule and
+   * before `execute`, so a tool that only reveals its paths while running (patch.apply derived
+   * them inside `execute` and wrote them back onto the input) is invisible to path rules — the
+   * shipped `protect-secrets` Deny matched `fs.write ".env"` and skipped `patch.apply` on the
+   * same file.
+   *
+   * `ctx` is optional and is the caller's own context, without `approvedPaths`. It is there for a
+   * declaration that has to read the tree — a name that is a symlink today, say — so the gate can
+   * record a refusal instead of an Allow that `execute` then declines. A tool that does not read
+   * the tree ignores it and must behave the same with and without it.
    *
    * MUST over-declare rather than under-declare: a path that is declared but never touched
    * can only make a rule match sooner, while a path that is touched but not declared is a
@@ -152,7 +174,7 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
    * and a path that leaves the root is refused. A tool that takes a path from `input` should
    * resolve it the same way — see `resolveInside`.
    */
-  declaredPaths(input: I): string[];
+  declaredPaths(input: I, ctx?: ToolContext): string[];
 
   /**
    * The input `execute` reads, field by field. The in-process loop advertises it in the tool
@@ -382,6 +404,19 @@ export class PathConfinementError extends Error {
   constructor(message: string, readonly path: string, readonly reason: string) {
     super(message);
     this.name = 'PathConfinementError';
+  }
+}
+
+/**
+ * A tool cannot say which paths it will touch, so no path rule can cover it. Thrown from
+ * `declaredPaths` — `patch.apply` on a diff whose headers name no file, or name one only in a form
+ * it does not read — and turned by the gate into an attested refusal (`builtin:declaration`) that
+ * the model is handed, so nothing runs. Fail-closed: an undeclarable call is not an unjudged one.
+ */
+export class ToolDeclarationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ToolDeclarationError';
   }
 }
 
@@ -1583,3 +1618,10 @@ export {
   redactCredentials, redactSecrets, redactText,
   redactCredentialsRecord, redactRecord,
 } from './redaction.js';
+
+/**
+ * The environment for a child that runs project code. In 0.5.1 that child is `patch.apply`'s
+ * `git apply`: the allowlist keeps `GIT_DIR`/`GIT_CONFIG_*`, every provider token and every
+ * `MAF_*` variable in maf's own environment out of a process a patch an agent wrote controls.
+ */
+export { toolEnv } from './childEnv.js';

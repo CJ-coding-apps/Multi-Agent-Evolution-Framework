@@ -55,12 +55,45 @@ export class PolicyViolationError extends VerdictError {
   }
 }
 
+/** What the engine consults besides its rules. */
+export interface PolicyEngineOptions {
+  /**
+   * Match the paths of **Deny and Escalate** rules without regard to case, and in NFC. Defaults to
+   * the platform's filesystem convention.
+   *
+   * APFS and NTFS are case-insensitive by default, so `+++ b/.ENV` writes `.env` on macOS: a Deny
+   * rule for dotenv files that compared case-sensitively would miss the file the write lands in.
+   * It is *not* applied to an `Allow` rule or to `allowedPathGlobs`, where matching more would mean
+   * permitting more: `DOCS/x.env` must not satisfy an allow-list written for `docs/**`.
+   *
+   * Folding a refusing rule only makes *that rule* match more, and rules are first-match by
+   * priority — so folding is not monotone on its own. A folded `docs/**` Escalate at priority 100
+   * used to catch `DOCS/x.env` and pre-empt the dotenv Deny at priority 50, turning a refusal
+   * nobody can lift into one a single approval lifts. `evaluate` therefore asks the rules twice,
+   * exactly and folded, and answers with the stricter of the two verdicts; see `decide`.
+   */
+  caseInsensitivePaths?: boolean;
+  /**
+   * The platform whose filesystem convention `caseInsensitivePaths` defaults to. `process.platform`
+   * unless given, so a test can state all three platforms' behaviour on any machine.
+   */
+  platform?: NodeJS.Platform;
+}
+
+/** Whether a filesystem opens `.ENV` as `.env` (APFS) or `FOO` as `foo` (NTFS). */
+export function caseInsensitiveFilesystem(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'darwin' || platform === 'win32';
+}
+
 export class PolicyEngine implements PolicyEngineHandle {
   private rules: PolicyRule[] = [];
   private source: PolicySource | undefined;
   private readonly counts: PolicyVerdictCounts = { allow: 0, deny: 0, escalate: 0, indeterminate: 0 };
+  private readonly caseInsensitivePaths: boolean;
 
-  constructor(private readonly graph: GraphQueryRunner) {}
+  constructor(private readonly graph: GraphQueryRunner, options: PolicyEngineOptions = {}) {
+    this.caseInsensitivePaths = options.caseInsensitivePaths ?? caseInsensitiveFilesystem(options.platform);
+  }
 
   // Rules from a file arrive through `PolicyLoader`, which validates them; this takes them as given.
   loadRules(rules: PolicyRule[], source?: PolicySource): void {
@@ -136,10 +169,36 @@ export class PolicyEngine implements PolicyEngineHandle {
       };
     }
 
+    // On a case-insensitive filesystem the rules are asked twice: once exactly, as on any other
+    // platform, and once with the refusing rules folded. The verdict is the stricter of the two.
+    //
+    // One pass cannot do this. Rules are first-match by priority, so folding a rule changes which
+    // rule answers first: a folded `docs/**` Escalate above the dotenv Deny turns `DOCS/x.env`
+    // from a Deny into an Escalate, which is one approval away from permitted. Taking the stricter
+    // result keeps the two separate properties this needs at once — a Deny fires on every spelling
+    // of the file it names (`.ENV` on macOS), and no spelling it would have denied becomes
+    // escalatable. An `Allow` verdict is returned alone only when neither pass refused.
+    //
+    // The exact pass is skipped when it already answered `Deny`: nothing is stricter than a Deny,
+    // and the second pass could also ask a rule's graph half a second time.
+    const exact = await this.matchRules(toolId, input, ctx, confined, false);
+    if (!this.caseInsensitivePaths || exact.verdict === 'Deny') return exact;
+    const folded = await this.matchRules(toolId, input, ctx, confined, true);
+    return stricterOf(exact, folded);
+  }
+
+  /** One pass over the rules, in priority order; `folded` folds the path of refusing rules only. */
+  private async matchRules(
+    toolId: ToolId,
+    input: ToolInput,
+    ctx: ToolContext,
+    confined: readonly string[],
+    folded: boolean,
+  ): Promise<PolicyDecision> {
     for (const rule of this.rules) {
       if (!this.matchesToolId(rule, toolId)) continue;
       if (!this.matchesAgentRole(rule, ctx)) continue;
-      if (!this.matchesPath(rule, confined)) continue;
+      if (!this.matchesPath(rule, confined, folded)) continue;
       if (!this.matchesAllowedPaths(rule, confined)) continue;
       if (rule.predicate.memoryPattern) {
         const pattern = await this.evaluateCypher(
@@ -185,21 +244,37 @@ export class PolicyEngine implements PolicyEngineHandle {
   // They arrive here already confined and root-relative (see `evaluate`), so a glob means what
   // its author meant by it: `.env`, `./.env` and `a/../.env` are one path, and none of them is
   // matched by accident or missed by spelling.
-  private matchesPath(rule: PolicyRule, declaredPaths: readonly string[]): boolean {
+  //
+  // Case and Unicode form are folded only for a rule whose match refuses the call, and only in the
+  // folded pass. For an `Allow` rule, folding is a loosening: on a case-insensitive volume a rule
+  // written for `docs/**` would match `DOCS/x.env`, and a higher-priority Allow stops the dotenv
+  // Deny from ever being consulted. The same glob on a case-sensitive volume does
+  // not match it at all, so the two platforms would disagree about whether a dotenv write is
+  // allowed. Exact matching for Allow makes the platform difference one-directional: it can only
+  // ever refuse a call that another platform would have allowed.
+  //
+  // The folded pass is not a superset of the exact one, because folding changes priority order —
+  // which is why `decide` takes the stricter of the two rather than the folded one.
+  private matchesPath(rule: PolicyRule, declaredPaths: readonly string[], folded: boolean): boolean {
     const glob = rule.predicate.pathGlob;
     if (!glob) return true;
     if (declaredPaths.length === 0) return false;
-    return declaredPaths.some((p) => matchesGlob(p, glob));
+    const fold = folded && rule.action.kind !== 'Allow';
+    return declaredPaths.some((p) => matchesGlob(p, glob, fold));
   }
 
   // Rule matches when at least one declared path falls OUTSIDE every allowed glob.
   // Used to express "this role may only modify files matching these patterns" —
   // pair with a Deny action to block writes elsewhere.
+  //
+  // An allow-list is never folded: a path matching an allowed glob is the permitting outcome here
+  // (the rule does not fire), so matching it case-insensitively would let `DOCS/x.env` satisfy a
+  // list written for `docs/**` and turn a refusal into a permission.
   private matchesAllowedPaths(rule: PolicyRule, declaredPaths: readonly string[]): boolean {
     const allowed = rule.predicate.allowedPathGlobs;
     if (!allowed || allowed.length === 0) return true;
     if (declaredPaths.length === 0) return false;
-    return declaredPaths.some((p) => !allowed.some((g) => matchesGlob(p, g)));
+    return declaredPaths.some((p) => !allowed.some((g) => matchesGlob(p, g, false)));
   }
 
   /**
@@ -270,11 +345,31 @@ export class PolicyEngine implements PolicyEngineHandle {
   }
 }
 
+/**
+ * How strict a verdict is, for choosing between the exact pass and the folded one.
+ *
+ * `Indeterminate` sits above `Escalate`: an approval lifts an escalation, and there is nothing for
+ * a human to approve about a rule that could not be asked. `Allow` is the least, and a verdict
+ * outside the union cannot be produced by this engine.
+ */
+const STRICTNESS = { Allow: 0, Escalate: 1, Indeterminate: 2, Deny: 3 } as const;
+
+function stricterOf(a: PolicyDecision, b: PolicyDecision): PolicyDecision {
+  return STRICTNESS[b.verdict] > STRICTNESS[a.verdict] ? b : a;
+}
+
 // `dot: true` because a glob here is a statement about every file it names. Without it `**` and
 // `*` skip any path segment starting with `.`, so `**/secrets/**` did not cover
 // `secrets/.hidden` and a Deny rule had a hole exactly where configuration and credentials live.
-function matchesGlob(relativePath: string, glob: string): boolean {
-  return minimatch(relativePath, glob, { dot: true });
+//
+// `fold` is passed only in the folded pass, and only for a rule whose match refuses the call (see
+// `matchesPath`): `nocase` and NFC, which `decide` asks for only on a case-insensitive filesystem —
+// APFS and NTFS normalize a decomposed name to its composed form. On Linux, and for every permitting
+// rule on any platform, the two strings are compared exactly: minimatch normalises nothing, and a
+// permitting rule must not match a name that differs on disk.
+function matchesGlob(relativePath: string, glob: string, fold: boolean): boolean {
+  if (!fold) return minimatch(relativePath, glob, { dot: true });
+  return minimatch(relativePath.normalize('NFC'), glob.normalize('NFC'), { dot: true, nocase: true });
 }
 
 /**
