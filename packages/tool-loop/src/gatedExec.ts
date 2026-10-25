@@ -2,7 +2,7 @@ import type {
   ToolPlugin, ToolInput, ToolResult, ToolContext,
   PolicyEngineHandle, AttestorHandle, PolicyDecision, ApprovalAsk, ApprovalGateHandle, ApprovalOutcome,
 } from '@maf/types';
-import { PathConfinementError, PathEscapeError, toolFailureMessage, toolInputProblem } from '@maf/types';
+import { PathConfinementError, PathEscapeError, ToolDeclarationError, toolFailureMessage, toolInputProblem } from '@maf/types';
 import { PolicyViolationError } from '@maf/policy-engine';
 import { redactSecrets, redactCredentialsRecord } from '@maf/processors';
 
@@ -31,8 +31,13 @@ export interface GatedExecDeps {
  * verdict the policy gave and returned. A tool's built-in confinement (`PathConfinementError`, from
  * `declaredPaths` or from `execute` before it acts) is refused the same way policy refuses, as a
  * `Deny` under rule id `builtin:git-dir`; so is a path the tool resolved outside the project root
- * as it ran (`PathEscapeError`), under `builtin:path-escape`. Processor-mediated input edits happen upstream of this function —
- * policy always sees the final input.
+ * as it ran (`PathEscapeError`), under `builtin:path-escape`. A tool that cannot declare what it will
+ * touch at all (`ToolDeclarationError`) is refused under `builtin:declaration`: policy was never asked, so
+ * no rule could have covered the call, and an undeclared call is not an allowed one. The approved declaration
+ * is handed to `execute` on its context (`ToolContext.approvedPaths`), and a tool that recomputes it where it
+ * acts refuses under the same rule id when the two sets differ — a call that would write a set the policy did
+ * not see is not covered by the Allow it earned. Processor-mediated
+ * input edits happen upstream of this function — policy always sees the final input.
  *
  * Secret redaction (L1): policy evaluation and execution use the REAL input, but
  * the values persisted (attestation bundle on disk + memory graph) and the result
@@ -70,9 +75,11 @@ export async function executeToolGated(
   // a path, which is a verdict, not a failure: it is refused on the record like a `Deny`.
   let declaredPaths: string[];
   try {
-    declaredPaths = tool.declaredPaths(input);
+    // The caller's own context, so a declaration that reads the tree (a path that is a symlink
+    // today) is refused here, as a verdict, rather than earned an Allow that `execute` declines.
+    declaredPaths = tool.declaredPaths(input, ctx);
   } catch (err: unknown) {
-    const deny = confinementDeny(err);
+    const deny = builtinRefusal(err);
     if (deny !== undefined) return refuse(deny, undefined, tool, input, ctx, deps, new Date(), Date.now());
     throw err;
   }
@@ -100,11 +107,18 @@ export async function executeToolGated(
   // into `.git`, or one swapped in after policy confined the spelling that now leads out of the root):
   // the tool refuses before it touches anything, and the call is refused as above — a refusal, never
   // a failed call recorded under the `Allow` the spelling had earned.
+  // The approved set travels with the call, on a copy of the context, so a tool that can recompute
+  // its declaration where it acts can refuse when the two differ. The policy and the approval gate
+  // were asked about the caller's context, and a tool must not be able to change what they saw.
+  // The array itself is frozen (on a copy, so the caller's own array is untouched): it is the record
+  // of what was approved, and a policy, an approval gate or a tool that kept a handle to it must not
+  // be able to change that record by writing to the array.
+  const approvedPaths: readonly string[] = Object.freeze([...declaredPaths]);
   let rawResult: ToolResult;
   try {
-    rawResult = await tool.execute(input, ctx);
+    rawResult = await tool.execute(input, { ...ctx, approvedPaths });
   } catch (err: unknown) {
-    const deny = confinementDeny(err);
+    const deny = builtinRefusal(err);
     if (deny !== undefined) return refuse(deny, undefined, tool, input, ctx, deps, invokedAt, start);
     // A refusal raised inside a tool is still a refusal, and keeps the refusal's path.
     if (err instanceof PolicyViolationError) throw err;
@@ -139,9 +153,14 @@ export async function executeToolGated(
   return result;
 }
 
-/** The rule ids a built-in confinement refusal is recorded under: they are no policy file's rules. */
+/** The rule ids a built-in refusal is recorded under: they are no policy file's rules. */
 const BUILTIN_GIT_DIR_RULE = 'builtin:git-dir';
 const BUILTIN_PATH_ESCAPE_RULE = 'builtin:path-escape';
+/**
+ * A tool that cannot say which paths it will touch. The policy was never asked, so no rule could
+ * have covered the call — and a call no rule can see is refused, not run.
+ */
+const BUILTIN_DECLARATION_RULE = 'builtin:declaration';
 
 /** The rule id a call whose input does not match the tool's schema is recorded under. */
 const BUILTIN_INPUT_SCHEMA_RULE = 'builtin:input-schema';
@@ -181,12 +200,14 @@ async function answerMalformed(
 }
 
 /**
- * A tool's own confinement refusal, as the `Deny` it is recorded and reported as: a path into `.git`,
- * or a path that resolves outside the project root. `undefined` for any other error.
+ * A tool's own refusal, as the `Deny` it is recorded and reported as: a path into `.git`, a path that
+ * resolves outside the project root, or a declaration the tool cannot produce at all. `undefined` for
+ * any other error.
  */
-function confinementDeny(err: unknown): Refusal | undefined {
+function builtinRefusal(err: unknown): Refusal | undefined {
   if (err instanceof PathConfinementError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_GIT_DIR_RULE };
   if (err instanceof PathEscapeError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_PATH_ESCAPE_RULE };
+  if (err instanceof ToolDeclarationError) return { verdict: 'Deny', reason: err.message, ruleId: BUILTIN_DECLARATION_RULE };
   return undefined;
 }
 

@@ -111,7 +111,7 @@ Declared paths come from the tool itself — `ToolPlugin.declaredPaths(input)`, 
 - `grep` declares `input.path`, or `.` when it searches the whole working directory.
 - `git.diff` declares `input.paths` (a legacy `input.path` is merged into it), and diffs exactly that list.
 - `git.add` declares `input.paths` (or `input.path`).
-- `patch.apply` declares every file in the diff headers (`extractDiffPaths`), so a path-glob rule applies to every file the patch touches, not just whatever the caller passed in.
+- `patch.apply` declares every file `git apply --numstat -z` reports, for the same diff bytes and the same `-p` it then hands the same `git apply`, so a path-glob rule applies to every file the patch writes, not just whatever the caller passed in — and the declaration cannot be a different reading of the diff from the one that gets written.
 - `git.status` / `git.commit` / `git.log` / `git.reset` and `test.run` act on the repository or project as a whole and declare `[]`, so no path rule can match them. Their inputs are checked by the tools instead: `git.log` accepts only a positive whole number of commits, and `git.reset` only a hex object name, `HEAD`, `HEAD~N`, `HEAD^N` or a branch or tag name not starting with `-`, which it passes before a trailing `--` so git reads it as a revision ([D-28](DECISIONS.md): not `--end-of-options`, which `git reset` accepts only from git 2.44).
 
 Four consequences worth stating:

@@ -21,7 +21,7 @@ export abstract class BaseTool<I extends ToolInput = ToolInput> implements ToolP
    * empty one. A default of `[]` would look identical to `git.status` and would silently
    * exempt the next tool that forgets — which is the defect this exists to close.
    */
-  abstract declaredPaths(input: I): string[];
+  abstract declaredPaths(input: I, ctx?: ToolContext): string[];
 
   /**
    * Abstract for the same reason: every built-in tool states the input its `execute` reads, so the
