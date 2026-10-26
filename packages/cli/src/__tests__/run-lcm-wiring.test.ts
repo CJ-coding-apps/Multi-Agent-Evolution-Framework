@@ -176,16 +176,25 @@ test('run wiring: a summary made with the configured model reaches the next node
       const summaryCalls = adapter.calls.filter((call) => call.kind === 'summary');
       assert.equal(taskCalls.length, 2, 'both nodes reached the backend');
 
-      // W1/W2: the summary is a model call like any other, with the operator's model and no tools.
-      assert.equal(summaryCalls.length, 1, 'one compaction was needed, and made');
-      const summaryCall = summaryCalls[0]!.options;
-      assert.equal(summaryCall.model, 'summary-model', 'lcm.model is the summary call\'s model');
-      assert.equal(summaryCall.nativeTools, false, 'a summary call asks for text only');
-      // R8: every `lcm` setting reaches the engine. The timeout is the one a slow backend depends
-      // on, and a default here would silently outrank the run's config.
-      assert.equal(summaryCall.timeoutMs, 4_321, 'lcm.summaryTimeoutMs reaches the call');
-      assert.match(summaryCall.prompt, /\[USER\] \[analyst\] node one/, 'it summarizes node one\'s history');
-      assert.ok(summaryCall.prompt.length <= 64 * 1024, 'the prompt is under the single-argument cap');
+      // W1/W2: every summary call is a model call like any other, with the operator's model, no
+      // tools, the configured timeout, and the run's working directory. The *number* of calls is
+      // not the property (D-52): it is a function of how many messages the dispatches write, so
+      // the invariant is asserted on every call instead of on one count.
+      assert.ok(summaryCalls.length >= 1, 'the run compacted at least once');
+      let summarizesNodeOne = false;
+      for (const [index, call] of summaryCalls.entries()) {
+        const options = call.options;
+        assert.equal(options.model, 'summary-model', `summary call ${index + 1}: lcm.model`);
+        assert.equal(options.nativeTools, false, `summary call ${index + 1}: text only`);
+        // R8: every `lcm` setting reaches the engine. The timeout is the one a slow backend
+        // depends on, and a default here would silently outrank the run's config.
+        assert.equal(options.timeoutMs, 4_321, `summary call ${index + 1}: lcm.summaryTimeoutMs`);
+        assert.equal(options.workingDir, repo, `summary call ${index + 1}: the run's working directory`);
+        assert.ok(options.prompt.length <= 64 * 1024,
+          `summary call ${index + 1}: the prompt is under the single-argument cap`);
+        if (/\[USER\] \[analyst\] node one/.test(options.prompt)) summarizesNodeOne = true;
+      }
+      assert.ok(summarizesNodeOne, 'a summary summarizes node one\'s history');
 
       // W3: the summary is in the prompt of the node after it, and not in the one before.
       assert.doesNotMatch(taskCalls[0]!.options.systemPrompt ?? '', new RegExp(SUMMARY_TEXT));
@@ -195,13 +204,15 @@ test('run wiring: a summary made with the configured model reaches the next node
         'the second node is handed the summary node one produced',
       );
 
-      // W4: the call is in the run's record, attributed to the node whose assembly made it.
+      // W4: every call is in the run's record, attributed to the node whose assembly made it.
       const lcmRecords = (bundle.modelSurfaces ?? []).filter((record) => record.kind === 'lcm-summary');
-      assert.equal(lcmRecords.length, 1, 'the summary call is in the same array as every role call');
-      const record = lcmRecords[0]!;
-      assert.equal(record.role, 'lcm');
-      assert.equal(record.nativeTools, 'none');
-      assert.equal(record.model, 'summary-model');
+      assert.ok(lcmRecords.length >= 1, 'every summary call is in the same array as every role call');
+      for (const [index, each] of lcmRecords.entries()) {
+        assert.equal(each.role, 'lcm', `summary record ${index + 1}: the role`);
+        assert.equal(each.nativeTools, 'none', `summary record ${index + 1}: no tools`);
+        assert.equal(each.model, 'summary-model', `summary record ${index + 1}: the model`);
+      }
+      const record = lcmRecords.at(-1)!;
       assert.equal(record.lcmSummary?.level, 0);
       assert.equal(record.lcmSummary?.reportedTokens, REPORTED_TOKENS);
       assert.ok(record.lcmSummary?.messages >= 2, 'it names the messages it covered');
@@ -225,8 +236,11 @@ test('run wiring: lcm.operator agentic-map compacts through the sub-agent (F3)',
     await stack.dispatchTask(harness, 'analyst', 'node two', repo, 60_000, 0);
 
     const summaryCalls = adapter.calls.filter((call) => call.kind === 'summary');
-    assert.equal(summaryCalls.length, 1, 'the operator named in config made the call');
-    assert.equal(summaryCalls[0]!.options.nativeTools, false);
+    // F12 is about the operator, not about how many compactions the two dispatches needed (D-52).
+    assert.ok(summaryCalls.length >= 1, 'the operator named in config made the call');
+    for (const [index, call] of summaryCalls.entries()) {
+      assert.equal(call.options.nativeTools, false, `summary call ${index + 1}: text only`);
+    }
 
     // The operator is in the stored summary, not only in the engine's default: the setting reached
     // the engine through the stack (F12). Read it back by the id the record names, not through
@@ -237,7 +251,7 @@ test('run wiring: lcm.operator agentic-map compacts through the sub-agent (F3)',
       { configSource: { uri: 'test', digest: { sha256: harness.sha } }, parameters: {}, environment: {} },
       [], { status: 'Succeeded', unscheduled: [] },
     );
-    const record = (bundle.modelSurfaces ?? []).find((r) => r.kind === 'lcm-summary');
+    const record = (bundle.modelSurfaces ?? []).filter((r) => r.kind === 'lcm-summary').at(-1);
     assert.ok(record?.lcmSummary?.summaryId, 'the summary call is recorded with its summary id');
     const expanded = await stack.lcm.expandSummary(record.lcmSummary.summaryId!);
     assert.ok(expanded, 'the stored summary is reachable by the recorded id');
@@ -270,15 +284,20 @@ test('a failing summarizer degrades the compaction, not the node (F5)', needsLcm
 
     assert.equal(adapterUnderTest.calls.filter((call) => call.kind === 'task').length, 2,
       'both nodes still ran');
-    assert.equal(adapterUnderTest.calls.filter((call) => call.kind === 'summary').length, 2,
-      'the transport failure was retried once, then the assembly continued');
+    const summaryCalls = adapterUnderTest.calls.filter((call) => call.kind === 'summary');
+    // F5 is about attempts per compaction, not about how many compactions two dispatches need
+    // (D-52). A transport failure is retried exactly once, so every failed compaction made two
+    // calls and left one degradation — the ratio is the property.
+    assert.ok(summaryCalls.length >= 2, 'the transport failure was retried');
+    assert.equal(summaryCalls.length % 2, 0, 'no compaction was attempted a third time');
 
     const bundle = await stack.attestor.bundle(
       { id: 'test', modelVersion: 'cli-recorder' },
       { configSource: { uri: 'test', digest: { sha256: harness.sha } }, parameters: {}, environment: {} },
       [], { status: 'Succeeded', unscheduled: [] },
     );
-    assert.equal(bundle.lcmDegraded?.length, 1, 'the degradation is in the run\'s record');
+    assert.equal(bundle.lcmDegraded?.length, summaryCalls.length / 2,
+      'the degradation is in the run\'s record, one per failed compaction');
     assert.match(bundle.lcmDegraded![0]!.reason, /timed out/);
 
     const transcript = await readFile(path.join(mafDir, 'transcripts', `${runId}.jsonl`), 'utf8');
@@ -295,7 +314,17 @@ test('a summarizer that answers with a failure is not retried (F5)', needsLcm, a
   await withWiringStack({}, async (stack, adapterUnderTest, harness, runId, repo) => {
     await stack.dispatchTask(harness, 'analyst', 'node one', repo, 60_000, 0);
     await stack.dispatchTask(harness, 'analyst', 'node two', repo, 60_000, 0);
-    assert.equal(adapterUnderTest.calls.filter((call) => call.kind === 'summary').length, 1);
+    const summaryCalls = adapterUnderTest.calls.filter((call) => call.kind === 'summary');
+    // "Not retried" is attempts == failed compactions, not an absolute count: every compaction the
+    // two dispatches needed was asked once, and each left exactly one degradation.
+    assert.ok(summaryCalls.length >= 1, 'the summarizer was asked');
     assert.equal(adapterUnderTest.calls.filter((call) => call.kind === 'task').length, 2);
+    const bundle = await stack.attestor.bundle(
+      { id: 'test', modelVersion: 'cli-recorder' },
+      { configSource: { uri: 'test', digest: { sha256: harness.sha } }, parameters: {}, environment: {} },
+      [], { status: 'Succeeded', unscheduled: [] },
+    );
+    assert.equal(bundle.lcmDegraded?.length, summaryCalls.length,
+      'one call per failed compaction — the judgement was not retried');
   }, adapter);
 });

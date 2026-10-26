@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, AssistantTurn, CliAdapter,
   TurnAdapter, TurnMessage,
@@ -32,6 +33,9 @@ import { collector, needsLcm, registryOf } from './runFixture.js';
 // Names are K-prefixed so they cannot be mistaken for the verifier's mutant ids.
 
 const SUMMARY_TEXT = 'Node one read the sum module and reported that it subtracts.';
+// The merge brought a second compaction (the plan-source system line). Giving it its own text keeps
+// K7's "the summary reached the node after it, and not the one before" about *node one's* summary.
+const PLAN_SOURCE_SUMMARY = 'The plan came from the planner.';
 const REPORTED_TOKENS = 42;
 const ROLE_BUDGET = 10_000;
 const SUMMARY_TIMEOUT_MS = 4_321;
@@ -43,6 +47,19 @@ const PLAN = [
     nodes: [
       { id: 'n1', label: 'node one', description: 'node one', agentRole: 'analyst' },
       { id: 'n2', label: 'node two', description: 'node two', agentRole: 'analyst', dependencies: ['n1'] },
+    ],
+  }),
+  '```',
+].join('\n');
+
+/** Two independent nodes: the runner dispatches them at once, so both assemble at once. */
+const PARALLEL_PLAN = [
+  'Here is the plan.',
+  '```json',
+  JSON.stringify({
+    nodes: [
+      { id: 'p1', label: 'node one', description: 'node one', agentRole: 'reader' },
+      { id: 'p2', label: 'node two', description: 'node two', agentRole: 'reader' },
     ],
   }),
   '```',
@@ -70,6 +87,19 @@ roles:
     tokenBudget: ${ROLE_BUDGET}
 `;
 
+// D-01/A3 serializes every cli-tier role, so two cli nodes never assemble at once. The in-process
+// tier is the tier where independent readers really run concurrently.
+const PARALLEL_ROLES = `version: 1
+defaultRole: reader
+roles:
+  - role: reader
+    description: Read-only. Reads a file and answers.
+    systemPrompt: read and answer
+    allowedTools: [fs.read]
+    execution: in-process
+    tokenBudget: ${ROLE_BUDGET}
+`;
+
 /** The parts of the written bundle this test reads. The file is the in-toto statement. */
 interface SummaryRecord {
   kind?:         string;
@@ -84,10 +114,40 @@ interface BundlePredicate {
   modelSurfaces?: SummaryRecord[];
 }
 
+/**
+ * One call, with the interval it occupied. A summary call is not instantaneous, so the interval is
+ * what the per-session compaction lock (D-52) has to keep apart: two summary calls that overlap
+ * means the lock did not hold. The clock is monotonic and only used for ordering.
+ */
+interface RecordedCall {
+  kind:      'plan' | 'summary' | 'task';
+  options:   AdapterInvokeOptions;
+  startedAt: number;
+  endedAt:   number;
+}
+
+/**
+ * D-52's per-session compaction lock, as the property it is: no summary call starts before the
+ * previous one has ended. Two assemblies that both need compaction make one call, not two
+ * interleaved ones.
+ */
+function assertSummaryCallsDoNotOverlap(summaries: readonly RecordedCall[]): void {
+  for (let i = 0; i < summaries.length; i++) {
+    for (let j = i + 1; j < summaries.length; j++) {
+      const a = summaries[i]!;
+      const b = summaries[j]!;
+      assert.ok(
+        a.endedAt <= b.startedAt || b.endedAt <= a.startedAt,
+        `summary calls ${i + 1} and ${j + 1} do not overlap`,
+      );
+    }
+  }
+}
+
 /** Three kinds of call, told apart by what `run.ts` asked for. */
 class RunAdapter implements CliAdapter {
   readonly name = 'round-two-recorder';
-  readonly calls: { kind: 'plan' | 'summary' | 'task'; options: AdapterInvokeOptions }[] = [];
+  readonly calls: RecordedCall[] = [];
   private taskCount = 0;
 
   capabilities(): AdapterCapabilities {
@@ -102,8 +162,15 @@ class RunAdapter implements CliAdapter {
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const summary = (options.systemPrompt ?? '').startsWith('You are a context summarization agent.');
     const plan = !summary && options.prompt.startsWith('Create a task execution DAG for:');
-    this.calls.push({ kind: summary ? 'summary' : plan ? 'plan' : 'task', options });
-    const output = summary ? SUMMARY_TEXT : plan ? PLAN : `answer ${++this.taskCount}`;
+    const startedAt = performance.now();
+    // A summary call costs something, so its interval has width; without it a call would be a
+    // point and "no interval intersects another" could never fail.
+    if (summary) await new Promise<void>((resolve) => setImmediate(resolve));
+    const summaryText = options.prompt.includes('plan source:') ? PLAN_SOURCE_SUMMARY : SUMMARY_TEXT;
+    const output = summary ? summaryText : plan ? PLAN : `answer ${++this.taskCount}`;
+    this.calls.push({
+      kind: summary ? 'summary' : plan ? 'plan' : 'task', options, startedAt, endedAt: performance.now(),
+    });
     return {
       success: true, output, exitCode: 0, duration: 1, toolCallLog: [],
       // No `modelSurface` on purpose: R6 says a summary is recorded even when the backend reports
@@ -113,6 +180,58 @@ class RunAdapter implements CliAdapter {
   }
 
   async *stream(): AsyncGenerator<string> { yield ''; }
+}
+
+/**
+ * An in-process reader whose summary calls are recorded with their intervals. Each turn executes
+ * one read (D-46: a reader that executes nothing fails `no_work`), then answers.
+ */
+class ParallelReaderAdapter implements TurnAdapter {
+  readonly name = 'parallel-reader';
+  readonly calls: RecordedCall[] = [];
+  turns = 0;
+  private taskCount = 0;
+
+  capabilities(): AdapterCapabilities {
+    return {
+      supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: false,
+      inProcessLoop: true, maxConcurrentTasks: 4, nativePlugins: [],
+    };
+  }
+
+  isAvailable(): Promise<boolean> { return Promise.resolve(true); }
+
+  async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    const summary = (options.systemPrompt ?? '').startsWith('You are a context summarization agent.');
+    const plan = !summary && options.prompt.startsWith('Create a task execution DAG for:');
+    const startedAt = performance.now();
+    // The lock's property needs a call that is still in flight when the second assembly arrives,
+    // so the fixture's summary takes real time. A tick is not enough: without a duration the two
+    // calls can never intersect, and dropping the lock would go unnoticed (measured: a tick put
+    // the second call 3ms after the first, and the mutant survived).
+    if (summary) await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    const output = summary ? SUMMARY_TEXT : plan ? PARALLEL_PLAN : `answer ${++this.taskCount}`;
+    this.calls.push({
+      kind: summary ? 'summary' : plan ? 'plan' : 'task', options, startedAt, endedAt: performance.now(),
+    });
+    return {
+      success: true, output, exitCode: 0, duration: 1, toolCallLog: [],
+      ...(summary ? { tokensUsed: REPORTED_TOKENS } : {}),
+    };
+  }
+
+  async *stream(): AsyncGenerator<string> { yield ''; }
+
+  async sendTurn(history: TurnMessage[]): Promise<AssistantTurn> {
+    this.turns += 1;
+    if (history.some((message) => message.kind === 'tool')) {
+      return { text: 'read complete', toolCalls: [] };
+    }
+    return {
+      text: 'reading',
+      toolCalls: [{ toolUseId: 'r1', toolName: 'fs.read', input: { path: 'sum.js' } }],
+    };
+  }
 }
 
 test('maf run itself: the LCM factory is wired, from the summary call to the bundle (R1)', needsLcm, async () => {
@@ -174,25 +293,42 @@ test('maf run itself: the LCM factory is wired, from the summary call to the bun
       model: 'run-model',
     });
 
-    // K3/K4/K5/K2: one compaction was needed and it was made by the run's adapter, with the
-    // configured model, text-only, with the configured timeout, where the run works.
-    assert.equal(summaries.length, 1, 'one compaction was needed, and made');
-    const summaryCall = summaries[0]!.options;
-    assert.equal(summaryCall.model, 'run-model', 'the run\'s model is the summary call\'s model');
-    assert.equal(summaryCall.nativeTools, false, 'a summary call asks for text only');
-    assert.equal(summaryCall.timeoutMs, SUMMARY_TIMEOUT_MS, 'lcm.summaryTimeoutMs reaches the call');
-    assert.equal(summaryCall.workingDir, repo, 'the summary runs in the run\'s working directory');
-    assert.match(summaryCall.prompt, /\[USER\] \[analyst\] node one/, 'it summarizes node one');
+    // K3/K4/K5/K2: at least one compaction was needed, and every one was made by the run's
+    // adapter, with the configured model, text-only, with the configured timeout, where the run
+    // works. The count is not the property (D-52): with `contextThreshold: 0.001` the number of
+    // compactions is a function of how many messages the run writes — the plan-source line
+    // WP-3.6 F4 added is one more — so the invariant is asserted on every call, not on one.
+    assert.ok(summaries.length >= 1, 'the run compacted at least once');
+    for (const [index, call] of summaries.entries()) {
+      const summaryCall = call.options;
+      assert.equal(summaryCall.model, 'run-model', `summary call ${index + 1}: the run's model`);
+      assert.equal(summaryCall.nativeTools, false, `summary call ${index + 1}: text only`);
+      assert.equal(summaryCall.timeoutMs, SUMMARY_TIMEOUT_MS, `summary call ${index + 1}: the timeout`);
+      assert.equal(summaryCall.workingDir, repo, `summary call ${index + 1}: the working directory`);
+    }
+    // The merge (WP-3.6 F4) put the plan-source system line in the transcript before node one
+    // runs, and `contextThreshold: 0.001` compacts as each message arrives — so the first summary
+    // covers that line and node one is the second. Both are asserted: the line is a WP-3.6 record
+    // that must reach the LCM (ruling 1), and node one must be summarized (K7).
+    assert.match(summaries[0]!.options.prompt, /\[SYSTEM\] plan source:/,
+      'the first summary covers the plan-source line the merge added');
+    assert.ok(summaries.some((call) => /\[USER\] \[analyst\] node one/.test(call.options.prompt)),
+      'a summary summarizes node one');
+
+    assertSummaryCallsDoNotOverlap(summaries);
 
     // K5: the operator is on the stored summary, and K6: the summary is reachable from this run's
     // archive only. Read it back by the id the record names — a second engine over the same
     // `.maf/lcm.db`, scoped to this run.
     const lcmRecords = (predicate.modelSurfaces ?? []).filter((r) => r.kind === 'lcm-summary');
-    assert.equal(lcmRecords.length, 1, 'the summary call is in the same array as every role call');
-    const record = lcmRecords[0]!;
-    assert.equal(record.role, 'lcm');
-    assert.equal(record.nativeTools, 'none');
-    assert.equal(record.model, 'run-model');
+    assert.ok(lcmRecords.length >= 1, 'every summary call is in the same array as every role call');
+    for (const [index, each] of lcmRecords.entries()) {
+      assert.equal(each.role, 'lcm', `summary record ${index + 1}: the role`);
+      assert.equal(each.nativeTools, 'none', `summary record ${index + 1}: no tools`);
+      assert.equal(each.model, 'run-model', `summary record ${index + 1}: the model`);
+    }
+    // Node one's summary is the last call (the plan-source line was compacted first).
+    const record = lcmRecords.at(-1)!;
     assert.equal(record.lcmSummary?.level, 0);
     assert.equal(record.lcmSummary?.reportedTokens, REPORTED_TOKENS);
     const summaryId = record.lcmSummary?.summaryId ?? '';
@@ -216,8 +352,11 @@ test('maf run itself: the LCM factory is wired, from the summary call to the bun
     elsewhere.close();
     assert.equal(theirs, undefined, 'another run cannot expand this run\'s summary');
 
-    // K7: the summary reached the prompt of the node after it, and not the one before.
+    // K7: node one's summary reached the prompt of the node after it, and not the one before. Node
+    // one is handed the summary of the plan-source line, which is a different text.
     assert.doesNotMatch(tasks[0]!.options.systemPrompt ?? '', new RegExp(SUMMARY_TEXT));
+    assert.match(tasks[0]!.options.systemPrompt ?? '', new RegExp(PLAN_SOURCE_SUMMARY),
+      'the first node is handed the plan-source line\'s summary');
     assert.match(
       tasks[1]!.options.systemPrompt ?? '',
       new RegExp(`<summary [^>]*>[^<]*${SUMMARY_TEXT.replace(/\./g, '\\.')}`),
@@ -225,11 +364,53 @@ test('maf run itself: the LCM factory is wired, from the summary call to the bun
     );
     assert.match(tasks[1]!.options.systemPrompt ?? '', /<summaries>/, 'the archive is rendered');
 
-    // R5 through the user's path: the reported cost is charged to the triggering node, so the
-    // node after it is given what remains of its budget.
-    assert.equal(tasks[0]!.options.tokenBudget, ROLE_BUDGET);
+    // R5 through the user's path: each summary's reported cost is charged to the node whose
+    // assembly triggered it. Node one assembles the plan-source line; node two assembles node
+    // one's history. Each therefore makes one compaction and is given what remains of its budget.
+    assert.equal(tasks[0]!.options.tokenBudget, ROLE_BUDGET - REPORTED_TOKENS,
+      'node one\'s budget paid for the plan-source line\'s summary');
     assert.equal(tasks[1]!.options.tokenBudget, ROLE_BUDGET - REPORTED_TOKENS,
-      'the summary spent the triggering node\'s budget');
+      'node two\'s budget paid for node one\'s summary');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('maf run: nodes dispatched at once never overlap their summary calls (D-52 lock)', needsLcm, async () => {
+  // R1's plan is linear (n2 depends on n1), so its summary calls are sequential even without the
+  // lock — the interval assertion there documents the property but cannot kill a dropped lock.
+  // Two independent nodes make the runner dispatch both assemblies at once, which is the case the
+  // per-session lock exists for: without it, both compactions call the adapter concurrently.
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-run-task-lcm-parallel-'));
+  try {
+    const repo = await createDemoFixture(root);
+    const mafDir = path.join(repo, '.maf');
+    await mkdir(mafDir, { recursive: true });
+    await writeFile(path.join(mafDir, 'config.yaml'),
+      CONFIG.replace('adapter: round-two-recorder', 'adapter: parallel-reader'), 'utf8');
+    await writeFile(path.join(mafDir, 'roles.yaml'), PARALLEL_ROLES, 'utf8');
+
+    const adapter = new ParallelReaderAdapter();
+    const opts: RunOptions = {
+      adapter: adapter.name,
+      dir: repo,
+      worktree: false,
+      policy: '.maf/policy.yaml',
+      roles: '.maf/roles.yaml',
+    };
+    const given = (flag: GivenFlag): boolean => flag === 'adapter' || flag === 'roles';
+
+    await runTask('two nodes at once', opts, {
+      adapters: registryOf(adapter),
+      given,
+      io: { stdout: collector(), stderr: collector(), isTTY: false },
+    });
+
+    const summaries = adapter.calls.filter((call) => call.kind === 'summary');
+    // One turn to ask for the read, one to answer: two nodes, four turns.
+    assert.equal(adapter.turns, 4, 'both independent nodes reached the backend');
+    assert.ok(summaries.length >= 1, 'the concurrent assemblies compacted');
+    assertSummaryCallsDoNotOverlap(summaries);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
