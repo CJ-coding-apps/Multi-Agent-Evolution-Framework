@@ -512,6 +512,11 @@ export interface YamlDocument {
  * `<<` key at any depth. YAML 1.2 has no merge keys, so `<<: *base` would load as an ordinary key
  * named `<<` and the keys it was written to merge would be silently missing; a schema that checks
  * only the keys it needs would never notice.
+ *
+ * A key that names a prototype — `__proto__`, `constructor`, `prototype` — is refused here, at any
+ * depth (WP-3.9 F10), rather than loaded as ordinary data and refused by each reader. Every file
+ * under `.maf/` comes through this function, so the refusal covers `roles.yaml`, `policy.yaml` and
+ * the workflow spec at once, and a reader that forgets to check cannot be the way one through.
  */
 export function parseYamlDocument(text: string, sourcePath: string): YamlDocument {
   const counter = new LineCounter();
@@ -534,6 +539,18 @@ export function parseYamlDocument(text: string, sourcePath: string): YamlDocumen
         fail(
           isNode(pair.key) ? (pair.key.range?.[0] ?? 0) : 0,
           'the key "<<" asks for a YAML merge, which MAF does not perform; write the merged keys out in full.',
+        );
+      }
+      // A prototype key is refused wherever it appears (WP-3.9 F10). `toJS` would make
+      // `__proto__` an own property, so the loaded value is not itself poisoned — but every
+      // consumer that copies the value with a plain assignment turns it into one, and the copies
+      // are the readers. Refusing at the one parse every file goes through is what makes the
+      // safety a property of the loader rather than of each reader's memory.
+      if (isScalar(key) && typeof key.value === 'string' && PROTOTYPE_KEYS.has(key.value)) {
+        fail(
+          isNode(pair.key) ? (pair.key.range?.[0] ?? 0) : 0,
+          `the key ${JSON.stringify(key.value)} names a prototype (__proto__, constructor, ` +
+          'prototype), which a configuration file may not name at any depth.',
         );
       }
     },
@@ -571,6 +588,9 @@ export function parseYamlDocument(text: string, sourcePath: string): YamlDocumen
     },
   };
 }
+
+/** The key names that reach a prototype when a map is copied with a plain assignment. */
+const PROTOTYPE_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
 
 /** `<<` as written, or as a `%YAML 1.1` document resolves it: the merge-key symbol. */
 function isMergeKey(value: unknown): boolean {

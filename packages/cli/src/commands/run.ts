@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
-import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
+import { makeRunId, makeTaskId, makeAgentId, redactText } from '@maf/types';
 import type { AdapterName, CliAdapter, Dag, DagNode, PlanSource, RetryPolicy } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
@@ -22,7 +22,7 @@ import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
 import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterRole, roleSetFromHarness } from '@maf/roles';
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
-import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
+import { createAdapterRegistry, lookupAdapter, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { loadCommandPolicy, planRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
@@ -160,7 +160,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
   // Everything that can refuse the run without opening a store comes first.
   const adapterRegistry = ctx.adapters?.() ?? createAdapterRegistry();
-  const adapter = await resolveAdapter(cfg.adapter, adapterRegistry);
+  const adapter = lookupAdapter(cfg.adapter, adapterRegistry);
 
   const baseTools = createDefaultRegistry();
 
@@ -204,6 +204,30 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       dag:    applyDagSettings(read.dag, cfg.dag),
       source: { kind: 'spec', path: specPath, sha256: read.sha256 },
     };
+  }
+
+  // ── Preflight (WP-3.9 F5): once, before anything is planned. Claude's argv carries `--tools`
+  // on every governed turn and on both isolated cli-tier sets, and a binary that does not know
+  // the flag exits 1 on every node — so a plan of identical failures was how a stale CLI read.
+  // Asking `--version` and `--help` here names the binary and the version found, before a
+  // worktree, a store or a plan exists.
+  //
+  // It runs after the spec above (D-59 merge duty 5): resolving or probing a backend before the
+  // operator's spec was accepted would make a malformed spec pay for a backend call — and could
+  // refuse a run over a binary when the file was wrong. A refused spec never reaches this line.
+  //
+  // It runs before `isAvailable` (WP-3.9 G15): the availability check refuses with a sentence that
+  // names no binary and no PATH, so its own "not found on PATH (N directories searched)" branch was
+  // unreachable — the generic refusal always came first. A passing preflight has proved the binary
+  // runs and takes the argv, which is what `isAvailable` was asking anyway; an adapter with no
+  // preflight still gets that check, and it is now the only one.
+  if (adapter.preflight === undefined) {
+    await resolveAdapter(cfg.adapter, adapterRegistry);
+  } else {
+    const preflight = await adapter.preflight();
+    if (preflight !== undefined) {
+      say(`[maf] preflight: ${adapter.name} ${preflight.path} (${preflight.version})`);
+    }
   }
 
   // ── Nothing above wrote; from here the run is going ahead. The stores below open files inside
@@ -374,10 +398,14 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       ...(cfg.model !== undefined ? { modelOverride: cfg.model } : {}),
     });
 
-    // Record run start in memory graph (harness provenance)
+    // Record run start in memory graph (harness provenance). The description is what the user
+    // typed, and this node is recalled by a later run and rendered into its planner prompt, so it
+    // is masked here on the way in (WP-3.9 G1). `GraphAwareInjector` masks again on the way out:
+    // memory also holds nodes this path did not write, and a mask that exists only at one end
+    // stops being true the moment a second writer appears.
     await graph.addNode({
       kind: 'Run', label: runId,
-      properties: { taskDescription, adapter: cfg.adapter, harnessId: harness.id, harness_sha: harness.sha, planSource },
+      properties: { taskDescription: redactText(taskDescription), adapter: cfg.adapter, harnessId: harness.id, harness_sha: harness.sha, planSource },
       runId,
     });
 

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord } from '@maf/types';
+import { backendEnv } from '@maf/types';
 import { BaseAdapter, spawnAndCollect, spawnStreaming, elided, cliModelSurface } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
@@ -51,7 +52,7 @@ export class GeminiAdapter extends BaseAdapter {
 
   async isAvailable(): Promise<boolean> {
     try {
-      await execFileAsync('gemini', ['--version']);
+      await execFileAsync('gemini', ['--version'], { env: backendEnv() });
       return true;
     } catch { return false; }
   }
@@ -62,7 +63,7 @@ export class GeminiAdapter extends BaseAdapter {
     const result = await this.spawn('gemini', args, {
       cwd: options.workingDir,
       timeoutMs: options.timeoutMs,
-      env: { ...process.env },
+      env: backendEnv(),
     });
     return {
       success:     result.exitCode === 0,

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -24,7 +24,12 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
   const root = await mkdtemp(path.join(tmpdir(), 'maf-approval-stack-'));
   try {
     const repo = await createDemoFixture(root);
+    // Every production caller ensures its mafDir first (`run.ts`, `goldens.ts`, the demo), and
+    // `buildRunStack` opens `lcm.db` under it eagerly. Created here rather than relied on: this
+    // test passed on Linux only because kuzu creates the parent synchronously there, and on macOS
+    // the SQLite store was the first thing to notice it did not exist.
     const mafDir = path.join(root, 'state');
+    await mkdir(mafDir, { recursive: true });
     const policyPath = path.join(root, 'policy.yaml');
     await writeFile(policyPath, JSON.stringify({ rules: [
       { id: 'lock-files-need-a-human', description: 'lock files', priority: 95,

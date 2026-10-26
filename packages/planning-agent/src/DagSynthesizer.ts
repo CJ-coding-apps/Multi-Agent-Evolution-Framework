@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import type {
   Dag, DagNode, DagEdge, DagConfig, NodeId, EdgeId, RunId, RetryPolicy, RoleName, RoleResolver,
 } from '@maf/types';
-import { makeNodeId, DEFAULT_RETRY_POLICY, MAX_TIMER_MS } from '@maf/types';
+import { makeNodeId, DEFAULT_RETRY_POLICY, MAX_TIMER_MS, PrototypeKeyError, refusePrototypeKey } from '@maf/types';
 import type { FailurePattern } from './FailurePatternDetector.js';
 
 const DEFAULT_RETRY: RetryPolicy = DEFAULT_RETRY_POLICY;
@@ -204,8 +204,15 @@ export class DagSynthesizer {
     }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(text);
+      // WP-3.9 G5: a spec is an operator's file read from disk, so it goes through the shared
+      // reviver. `metadata` is spread into node metadata downstream; a document naming
+      // `__proto__`, `constructor` or `prototype` never reaches that copy.
+      parsed = JSON.parse(text, refusePrototypeKey);
     } catch (err) {
+      // A refused key is not a syntax failure, and calling it one would hide the reason.
+      if (err instanceof PrototypeKeyError) {
+        throw new Error(`DagSynthesizer: ${filePath} is refused: ${err.message}.`);
+      }
       throw new Error(
         `DagSynthesizer: could not read ${filePath} as a JSON workflow spec ` +
         `(${err instanceof Error ? err.message : String(err)}).`,

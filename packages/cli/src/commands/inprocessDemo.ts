@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { makeRunId } from '@maf/types';
+import { makeRunId, toolEnv } from '@maf/types';
 import type { CliAdapter } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -86,6 +86,22 @@ export async function createDemoFixture(tmpDir: string): Promise<string> {
 
 async function makeFixture(): Promise<string> {
   return createDemoFixture(await mkdtemp(path.join(tmpdir(), 'maf-inproc-')));
+}
+
+/**
+ * Runs the fixture's own `npm test` and reports whether it printed its pass line.
+ *
+ * The command is a `package.json` script of a fixture the coder just edited — in `--live` the
+ * model wrote it — so it is agent-touched code and gets the tool allowlist: no `MAF_*`, no
+ * provider credentials. (WP-3.9 F2.)
+ */
+export function runFixtureTests(fixture: string): { passed: boolean; output: string } {
+  try {
+    const out = execFileSync('npm', ['test'], { cwd: fixture, stdio: 'pipe', env: toolEnv() }).toString();
+    return { passed: /PASS/.test(out), output: out };
+  } catch (e) {
+    return { passed: false, output: (e as { stdout?: Buffer }).stdout?.toString() ?? String(e) };
+  }
 }
 
 /**
@@ -206,14 +222,7 @@ export function registerInProcessDemoCommand(program: Command): void {
 
       // ── observe real effects ──
       const sumAfter = await readFile(path.join(fixture, 'sum.js'), 'utf8');
-      let testPassed = false;
-      let testOut = '';
-      try {
-        testOut = execFileSync('npm', ['test'], { cwd: fixture, stdio: 'pipe' }).toString();
-        testPassed = /PASS/.test(testOut);
-      } catch (e) {
-        testOut = (e as { stdout?: Buffer }).stdout?.toString() ?? String(e);
-      }
+      const { passed: testPassed, output: testOut } = runFixtureTests(fixture);
 
       console.log('\n──────── end-to-end result ────────');
       const observed: DemoObservation = { sumFixed: sumAfter.trim() === SUM_FIXED.trim(), testPassed };

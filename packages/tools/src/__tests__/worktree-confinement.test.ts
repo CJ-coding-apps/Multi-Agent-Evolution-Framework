@@ -109,7 +109,10 @@ test('fs.write and fs.delete refuse every spelling of a .git path when they decl
         return true;
       }, `${tool} ${p}`);
     }
-    for (const p of NOT_GIT_DIR) assert.deepEqual(declare(p), [p], `${tool} ${p} is not git's data`);
+    // patch declares the reject/backup siblings it may leave beside a target, so a path rule
+    // covers `.env.rej` as well as `.env`; the other two tools write exactly the path they name.
+    const declared = (p: string): string[] => (tool === 'patch.apply' ? [p, `${p}.orig`, `${p}.rej`] : [p]);
+    for (const p of NOT_GIT_DIR) assert.deepEqual(declare(p), declared(p), `${tool} ${p} is not git's data`);
   }
 });
 

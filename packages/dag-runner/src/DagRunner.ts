@@ -3,7 +3,7 @@ import type {
   AdapterInvokeOptions, BlackboardKey, BlackboardValue, RunOutcome, RunStatus,
   FailureRecorder, NodeFailureRecord, WriterLockLedger,
 } from '@maf/types';
-import { makeAgentId, NodeFailure, outcomeFailureDetail } from '@maf/types';
+import { makeAgentId, NodeFailure, outcomeFailureDetail, redactText } from '@maf/types';
 import type { BlackboardStore } from '@maf/blackboard';
 import { NodeStateMachine } from './NodeStateMachine.js';
 import { withRetry } from './RetryOrchestrator.js';
@@ -228,18 +228,26 @@ async function recordFailure(
   }
 }
 
+/**
+ * The record handed to memory, with every human- or agent-authored string redacted (WP-3.9 F4).
+ *
+ * The memory graph outlives the run and its contents are read back into a later planner's prompt
+ * (`<past-failures>`), so a key pasted into a task description or an error message quoting a tool's
+ * output would be replayed to a model on a later run. The broad `redactText` set is the right one
+ * here: this is model-facing recall, not the evidence bundle, which keeps its byte-faithful form.
+ */
 function failureRecord(node: DagNode, runId: RunId, err: unknown, message: string): NodeFailureRecord {
   const description = node.metadata['taskDescription'];
   const runTitle = node.metadata['runTitle'];
   return {
     runId,
     nodeId:  node.id,
-    label:   node.label,
-    task:    typeof description === 'string' && description.trim() !== '' ? description : node.label,
-    ...(typeof runTitle === 'string' && runTitle.trim() !== '' ? { runTitle } : {}),
+    label:   redactText(node.label),
+    task:    redactText(typeof description === 'string' && description.trim() !== '' ? description : node.label),
+    ...(typeof runTitle === 'string' && runTitle.trim() !== '' ? { runTitle: redactText(runTitle) } : {}),
     role:    node.agentRole,
     reason:  failureReason(err),
-    message,
+    message: redactText(message),
     ...(err instanceof NodeFailure && err.exitCode !== undefined ? { exitCode: err.exitCode } : {}),
   };
 }

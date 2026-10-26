@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import {
-  closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync,
+  chmodSync, closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync,
+  rmSync, symlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
@@ -487,8 +488,9 @@ function lstatOrRefuse(target: string, declared: string): Stats | undefined {
  * a regular file. `--check` passes on it, because the diff parses; the apply then fails partway
  * through, after a multi-file patch has already changed or deleted the files before it (measured: the
  * other file deleted, exit 128). This is refused here — one of the shapes this walk can see that git
- * would otherwise fail partway after `--check`; the guarantee is the declared set, not atomicity, and
- * a structural conflict git only fails mid-apply is restored in 0.6.0 (WP-3.9, #53). The declared path itself may be a regular file: that is an
+ * would otherwise fail partway after `--check`. The shapes it cannot see are restored: every declared
+ * path is recorded before the apply, and a failed apply puts them all back, so a failed call changed
+ * nothing. The declared path itself may be a regular file: that is an
  * ordinary write to it. The exception is a prefix the *same diff deletes* — `x` (a file) deleted while
  * `x/y` is created: git removes `x` first, then writes beneath it, and the whole patch applies
  * (measured: exit 0, `x` becomes a directory). A deleted prefix is skipped and the walk stops there,
@@ -541,6 +543,143 @@ function refuseSymlinkTargets(root: string, paths: readonly string[], kinds: Sum
       }
     }
   }
+}
+
+/**
+ * One name — a declared path, or a parent of one — as the tree held it before the apply.
+ *
+ * `absent` is a name that did not exist: a file the diff creates, or a directory the apply would
+ * have to create. `bytes` and `mode` are the whole of a regular file's identity for this purpose;
+ * a symlink is recorded by its target because the walk above refuses one at a declared name, and a
+ * restore that cannot rebuild what it found would not be a restore.
+ */
+interface PathSnapshot {
+  readonly path:  string;
+  readonly kind:  'absent' | 'file' | 'directory' | 'symlink';
+  readonly bytes?: Buffer;
+  readonly mode?:  number;
+  readonly target?: string;
+}
+
+/**
+ * What the tree holds at every declared path and every parent of one, before git writes anything.
+ *
+ * A declared path alone is not enough. `x` is a file and the diff deletes it and creates `x/y`: the
+ * apply turns `x` into a directory, and undoing that means removing `x/y` *and* the directory `x`
+ * before `x` can be written back as a file. Recording every prefix gives the restore that order,
+ * and the prefixes that did not exist are exactly the directories the apply creates — the ones a
+ * failed call has to remove again.
+ *
+ * A name that cannot be read refuses the call before anything is written: an apply this tool could
+ * not undo is not one it makes. A FIFO, socket or device at a declared name is refused the same
+ * way, by the `isFile` test at the end.
+ */
+function snapshotDeclared(root: string, declared: readonly string[]): PathSnapshot[] {
+  const entries = new Map<string, PathSnapshot>();
+  const record = (relative: string): void => {
+    if (entries.has(relative)) return;
+    const absolute = path.join(root, relative);
+    let stat: Stats | undefined;
+    try {
+      stat = lstatSync(absolute, { throwIfNoEntry: false });
+    } catch (err: unknown) {
+      // `ENOTDIR` is a component above the name being a regular file, and `ENOENT` a parent removed
+      // between the walk and here. Neither names anything today: a component that is a file cannot
+      // contain this name, and the shapes that legitimately reach the apply in that state are the
+      // ones where the same diff deletes that file (`x` deleted, `x/y` created) — absent is right,
+      // and the restore removes whatever the apply puts there.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOTDIR' || code === 'ENOENT') {
+        entries.set(relative, { path: relative, kind: 'absent' });
+        return;
+      }
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new ToolDeclarationError(
+        `patch.apply refused this call: it would write ${JSON.stringify(relative)}, and recording that `
+        + `path before the apply failed (${detail}). A write this tool cannot undo is not one it makes, `
+        + 'so nothing was written.',
+      );
+    }
+    if (stat === undefined) { entries.set(relative, { path: relative, kind: 'absent' }); return; }
+    if (stat.isSymbolicLink()) {
+      entries.set(relative, { path: relative, kind: 'symlink', target: readlinkSync(absolute) });
+      return;
+    }
+    if (stat.isDirectory()) { entries.set(relative, { path: relative, kind: 'directory' }); return; }
+    if (!stat.isFile()) {
+      throw new ToolDeclarationError(
+        `patch.apply refused this call: ${JSON.stringify(relative)} is not a regular file, a directory `
+        + 'or a symlink, and this tool cannot record what a write to it would replace, so nothing was '
+        + 'written.',
+      );
+    }
+    entries.set(relative, {
+      path: relative, kind: 'file', bytes: readFileSync(absolute), mode: stat.mode & 0o7777,
+    });
+  };
+  for (const p of declared) {
+    const segments = p.split('/');
+    for (let i = 1; i <= segments.length; i++) record(segments.slice(0, i).join('/'));
+  }
+  return [...entries.values()];
+}
+
+/**
+ * Puts every snapshotted name back, and removes what the apply created.
+ *
+ * Deepest first, so a file the apply turned into a directory is emptied from the bottom up; then
+ * files and directories are written back shallowest first. A name whose kind is unchanged is left
+ * in place in the first pass and rewritten in the second, because its content may have changed.
+ *
+ * Returns the names it could not restore rather than throwing: a failure here must not replace the
+ * apply's own error, and the caller reports both. An empty array means the tree is as it was.
+ */
+function restoreTree(root: string, entries: readonly PathSnapshot[]): string[] {
+  const depth = (p: string): number => p.split('/').length;
+  const failures: string[] = [];
+  const note = (p: string, err: unknown): void => {
+    failures.push(`${JSON.stringify(p)} (${err instanceof Error ? err.message : String(err)})`);
+  };
+
+  for (const entry of [...entries].sort((a, b) => depth(b.path) - depth(a.path))) {
+    const absolute = path.join(root, entry.path);
+    try {
+      const now = lstatSync(absolute, { throwIfNoEntry: false });
+      if (now === undefined) continue;
+      const sameKind =
+        (entry.kind === 'file' && now.isFile())
+        || (entry.kind === 'directory' && now.isDirectory())
+        || (entry.kind === 'symlink' && now.isSymbolicLink());
+      if (entry.kind === 'absent' || !sameKind) rmSync(absolute, { recursive: true, force: true });
+    } catch (err) { note(entry.path, err); }
+  }
+
+  for (const entry of [...entries].sort((a, b) => depth(a.path) - depth(b.path))) {
+    if (entry.kind === 'absent') continue;
+    const absolute = path.join(root, entry.path);
+    try {
+      if (entry.kind === 'directory') { mkdirSync(absolute, { recursive: true }); continue; }
+      mkdirSync(path.dirname(absolute), { recursive: true });
+      if (entry.kind === 'symlink') {
+        rmSync(absolute, { force: true });
+        symlinkSync(entry.target!, absolute);
+        continue;
+      }
+      writeFileSync(absolute, entry.bytes!);
+      chmodSync(absolute, entry.mode!);
+    } catch (err) { note(entry.path, err); }
+  }
+  return failures;
+}
+
+/** The apply's own failure, plus what the restore did, as the stderr an agent and a bundle read. */
+function withRestoreNote(result: GitResult, unrestored: readonly string[]): GitResult {
+  const note = unrestored.length === 0
+    ? 'patch.apply: the apply failed part-way; every declared path was restored, so the tree is as it '
+      + 'was before the call.'
+    : 'patch.apply: the apply failed part-way and the restore could not put back '
+      + `${unrestored.join('; ')}. Report this to the operator before trying again.`;
+  return { ...result, stderr: [result.stderr.trimEnd(), note].filter((line) => line !== '').join('\n') };
 }
 
 /**
@@ -659,9 +798,11 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
       refuseSymlinkTargets(ctx.projectRoot, declared, kinds);
 
       // Check first, and apply only what passed: all-or-nothing for everything `--check` verifies,
-      // since no `--reject` is passed. A structural conflict git accepts at `--check` and only fails
-      // mid-apply (the `x`/`x/y` shape) can still write some declared, allowed files; 0.6.0 restores
-      // the declared paths on failure (WP-3.9, #53).
+      // since no `--reject` is passed. `--check` does not model the sections before it, so a
+      // structural conflict can pass the check and fail mid-apply, after earlier sections wrote —
+      // the `x`/`x/y` and `x/y`/`x/y/z` shapes, and a file over a non-empty directory. Every declared
+      // path (and every parent of one) is recorded before the apply, and a failed apply restores
+      // them, so a call that fails is a call that changed nothing.
       const check = runGitApply(sealed, ['--check']);
       if (check.status !== 0) return { declared, result: check };
       if (input.dryRun) {
@@ -670,7 +811,10 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
           result: { status: 0, stdout: `checked ${declared.length} file(s)`, stderr: '' } satisfies GitResult,
         };
       }
-      return { declared, result: runGitApply(sealed, []) };
+      const snapshots = snapshotDeclared(ctx.projectRoot, declared);
+      const applied = runGitApply(sealed, []);
+      if (applied.status === 0) return { declared, result: applied };
+      return { declared, result: withRestoreNote(applied, restoreTree(ctx.projectRoot, snapshots)) };
     });
 
     const result = outcome.result;

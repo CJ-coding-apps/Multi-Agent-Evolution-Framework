@@ -66,7 +66,9 @@ export async function executeToolGated(
   // is not checked.
   if (tool.inputSchema !== undefined) {
     const problem = toolInputProblem(String(tool.id), tool.inputSchema, input);
-    if (problem !== undefined) return answerMalformed(redactSecrets(problem), tool, input, ctx, deps);
+    if (problem !== undefined) {
+      return answerMalformed(redactSecrets(problem), BUILTIN_INPUT_SCHEMA_RULE, tool, input, ctx, deps);
+    }
   }
 
   // The tool's own declaration, computed before any rule is consulted. An error here (a tool
@@ -173,6 +175,7 @@ const BUILTIN_INPUT_SCHEMA_RULE = 'builtin:input-schema';
  */
 async function answerMalformed(
   problem: string,
+  ruleId: string,
   tool: ToolPlugin,
   input: ToolInput,
   ctx: ToolContext,
@@ -183,7 +186,7 @@ async function answerMalformed(
     stderr:   problem,
     exitCode: 1,
     duration: 0,
-    metadata: { refused: true, ruleId: BUILTIN_INPUT_SCHEMA_RULE },
+    metadata: { refused: true, ruleId },
   };
   await deps.attestor.record({
     toolId:         tool.id,
@@ -194,7 +197,7 @@ async function answerMalformed(
     result,
     invokedAt:      new Date(),
     durationMs:     0,
-    policyDecision: { verdict: 'Indeterminate', reason: problem, ruleId: BUILTIN_INPUT_SCHEMA_RULE },
+    policyDecision: { verdict: 'Indeterminate', reason: problem, ruleId },
   });
   return result;
 }

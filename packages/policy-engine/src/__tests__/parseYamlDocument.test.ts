@@ -79,12 +79,37 @@ test('an alias bomb is refused, not expanded', () => {
   assert.match(err.reason, /alias/i);
 });
 
-test('a "__proto__" key is an own key of the value, never its prototype', () => {
-  const { value } = parseYamlDocument('__proto__:\n  polluted: true\nb: 1\n', '/p');
-  assert.ok(typeof value === 'object' && value !== null);
-  assert.equal(Object.getPrototypeOf(value), Object.prototype);
-  assert.ok(Object.keys(value).includes('__proto__'), 'a loader sees the key, so it can refuse it');
+test('a prototype key is refused at parse time, at any depth (WP-3.9 F10)', () => {
+  // `toJS` would make `__proto__` an own key, so the loaded value is not itself poisoned — but a
+  // reader that copies it with a plain assignment turns it into one. Refusing at the one parse
+  // every `.maf/` file goes through makes the safety the loader's, not each reader's to remember.
+  for (const key of ['__proto__', 'constructor', 'prototype']) {
+    const err = syntaxError(`${key}:\n  polluted: true\nb: 1\n`);
+    assert.equal(err.line, 1);
+    assert.ok(err.reason.includes(key), err.reason);
+    assert.match(err.reason, /names a prototype/);
+  }
+  // Nested, inside a flow mapping, and as a value's key rather than the document's own.
+  assert.equal(syntaxError('dag:\n  __proto__:\n    maxConcurrent: 99\n').line, 2);
+  assert.equal(syntaxError('{\n  "a": { "constructor": 1 }\n}\n').line, 2);
+  assert.equal(syntaxError('roles:\n  - role: x\n    prototype: 1\n').line, 3);
   assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
+});
+
+test('a prototype key reached through a YAML alias is refused, not loaded (WP-3.9 G17)', () => {
+  // `a: &k __proto__` anchors a scalar; `*k : 1` uses it as a key. The Pair visitor resolves the
+  // alias before checking, so what is refused is the key it stands for — reading `pair.key.value`
+  // directly would see an Alias node, whose value is undefined, and let the key through to `toJS`.
+  const err = syntaxError('a: &k __proto__\nb:\n  *k : 1\n');
+  assert.equal(err.line, 3);
+  assert.ok(err.reason.includes('__proto__'), err.reason);
+  assert.match(err.reason, /names a prototype/);
+
+  // At the document's own top level, and for the other two names.
+  assert.match(syntaxError('a: &k constructor\n*k : 1\n').reason, /names a prototype/);
+  assert.match(syntaxError('a: &k prototype\nb:\n  *k : 1\n').reason, /names a prototype/);
+  // An alias whose anchor is not a prototype name is ordinary data.
+  assert.deepEqual(parseYamlDocument('a: &k plain\nb:\n  *k : 1\n', '/p').value, { a: 'plain', b: { plain: 1 } });
 });
 
 test('a "<<" merge key is refused at any depth, naming the line, rather than loaded as an ordinary key', () => {

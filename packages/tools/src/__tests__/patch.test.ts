@@ -1015,6 +1015,105 @@ test('a file replaced by a directory in one diff is allowed: git deletes the fil
   assert.equal(readFileSync(path.join(dir, 'x', 'y'), 'utf8'), 'ynew\n');
 });
 
+/**
+ * Every name under `root`, `.git` aside: its kind, and for a file the mode and a digest of its
+ * bytes. Directories are recorded too — a failed apply can turn a file into one, and the restore
+ * has to turn it back — which `snapshot` above deliberately does not.
+ */
+function treeState(root: string): Record<string, string> {
+  const state: Record<string, string> = {};
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (prefix === '' && entry.name === '.git') continue;
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        state[relative] = 'dir';
+        walk(absolute, relative);
+      } else if (entry.isSymbolicLink()) {
+        state[relative] = `link:${readlinkSync(absolute)}`;
+      } else {
+        const mode = (lstatSync(absolute).mode & 0o777).toString(8);
+        const digest = crypto.createHash('sha256').update(readFileSync(absolute)).digest('hex');
+        state[relative] = `file:${mode}:${digest}`;
+      }
+    }
+  };
+  walk(root, '');
+  return state;
+}
+
+/** A fresh committed repository holding `files` (relative name → content, or a directory). */
+function seededRepo(prefix: string, files: Record<string, string | null>): string {
+  const dir = mkdtempSync(path.join(scratch, prefix));
+  for (const [name, body] of Object.entries(files)) {
+    if (body === null) { mkdirSync(path.join(dir, name), { recursive: true }); continue; }
+    mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+    writeFileSync(path.join(dir, name), body, 'utf8');
+  }
+  assert.equal(git(dir, ['init', '-q', '.']).status, 0);
+  assert.equal(git(dir, ['add', '-A']).status, 0);
+  assert.equal(git(dir, [
+    '-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 's',
+  ]).status, 0);
+  return dir;
+}
+
+// The sections of the R4-H1 shapes. `DEL_X` + `NEW_XY` alone applies in full (`x` becomes a
+// directory); `FAIL_C` is a section git accepts at `--check` and fails on mid-apply, because a file
+// cannot replace a directory that still holds `keep`. Appending it makes the earlier sections write
+// and the call fail — the partial write the restore exists for.
+const R4_DEL_X = 'diff --git a/x b/x\ndeleted file mode 100644\n--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-old x\n';
+const R4_NEW_XY = 'diff --git a/x/y b/x/y\nnew file mode 100644\n--- /dev/null\n+++ b/x/y\n@@ -0,0 +1 @@\n+new y\n';
+const R4_DEL_XY = 'diff --git a/x/y b/x/y\ndeleted file mode 100644\n--- a/x/y\n+++ /dev/null\n@@ -1 +0,0 @@\n-old y\n';
+const R4_NEW_XYZ = 'diff --git a/x/y/z b/x/y/z\nnew file mode 100644\n--- /dev/null\n+++ b/x/y/z\n@@ -0,0 +1 @@\n+new z\n';
+const R4_FAIL_C = 'diff --git a/d/a b/d/a\ndeleted file mode 100644\n--- a/d/a\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n'
+  + 'diff --git a/d b/d\nnew file mode 100644\n--- /dev/null\n+++ b/d\n@@ -0,0 +1 @@\n+new d\n';
+
+/**
+ * The four R4-H1 shapes, each on a diff that passes `--check` and fails mid-apply: `x` and `x/y` in
+ * both section orders, `x/y` and `x/y/z`, and a file over a non-empty directory. Each has already
+ * written some declared paths by the time git exits non-zero; the call must leave the tree exactly
+ * as it found it, including the file that the apply turned into a directory.
+ */
+for (const [name, files, diff] of [
+  ['x and x/y, deletion first', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' }, R4_DEL_X + R4_NEW_XY + R4_FAIL_C],
+  ['x and x/y, creation first', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' }, R4_NEW_XY + R4_DEL_X + R4_FAIL_C],
+  ['x/y and x/y/z', { 'x/y': 'old y\n', 'd/a': 'a\n', 'd/keep': 'keep\n' }, R4_DEL_XY + R4_NEW_XYZ + R4_FAIL_C],
+  ['a file over a non-empty directory', { 'd/a': 'a\n', 'd/keep': 'keep\n' }, R4_FAIL_C],
+] as const) {
+  test(`a failed apply restores every declared path: ${name} (R4-H1)`, async () => {
+    const dir = seededRepo('restore-', files as Record<string, string>);
+    const before = treeState(dir);
+    const ctx = ctxIn({ cwd: dir, projectRoot: dir });
+    const declared = tool.declaredPaths({ diff }, ctx);
+    // The shape is one git accepts at --check; without the failing section it applies in full, so
+    // the failure below is the apply's, not the check's.
+    assert.equal(
+      spawnSync('git', ['apply', '--check', '-'], { cwd: dir, input: diff, encoding: 'utf8' }).status,
+      0, 'git passes --check on this diff',
+    );
+
+    const result = await tool.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+    assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+    assert.match(result.stderr, /every declared path was restored/);
+    assert.deepEqual(treeState(dir), before, 'the tree is byte-identical to what it was before the call');
+  });
+}
+
+test('an apply is not snapshotted for a dry run, and a dry run writes nothing (R4-H1)', async () => {
+  // `dryRun` returns after `--check`, so it never needs the restore. The assertion is the tree: a
+  // dry run of the failing shape above changes nothing and reports no restore, because nothing ran.
+  const dir = seededRepo('dry-restore-', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' });
+  const before = treeState(dir);
+  const diff = R4_DEL_X + R4_NEW_XY + R4_FAIL_C;
+  const declared = tool.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+  const result = await tool.execute({ diff, dryRun: true }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+  assert.equal(result.exitCode, 0);
+  assert.doesNotMatch(result.stderr, /restored/);
+  assert.deepEqual(treeState(dir), before);
+});
+
 test('deleting an unrelated file does not exempt a regular-file parent (R5-L1)', async () => {
   // The exemption is scoped to the prefix the same diff deletes: `x` deleted → `x/y` allowed. It must
   // not generalise to "the diff deletes *something*, so any regular-file parent is fine". Here the

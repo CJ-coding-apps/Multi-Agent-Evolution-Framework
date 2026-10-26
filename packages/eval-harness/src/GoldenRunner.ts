@@ -2,6 +2,7 @@ import { cp, mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { snapshotDiff, runIsolatedGit } from '@maf/git-ops';
+import { refusePrototypeKey } from '@maf/types';
 import type { GoldenTask } from './GoldenTask.js';
 import { assertGoldenCorpus } from './GoldenTask.js';
 import { checkUnmodified, runVerifiers } from './verifiers.js';
@@ -79,7 +80,8 @@ export class GoldenRunner {
 
   async loadCorpus(): Promise<GoldenTask[]> {
     const text = await readFile(path.join(this.opts.corpusRoot, 'corpus.json'), 'utf8');
-    const parsed: unknown = JSON.parse(text);
+    // WP-3.9 G5: a corpus is a file the operator names, read through the shared reviver.
+    const parsed: unknown = JSON.parse(text, refusePrototypeKey);
     assertGoldenCorpus(parsed);
     return parsed;
   }

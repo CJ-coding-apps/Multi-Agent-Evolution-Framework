@@ -1,3 +1,4 @@
+import { redactText } from '@maf/types';
 import type { MemorySubgraph, MemoryNode, MemoryEdge, GhostCue } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import type { LcmEngine } from '@maf/lcm';
@@ -85,12 +86,19 @@ function formatSubgraph(subgraph: MemorySubgraph, tokenBudget: number): string {
   return lines.join('\n');
 }
 
+/**
+ * Every string this file renders reaches a model: the assembled block is prepended to the next
+ * agent's system prompt. A node label or property arrives from whatever wrote it — this run's
+ * `Run` node, an agent's own Task, a Failure recorded from tool output — so the text is masked on
+ * the way OUT as well as on the way in (WP-3.9 G1). Masking at the writer alone would leave every
+ * past write, and every future writer that forgets, unmasked.
+ */
 function formatNode(n: MemoryNode): string {
   const props = Object.entries(n.properties)
     .slice(0, 3)
-    .map(([k, v]) => `${k}="${String(v).slice(0, 80)}"`)
+    .map(([k, v]) => `${k}="${redactText(String(v)).slice(0, 80)}"`)
     .join(' ');
-  return `  <node id="${n.id.slice(0, 8)}" kind="${n.kind}" label="${n.label}" ${props}/>`;
+  return `  <node id="${n.id.slice(0, 8)}" kind="${n.kind}" label="${redactText(n.label)}" ${props}/>`;
 }
 
 function formatEdge(e: MemoryEdge): string {
@@ -98,8 +106,10 @@ function formatEdge(e: MemoryEdge): string {
 }
 
 function formatGhosts(ghosts: GhostCue[]): string {
+  // Same channel as a node: this text is prompt. A ghost cue is short by construction, but it is
+  // built from summary content, and the mask belongs wherever prompt text is assembled (G1).
   const lines = ghosts.map((g) =>
-    `  <ghost id="${g.summaryId}" relevance="${g.relevance.toFixed(2)}">${g.cueText}</ghost>`,
+    `  <ghost id="${g.summaryId}" relevance="${g.relevance.toFixed(2)}">${redactText(g.cueText)}</ghost>`,
   );
   return `<ghost-cues>\n${lines.join('\n')}\n</ghost-cues>`;
 }

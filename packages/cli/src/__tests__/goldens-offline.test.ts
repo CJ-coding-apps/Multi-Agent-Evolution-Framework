@@ -14,7 +14,7 @@ import { GraphAwareInjector } from '@maf/prompt-injector';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import { harnessesAssetRoot } from '../assets.js';
-import { incomparable, resolveGoldensHarness, runGoldenSuite } from '../commands/goldens.js';
+import { incomparable, resolveGoldensAdapter, resolveGoldensHarness, runGoldenSuite } from '../commands/goldens.js';
 import { loadHarnessFile, loadStoredHarness } from '../commands/harness.js';
 
 // ORACLE: D-14 / D-24 — `goldens run --adapter scripted` runs on a fresh clone with no keys and
@@ -165,6 +165,20 @@ test('goldens compare refuses results measured on different corpora, or on an un
     const crossCorpus = await compare(dir, a, b);
     assert.equal(crossCorpus.code, 2, 'a cross-corpus compare exits 2, not REJECT (1) or SHIP (0)');
     assert.match(crossCorpus.stderr, /cannot compare: the results were measured on different corpora/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the scripted adapter refuses a corpus that names a prototype key (G5)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-corpus-proto-'));
+  try {
+    await writeFile(path.join(dir, 'corpus.json'), '[{"id":"x","__proto__":{"polluted":true}}]', 'utf8');
+    await assert.rejects(
+      () => resolveGoldensAdapter('scripted', dir),
+      (err: Error) => /the JSON key "__proto__" names a prototype/.test(err.message),
+      'a corpus naming __proto__ is refused as a prototype key, not read as an ordinary task',
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { makeRunId } from '@maf/types';
+import { makeRunId, refusePrototypeKey } from '@maf/types';
+import type { PermissionLevel } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { GoldenRunner, describeJudge, makeLlmJudge } from '@maf/eval-harness';
@@ -43,7 +44,12 @@ export function registerEvolveCommand(program: Command): void {
     .option('--rounds <n>', 'Max evolution rounds', '10')
     .option('--patience <n>', 'Consecutive no-ship rounds before stopping', '3')
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
-    .option('--approve-sensitive', 'Pre-approve edits to safety-adjacent roles (security/reviewer)', false)
+    .option(
+      '--approve-sensitive',
+      'Evaluate edits to safety-adjacent roles (security/reviewer) in full and decide them normally, '
+      + 'instead of archiving them unevaluated as needs-approval; does not approve a tool widening',
+      false,
+    )
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .action(async (opts: EvolveCliOpts, cmd: Command) => {
       const cwd = path.resolve(opts.dir);
@@ -65,7 +71,10 @@ export function registerEvolveCommand(program: Command): void {
         ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
       });
 
-      const corpus: GoldenTask[] = JSON.parse(await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'));
+      // WP-3.9 G5: a corpus file, through the shared reviver like `goldens run` reads it.
+      const corpus: GoldenTask[] = JSON.parse(
+        await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'), refusePrototypeKey,
+      );
 
       const metaGenerate = async (systemPrompt: string, userPrompt: string): Promise<string> => {
         const result = await adapter.invoke({
@@ -132,6 +141,11 @@ export function registerEvolveCommand(program: Command): void {
           ...(r.model ? { model: r.model } : {}),
         })),
         knownToolIds: new Set(createDefaultRegistry().getAll().map((t) => String(t.id))),
+        // What each known tool may do, so the gate can tell a widening that hands a role the tree
+        // (`fs.write`, `test.run`) from one that hands it another way to read.
+        toolPermissions: new Map<string, PermissionLevel>(
+          createDefaultRegistry().getAll().map((t): [string, PermissionLevel] => [String(t.id), t.permissionLevel]),
+        ),
         knownProcessorNames: processorNames,
         judgeOnlyTaskIds: new Set(corpus
           .filter((t) => t.verifiers.every((v) => v.kind === 'llm-judge'))

@@ -6,6 +6,7 @@
 // Nothing here knows a Cypher dialect beyond the queries below, so a later importer for
 // another backend reads the same file.
 import type { GraphQueryRunner, GraphRow } from '@maf/types';
+import { PrototypeKeyError, refusePrototypeKey } from '@maf/types';
 
 export const GRAPH_EXPORT_FORMAT = 'maf-graph';
 export const GRAPH_EXPORT_FORMAT_VERSION = 1;
@@ -136,8 +137,11 @@ function assertExportable(nodes: ExportedNode[], edges: ExportedEdge[]): void {
 export function parseGraphExport(text: string, source: string): GraphExport {
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    // WP-3.9 G5: a graph export is an operator's file read from disk, so it goes through the
+    // shared reviver. A refused key is named as what it is, not reported as malformed JSON.
+    value = JSON.parse(text, refusePrototypeKey);
   } catch (err) {
+    if (err instanceof PrototypeKeyError) throw new GraphTransferError(`${source} is refused: ${err.message}.`);
     throw new GraphTransferError(`${source} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
   const file = asRecord(value, source);
@@ -336,8 +340,12 @@ function requiredString(value: unknown, where: string): string {
 function parseJsonObject(text: string, what: string): Record<string, unknown> {
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    // WP-3.9 G5: a stored properties blob is read back through the same reviver as a file, so a
+    // row naming a prototype key is refused at export rather than carried into the export file.
+    value = JSON.parse(text, refusePrototypeKey);
   } catch (err) {
+    if (err instanceof PrototypeKeyError)
+      throw new GraphTransferError(`${what} is refused: ${err.message}. Refusing to continue.`);
     throw new GraphTransferError(
       `${what} is not valid JSON (${err instanceof Error ? err.message : String(err)}), so the export would lose it. Refusing to continue: ${text.slice(0, 120)}`,
     );
