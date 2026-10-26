@@ -175,9 +175,12 @@ states each as implemented.
   `--version` then `--help` — both with `backendEnv()`, both bounded at 10 s — and refuses unless
   `--help` lists `--tools`. A failure names the resolved path and the version found, so a stale
   binary is distinguishable from a missing one.
-- **`packages/cli/src/commands/run.ts`** (lines 155–176) — `maf run` looks the adapter up by name
-  (`lookupAdapter`, a refusal that names only an unknown adapter), calls preflight exactly once, and
-  then plans: before a worktree, a store or a plan exists. Preflight runs *instead of* the
+- **`packages/cli/src/commands/run.ts`** (lines 209–231) — `maf run` looks the adapter up by name
+  (`lookupAdapter`, a refusal that names only an unknown adapter), reads and validates a
+  `--plan-from` spec if one was given, and only then calls preflight exactly once and plans: before
+  a worktree, a store or a plan exists. The order is deliberate (D-59 merge duty 5): a malformed
+  spec is refused without resolving or probing any backend, so the operator's own file is answered
+  first and a wrong file cannot be reported as a wrong binary. Preflight runs *instead of* the
   availability check for an adapter that has one (G15) — a passing preflight has already proved the
   binary runs and takes the argv, which is what `isAvailable` was asking — and an adapter without a
   preflight still gets `resolveAdapter`. A report is said as
@@ -188,6 +191,11 @@ states each as implemented.
   case runs with an empty PATH. Both stand-in probes are also proved to receive `backendEnv()`
   (round 2, G6). `packages/cli/src/__tests__/preflight-wiring.test.ts` drives a fake adapter
   through `maf run` and proves the call happens once with zero adapter calls behind it.
+- **Proof of the order (round 3).** `packages/cli/src/__tests__/plan-from.test.ts` runs every
+  malformed spec in its refusal table through both adapter shapes — one with a `preflight`, one
+  with only `isAvailable` — and asserts all three counts stay zero: the availability check, the
+  preflight probes and any invoke. Measured: restoring the pre-round-3 order (preflight before the
+  spec) fails this test on the first count (`expected 0, actual 1`).
 - **Proof the refusal stops the run (round 2, G7).** A second test in the same file runs the
   **real** `ClaudeAdapter` — not a stub whose `preflight()` throws — against a stand-in `claude`
   on PATH whose `--help` has no `--tools`, through `driveRun`, which is the wiring `main.ts`
@@ -272,15 +280,17 @@ states each as implemented.
   the harness store's `<sha>.yaml` body and its `index.json`; the CLI's harness files (`--harness
   <file>` and the committed `default-<sha>.json`) and goldens result files; the golden corpus
   (`corpus.json`) in `GoldenRunner`, `maf evolve` and `maf goldens`, and `scripted.json` in the
-  scripted adapter; a DAG workflow spec read as JSON; an attestation bundle and an in-toto
-  statement; the evolver digester's graph-properties column; and the three memory-graph property
-  readers. A refused document fails as a refusal, not as unparseable input: the store names the
-  key and the file, the bundle says what it refused, and a properties blob is read as empty with
-  the reason printed rather than as an object with one. The store's `readIndex` answers the same
-  way as for an unparseable index — **no id resolves** — while the harness stays reachable by its
-  sha, because the index is a lookup and the content is addressed by the hash.
+  scripted adapter; a DAG workflow spec read as JSON (`DagParser.fromYamlText`, and `--plan-from`'s
+  file in `DagSynthesizer.fromFile`); an attestation bundle and an in-toto statement; a graph export
+  file and the properties blobs it carries (`GraphTransfer`); the evolver digester's graph-properties
+  column; and the three memory-graph property readers. A refused document fails as a refusal, not as
+  unparseable input: the store names the key and the file, the bundle says what it refused, the
+  `--plan-from` reader names the spec file, the export reader names the row, and a properties blob
+  is read as empty with the reason printed rather than as an object with one. The store's `readIndex`
+  answers the same way as for an unparseable index — **no id resolves** — while the harness stays
+  reachable by its sha, because the index is a lookup and the content is addressed by the hash.
 - **Explained, not routed** — the remaining `JSON.parse` calls in `packages/*/src` parse what is
-  not a configuration file. The count is measured, not sampled: 30 call sites, 16 routed and 14
+  not a configuration file. The count is measured, not sampled: 33 call sites, 19 routed and 14
   here. Ten are model or provider output, each read field by field and failing closed on a wrong
   shape: the tool-call block (`adapters/base/src/turnProtocol.ts`), the JSON response and the
   streamed chunk in `OllamaAdapter` and `OpenRouterAdapter`, the judge's verdict
@@ -303,7 +313,14 @@ states each as implemented.
   harness-file read fails only the first test, and removing it from the index read fails only the
   second. The third reader was the gap round 2 found — `GoldenRunner` and `maf evolve` routed
   their corpus read and `resolveGoldensAdapter` did not — so the sentence above was false for one
-  of the three names it listed until that call site was fixed.
+  of the three names it listed until that call site was fixed. Round 3 closed the remaining three:
+  `packages/planning-agent/src/__tests__/DagSynthesizer.test.ts` refuses a spec whose node
+  `metadata` names `__proto__` (and an edge-level `constructor`) with the file and key named, and
+  asserts it is not reported as "could not read"; `packages/memory-graph/src/__tests__/
+  graph-transfer.test.ts` refuses an export file naming `__proto__` in a node's properties (and
+  `constructor` inside edge metadata) and a stored properties blob naming one, which the export
+  refuses to carry into a new file. Removing the reviver at each of the three sites was measured:
+  each owning test fails, and the other tests in its file stay green.
 
 ## Decisions
 
@@ -378,25 +395,43 @@ it started survive it; and `ToolContext` carries no abort signal (G16a), so a `t
 or abandoned node leaves in flight runs until its own timeout, at most the fifteen-minute ceiling.
 Adding `signal?` to `ToolContext` is WP-3.5's decision.
 
-**(4) `patch.apply` declares what `patch` will open, before policy runs.** `declaredPaths` is a
-pure function of the input: `extractDiffPaths` reads `---`/`+++`, `diff --git` (both sides of a
-rename), context-diff and `Index:` headers, cuts each name at the first unquoted TAB (the normal
-output of `diff -u` is `+++ b/Cargo.lock<TAB>2026-01-01 …`), skips `/dev/null` and a context
-diff's hunk separators, ignores any line it does not recognise, and refuses the diff when no name
-survives the strip; `patchWritePaths` adds each target's `.orig` and `.rej` siblings. The policy
-layer calls it before `execute`, so a Deny rule sees the files the command will write. A diff
-naming `.git` is refused before policy — as `fs.write` does — and a target that resolves into
-`.git` through a link inside the root is refused before the temp file exists. The
-temp diff is written `{ mode: 0o600, flag: 'wx' }` and removed in `finally`; `--no-backup-if-mismatch`
-stops a `.orig` backup, and rejects go to a named `0600` file in the temp dir that is read and
-deleted. Rejected: extracting the paths *inside* `execute` and assigning `input.paths` there — the
-policy engine evaluates before `execute`, so it saw `paths: []` and the shipped `protect-secrets`
-rule was skipped for the one tool it had been extended to cover. Rejected: moving the extraction
-earlier for `patch.apply` alone — it fixes one tool and leaves the next input-mutating tool with
-the same hole; the declaration is an interface member instead. Part A's five HIGH findings are not
-addressed on this branch: they are built on `hotfix/0.5.1` if CJ approves (and reach this branch by
-merge-forward) or built here otherwise. This entry records the design that is here and claims
-nothing about those.
+**(4) `patch.apply` declares what `git apply` will write, before policy runs, and undoes a
+part-applied change.** `git apply` is the applier (WP-3.9's header parser was superseded by the
+0.5.1 hotfix, which reached this branch by merge-forward, CJ). Each call opens a sealed context: a
+throwaway empty `GIT_DIR`, `GIT_WORK_TREE` at the worktree, system and global configuration off, and
+`-c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null`, so no
+filter driver, hook or fsmonitor runs even when the repository defines one. The declared set is
+git's own answer rather than a reading of the headers: `--numstat -z` forward and `-R --numstat -z`
+in the reverse direction (every path either direction would write), plus `--summary -z` for the
+create/delete/rename forms a path list cannot describe. The policy-approved set and the set
+`execute` derives are compared both ways, and a call whose sets differ is refused before `--check`
+and before anything is written. `--check` runs before the apply, so a diff git rejects there writes
+nothing; absolute names and names containing `..` are refused by name; the temp diff is `0600` in a
+private directory and removed in `finally`.
+
+A structural conflict can still pass `--check` and fail part-way: `git apply --check` validates
+each section against the current tree without simulating the sections before it, so a diff that
+creates `x` and `x/y` (either order), or `x/y` and `x/y/z`, or a file where a non-empty directory
+is, can have written earlier sections when a later one fails — every one of them declared and
+allowed. Before the apply, each declared path and every ancestor is recorded: content and mode for
+a file, the target for a symlink, the kind for a directory, absence for a name that does not
+exist. On a non-zero apply the recorded names are removed deepest-first and recreated
+shallowest-first, a name of unchanged kind being rewritten because its content may have changed,
+and directories the apply created are removed. If a declared path cannot be recorded, the call is
+refused before anything is written: a write the tool cannot undo is not one it makes. Rejected:
+extracting the paths *inside* `execute` and assigning `input.paths` there — the policy engine
+evaluates before `execute`, so it saw `paths: []` and the shipped `protect-secrets` rule was skipped
+for the one tool it had been extended to cover. Rejected: moving the extraction earlier for
+`patch.apply` alone — it fixes one tool and leaves the next input-mutating tool with the same hole;
+the declaration is an interface member instead. Rejected: parsing the headers instead of asking
+git — a parser can only see the forms it models, while `--numstat`/`--summary` answer for the bytes
+the same git will apply. Rejected: undoing a part-applied change by applying the reverse diff — the
+reverse fails on the same sections that failed forwards and needs every applied section to be
+exactly reversible; the snapshot is bounded by the declared set, which is the set policy saw.
+Rejected: no restore — a part-applied tree is neither the old one nor the new, and 0.5.1's
+`CHANGELOG.md` promises the restore. Limit, recorded: the restore covers the declared paths and
+their ancestors and nothing else, because a sealed `git apply` writes nothing else; a restore that
+itself fails is reported by name on stderr, beside the apply's own error rather than replacing it.
 
 **(5) A candidate that widens a role with a write tool is the operator's decision, not the
 evolver's refusal.** Stage `b4-write-tool-widening` answered `reject`: a candidate that added a
@@ -454,7 +489,7 @@ its file with a bare `JSON.parse`. That is the shape of rule that survives only 
 reader is added: the YAML side already had one implementation, and the JSON side had one copy
 per caller. The reviver now lives in `@maf/types` and every reader that takes a path from the
 operator or from `.maf/` uses it, so `__proto__` cannot enter the harness store, the index, a
-corpus, a bundle, a spec or a graph-properties blob. Two behaviours follow from the ruling and
+corpus, a bundle, a spec, a graph export file or a graph-properties blob. Two behaviours follow from the ruling and
 are not incidental: a refused key is reported as a refusal and never as "not parseable" — an
 operator reading "not parseable" would edit JSON that was syntactically fine — and a reader that
 fails open on unparseable input (the index, the property blobs) fails open on a refused one too,
@@ -520,9 +555,11 @@ The spec (`docs/BUILD_PLAN.md`, WP-3.9) lists `ProcessSpawner.ts`,
 | `packages/dag-runner/src/DagParser.ts` | A JSON workflow spec gets the same refusal through a `JSON.parse` reviver. |
 | `packages/dag-runner/src/DagRunner.ts` | `failureRecord` redacts before the record reaches the memory graph. |
 | `packages/planning-agent/src/{RetrievalAugmentedPlanner,FailurePatternDetector}.ts` | Both `<past-failures>` renderers redact again on the way into a prompt. |
+| `packages/planning-agent/src/DagSynthesizer.ts` | `--plan-from`'s spec file (content merged from #54) is read through the shared reviver; a refused key is reported as a refusal naming the spec file (round 3, D-59 merge duty 1). |
+| `packages/memory-graph/src/GraphTransfer.ts` | A graph export file and the stored properties blobs it carries (WP-3.8, merged base) go through the same reviver; a refused key is named and the import or export refuses (round 3, G5). |
 | `packages/evolver/src/{gate,loop,index}.ts` | The widening rule (exported as `gateWidening`), the required permission map, and the pre-spend check. |
 | `packages/cli/src/commands/evolve.ts` | Supplies each tool's `permissionLevel` from `createDefaultRegistry()`. |
-| Tests | `packages/adapters/base/src/__tests__/ProcessSpawner.test.ts`, `packages/adapters/{claude,codex,gemini}/src/__tests__/backend-env.test.ts`, `packages/adapters/claude/src/__tests__/preflight.test.ts` (claude only: it is the only adapter with a `preflight`), `packages/types/src/__tests__/childEnv.test.ts`, `packages/tools/src/__tests__/{patch,test-runner,git-args,grep-args,worktree-confinement,input-schema}.test.ts`, `packages/git-ops/src/__tests__/SnapshotDiff.test.ts`, `packages/eval-harness/src/__tests__/verifier-env.test.ts`, `packages/cli/src/__tests__/{preflight-wiring,fixture-tests-env,ConfigLoader,approval-gate-stack}.test.ts`, `packages/policy-engine/src/__tests__/parseYamlDocument.test.ts`, `packages/dag-runner/src/__tests__/{spec-keys,failure-recorder}.test.ts`, `packages/roles/src/__tests__/roles-file-loading.test.ts`, `packages/planning-agent/src/__tests__/failure-recall.test.ts`, `packages/tool-loop/src/__tests__/declaredPaths.test.ts`, `packages/evolver/src/__tests__/evolver.test.ts`. |
+| Tests | `packages/adapters/base/src/__tests__/ProcessSpawner.test.ts`, `packages/adapters/{claude,codex,gemini}/src/__tests__/backend-env.test.ts`, `packages/adapters/claude/src/__tests__/preflight.test.ts` (claude only: it is the only adapter with a `preflight`), `packages/types/src/__tests__/childEnv.test.ts`, `packages/tools/src/__tests__/{patch,test-runner,git-args,grep-args,worktree-confinement,input-schema}.test.ts`, `packages/git-ops/src/__tests__/SnapshotDiff.test.ts`, `packages/eval-harness/src/__tests__/verifier-env.test.ts`, `packages/cli/src/__tests__/{preflight-wiring,fixture-tests-env,ConfigLoader,approval-gate-stack}.test.ts`, `packages/policy-engine/src/__tests__/parseYamlDocument.test.ts`, `packages/dag-runner/src/__tests__/{spec-keys,failure-recorder}.test.ts`, `packages/roles/src/__tests__/roles-file-loading.test.ts`, `packages/planning-agent/src/__tests__/{failure-recall,DagSynthesizer}.test.ts`, `packages/memory-graph/src/__tests__/graph-transfer.test.ts`, `packages/cli/src/__tests__/{preflight-wiring,plan-from}.test.ts` (both listed above), `packages/tool-loop/src/__tests__/declaredPaths.test.ts`, `packages/evolver/src/__tests__/evolver.test.ts`. |
 | `docs/SECURITY.md` | States each boundary as implemented, including the three limits on the group kill. |
 | `docs/changes/WP-3.9.md` | This fragment. |
 
@@ -532,15 +569,10 @@ than claimed as a change to the loader.
 
 ### Overlap with WP-3.2 (#52)
 
-Measured against `wp/3.2-lcm` at `ae45750` with `git merge-tree`: eight files are changed by both
-branches — `packages/cli/src/__tests__/approval-gate-stack.test.ts`,
-`packages/cli/src/__tests__/ConfigLoader.test.ts`, `packages/cli/src/commands/{evolve,run,inprocessDemo}.ts`,
-`packages/git-ops/src/SnapshotDiff.ts`, `packages/tools/src/__tests__/input-schema.test.ts` and
-`packages/types/src/index.ts`. Seven auto-merge. The one conflict is
-`approval-gate-stack.test.ts`, and it is comment-only: both branches added a comment above the same
-`const mafDir` line (this branch saying the directory is created here; WP-3.2 saying the stores do
-not create it). Keeping either comment resolves it; the rest of what either side adds there —
-including the `mkdir` call and its import — is identical.
+An earlier draft measured eight shared files at `ae45750`; the branch has moved and #52 has grown
+since. The PR body carries the overlap re-measured at the head this branch is handed back at
+(`git merge-tree --write-tree HEAD wp/3.2-lcm`), with the two conflicts and the one remaining merge
+duty — the injector's redact-then-escape composition and `formatSummaries`'s render-time mask.
 
 ### Overlap with WP-3.6 (#54) and WP-3.7
 
@@ -599,12 +631,13 @@ flag-support check was added afterwards.
 - A `needs-approval` from the widening rule has no flag that grants it: `maf evolve` records the
   tools and the role and stops. The operator grants a widening by authoring it; there is no
   `--approve-widening`, and this branch does not add one.
-- `preflight` is asked once, by `maf run`, before anything is planned; `goldens` and `evolve` do not
-  ask it. It proves `claude --help` lists `--tools`; a binary that lists the flag and rejects it at
-  run time still fails at the first node — one sentence later than before.
-- The prototype-key refusal covers keys a **file** names. `DagParser.fromSpec` takes an
-  already-built object from a programmatic caller and parses no text; that caller is trusted by
-  construction.
+- `preflight` is asked once, by `maf run`, after a `--plan-from` spec (if any) is accepted and
+  before anything is planned; `goldens` and `evolve` do not ask it. It proves `claude --help` lists
+  `--tools`; a binary that lists the flag and rejects it at run time still fails at the first node —
+  one sentence later than before.
+- The prototype-key refusal covers keys a **file** names: every reader above parses text.
+  `DagParser.fromSpec` takes an already-built object from a programmatic caller and parses no text;
+  that caller is trusted by construction.
 - Redaction at the memory boundaries is pattern-based, on the broad `redactText` set rather than
   credentials-only, applied on write and again on read-back. A secret in a format no pattern
   recognises is masked by neither.
