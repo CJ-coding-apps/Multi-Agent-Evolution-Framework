@@ -784,10 +784,14 @@ map used to skip the rule silently, and a tool the map does not name is treated 
 never as `read`.
 
 The only route to a write tool is the operator. An edit whose target role is safety-adjacent
-(`security`, `reviewer`) is routed to the operator at stage `b3`, before any evaluation spend, and the
-gate returns `needs-approval` for one that reaches it; the loop records that outcome and does not ship
-the candidate. `--approve-sensitive` decides only whether such an edit is evaluated at all — it is not
-a shipping approval, and `maf evolve` has no interactive prompt. An unknown tool id never reaches the
+(`security`, `reviewer`) is routed to the operator at stage `b3` unless the run was started with
+`--approve-sensitive`: without the flag the loop records `needs-approval` after the planner call and
+evaluates nothing; with it the edit is evaluated in full — critic, smoke test, golden suite — and
+receives the verdict those stages give any other candidate, which can be `ship`. The flag approves
+the evaluation, not the shipping: nothing about a sensitive role's result is exempt from the normal
+gate, and `maf evolve` has no interactive prompt, so without the flag there is no way to answer the
+question inside the run. The flag does not touch the widening rule below. An unknown tool id never
+reaches the
 widening rule: the invariant stage runs first and refuses the candidate (`reject`, stage
 `b-invariants`), naming the tools the registry does know. An unknown id is a malformed candidate, not
 a widening — the widening rule treats a tool the permission map does not name as `dangerous`, and

@@ -49,7 +49,12 @@ export interface EvolveOptions {
   knownModels?: ReadonlySet<string>;
   safetyAdjacentRoles?: ReadonlySet<string>;
   judgeOnlyTaskIds?: ReadonlySet<string>;
-  /** When false (default), sensitive edits are archived without evaluation. */
+  /**
+   * When true, an edit targeting a safety-adjacent role is evaluated in full — critic, smoke test,
+   * golden suite — and receives the normal verdict. When false (default) it is archived
+   * unevaluated as `needs-approval`. It does not approve a tool widening: stage b4 asks the
+   * operator whatever this says.
+   */
   approveSensitive?: boolean;
 }
 
@@ -154,6 +159,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
         toolPermissions: opts.toolPermissions,
         knownProcessorNames: opts.knownProcessorNames,
         safetyAdjacentRoles: safetyAdjacent,
+        approveSensitive: opts.approveSensitive === true,
         ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
       });
       return veto ? { veto } : { candidate };
@@ -295,6 +301,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       toolPermissions: opts.toolPermissions,
       knownProcessorNames: opts.knownProcessorNames,
       safetyAdjacentRoles: safetyAdjacent,
+      approveSensitive: opts.approveSensitive === true,
       ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
       ...(opts.judgeOnlyTaskIds ? { judgeOnlyTaskIds: opts.judgeOnlyTaskIds } : {}),
     });

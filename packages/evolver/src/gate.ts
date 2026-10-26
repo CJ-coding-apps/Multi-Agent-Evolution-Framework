@@ -40,6 +40,15 @@ export interface GateContext {
   knownModels?: ReadonlySet<string>;
   /** Roles whose prompts never change without human approval. */
   safetyAdjacentRoles?: ReadonlySet<string>;
+  /**
+   * The operator has approved edits to safety-adjacent roles for this run (WP-3.9 H1).
+   *
+   * It changes stage b3 and nothing else: with it set, such an edit is evaluated like any other
+   * and its verdict comes from the normal stages; without it, b3 asks the operator before any
+   * evaluation spend. Stage b4 never consults it — a tool widening needs approval whatever the
+   * operator approved for role prompts.
+   */
+  approveSensitive?: boolean;
   /** Golden task ids whose verifiers are all llm-judge (rule e needs this). */
   judgeOnlyTaskIds?: ReadonlySet<string>;
 }
@@ -153,8 +162,14 @@ export function gateStatic(ctx: GateStaticContext): GateVeto | undefined {
   }
 
   // ── stage b3: human approval for sensitive mutations (plan §6.3 amended) ──
+  // The approval is `approveSensitive`, not the mere existence of this stage: it says the operator
+  // has already decided that edits to these roles may be evaluated, and with it set the candidate
+  // goes through the critic, the smoke test and the golden suite like any other. Without it the
+  // answer is `needs-approval` and nothing is evaluated. Before WP-3.9 H1 this stage fired
+  // unconditionally, so the flag had no effect on the verdict — a caller passed the approval and
+  // was still stopped here, before the critic.
   const safetyAdjacent = ctx.safetyAdjacentRoles ?? new Set(['security', 'reviewer']);
-  if ('role' in manifest.edit && safetyAdjacent.has(manifest.edit.role)) {
+  if (!ctx.approveSensitive && 'role' in manifest.edit && safetyAdjacent.has(manifest.edit.role)) {
     return {
       verdict: 'needs-approval',
       reason: `edit targets safety-adjacent role "${manifest.edit.role}" (§6.3: prompt/config edits here require operator approval)`,
@@ -162,8 +177,9 @@ export function gateStatic(ctx: GateStaticContext): GateVeto | undefined {
   }
 
   // ── stage b4: widening an ordinary role into a writer needs the operator ──
-  // b3 has already routed every edit that targets a safety-adjacent role to the operator, so an
-  // edit still here targets an ordinary role. Widening that role's surface with a tool that can
+  // Either the edit targets an ordinary role, or the operator pre-approved sensitive edits and b3
+  // let it through; a safety-adjacent role's allowlist can widen, and that still needs the
+  // operator. Widening a role's surface with a tool that can
   // change the tree or run code is the mutation the evolver may not perform on its own: it may
   // tune a prompt, a budget or a model, but it may not make a reader a writer. The verdict is
   // `needs-approval` rather than `reject` (WP-3.9 F8): the operator may grant the tool, and a

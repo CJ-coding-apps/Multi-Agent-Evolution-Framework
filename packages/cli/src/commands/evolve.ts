@@ -44,7 +44,12 @@ export function registerEvolveCommand(program: Command): void {
     .option('--rounds <n>', 'Max evolution rounds', '10')
     .option('--patience <n>', 'Consecutive no-ship rounds before stopping', '3')
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
-    .option('--approve-sensitive', 'Pre-approve edits to safety-adjacent roles (security/reviewer)', false)
+    .option(
+      '--approve-sensitive',
+      'Evaluate edits to safety-adjacent roles (security/reviewer) in full and decide them normally, '
+      + 'instead of archiving them unevaluated as needs-approval; does not approve a tool widening',
+      false,
+    )
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .action(async (opts: EvolveCliOpts, cmd: Command) => {
       const cwd = path.resolve(opts.dir);

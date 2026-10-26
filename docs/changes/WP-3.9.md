@@ -393,8 +393,9 @@ human may make. Nothing else about the rule changes: the widening is still judge
 registry `permissionLevel`, still taken as the candidate's surface minus the current one, and a
 candidate still cannot ship itself — `maf evolve` records `needs-approval` with the tools and the
 role, and moves on without a smoke test or a golden run. No flag grants this particular approval:
-`--approve-sensitive` covers b3's safety-adjacent routing, and the widening rule runs whether or
-not it is set. What changed is who answers the question. WP-3.7's live row holds on this verdict —
+`--approve-sensitive` decides stage b3 and nothing else — with it set, an edit targeting a
+safety-adjacent role is evaluated and decided normally — and the widening rule runs whether or not
+it is set. What changed is who answers the question. WP-3.7's live row holds on this verdict —
 the row is the end-to-end check on what an operator is offered, and it is why this ruling is
 recorded rather than left as an internal detail. The order the gate asks in — invariants first,
 then b4, both the moment the manifest exists — is its own entry below.
@@ -573,9 +574,13 @@ flag-support check was added afterwards.
 - `patch.apply` is still confined by the policy engine only (the tool does not re-resolve the paths
   it declares), and a direct call that skips the policy layer gets no confinement. `docs/SECURITY.md`
   already states this; the declaration above is what lets a path rule see the files at all.
-- `--approve-sensitive` changes only whether an edit targeting a safety-adjacent role is evaluated;
-  `maf evolve` has no interactive approval and does not ship such a candidate. `docs/SECURITY.md`
-  states this rather than implying a path that would ship one.
+- `--approve-sensitive` changes only whether an edit targeting a safety-adjacent role is evaluated:
+  without it the round is archived unevaluated as `needs-approval`; with it the candidate is
+  evaluated in full and can ship on the ordinary gate's verdict. `maf evolve` has no interactive
+  approval, so without the flag there is no way to answer the question inside the run. The flag
+  decides stage b3 only — a tool widening still needs the operator. `docs/SECURITY.md` states this
+  rather than implying either that the flag approves a ship or that an approved candidate cannot
+  reach one.
 - A `needs-approval` from the widening rule has no flag that grants it: `maf evolve` records the
   tools and the role and stops. The operator grants a widening by authoring it; there is no
   `--approve-widening`, and this branch does not add one.

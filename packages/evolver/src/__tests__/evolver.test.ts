@@ -360,17 +360,89 @@ test('loop: smoke crash archives the candidate and the loop continues', async ()
 
 test('loop: sensitive-role edit archived unevaluated without approval', async () => {
   let goldensRan = 0;
+  let criticCalls = 0;
+  let smoked = 0;
+  let plannerCalls = 0;
   const opts = loopOpts({
-    metaGenerate: mockMeta([manifestJson({
-      kind: 'edit_role_prompt', role: 'security', newPrompt: 'x', rationale: 'r',
-    })]),
+    metaGenerate: async (system: string): Promise<string> => {
+      if (system.includes('critic')) { criticCalls++; return '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+      plannerCalls++;
+      return manifestJson({
+        kind: 'edit_role_prompt', role: 'security', newPrompt: 'x', rationale: 'r',
+      });
+    },
     runGoldens: async (h) => { goldensRan++; return suite(['t1'], h.sha); },
+    runSmoke: async () => { smoked++; },
     patience: 1,
   });
   // baseline run counts once; after that, no evaluation for the sensitive edit
   const report = await evolve(opts);
   assert.equal(report.rounds[0]?.outcome, 'needs-approval');
+  assert.match(report.rounds[0]?.note ?? '', /archived unevaluated/);
+  assert.equal(plannerCalls, 1, 'the planner call is the only model call');
+  assert.equal(criticCalls, 0, 'no critic ran for an unapproved sensitive edit');
+  assert.equal(smoked, 0, 'no smoke test ran for an unapproved sensitive edit');
   assert.ok(goldensRan <= 1, 'no evaluation spend on unapproved sensitive edits');
+});
+
+// WP-3.9 H1. `--approve-sensitive` had stopped meaning anything: the loop's pre-evaluation guard
+// was keyed on the flag, but gate b3 fired unconditionally right after it, so an approved edit was
+// stopped before the critic anyway. The flag now decides only b3, and with it set the candidate
+// goes through the whole evaluation and gets the verdict the ordinary stages give it.
+test('loop: an approved sensitive-role edit is evaluated in full and ships on its merits (WP-3.9 H1)', async () => {
+  let goldensRan = 0;
+  let criticCalls = 0;
+  let smoked = 0;
+  const opts = loopOpts({
+    approveSensitive: true,
+    maxRounds: 1,
+    metaGenerate: async (system: string): Promise<string> => {
+      if (system.includes('critic')) { criticCalls++; return '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+      return manifestJson({
+        kind: 'edit_role_prompt', role: 'security', newPrompt: 'be thorough when auditing', rationale: 'r',
+      }, ['t2']);
+    },
+    // model: the harness solves t2 IFF the SECURITY prompt is the revised one
+    runGoldens: async (h) => {
+      goldensRan++;
+      const thorough = h.roleSet.roles.find((r) => r.role === 'security')?.systemPrompt?.includes('thorough');
+      const solved = thorough ? ['t1', 't2'] : ['t1'];
+      return suite(solved, h.sha);
+    },
+    runSmoke: async () => { smoked++; },
+    onShip: async () => {},
+    patience: 1,
+  });
+  const report = await evolve(opts);
+  assert.equal(criticCalls, 1, 'the critic ran for an approved sensitive edit');
+  assert.equal(smoked, 1, 'the smoke test ran for an approved sensitive edit');
+  assert.equal(goldensRan, 2, 'the baseline and the candidate were both evaluated');
+  assert.equal(report.rounds[0]?.outcome, 'ship', 'the normal verdict, not needs-approval');
+  assert.equal(report.ships, 1);
+});
+
+test('loop: --approve-sensitive does not approve a tool widening (b4 unchanged, WP-3.9 H1)', async () => {
+  let criticCalls = 0;
+  let smoked = 0;
+  const evaluated: string[] = [];
+  const opts = loopOpts({
+    approveSensitive: true,
+    metaGenerate: async (system: string): Promise<string> => {
+      if (system.includes('critic')) { criticCalls++; return '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+      return manifestJson({
+        kind: 'adjust_tool_allowlist', role: 'security', add: ['test.run'], remove: [],
+      }, ['t2']);
+    },
+    runSmoke: async () => { smoked++; },
+    runGoldens: async (h) => { evaluated.push(h.sha); return suite(['t1'], h.sha); },
+    patience: 1,
+  });
+  const report = await evolve(opts);
+  assert.equal(report.rounds[0]?.outcome, 'needs-approval');
+  assert.match(report.rounds[0]?.note ?? '', /b4-write-tool-widening/);
+  assert.equal(criticCalls, 0, 'the widening still stops the round before the critic');
+  assert.equal(smoked, 0);
+  assert.deepEqual(evaluated, [CURRENT.sha], 'only the baseline was evaluated');
 });
 
 test('loop: a widening is caught BEFORE the critic, the smoke test and the golden suite (WP-3.9 G3)', async () => {
