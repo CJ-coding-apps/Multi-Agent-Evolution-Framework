@@ -206,10 +206,23 @@ const LEAKING_RUNNER = [
   '',
 ].join('\n');
 
+/**
+ * How long a fixture gets to record its pid. The chain is four processes deep (this suite → the
+ * parent → `node --test` → the file child → the grandchild), and process startup is what the wait
+ * is really for. Measured on this host: 0.5–1.1 s with the suite quiet, but 17 s for a single
+ * `node` script when `patch.test.js` was running beside it (macOS process-spawn contention), and
+ * over 30 s for the whole fixture under the full nine-file suite — four tests went red with "the
+ * grandchild recorded its pid" at the 2 s the first draft allowed, while the package passed
+ * serially and the same suite passed on Linux in the same state. The poll stops as soon as the
+ * file appears, so the budget costs nothing when the machine is quiet; a fixture that never writes
+ * the pid still fails, only later.
+ */
+const PID_WAIT_MS = 120_000;
+
 /** The pid a fixture recorded, waiting until it is on disk. */
 async function waitForPid(file: string): Promise<number> {
   let pid: number | undefined;
-  for (let i = 0; i < 40 && pid === undefined; i++) {
+  for (let i = 0; i < PID_WAIT_MS / 50 && pid === undefined; i++) {
     pid = await readFile(file, 'utf8').then((s) => Number(s.trim()) || undefined, () => undefined);
     if (pid === undefined) await new Promise((r) => setTimeout(r, 50));
   }
@@ -304,7 +317,11 @@ test('a passing suite is not reported as a timeout when a helper holds its stdou
     JSON.stringify({ name: 't', version: '1.0.0', scripts: { test: 'node leave.js' } }));
   await writeFile(path.join(root, 'leave.js'), INHERITING_SUITE);
 
-  const result = await new TestRunnerTool().execute({ runner: 'npm', timeout: 8000 }, ctxIn(root));
+  // The timeout is a hang guard, not the expected wait: the fixture's own `node leave.js` was
+  // measured at 0.4 s with the suite quiet and 17–30 s with `patch.test.js` running beside it, so
+  // an 8 s guard answered 124 for a suite that was merely slow to start. What is asserted is the
+  // exit code and the absence of `[TIMEOUT`, both of which still fail if the grace path regresses.
+  const result = await new TestRunnerTool().execute({ runner: 'npm', timeout: 120_000 }, ctxIn(root));
   assert.equal(result.exitCode, 0, `a passing suite answered ${String(result.exitCode)}:\n${result.stdout}${result.stderr}`);
   assert.doesNotMatch(result.stderr, /\[TIMEOUT after/);
 
@@ -334,7 +351,9 @@ const ESCAPING_SUITE = [
 // open, so no `close` ever arrives and only the grace can answer. What is asserted is the
 // ordering, not a duration: the call returns with the runner's own status while the helper is
 // still alive and still holding the pipe. Without the grace the same call cannot answer until the
-// timeout — which is why the timeout is generous: it is the failure mode, not the expected wait.
+// timeout — so the timeout is a hang guard, not the expected wait, and it is set well above the
+// measured startup time of the fixture on a contended host (17–30 s); the property under test is
+// the early answer, which is thousands of milliseconds below it either way.
 test('the grace answers the call while a helper that left the group still holds stdout (WP-3.9 H6)', async (t) => {
   if (process.platform === 'win32') return; // no process groups; the grace is not the mechanism
   const root = await project(t);
@@ -342,7 +361,7 @@ test('the grace answers the call while a helper that left the group still holds 
     JSON.stringify({ name: 't', version: '1.0.0', scripts: { test: 'node escape.js' } }));
   await writeFile(path.join(root, 'escape.js'), ESCAPING_SUITE);
 
-  const result = await new TestRunnerTool().execute({ runner: 'npm', timeout: 10_000 }, ctxIn(root));
+  const result = await new TestRunnerTool().execute({ runner: 'npm', timeout: 120_000 }, ctxIn(root));
 
   const pid = await waitForPid(path.join(root, 'escaped.pid'));
   t.after(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ } });
