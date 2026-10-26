@@ -162,26 +162,6 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   const adapterRegistry = ctx.adapters?.() ?? createAdapterRegistry();
   const adapter = lookupAdapter(cfg.adapter, adapterRegistry);
 
-  // ── Preflight (WP-3.9 F5): once, before anything is planned. Claude's argv carries `--tools`
-  // on every governed turn and on both isolated cli-tier sets, and a binary that does not know
-  // the flag exits 1 on every node — so a plan of identical failures was how a stale CLI read.
-  // Asking `--version` and `--help` here names the binary and the version found, before a
-  // worktree, a store or a plan exists.
-  //
-  // It runs before `isAvailable` (WP-3.9 G15): the availability check refuses with a sentence that
-  // names no binary and no PATH, so its own "not found on PATH (N directories searched)" branch was
-  // unreachable — the generic refusal always came first. A passing preflight has proved the binary
-  // runs and takes the argv, which is what `isAvailable` was asking anyway; an adapter with no
-  // preflight still gets that check, and it is now the only one.
-  if (adapter.preflight === undefined) {
-    await resolveAdapter(cfg.adapter, adapterRegistry);
-  } else {
-    const preflight = await adapter.preflight();
-    if (preflight !== undefined) {
-      say(`[maf] preflight: ${adapter.name} ${preflight.path} (${preflight.version})`);
-    }
-  }
-
   const baseTools = createDefaultRegistry();
 
   // ── Harness (WP-2.9): --harness, else an operator-set CURRENT, else legacy-default minted from
@@ -224,6 +204,30 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       dag:    applyDagSettings(read.dag, cfg.dag),
       source: { kind: 'spec', path: specPath, sha256: read.sha256 },
     };
+  }
+
+  // ── Preflight (WP-3.9 F5): once, before anything is planned. Claude's argv carries `--tools`
+  // on every governed turn and on both isolated cli-tier sets, and a binary that does not know
+  // the flag exits 1 on every node — so a plan of identical failures was how a stale CLI read.
+  // Asking `--version` and `--help` here names the binary and the version found, before a
+  // worktree, a store or a plan exists.
+  //
+  // It runs after the spec above (D-59 merge duty 5): resolving or probing a backend before the
+  // operator's spec was accepted would make a malformed spec pay for a backend call — and could
+  // refuse a run over a binary when the file was wrong. A refused spec never reaches this line.
+  //
+  // It runs before `isAvailable` (WP-3.9 G15): the availability check refuses with a sentence that
+  // names no binary and no PATH, so its own "not found on PATH (N directories searched)" branch was
+  // unreachable — the generic refusal always came first. A passing preflight has proved the binary
+  // runs and takes the argv, which is what `isAvailable` was asking anyway; an adapter with no
+  // preflight still gets that check, and it is now the only one.
+  if (adapter.preflight === undefined) {
+    await resolveAdapter(cfg.adapter, adapterRegistry);
+  } else {
+    const preflight = await adapter.preflight();
+    if (preflight !== undefined) {
+      say(`[maf] preflight: ${adapter.name} ${preflight.path} (${preflight.version})`);
+    }
   }
 
   // ── Nothing above wrote; from here the run is going ahead. The stores below open files inside
