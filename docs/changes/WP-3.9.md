@@ -366,7 +366,13 @@ receives `SIGINT`/`SIGTERM`, where the hook kills every live group and re-raises
 call is answered on the runner's **`exit`**, with a stated 100 ms grace for `close` (G16b, below).
 Rejected: signalling the runner alone — its workers survive; rejected: walking descendants by pid —
 the kernel's group is the accounting, and a pid walk races reuse. Limits, recorded rather than
-implied: a child that calls `setsid()`/`setpgid()` leaves the group and is not reached; Windows has
+implied: a child that calls `setsid()`/`setpgid()` leaves the group and is not reached — and if it
+inherited the runner's stdout, it also holds that pipe open, so `close` never arrives. The call is
+still answered, by the grace, with the runner's own status (H6): measured, `exit 0` in 0.66 s with
+the helper alive and still holding the pipe, so no `close` produced that answer. What maf cannot
+recover is its own lifetime — a process that never killed that helper did not exit at all (alive at
+5 s, ended only by the probe's alarm) — because the open pipe is an active handle until the helper
+dies. A helper that stays in the group cannot do this: the group kill closes the pipe. Windows has
 no POSIX groups, so only the runner is signalled; a `SIGKILL` to maf runs no handler, so the groups
 it started survive it; and `ToolContext` carries no abort signal (G16a), so a `test.run` a failing
 or abandoned node leaves in flight runs until its own timeout, at most the fifteen-minute ceiling.

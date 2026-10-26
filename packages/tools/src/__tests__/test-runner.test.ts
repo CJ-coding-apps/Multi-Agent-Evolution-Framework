@@ -311,6 +311,52 @@ test('a passing suite is not reported as a timeout when a helper holds its stdou
   await waitForDeath(await waitForPid(path.join(root, 'grandchild.pid')), 'the normal exit');
 });
 
+/**
+ * A suite whose helper leaves the runner's process group *and* keeps the inherited stdout (WP-3.9
+ * H6). `detached: true` puts the helper in its own group, so the group kill on `exit` cannot reach
+ * it; `stdio: 'inherit'` means it holds the write end of MAF's pipe, so `close` — child gone AND
+ * stdio closed — never fires. The grace timer is then the only path that can answer the call.
+ */
+const ESCAPING_SUITE = [
+  "const { spawn } = require('node:child_process');",
+  "const { writeFileSync } = require('node:fs');",
+  "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],",
+  "  { stdio: 'inherit', detached: true });",
+  "child.unref();",
+  "writeFileSync('escaped.pid', String(child.pid));",
+  "console.log('suite passed');",
+  '',
+].join('\n');
+
+// WP-3.9 H6: the 100 ms grace, tested as the path that answers rather than as an exit code that
+// happens to be right. In the G16b fixture above the group kill closes the pipe, so `close` can
+// answer first and the grace is never exercised; a helper that left the group leaves the pipe
+// open, so no `close` ever arrives and only the grace can answer. What is asserted is the
+// ordering, not a duration: the call returns with the runner's own status while the helper is
+// still alive and still holding the pipe. Without the grace the same call cannot answer until the
+// timeout — which is why the timeout is generous: it is the failure mode, not the expected wait.
+test('the grace answers the call while a helper that left the group still holds stdout (WP-3.9 H6)', async (t) => {
+  if (process.platform === 'win32') return; // no process groups; the grace is not the mechanism
+  const root = await project(t);
+  await writeFile(path.join(root, 'package.json'),
+    JSON.stringify({ name: 't', version: '1.0.0', scripts: { test: 'node escape.js' } }));
+  await writeFile(path.join(root, 'escape.js'), ESCAPING_SUITE);
+
+  const result = await new TestRunnerTool().execute({ runner: 'npm', timeout: 10_000 }, ctxIn(root));
+
+  const pid = await waitForPid(path.join(root, 'escaped.pid'));
+  t.after(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ } });
+
+  // The helper was alive when the call answered, so no `close` can have produced this result.
+  assert.doesNotThrow(() => process.kill(pid, 0), 'the escaping helper is still alive when the call returns');
+  assert.equal(result.exitCode, 0, `a passing suite answered ${String(result.exitCode)}:\n${result.stdout}${result.stderr}`);
+  assert.doesNotMatch(result.stderr, /\[TIMEOUT after/);
+
+  // Clean up the group the group kill could not reach, and prove it went.
+  process.kill(-pid, 'SIGKILL');
+  await waitForDeath(pid, 'the test cleanup');
+});
+
 // WP-3.9 F9: the other exit MAF does not choose. A tool call is synchronous from the operator's point
 // of view — Ctrl-C at the terminal ends MAF, and the runner it started used to keep running with no
 // parent to answer to. The parent fixture is a real process, because only a process can receive the

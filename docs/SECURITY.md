@@ -747,7 +747,11 @@ Four limits bound it, all enforced in the tool rather than left to the runner:
   and that a forwarded interrupt reaches it. Two limits: a child that leaves the group (anything
   that calls `setsid()` or `setpgid()`) is not reached by `-pid`, and neither is a Windows tree,
   where there are no POSIX process groups and only the runner itself is signalled; a `SIGKILL` to
-  MAF runs no handler at all, so the groups it started survive it.
+  MAF runs no handler at all, so the groups it started survive it. A helper that both leaves the
+  group and inherited the runner's stdout keeps that pipe open, so the call is answered by the
+  100 ms grace rather than by `close` — measured, with the runner's own exit status — but the open
+  pipe is an active handle until the helper dies, so a MAF process that does not kill it can be
+  held open after the call has returned.
 - **The ceiling is the only bound on an abandoned call.** `ToolContext` carries no abort signal
   (WP-3.9 G16a), so a `test.run` that a failing or abandoned node leaves in flight cannot be
   cancelled: it runs until its own timeout, at most fifteen minutes, and the node's failure does not
