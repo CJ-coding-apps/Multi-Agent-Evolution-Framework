@@ -284,7 +284,10 @@ test('a timeout kills the runner\'s own children, not only the runner', async (t
   // Signalling only the runner leaves the grandchild alive — which is what the old code did.
   await writeFile(path.join(root, 'hang.test.js'), HANGING_RUNNER);
 
-  const result = await new TestRunnerTool().execute({ runner: 'node', timeout: 2000 }, ctxIn(root));
+  // The timeout has to outlive the fixture's own startup, or the run times out before a grandchild
+  // exists and the test proves nothing (measured: the chain took 17 s to start on a contended host,
+  // and a 2 s guard killed it first). 60 s is a guard on a hang, not a wait the test depends on.
+  const result = await new TestRunnerTool().execute({ runner: 'node', timeout: 60_000 }, ctxIn(root));
   assert.equal(result.exitCode, 124, result.stdout + result.stderr);
 
   await waitForDeath(await waitForPid(path.join(root, 'grandchild.pid')), 'the timeout');
