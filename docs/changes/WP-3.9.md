@@ -41,6 +41,13 @@ states each as implemented.
   "empty environment" cannot pass as the policy. Measured: six reverted spawn sites (claude
   `sendTurn`, claude `isAvailable`, claude `preflight`, codex `sendTurn`, codex `isAvailable`,
   the spawner's default) each failed exactly the one test that names it, and nothing else.
+  **Round 3 (H4) — the sentence above overclaimed.** Gemini has two spawn sites, `invoke` and the
+  `--version` probe `isAvailable` asks; only the first had a test, so the probe could revert to
+  `{ ...process.env }` and the suite stayed green, in the same round that claimed every adapter
+  spawn site was proved. Gemini now has the probe test, written the same way; reverting the probe
+  fails that test and nothing else, and `invoke`'s still passes — which is what shows the new test
+  covers the probe and not the call beside it. The other two adapters' probes were grepped again
+  and already had theirs (openrouter and ollama ask over HTTP, so they have no child to prove).
 
 ### `patch.apply` declares what `patch` will open
 
@@ -462,6 +469,8 @@ test driving all six, so a regression names the site instead of the record's len
 unit test that asserts `backendEnv()` was called. It is the weaker claim — an adapter could call it
 and pass the result nowhere. Rejected: asserting a specific deny-list of variable names. The rule
 is "no `MAF_*`", and a test that names two of them passes the day a third one is added.
+Round 3 (H4) completed the claim: gemini's probe had no test until then, and the entry above
+records the gap and its measurement.
 
 **Rejected — keep `reject` and re-scope WP-3.7's live row.** A rejection does not guard the
 decision, it removes it: a role is permanently denied a tool its operator may well have wanted,
