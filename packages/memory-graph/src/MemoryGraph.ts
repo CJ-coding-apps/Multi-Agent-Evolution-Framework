@@ -295,9 +295,11 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
    * Export and import are one operation each, like `run` and `mergeRuns`: they are counted (so a
    * concurrent `close()` waits for them) and their many internal `run`s go through `openRunner`,
    * which does not re-apply the `closed` check — otherwise a `close()` during an import would
-   * refuse a statement mid-transaction and leave the graph half-written (R2-1). The free
-   * `exportGraph`/`importGraph` stay backend-neutral; these methods only make the whole of one a
-   * single admitted unit. A call that *starts* after `close()` is still refused, by `ensureSchema`.
+   * refuse a statement mid-transaction and fail the import (the transaction is rolled back, so the
+   * graph is not half-written, but the work is lost). The free `exportGraph`/`importGraph` stay
+   * backend-neutral and are not part of the package's public surface; these methods are the only
+   * admitted way to run one. A call that *starts* after `close()` is still refused, by
+   * `ensureSchema`.
    */
   exportGraph(kuzuVersion: string): Promise<GraphExport> {
     return this.track(async () => {

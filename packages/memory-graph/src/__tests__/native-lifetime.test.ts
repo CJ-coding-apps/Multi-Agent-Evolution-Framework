@@ -9,7 +9,7 @@ import * as kuzu from 'kuzu';
 import type { Connection, Database, KuzuModule, KuzuParameter, PreparedStatement, QueryResult } from 'kuzu';
 import { makeRunId } from '@maf/types';
 import type { GraphQuery } from '@maf/types';
-import { KuzuDriver } from '../KuzuDriver.js';
+import { KuzuDriver, kuzuVersion } from '../KuzuDriver.js';
 import { MemoryGraph } from '../MemoryGraph.js';
 import type { GraphDriver } from '../MemoryGraph.js';
 import { GRAPH_EXPORT_FORMAT, GRAPH_EXPORT_FORMAT_VERSION } from '../GraphTransfer.js';
@@ -25,11 +25,11 @@ import type { GraphExport } from '../GraphTransfer.js';
 // ORACLE (WP-3.8 follow-up): the driver's `close()` was synchronous and returned at once. When
 // anything was in flight — the connection's `init()` that every constructor starts, a query, a
 // schema statement — the release was deferred, so a caller that removed the directory next raced
-// the native writes. Under Kùzu 0.7.x that race failed with `ENOTEMPTY` (3 of 10 processes at
-// 10 processes × 60 cycles, 0 of 600 run one at a time); the database was a directory then.
+// the native writes. CI at `6beab28` (Kùzu 0.11.3) failed once with `ENOTEMPTY`; the verifier's
+// attempts did not reproduce it on demand, and the base code at 10 × 60 on 0.7.1 never failed.
 // `close()` now returns a promise that resolves only after the release. Tests 5–7 pin that by
-// ordering, without wall-clock budgets; test 13 is the M1 shape as a smoke test, because at
-// 0.11.3 the race no longer has an observable symptom (see its comment).
+// ordering, without wall-clock budgets; the four-process test is the M1 shape as a smoke test,
+// because at 0.11.3 the race no longer has an observable symptom (see its comment).
 
 const execFileAsync = promisify(execFile);
 const ENTRY = path.resolve(__dirname, '../index.js');
@@ -495,14 +495,15 @@ test('a connection whose init() failed still releases in order, and close() reso
 // ── WP-3.8 follow-up round 3: the HIGH, and operations that finish across close() ──────────────
 
 test('release() does not free the database when conn.close() throws after a failed init (R2-2)', async () => {
-  // The 0.11.3 path with no other way to be reached: `Connection.init()` rejects, and a later
-  // `Connection.close()` re-awaits the retained rejected init promise and throws *before* it
-  // releases the native connection (`kuzu@0.11.3 connection.js:425-445`). Freeing the `Database`
-  // under a connection that still points into its buffer manager is a use-after-free, so
-  // `release()` must skip `db.close()` — a leaked handle is the lesser evil — and still resolve,
-  // because the one real error was already delivered through `ready`. A fake module is injected so
-  // the throw is deterministic and no real native handle leaks. Removing the `connClosed` guard in
-  // `release()` turns the `dbCloseCalls === 0` assertion red.
+  // `release()`'s path (b), which has no other way to be reached: the database opened, then only
+  // the connection's `Connection.init()` rejected. A later `Connection.close()` re-awaits the
+  // connection's retained rejected init promise and throws *before* it releases the native
+  // connection (`kuzu@0.11.3 connection.js:425-445`). The database is natively open, so freeing it
+  // under a connection that still points into its buffer manager is a use-after-free; `release()`
+  // must skip `db.close()` — a leaked handle is the lesser evil — and still resolve, because the
+  // one real error was already delivered through `ready`. A fake module is injected so the throw is
+  // deterministic and no real native handle leaks. Removing the `connClosed` guard in `release()`
+  // turns the `dbCloseCalls === 0` assertion red.
   let dbCloseCalls = 0;
   let connCloseCalls = 0;
   const fakeModule = {
@@ -518,7 +519,9 @@ test('release() does not free the database when conn.close() throws after a fail
   const driver = new KuzuDriver(':memory:', undefined, fakeModule);
   // The init failure is delivered to the query that awaits it, exactly as a real open failure is.
   await assert.rejects(() => driver.run({ cypher: 'RETURN 1 AS one', params: {} }), /init refused/);
-  // close() resolves rather than rejecting: init failed, so there was nothing native to free.
+  // close() resolves rather than rejecting: path (b) — the connection's init failed, conn.close()
+  // threw before releasing it, and db.close() was deliberately skipped. The natively open database
+  // is leaked to the GC rather than freed under the connection; that is still the error path.
   await driver.close();
   assert.equal(connCloseCalls, 1, 'the connection close was attempted');
   assert.equal(dbCloseCalls, 0, 'the database was NOT freed under a connection that did not release');
@@ -619,6 +622,48 @@ test('MemoryGraph.close() lets an in-flight importGraph finish its transaction r
   }
 });
 
+test('MemoryGraph.close() lets an in-flight exportGraph return the full export rather than refusing it halfway (R3-4)', async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, 'export-close.kuzu');
+  try {
+    const inner = new KuzuDriver(file);
+    // Hold the export's node query, so `close()` lands after the nodes have been read and before
+    // the edge query starts. Routing the export through the closed-checked `run` turns the edge
+    // assertion red: the second query is refused once `close()` has set the flag.
+    const held = holdQuery(inner, (q) => q.cypher.includes('MATCH (n:MemoryNode)'));
+    const graph = new MemoryGraph(file, undefined, held.driver);
+    try {
+      const from = await graph.addNode({ kind: 'Task', label: 'from', properties: {}, runId: makeRunId('export') });
+      const to   = await graph.addNode({ kind: 'Task', label: 'to',   properties: {}, runId: makeRunId('export') });
+      await graph.addEdge({ fromId: from, toId: to, relation: 'DEPENDS_ON', weight: 1, metadata: {} });
+
+      const exporting = graph.exportGraph(kuzuVersion());
+      await waitFor(() => held.entered(), 'the export to reach its node query');
+
+      const closing = graph.close();
+      await drain();
+      held.release();
+
+      // The whole export — the edge query after the held node query, the row checks and the
+      // returned object — ran across the close rather than being refused halfway.
+      const exported = await exporting;
+      assert.deepEqual(
+        exported.nodes.map((n) => n.label).sort(),
+        ['from', 'to'],
+        'the export read every node',
+      );
+      assert.equal(exported.edges.length, 1, 'the export read the edge after the close');
+      assert.equal(exported.edges[0]?.fromId, from);
+      assert.equal(exported.edges[0]?.toId, to);
+      await closing;
+    } finally {
+      held.release();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('four processes closing and removing graphs at once, thirty cycles each, leave no ENOTEMPTY', async () => {
   // The shape that raced: open → close → rm with **no query**, so the connection's `init()` is
   // still in flight when `close()` is called. The earlier form wrote a node first, which settled
@@ -628,12 +673,15 @@ test('four processes closing and removing graphs at once, thirty cycles each, le
   // are in the PR body). CI at `6beab28` (kuzu 0.11.3, run 39832249760) failed once with
   // `ENOTEMPTY`; neither 0.11.3 nor this reshaped test has reproduced it on demand on macOS or
   // Linux, and `close()` now resolves only after both native closes, which removes the window by
-  // construction. So this is a smoke test of the M1 shape, not a regression pin. It targets 0.11.3,
-  // whose single-file database removes the case the race depended on — the release re-creating a
-  // directory entry after `rm` had emptied the directory. On 0.7.1 the database was a directory and
-  // the race did fail (2 of 10 runs at 10 processes × 60 cycles), so "cannot go red" is a property
-  // of 0.11.3, not of the test. The regression itself is pinned by tests 5–7, which fail on an
-  // early-resolving `close()`.
+  // construction. In the verifier's ten runs, with `close()` mutated to resolve early this 4 × 30
+  // test failed 2 of 10 and unmutated it failed 0 of 10; this session's ten runs of each, on macOS
+  // and Linux, failed 0 of 10 in both — it is a race, not a guaranteed red. So it can go red when
+  // the release returns early: "cannot go red" is not a property of the test. The base code at
+  // 10 × 60 on 0.7.1 never failed. It is still a smoke test of the M1 shape rather than a
+  // regression pin, because on the unmutated 0.11.3 build the race has no observable symptom. It
+  // targets 0.11.3, whose single-file database removes the case the race depended on — the release
+  // re-creating a directory entry after `rm` had emptied the directory. The regression itself is
+  // pinned by tests 5–7, which fail on an early-resolving `close()`.
   const child = `
     const { MemoryGraph } = require(${JSON.stringify(ENTRY)});
     const fs = require('node:fs'), os = require('node:os'), path = require('node:path');

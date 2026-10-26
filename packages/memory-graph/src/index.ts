@@ -5,9 +5,12 @@ export { SubgraphQuery } from './SubgraphQuery.js';
 export { RunMerger } from './RunMerger.js';
 export { KuzuDriver, GraphOpenError, kuzuVersion } from './KuzuDriver.js';
 export {
-  GRAPH_EXPORT_FORMAT, GRAPH_EXPORT_FORMAT_VERSION,
-  exportGraph, importGraph, parseGraphExport, GraphTransferError,
+  GRAPH_EXPORT_FORMAT, GRAPH_EXPORT_FORMAT_VERSION, parseGraphExport, GraphTransferError,
 } from './GraphTransfer.js';
+// `exportGraph`/`importGraph` are deliberately NOT exported here: a free function over a raw
+// runner is not one admitted operation the way `MemoryGraph.exportGraph`/`importGraph` are, so a
+// caller outside the package must go through the methods (which count the whole transfer and hold
+// `close()` off it). They stay exported from their own module for `MemoryGraph` and its tests.
 export type { GraphExport, ExportedNode, ExportedEdge, ImportReport } from './GraphTransfer.js';
 // The two positions Cypher cannot bind (`LIMIT`, a variable-length path's hop count) need a
 // validated literal. Exported so a caller outside this package does not write its own copy of

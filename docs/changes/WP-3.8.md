@@ -148,7 +148,7 @@ after.** The regression tests are retry-free and observe ordering, not duration:
 | `close()` during `init()` | the same file — `init()` is held open, `close()` must not have resolved, then it must |
 | `close()` during a query | the same file — the query is held open, completes, and its row is on disk in a re-opened graph |
 | `close()` between two schema statements | the same file — the sequence is held mid-flight, and no statement meets a released database |
-| four processes closing and removing at once, 30 cycles each | the same file — the M1 shape as a **smoke test**, not a regression pin: the child opens, closes and removes with no query, so `init()` is in flight at `close()`. Measured on base `60e93e5` with Kùzu 0.11.3 on macOS **and** Linux: it **passes**. CI at `6beab28` (kuzu 0.11.3, run 39832249760) failed once with `ENOTEMPTY`; neither 0.11.3 nor the reshaped test reproduced it on demand on macOS or Linux, and `close()` now resolves only after both native closes, which removes the window by construction. It targets 0.11.3, whose single-file database removes the case the race needed — a directory entry re-created after `rm`. On 0.7.1 the database was a directory and the race did fail (2 of 10 runs), so "cannot go red" is a property of 0.11.3, not of the test. The regression itself is pinned by the three rows above |
+| four processes closing and removing at once, 30 cycles each | the same file — the M1 shape as a **smoke test**, not a regression pin: the child opens, closes and removes with no query, so `init()` is in flight at `close()`. Measured on base `60e93e5` with Kùzu 0.11.3 on macOS **and** Linux: it **passes**. CI at `6beab28` (kuzu 0.11.3, run 39832249760) failed once with `ENOTEMPTY`; neither 0.11.3 nor the reshaped test reproduced it on demand on macOS or Linux, and `close()` now resolves only after both native closes, which removes the window by construction. It targets 0.11.3, whose single-file database removes the case the race needed — a directory entry re-created after `rm`. In the verifier's ten runs, with `close()` mutated to resolve early this 4 × 30 test failed 2 of 10 and unmutated it failed 0 of 10; this session's ten runs of each, on macOS and Linux, failed 0 of 10 in both — it is a race, not a guaranteed red, but it can go red, so "cannot go red" is not a property of the test. The base code at 10 × 60 on 0.7.1 never failed. The regression itself is pinned by the three rows above |
 
 ### Round 2 — the graph waits for its own operations, and a failed release fails the close
 
@@ -165,12 +165,18 @@ the driver's close. `close()` itself is memoised (`closePromise ??=`), and a cal
 refused at once by the `closed` flag.
 
 **`release()` swallows only what cannot be acted on (C4).** Both native closes are attempted on
-every path, connection first. If `init()` failed there is nothing native to free — that error was
-already delivered through `ready` — so the close resolves. Otherwise a native close error
-**rejects** the close, naming which handle failed and carrying the first error as `cause`: a caller
-in a `finally` must not remove the directory of a database that did not close. `close()` also has
-no deadline, stated as a known property in its JSDoc: a native query that never settles keeps it
-pending (C9).
+every path, connection first. An init failure has two shapes. When the **database failed to open**
+(the 0.7.x-directory refusal), `Connection.init()` throws before it builds a native connection, so
+`conn.close()` returns normally and `db.close()` is called — and throws on the database's own
+retained rejected init promise — with no live connection to free the database under. When **only the
+connection's `init()` failed**, `conn.close()` throws before it releases the native connection, so
+`db.close()` is skipped and the natively open database is deliberately leaked to the GC rather than
+freed under a connection that may still point into it. Either way the one real error was already
+delivered through `ready`, so the close resolves; reporting it again here would say nothing new.
+Otherwise a native close error **rejects** the close, naming which handle failed and carrying the
+first error as `cause`: a caller in a `finally` must not remove the directory of a database that did
+not close. `close()` also has no deadline, stated as a known property in its JSDoc: a native query
+that never settles keeps it pending (C9).
 
 Tests: a query issued just before `close()` resolves with its real rows and the next is refused; an
 in-flight `querySubgraph` returns real edges; a database close that throws rejects with the message

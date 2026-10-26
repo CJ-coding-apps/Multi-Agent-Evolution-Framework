@@ -134,9 +134,10 @@ export class KuzuDriver {
    * zero, and a second `close()` returns the same promise.
    *
    * A native close that fails rejects this promise rather than resolving it: a caller in a
-   * `finally` must not remove the directory of a database that did not close. The one exception is
-   * a connection whose `init()` failed — there is nothing native to free, and that error was
-   * already delivered through `ready`.
+   * `finally` must not remove the directory of a database that did not close. The exception is an
+   * `init()` that failed: that error was already delivered through `ready`, so the close resolves
+   * rather than reporting it twice — see `release()` for the two paths, including the database
+   * deliberately leaked when only the connection's init failed.
    *
    * Known property, not a defect: there is no deadline. A native query that never settles keeps
    * `close()` pending, and every `finally { await graph.close() }` in the CLI waits with it. A
@@ -169,10 +170,10 @@ export class KuzuDriver {
   }
 
   private async release(): Promise<void> {
-    // `ready` is the connection's `init()`, tracked like a query. It may reject — a database that
-    // failed to open has nothing native to free — and that rejection has already been handed to
-    // every `run` that awaited it, so it is swallowed here rather than replacing the close. What
-    // it does change is the meaning of the closes below, which is why it is recorded.
+    // `ready` is the connection's `init()`, tracked like a query. It may reject, and that
+    // rejection has already been handed to every `run` that awaited it, so it is swallowed here
+    // rather than replacing the close. What it does change is what the closes below can do — the
+    // two init-failure paths differ (see the comment on them) — which is why it is recorded.
     let initFailed = false;
     await this.ready.catch(() => { initFailed = true; });
     while (this.inFlight > 0) await this.whenSettled();
@@ -192,10 +193,24 @@ export class KuzuDriver {
     if (connClosed) {
       try { await this.db.close(); } catch (error) { failures.push({ part: 'database', error }); }
     }
-    // A failed initialisation leaves nothing native to free: the `conn.close()` above threw on the
-    // rejected init promise, `db.close()` was therefore skipped, and the one real error was already
-    // reported through `ready` — so the close resolves rather than rejecting a second time. Any
-    // failure after a real `init()` means a handle may still be open, so the close rejects; a
+    // Two init-failure paths reach here, and they differ in what the closes above did.
+    //
+    // (a) The database failed to open — the 0.7.x-directory refusal is the reachable one.
+    // `Connection.init()` throws while opening the database, before it builds a native connection,
+    // so it retains neither a connection nor an init promise. `conn.close()` therefore returns
+    // normally, and `db.close()` is called: it re-awaits the database's own retained rejected init
+    // promise and throws there, so a database failure is recorded. The close still resolves — the
+    // one real error was already delivered through `ready`, and reporting it again here would say
+    // nothing new. There is no live connection to free the database under.
+    //
+    // (b) Only the connection's `init()` failed, after `Connection.init()` had opened the database.
+    // `conn.close()` re-awaits the connection's retained rejected init promise and throws *before*
+    // it releases the native connection (the citation above), so `db.close()` is skipped and the
+    // natively open database is deliberately leaked to the garbage collector rather than freed
+    // under a connection that may still point into its buffer manager. That leak is why the close
+    // resolves here too: this is the error path, not a successful release.
+    //
+    // Any failure after a real `init()` means a handle may still be open, so the close rejects; a
     // caller never treats a failed release as a successful one.
     if (initFailed || failures.length === 0) return;
     throw releaseFailure(this.dbPath, failures);
