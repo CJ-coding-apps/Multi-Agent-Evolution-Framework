@@ -283,6 +283,15 @@ export type PlanSource =
   /** The planner was asked, and its answer is the plan. */
   | { kind: 'planner' };
 
+/**
+ * The largest delay a Node timer honours. Above it `setTimeout` fires after 1 ms instead, so a
+ * timeout or a backoff that big would mean "at once". Both readers of a millisecond field — the
+ * `.maf/config.yaml` loader and the `--plan-from` spec's `timeoutMs` — bound it by this one value,
+ * so the two cannot disagree about what a valid timeout is (WP-3.6, R3).
+ */
+// WP-3.6: shared timer ceiling — the `.maf/config.yaml` loader and the `--plan-from` `timeoutMs` bound.
+export const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /** 'Unschedulable' is a real verdict: the DAG was valid but never ran to completion. */
 export type RunStatus = 'Succeeded' | 'Failed' | 'Unschedulable';
 
