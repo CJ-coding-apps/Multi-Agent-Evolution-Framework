@@ -6,12 +6,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import * as kuzu from 'kuzu';
-import type { Connection, Database, KuzuParameter, PreparedStatement, QueryResult } from 'kuzu';
+import type { Connection, Database, KuzuModule, KuzuParameter, PreparedStatement, QueryResult } from 'kuzu';
 import { makeRunId } from '@maf/types';
 import type { GraphQuery } from '@maf/types';
 import { KuzuDriver } from '../KuzuDriver.js';
 import { MemoryGraph } from '../MemoryGraph.js';
 import type { GraphDriver } from '../MemoryGraph.js';
+import { GRAPH_EXPORT_FORMAT, GRAPH_EXPORT_FORMAT_VERSION } from '../GraphTransfer.js';
+import type { GraphExport } from '../GraphTransfer.js';
 
 // ORACLE (WP-2.15): CI's goldens-offline tests aborted on most runs with `malloc(): unsorted double
 // linked list corrupted`. The driver never closed a kuzu QueryResult, whose rows live in its
@@ -490,17 +492,148 @@ test('a connection whose init() failed still releases in order, and close() reso
   }
 });
 
+// ── WP-3.8 follow-up round 3: the HIGH, and operations that finish across close() ──────────────
+
+test('release() does not free the database when conn.close() throws after a failed init (R2-2)', async () => {
+  // The 0.11.3 path with no other way to be reached: `Connection.init()` rejects, and a later
+  // `Connection.close()` re-awaits the retained rejected init promise and throws *before* it
+  // releases the native connection (`kuzu@0.11.3 connection.js:425-445`). Freeing the `Database`
+  // under a connection that still points into its buffer manager is a use-after-free, so
+  // `release()` must skip `db.close()` — a leaked handle is the lesser evil — and still resolve,
+  // because the one real error was already delivered through `ready`. A fake module is injected so
+  // the throw is deterministic and no real native handle leaks. Removing the `connClosed` guard in
+  // `release()` turns the `dbCloseCalls === 0` assertion red.
+  let dbCloseCalls = 0;
+  let connCloseCalls = 0;
+  const fakeModule = {
+    VERSION: '0.11.3-fake',
+    Database: class { constructor(_p?: string, _b?: number) { /* no native handle */ } async close(): Promise<void> { dbCloseCalls++; } },
+    Connection: class {
+      constructor(_db: unknown) { /* no native handle */ }
+      async init(): Promise<void> { throw new Error('init refused'); }
+      async close(): Promise<void> { connCloseCalls++; throw new Error('connection close after failed init'); }
+    },
+  } as unknown as KuzuModule;
+
+  const driver = new KuzuDriver(':memory:', undefined, fakeModule);
+  // The init failure is delivered to the query that awaits it, exactly as a real open failure is.
+  await assert.rejects(() => driver.run({ cypher: 'RETURN 1 AS one', params: {} }), /init refused/);
+  // close() resolves rather than rejecting: init failed, so there was nothing native to free.
+  await driver.close();
+  assert.equal(connCloseCalls, 1, 'the connection close was attempted');
+  assert.equal(dbCloseCalls, 0, 'the database was NOT freed under a connection that did not release');
+  // A second close hands back the same resolved promise, and still never calls db.close().
+  await driver.close();
+  assert.equal(dbCloseCalls, 0, 'a second close did not free the database either');
+});
+
+test('MemoryGraph.close() lets an in-flight mergeRuns finish rather than refusing it halfway (R2-1)', async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, 'merge-close.kuzu');
+  try {
+    const inner = new KuzuDriver(file);
+    // Hold mergeRuns' first source query, so `close()` lands before the merge has written anything.
+    // The two setup writes below are `CREATE`s, so this matcher is not tripped by them.
+    const held = holdQuery(inner, (q) => q.cypher.includes('{run_id: $runId}) RETURN n LIMIT'));
+    const graph = new MemoryGraph(file, undefined, held.driver);
+    try {
+      await graph.addNode({ kind: 'Task', label: 'first',  properties: {}, runId: makeRunId('src') });
+      await graph.addNode({ kind: 'Task', label: 'second', properties: {}, runId: makeRunId('src') });
+
+      const merging = graph.mergeRuns([makeRunId('src')], makeRunId('tgt'));
+      await waitFor(() => held.entered(), 'mergeRuns to reach its first source query');
+
+      const closing = graph.close();
+      await drain(); // let close() reach its wait on `inFlight`; mergeRuns is counted, so it waits
+      held.release();
+
+      // The merge finished with its full report rather than being refused mid-way with
+      // "graph is closed" — which is what the public `addNode`/`addEdge` path would have done.
+      const report = await merging;
+      assert.equal(report.conflictsFound.length, 0, 'no conflicts');
+      assert.ok(report.nodesCreated >= 3, `the merge wrote its nodes (got ${report.nodesCreated})`);
+      await closing;
+    } finally {
+      held.release();
+    }
+
+    const reopened = new MemoryGraph(file);
+    try {
+      const rows = await reopened.run({ cypher: `MATCH (n:MemoryNode {run_id: 'tgt'}) RETURN count(n) AS c`, params: {} });
+      assert.ok(Number(rows[0]?.['c']) >= 3, 'the merged nodes were written under the target run');
+    } finally {
+      await reopened.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('MemoryGraph.close() lets an in-flight importGraph finish its transaction rather than refusing it halfway (R2-1)', async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, 'import-close.kuzu');
+  try {
+    const inner = new KuzuDriver(file);
+    // Hold the first node insert of the import, so `close()` lands mid-transaction.
+    const held = holdQuery(inner, (q) => q.cypher.includes('CREATE (:MemoryNode {id: $id'));
+    const graph = new MemoryGraph(file, undefined, held.driver);
+    const exported: GraphExport = {
+      format: GRAPH_EXPORT_FORMAT,
+      formatVersion: GRAPH_EXPORT_FORMAT_VERSION,
+      kuzuVersion: 'test',
+      exportedAt: '2020-01-01T00:00:00.000Z',
+      nodes: [
+        { id: 'n1', kind: 'Task', label: 'one', properties: {}, runId: 'r', createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z' },
+        { id: 'n2', kind: 'Task', label: 'two', properties: {}, runId: 'r', createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z' },
+      ],
+      edges: [
+        { id: 'e1', fromId: 'n1', toId: 'n2', relation: 'DEPENDS_ON', weight: 1, metadata: {}, createdAt: '2020-01-01T00:00:00.000Z' },
+      ],
+    };
+    try {
+      const importing = graph.importGraph(exported);
+      await waitFor(() => held.entered(), 'the import to reach its first node insert');
+
+      const closing = graph.close();
+      await drain();
+      held.release();
+
+      // The whole import — the remaining inserts, COMMIT, and the final count check — ran across
+      // the close rather than being refused mid-transaction.
+      const report = await importing;
+      assert.deepEqual(report, { nodesCreated: exported.nodes.length, edgesCreated: exported.edges.length });
+      await closing;
+    } finally {
+      held.release();
+    }
+
+    const reopened = new MemoryGraph(file);
+    try {
+      const rows = await reopened.run({ cypher: `MATCH (n:MemoryNode) RETURN count(n) AS c`, params: {} });
+      assert.equal(Number(rows[0]?.['c']), 2, 'the imported nodes were committed');
+    } finally {
+      await reopened.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('four processes closing and removing graphs at once, thirty cycles each, leave no ENOTEMPTY', async () => {
   // The shape that raced: open → close → rm with **no query**, so the connection's `init()` is
   // still in flight when `close()` is called. The earlier form wrote a node first, which settled
   // `init()` and left nothing in flight — it passed on the old code, so it could not pin anything.
   //
   // Measured on base `60e93e5` with Kùzu 0.11.3: it **passes**, on macOS and on Linux (the logs
-  // are in the PR body). `ENOTEMPTY` was a 0.7.x property, when the database was a directory: the
-  // release re-created an entry after `rm` had emptied the directory. 0.11.3 writes a single file,
-  // and both platforms unlink an open file successfully, so the same race now leaves no residue and
-  // no error. This test is therefore a smoke test of the M1 shape, not a regression pin; the
-  // regression itself is pinned by tests 5–7, which fail on an early-resolving `close()`.
+  // are in the PR body). CI at `6beab28` (kuzu 0.11.3, run 39832249760) failed once with
+  // `ENOTEMPTY`; neither 0.11.3 nor this reshaped test has reproduced it on demand on macOS or
+  // Linux, and `close()` now resolves only after both native closes, which removes the window by
+  // construction. So this is a smoke test of the M1 shape, not a regression pin. It targets 0.11.3,
+  // whose single-file database removes the case the race depended on — the release re-creating a
+  // directory entry after `rm` had emptied the directory. On 0.7.1 the database was a directory and
+  // the race did fail (2 of 10 runs at 10 processes × 60 cycles), so "cannot go red" is a property
+  // of 0.11.3, not of the test. The regression itself is pinned by tests 5–7, which fail on an
+  // early-resolving `close()`.
   const child = `
     const { MemoryGraph } = require(${JSON.stringify(ENTRY)});
     const fs = require('node:fs'), os = require('node:os'), path = require('node:path');

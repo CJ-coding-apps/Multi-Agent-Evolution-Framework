@@ -7,6 +7,8 @@ import type {
 import { KuzuDriver } from './KuzuDriver.js';
 import { SCHEMA_DDL } from './schema.js';
 import { intLiteral, idListParams } from './cypherText.js';
+import { exportGraph as exportGraphRows, importGraph as importGraphRows } from './GraphTransfer.js';
+import type { GraphExport, ImportReport } from './GraphTransfer.js';
 
 /**
  * What `MemoryGraph` asks of its driver. `KuzuDriver` is the implementation production uses; the
@@ -54,8 +56,34 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
 
   private async ensureSchema(): Promise<void> {
     if (this.closed) throw new Error('This memory graph is closed; a query was issued after close().');
+    return this.ensureSchemaOpen();
+  }
+
+  /**
+   * Schema setup without the `closed` check. The check belongs at the entry of a public operation,
+   * not on every statement inside one: a multi-statement operation that was admitted before
+   * `close()` (its `inFlight` count holds the release open, R2-1) must finish, so its own internal
+   * statements run through this rather than being refused halfway. Entry is still guarded — public
+   * methods call `ensureSchema`, which refuses a call that *starts* after `close()`.
+   */
+  private ensureSchemaOpen(): Promise<void> {
     this.schemaReady ??= this.initSchema();
     return this.schemaReady;
+  }
+
+  /**
+   * One statement of an already-admitted operation: schema is ensured, but the `closed` check is
+   * not re-applied (see `ensureSchemaOpen`). The driver's own close waits on `inFlight`, so the
+   * backend is not released while such a statement is in flight.
+   */
+  private async runOpen(query: GraphQuery): Promise<GraphRow[]> {
+    await this.ensureSchemaOpen();
+    return this.driver.run(query);
+  }
+
+  /** A runner over `runOpen`, so an `exportGraph`/`importGraph` runs as one admitted operation. */
+  private openRunner(): GraphQueryRunner {
+    return { run: (query: GraphQuery) => this.runOpen(query) };
   }
 
   private async initSchema(): Promise<void> {
@@ -84,34 +112,50 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
   async addNode(n: Omit<MemoryNode, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
     return this.track(async () => {
       await this.ensureSchema();
-      const id  = crypto.randomUUID();
-      const now = new Date().toISOString();
-      await this.driver.run({
-        cypher: `CREATE (:MemoryNode {id: $id, kind: $kind, label: $label, properties: $properties, run_id: $runId, created_at: $now, updated_at: $now})`,
-        params: {
-          id, kind: n.kind, label: n.label,
-          properties: JSON.stringify(n.properties), runId: n.runId, now,
-        },
-      });
-      return id;
+      return this.insertNode(n);
     });
+  }
+
+  /**
+   * The write `addNode` performs, without the entry guard or the operation count. It is called
+   * from inside another admitted operation (`mergeRuns`), whose own `ensureSchema` and `track`
+   * already ran — so routing it through the public `addNode` would re-apply the `closed` check and
+   * refuse the write once `close()` had been called mid-merge (R2-1). The caller has ensured the
+   * schema.
+   */
+  private async insertNode(n: Omit<MemoryNode, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
+    const id  = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await this.driver.run({
+      cypher: `CREATE (:MemoryNode {id: $id, kind: $kind, label: $label, properties: $properties, run_id: $runId, created_at: $now, updated_at: $now})`,
+      params: {
+        id, kind: n.kind, label: n.label,
+        properties: JSON.stringify(n.properties), runId: n.runId, now,
+      },
+    });
+    return id;
   }
 
   async addEdge(e: Omit<MemoryEdge, 'id' | 'createdAt'>): Promise<string> {
     return this.track(async () => {
       await this.ensureSchema();
-      const id  = crypto.randomUUID();
-      const now = new Date().toISOString();
-      await this.driver.run({
-        cypher: `MATCH (a:MemoryNode {id: $fromId}), (b:MemoryNode {id: $toId})
-         CREATE (a)-[:MemoryEdge {id: $id, relation: $relation, weight: $weight, metadata: $metadata, created_at: $now}]->(b)`,
-        params: {
-          fromId: e.fromId, toId: e.toId, id, relation: e.relation,
-          weight: e.weight, metadata: JSON.stringify(e.metadata), now,
-        },
-      });
-      return id;
+      return this.insertEdge(e);
     });
+  }
+
+  /** The write `addEdge` performs, internal twin of `insertNode` (see it). */
+  private async insertEdge(e: Omit<MemoryEdge, 'id' | 'createdAt'>): Promise<string> {
+    const id  = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await this.driver.run({
+      cypher: `MATCH (a:MemoryNode {id: $fromId}), (b:MemoryNode {id: $toId})
+       CREATE (a)-[:MemoryEdge {id: $id, relation: $relation, weight: $weight, metadata: $metadata, created_at: $now}]->(b)`,
+      params: {
+        fromId: e.fromId, toId: e.toId, id, relation: e.relation,
+        weight: e.weight, metadata: JSON.stringify(e.metadata), now,
+      },
+    });
+    return id;
   }
 
   async querySubgraph(taskContext: string, maxNodes: number): Promise<MemorySubgraph> {
@@ -221,11 +265,14 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
             });
             if (ex.length > 0) { conflicts.push(`${node.kind}:${node.label}`); continue; }
           } catch { /* treat as no conflict */ }
-          await this.addNode({ kind: node.kind, label: node.label, properties: node.properties, runId: targetRunId });
+          // `insertNode`, not `addNode`: this write is already inside the admitted `mergeRuns`
+          // operation (counted, past its own `ensureSchema`), so it must not re-check `closed` and
+          // be refused halfway once `close()` has been called mid-merge (R2-1).
+          await this.insertNode({ kind: node.kind, label: node.label, properties: node.properties, runId: targetRunId });
           nodesCreated++;
         }
 
-        const mergedId = await this.addNode({ kind: 'Run' as MemoryNodeKind, label: sourceRunId, properties: { mergedFrom: sourceRunId }, runId: targetRunId });
+        const mergedId = await this.insertNode({ kind: 'Run' as MemoryNodeKind, label: sourceRunId, properties: { mergedFrom: sourceRunId }, runId: targetRunId });
         nodesCreated++;
 
         try {
@@ -234,13 +281,35 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
             params: { runId: targetRunId },
           });
           if (targetRows[0]) {
-            await this.addEdge({ fromId: mergedId, toId: String(targetRows[0]['n.id'] ?? ''), relation: 'MERGED_FROM' as MemoryRelation, weight: 1, metadata: {} });
+            await this.insertEdge({ fromId: mergedId, toId: String(targetRows[0]['n.id'] ?? ''), relation: 'MERGED_FROM' as MemoryRelation, weight: 1, metadata: {} });
             edgesCreated++;
           }
         } catch { /* skip edge */ }
       }
 
       return { nodesCreated, edgesCreated, conflictsFound: conflicts, mergedAt: new Date() };
+    });
+  }
+
+  /**
+   * Export and import are one operation each, like `run` and `mergeRuns`: they are counted (so a
+   * concurrent `close()` waits for them) and their many internal `run`s go through `openRunner`,
+   * which does not re-apply the `closed` check — otherwise a `close()` during an import would
+   * refuse a statement mid-transaction and leave the graph half-written (R2-1). The free
+   * `exportGraph`/`importGraph` stay backend-neutral; these methods only make the whole of one a
+   * single admitted unit. A call that *starts* after `close()` is still refused, by `ensureSchema`.
+   */
+  exportGraph(kuzuVersion: string): Promise<GraphExport> {
+    return this.track(async () => {
+      await this.ensureSchema();
+      return exportGraphRows(this.openRunner(), kuzuVersion);
+    });
+  }
+
+  importGraph(exported: GraphExport): Promise<ImportReport> {
+    return this.track(async () => {
+      await this.ensureSchema();
+      return importGraphRows(this.openRunner(), exported);
     });
   }
 
