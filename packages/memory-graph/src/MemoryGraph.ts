@@ -9,29 +9,61 @@ import { KuzuDriver } from './KuzuDriver.js';
 import { SCHEMA_DDL } from './schema.js';
 import { intLiteral, idListParams } from './cypherText.js';
 
-export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
-  private driver: KuzuDriver;
-  private schemaReady: Promise<void>;
+/**
+ * What `MemoryGraph` asks of its driver. `KuzuDriver` is the implementation production uses; the
+ * interface is named separately because schema setup's failure path — a DDL statement that
+ * rejects with something other than "already exists" — can only be exercised by a driver that
+ * fails on purpose.
+ */
+export interface GraphDriver {
+  run(query: GraphQuery): Promise<GraphRow[]>;
+  close(): void;
+}
 
-  constructor(dbPath: string, bufferPoolSizeBytes = 128 * 1024 * 1024) {
-    this.driver = new KuzuDriver(dbPath, bufferPoolSizeBytes);
-    this.schemaReady = this.initSchema();
+export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
+  private driver: GraphDriver;
+  /**
+   * Table setup, started by the first query and awaited by every query after it — never by the
+   * constructor. Starting it eagerly let `close()` run in the middle of the DDL sequence: the
+   * driver released the database between two statements, the next one threw, and the caller then
+   * removed a directory whose handles were still open (`ENOTEMPTY` in the M1 stack-cleanup test,
+   * measured at 1 in 20). A graph that is opened and closed without a query now runs no DDL at
+   * all, so that close is deterministic.
+   */
+  private schemaReady: Promise<void> | undefined;
+
+  constructor(dbPath: string, bufferPoolSizeBytes = 128 * 1024 * 1024, driver?: GraphDriver) {
+    this.driver = driver ?? new KuzuDriver(dbPath, bufferPoolSizeBytes);
+  }
+
+  private ensureSchema(): Promise<void> {
+    this.schemaReady ??= this.initSchema();
+    return this.schemaReady;
   }
 
   private async initSchema(): Promise<void> {
     for (const stmt of SCHEMA_DDL.split(';').map((s) => s.trim()).filter(Boolean)) {
-      try { await this.driver.run({ cypher: stmt, params: {} }); } catch { /* ignore already-exists */ }
+      try {
+        await this.driver.run({ cypher: stmt, params: {} });
+      } catch (err) {
+        // `IF NOT EXISTS` makes the expected case a success, so anything caught here is real:
+        // a read-only file, a full disk, a database that cannot be opened at all. Swallowing it
+        // used to turn every one of those into a graph that accepted writes and read back
+        // nothing.
+        if (err instanceof Error && /already exists/i.test(err.message)) continue;
+        throw err;
+      }
     }
   }
 
   /** The one way a value reaches a query: named in `params`, never written into `cypher`. */
   async run(query: GraphQuery): Promise<GraphRow[]> {
-    await this.schemaReady;
+    await this.ensureSchema();
     return this.driver.run(query);
   }
 
   async addNode(n: Omit<MemoryNode, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
-    await this.schemaReady;
+    await this.ensureSchema();
     const id  = crypto.randomUUID();
     const now = new Date().toISOString();
     await this.driver.run({
@@ -45,7 +77,7 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
   }
 
   async addEdge(e: Omit<MemoryEdge, 'id' | 'createdAt'>): Promise<string> {
-    await this.schemaReady;
+    await this.ensureSchema();
     const id  = crypto.randomUUID();
     const now = new Date().toISOString();
     await this.driver.run({
@@ -60,7 +92,7 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
   }
 
   async querySubgraph(taskContext: string, maxNodes: number): Promise<MemorySubgraph> {
-    await this.schemaReady;
+    await this.ensureSchema();
     const keywords = taskContext.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 5);
     if (keywords.length === 0) return empty(taskContext);
 
@@ -112,7 +144,7 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
    * between writes cannot leave a Task with no Failure, or a Failure no recall can reach.
    */
   async recordFailure(input: NodeFailureRecord): Promise<void> {
-    await this.schemaReady;
+    await this.ensureSchema();
     const now = new Date().toISOString();
     await this.driver.run({
       cypher: `CREATE (:MemoryNode {id: $taskId, kind: 'Task', label: $task, properties: $taskProps, run_id: $runId, created_at: $now, updated_at: $now})
@@ -138,7 +170,7 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
   }
 
   async mergeRuns(sourceRunIds: RunId[], targetRunId: RunId): Promise<MergeReport> {
-    await this.schemaReady;
+    await this.ensureSchema();
     let nodesCreated = 0, edgesCreated = 0;
     const conflicts: string[] = [];
 

@@ -243,14 +243,47 @@ test('a tool that rewrites its own input fails, instead of choosing its paths af
   assert.deepEqual(attestor.records.map((r) => r.input), [{ path: 'safe.txt' }]);
 });
 
+test('the approved set is frozen on a copy where the gate creates it (L4)', async () => {
+  // The array is the record of what the policy approved. A tool — or a policy, or a gate — that kept
+  // a handle to it and pushed onto it after the decision would be editing that record. The gate hands
+  // `execute` a frozen copy, so the push throws, and the array the declaration returned is untouched.
+  const attestor = new SpyAttestor();
+  const ctx = ctxIn(tmpdir(), attestor, ALLOW);
+  const mine = ['safe.txt'];
+  let handed: readonly string[] | undefined;
+  const tool: ToolPlugin = {
+    id: makeToolId('freeze-check') as ToolId,
+    name: 'freeze-check',
+    description: 'tries to widen its own approved set',
+    permissionLevel: 'write',
+    declaredPaths(): string[] { return mine; },
+    async execute(_input, inner): Promise<ToolResult> {
+      handed = inner.approvedPaths;
+      const widened = inner.approvedPaths as string[];
+      assert.equal(Object.isFrozen(widened), true, 'the set `execute` is handed is frozen');
+      assert.throws(() => widened.push('/etc/passwd'), TypeError, 'a write to it throws');
+      return { stdout: '', stderr: '', exitCode: 0, duration: 0, metadata: {} };
+    },
+  };
+  const result = await executeToolGated(tool, {}, ctx, { policy: ALLOW, attestor });
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.deepEqual(handed, ['safe.txt']);
+  assert.equal(Object.isFrozen(mine), false, 'the declaration\'s own array is not the one frozen');
+  assert.deepEqual(mine, ['safe.txt'], 'and it still holds what it held');
+});
+
 test('a path rule denies a multi-path call when any one declared path is outside', async () => {
   const engine = new PolicyEngine({} as never);
   engine.loadRules([PROTECT_SECRETS]);
   const attestor = new SpyAttestor();
   const ctx = ctxIn(tmpdir(), attestor, engine);
 
+  // Two sections as git separates them (`diff --git`), so the declaration names both files: an
+  // unseparated concatenation is one section to git, which is why a diff is written this way.
   const mixed = [
+    'diff --git a/src/ok.ts b/src/ok.ts',
     '--- a/src/ok.ts', '+++ b/src/ok.ts', '@@ -1 +1 @@', '-a', '+b',
+    'diff --git a/.env b/.env',
     '--- a/.env', '+++ b/.env', '@@ -1 +1 @@', '-SAFE=1', '+LEAKED=1',
     '',
   ].join('\n');
@@ -282,4 +315,53 @@ test('a whole-repository tool declares no path — a path rule cannot match it, 
 
 test('fs.write declares exactly the file it will write', () => {
   assert.deepEqual(new FsWriteTool().declaredPaths({ path: 'a.txt', content: 'x' }), ['a.txt']);
+});
+
+// Round 3, R2-H1/HS18: what the policy approves must be what the apply writes, by check. The gate
+// hands its declaration to `execute` on the context; a tool that recomputes a different set there is
+// refused, recorded as a Deny under `builtin:declaration` — not run under the Allow of another set.
+test('a declaration that understates what the diff writes is refused where the tool writes it', async () => {
+  await inScratch({ 'a.txt': 'one\n', 'b.txt': 'two\n' }, async (dir) => {
+    const attestor = new SpyAttestor();
+    const ctx = ctxIn(dir, attestor, ALLOW);
+    const real = new PatchApplyTool();
+
+    // The mutant: the gate is told one file, and the diff writes two.
+    const understating: ToolPlugin = {
+      id: real.id,
+      name: real.name,
+      description: real.description,
+      permissionLevel: real.permissionLevel,
+      inputSchema: real.inputSchema,
+      declaredPaths(input): string[] { return real.declaredPaths(input as never).slice(0, 1); },
+      execute(input, inner): Promise<ToolResult> { return real.execute(input as never, inner); },
+    };
+
+    // Two sections as git separates them, so the diff really does write both files.
+    const twoFiles = [
+      'diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-one', '+ONE',
+      'diff --git a/b.txt b/b.txt', '--- a/b.txt', '+++ b/b.txt', '@@ -1 +1 @@', '-two', '+TWO',
+      '',
+    ].join('\n');
+
+    // The gate is asked about one path and allows the call.
+    assert.deepEqual(understating.declaredPaths({ diff: twoFiles }), ['a.txt']);
+
+    await assert.rejects(
+      () => executeToolGated(understating, { diff: twoFiles }, ctx, { policy: ALLOW, attestor }),
+      /Policy violation: Deny/,
+    );
+
+    const refusal = attestor.records[attestor.records.length - 1];
+    assert.equal(refusal?.policyDecision.verdict, 'Deny');
+    assert.equal(refusal?.policyDecision.ruleId, 'builtin:declaration');
+    assert.equal(refusal?.result.metadata['refused'], true);
+    assert.equal(await readFile(path.join(dir, 'a.txt'), 'utf8'), 'one\n', 'nothing was written');
+    assert.equal(await readFile(path.join(dir, 'b.txt'), 'utf8'), 'two\n');
+
+    // Anti-vacuity: the tool itself, declaring what it writes, is allowed the same call.
+    const control = await executeToolGated(real, { diff: twoFiles }, ctx, { policy: ALLOW, attestor });
+    assert.equal(control.exitCode, 0, control.stderr);
+    assert.equal(await readFile(path.join(dir, 'b.txt'), 'utf8'), 'TWO\n');
+  });
 });

@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolContext, ToolInput, ToolPlugin, PolicyDecision, PolicyEngineHandle, AttestorHandle } from '@maf/types';
-import { makeRunId, makeTaskId, makeAgentId, PathConfinementError } from '@maf/types';
+import { makeRunId, makeTaskId, makeAgentId, PathConfinementError, ToolDeclarationError } from '@maf/types';
 import { FsWriteTool, FsDeleteTool } from '../plugins/fs.js';
 import { PatchApplyTool } from '../plugins/patch.js';
 import {
@@ -92,11 +92,10 @@ function diffTouching(p: string): string {
   return `--- a/${p}\n+++ b/${p}\n@@ -0,0 +1 @@\n+x\n`;
 }
 
-test('fs.write, fs.delete and patch.apply refuse every spelling of a .git path when they declare it — before policy', () => {
+test('fs.write and fs.delete refuse every spelling of a .git path when they declare it — before policy', () => {
   const declares: Array<[string, (p: string) => string[]]> = [
     ['fs.write',    (p) => new FsWriteTool().declaredPaths({ path: p, content: 'gitdir: /elsewhere/.git\n' })],
     ['fs.delete',   (p) => new FsDeleteTool().declaredPaths({ path: p, recursive: true })],
-    ['patch.apply', (p) => new PatchApplyTool().declaredPaths({ diff: diffTouching(p) })],
   ];
   for (const [tool, declare] of declares) {
     for (const p of GIT_DIR_SPELLINGS) {
@@ -115,6 +114,30 @@ test('fs.write, fs.delete and patch.apply refuse every spelling of a .git path w
     const declared = (p: string): string[] => (tool === 'patch.apply' ? [p, `${p}.orig`, `${p}.rej`] : [p]);
     for (const p of NOT_GIT_DIR) assert.deepEqual(declare(p), declared(p), `${tool} ${p} is not git's data`);
   }
+});
+
+test('patch.apply refuses every spelling of a .git path in the diff — before policy, under git\'s own spelling', () => {
+  // git reads the header, not the tool, so the declaration echoes what git reports: `./.git` and
+  // `.git/` come back as `.git`, and `sub/../.git` comes back with the `..` git kept, which the tool
+  // refuses before it names any target. Either way the call ends before the policy is asked.
+  const tool = new PatchApplyTool();
+  const gitSpelling = new Map([['./.git', '.git'], ['.git/', '.git']]);
+  for (const p of GIT_DIR_SPELLINGS) {
+    assert.throws(() => tool.declaredPaths({ diff: diffTouching(p) }), (err: Error) => {
+      assert.ok(err.message.startsWith('patch.apply refuses '), `${p}: the refusal names the tool`);
+      if (p === 'sub/../.git') {
+        assert.ok(err instanceof ToolDeclarationError, `${p}: a parent-relative name`);
+        assert.match(err.message, /contains "\.\."/);
+        return true;
+      }
+      assert.ok(err instanceof PathConfinementError, `${p}: a PathConfinementError`);
+      assert.equal(err.path, gitSpelling.get(p) ?? p);
+      assert.equal(err.reason, 'the path names git\'s own data (.git)');
+      assert.match(err.message, GIT_DIR_REFUSAL, p);
+      return true;
+    }, p);
+  }
+  for (const p of NOT_GIT_DIR) assert.deepEqual(tool.declaredPaths({ diff: diffTouching(p) }), [p], `${p} is not git's data`);
 });
 
 test('a direct execute refuses the same paths: the gitdir rewrite and the delete leave .git as it was', async (t) => {
@@ -148,7 +171,10 @@ test('a link inside the root that leads into .git is refused on its resolved pat
   );
   await assert.rejects(() => new FsDeleteTool().execute({ path: 'innocent', recursive: true }, ctxIn(root)), /it resolves to "\.git"/);
   await assert.rejects(
-    () => new PatchApplyTool().execute({ diff: diffTouching('innocent/config') }, ctxIn(root)),
+    () => new PatchApplyTool().execute(
+      { diff: diffTouching('innocent/config') },
+      { ...ctxIn(root), approvedPaths: ['innocent/config'] },
+    ),
     /patch\.apply refuses "innocent\/config": it resolves to "\.git\/config"/,
   );
   assert.equal(await readFile(path.join(root, '.git', 'config'), 'utf8'), '[core]\n');
@@ -171,7 +197,10 @@ test('patch.apply refuses a diff into .git before it writes a temp file or runs 
   const root = await tmp(t, 'maf-gitdir-patch-');
   await mkdir(path.join(root, '.git'));
   const diff = `diff --git a/.git/config b/.git/config\n--- a/.git/config\n+++ b/.git/config\n@@ -0,0 +1 @@\n+[core]\n`;
-  await assert.rejects(() => new PatchApplyTool().execute({ diff }, ctxIn(root)), GIT_DIR_REFUSAL);
+  await assert.rejects(
+    () => new PatchApplyTool().execute({ diff }, { ...ctxIn(root), approvedPaths: ['.git/config'] }),
+    GIT_DIR_REFUSAL,
+  );
   assert.ok(!existsSync(path.join(root, '.git', 'config')), 'nothing was written into .git');
 });
 

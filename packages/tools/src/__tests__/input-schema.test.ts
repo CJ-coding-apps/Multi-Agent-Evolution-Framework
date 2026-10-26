@@ -17,7 +17,8 @@ import type { GitExec } from '../plugins/git.js';
 // read an undefined `diff` and threw a TypeError from `writeFile`. Every built-in tool states the
 // input its `execute` reads; `execute` itself answers a missing or mistyped required field with a
 // failed result rather than a throw (the gate answers first; this is for a caller that bypassed it);
-// and `declaredPaths` on such an input still declares nothing it was not given.
+// `declaredPaths` on such an input still declares nothing it was not given — except `patch.apply`,
+// which cannot declare nothing and write anyway: a call it cannot declare is refused (0.5.1).
 
 const ALLOW: PolicyEngineHandle = { async evaluate(): Promise<PolicyDecision> { return { verdict: 'Allow' }; } };
 const NO_ATTESTOR: AttestorHandle = { async record(): Promise<void> {} };
@@ -134,16 +135,15 @@ test('execute checks only what it cannot run without: an unknown field from a di
   assert.deepEqual(await readdir(root), ['a.txt']);
 });
 
-test('declaredPaths on a malformed input declares nothing it was not given, and does not throw', () => {
+test('declaredPaths on a malformed input declares nothing it was not given; patch.apply refuses instead', () => {
   const malformed: ToolInput[] = [{}, { path: 5 }, { path: ['a'] }, { path: null }, { file: 'a.txt' }];
   const fsTools: ToolPlugin[] = [new FsReadTool(), new FsWriteTool(), new FsDeleteTool(), new FsStatTool(), new FsListTool()];
   for (const tool of fsTools) {
     for (const input of malformed) assert.deepEqual(tool.declaredPaths(input), [], `${tool.id} ${JSON.stringify(input)}`);
   }
-  // patch.apply is the exception (WP-3.9 F1): a diff it cannot read is a call no path rule can
-  // cover, so a direct caller gets a refusal rather than an empty declaration. Through the gate the
-  // schema check answers it first; the input the reported bypass used (`{path, patch}`) has no
-  // `diff` at all, and it used to be declared as touching nothing.
+  // `patch.apply` has no such answer: declaring nothing and then writing what the diff names is
+  // exactly the reported bypass. The gate answers the malformed input before this is reached
+  // (above); a caller that bypasses the gate gets a refusal, not an empty declaration.
   const patch: ToolPlugin = new PatchApplyTool();
   for (const input of [{}, { diff: 5 }, { path: 'hello.js', patch: '--- a/hello.js\n+++ b/hello.js\n' }]) {
     assert.throws(() => patch.declaredPaths(input), ToolDeclarationError, JSON.stringify(input));

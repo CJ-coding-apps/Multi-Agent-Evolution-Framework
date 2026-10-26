@@ -98,23 +98,20 @@ test('close() lets a query in flight finish, refuses one issued after it, and le
   }
 });
 
-test('graphs closed while still initialising are released once that settles', async () => {
-  const dir = await tempDir();
-  try {
-    // Twelve graphs closed with their schema creation in flight (release then waits for it, a few
-    // ms). Were they never released, their reservations would leave the next graph none to take.
-    for (let i = 0; i < 12; i++) {
-      new MemoryGraph(path.join(dir, `early-${i}.kuzu`)).close();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    const graph = new MemoryGraph(path.join(dir, 'after.kuzu'));
+test('a graph opened and closed without a query runs no schema setup, so its directory goes at once (M1)', async () => {
+  // F15. The constructor used to start the DDL sequence; a caller that failed right after
+  // construction closed the graph while the sequence was between two statements, the driver
+  // released the database, the next statement threw, and the caller's `rm` raced handles that
+  // were not yet closed — `ENOTEMPTY … memory.kuzu`, measured at 1 in 20. Schema setup now starts
+  // with the first query, so this close has nothing to wait for. Sixty clean removals is the
+  // measured form of the verifier's 20-run loop.
+  for (let i = 0; i < 60; i++) {
+    const dir = await tempDir();
     try {
-      await graph.addNode({ kind: 'Task', label: 'after', properties: {}, runId: makeRunId('lifetime-init') });
-      assert.deepEqual(await graph.run({ cypher: 'MATCH (n:MemoryNode) RETURN n.label AS label', params: {} }), [{ label: 'after' }]);
+      new MemoryGraph(path.join(dir, 'memory.kuzu')).close();
+      await rm(dir, { recursive: true, force: true });
     } finally {
-      graph.close();
+      await rm(dir, { recursive: true, force: true });
     }
-  } finally {
-    await rm(dir, { recursive: true, force: true });
   }
 });

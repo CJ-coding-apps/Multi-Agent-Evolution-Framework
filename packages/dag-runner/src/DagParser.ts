@@ -76,12 +76,19 @@ export class DagParser {
       });
     }
 
-    const edges: DagEdge[] = (spec.edges ?? []).map((e) => ({
-      id:   crypto.randomUUID() as EdgeId,
+    const edges: DagEdge[] = (spec.edges ?? []).map((e, i) => ({
+      // Derived from what the spec says, not the clock: the same spec parses to the same DAG on
+      // every machine, so a plan read from a file can be compared byte for byte with the last one.
+      id:   `e${i}:${e.from}->${e.to}:${e.kind ?? 'control'}` as EdgeId,
       from: makeNodeId(e.from),
       to:   makeNodeId(e.to),
       kind: (e.kind ?? 'control') as DagEdge['kind'],
     }));
+
+    // An edge is an ordering constraint: `to` runs only after `from` succeeded. The scheduler reads
+    // dependencies, and until this the parser kept `edges` as decoration, so a spec whose nodes
+    // declared an order only through edges ran them concurrently.
+    applyEdgeDependencies('DagParser', nodes, edges);
 
     const config: DagConfig = {
       ...DEFAULT_CONFIG,
@@ -90,7 +97,31 @@ export class DagParser {
       reviewGateNodeIds: (spec.config?.reviewGateNodeIds ?? []).map(makeNodeId),
     };
 
-    return { id: spec.id ?? crypto.randomUUID(), runId, nodes, edges, config };
+    return { id: spec.id ?? contentId(spec), runId, nodes, edges, config };
+  }
+}
+
+/** A stable id for a spec that names none: the same content always mints the same id. */
+export function contentId(spec: unknown): string {
+  return crypto.createHash('sha256').update(JSON.stringify(spec)).digest('hex');
+}
+
+/**
+ * Turns each edge into the dependency the scheduler understands, so both builders answer "what does
+ * this edge mean?" the same way. `DagSynthesizer` carries the same rule (it cannot import this
+ * package: `@maf/planning-agent` does not depend on `@maf/dag-runner`). An edge naming a node that
+ * is not in the DAG is refused here rather than reaching the runner.
+ */
+export function applyEdgeDependencies(
+  who: string,
+  nodes: ReadonlyMap<NodeId, DagNode>,
+  edges: readonly DagEdge[],
+): void {
+  for (const edge of edges) {
+    const target = nodes.get(edge.to);
+    if (!nodes.has(edge.from)) throw new Error(`${who}: edge names unknown node "${edge.from}" (from)`);
+    if (target === undefined) throw new Error(`${who}: edge names unknown node "${edge.to}" (to)`);
+    if (!target.dependencies.includes(edge.from)) target.dependencies.push(edge.from);
   }
 }
 

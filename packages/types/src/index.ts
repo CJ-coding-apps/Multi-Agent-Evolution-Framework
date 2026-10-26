@@ -124,6 +124,22 @@ export interface ToolContext {
   agentRole?:    string;
   policy:        PolicyEngineHandle;
   attestor:      AttestorHandle;
+
+  /**
+   * The declaration the policy approved for this call, when it was approved.
+   *
+   * `executeToolGated` sets it on the context it hands `execute` and nowhere else, so the policy
+   * and the approval gate see the caller's own context. A tool whose declaration can be recomputed
+   * where it acts must compare the two and refuse when they differ: an approval is of a set of
+   * paths, and a call that would write a different set was never approved. The set is frozen, so no
+   * holder of a handle to it can change what was approved.
+   *
+   * Absent means the call did not come through the gate — a caller that is not the gate, or a test
+   * calling `execute` directly — and a write is refused: there is no approved set to compare with,
+   * and a write nothing approved is not an allowed one. A direct call that is meant to write names
+   * the paths it was approved for; the tests do.
+   */
+  approvedPaths?: readonly string[];
 }
 
 export interface ToolPlugin<I extends ToolInput = ToolInput> {
@@ -136,11 +152,17 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
   /**
    * The filesystem paths this call will touch, as the tool itself declares them.
    *
-   * MUST be a pure function of `input`: the policy layer calls it before any rule and
-   * before `execute`, so a tool that only reveals its paths while running (patch.apply
-   * derived them inside `execute` and wrote them back onto the input) is invisible to
-   * path rules — the shipped `protect-secrets` Deny matched `fs.write ".env"` and skipped
-   * `patch.apply` on the same file.
+   * MUST be a pure function of `input` and, where given, `ctx`: the same input and the same
+   * context must always give the same declaration. The policy layer calls it before any rule and
+   * before `execute`, so a tool that only reveals its paths while running (patch.apply derived
+   * them inside `execute` and wrote them back onto the input) is invisible to path rules — the
+   * shipped `protect-secrets` Deny matched `fs.write ".env"` and skipped `patch.apply` on the
+   * same file.
+   *
+   * `ctx` is optional and is the caller's own context, without `approvedPaths`. It is there for a
+   * declaration that has to read the tree — a name that is a symlink today, say — so the gate can
+   * record a refusal instead of an Allow that `execute` then declines. A tool that does not read
+   * the tree ignores it and must behave the same with and without it.
    *
    * MUST over-declare rather than under-declare: a path that is declared but never touched
    * can only make a rule match sooner, while a path that is touched but not declared is a
@@ -152,7 +174,7 @@ export interface ToolPlugin<I extends ToolInput = ToolInput> {
    * and a path that leaves the root is refused. A tool that takes a path from `input` should
    * resolve it the same way — see `resolveInside`.
    */
-  declaredPaths(input: I): string[];
+  declaredPaths(input: I, ctx?: ToolContext): string[];
 
   /**
    * The input `execute` reads, field by field. The in-process loop advertises it in the tool
@@ -251,6 +273,24 @@ export interface DagConfig {
   timeoutMs:         number;
   reviewGateNodeIds: NodeId[];
 }
+
+// WP-3.6 — additive: where a run's DAG came from. The bundle and the Run node record it, so an
+// operator reading an attestation can tell a plan a model made from one a file asked for; without
+// it the two runs differ only in a line of stdout that is not part of the signed record.
+export type PlanSource =
+  /** `--plan-from`: the DAG was read from this file, whose bytes hash to `sha256`. */
+  | { kind: 'spec'; path: string; sha256: string }
+  /** The planner was asked, and its answer is the plan. */
+  | { kind: 'planner' };
+
+/**
+ * The largest delay a Node timer honours. Above it `setTimeout` fires after 1 ms instead, so a
+ * timeout or a backoff that big would mean "at once". Both readers of a millisecond field — the
+ * `.maf/config.yaml` loader and the `--plan-from` spec's `timeoutMs` — bound it by this one value,
+ * so the two cannot disagree about what a valid timeout is (WP-3.6, R3).
+ */
+// WP-3.6: shared timer ceiling — the `.maf/config.yaml` loader and the `--plan-from` `timeoutMs` bound.
+export const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** 'Unschedulable' is a real verdict: the DAG was valid but never ran to completion. */
 export type RunStatus = 'Succeeded' | 'Failed' | 'Unschedulable';
@@ -1609,12 +1649,11 @@ export {
   redactCredentialsRecord, redactRecord,
 } from './redaction.js';
 
-// WP-3.9 — additive only: a new re-export; no existing export moved or changed.
-/**
- * The environment a child process may inherit. Two policies, one home: backend CLIs get the
- * user's environment minus maf's own `MAF_*` variables; tools that run project code get an
- * allowlist. `@maf/adapter-base` and `@maf/tools` both already depend on this package.
- */
+// WP-3.9 — additive only: a new re-export; no existing export moved or changed. The child-process
+// environment helpers. Two policies, one home: backend CLIs get the user's environment minus maf's
+// own `MAF_*` variables (`backendEnv`); a tool that runs project code gets an allowlist (`toolEnv`)
+// — in 0.5.1 that child is `patch.apply`'s `git apply`, kept clear of `GIT_*`, provider tokens and
+// every `MAF_*` variable. `@maf/adapter-base` and `@maf/tools` both already depend on this package.
 export { TOOL_ENV_ALLOWLIST, toolEnv, backendEnv, isMafVariable } from './childEnv.js';
 
 // WP-3.9 G5 — additive only: a new re-export; no existing export moved or changed.

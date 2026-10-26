@@ -395,8 +395,8 @@ importers:
         specifier: workspace:*
         version: link:../types
       kuzu:
-        specifier: ^0.7.0
-        version: 0.7.1
+        specifier: 0.11.3
+        version: 0.11.3
     devDependencies:
       '@types/node':
         specifier: '*'
@@ -1046,8 +1046,8 @@ packages:
   jsonfile@6.2.1:
     resolution: {integrity: sha512-zwOTdL3rFQ/lRdBnntKVOX6k5cKJwEc1HdilT71BWEu7J41gXIB2MRp+vxduPSwZJPWBxEzv4yH1wYLJGUHX4Q==}
 
-  kuzu@0.7.1:
-    resolution: {integrity: sha512-p3wBt3qaKQG+vjEi+9AJ+lze3kX5QHoH8dmPRu8/HIh7AJh9t3DJ2zaJwCj0CQYLVMMtGAJb3WG9WpAr4UcGfw==}
+  kuzu@0.11.3:
+    resolution: {integrity: sha512-4+hD3Y+YMV3e0uiqTv1/GUal47D04l8qluw1WFWg8Nx3k7rLsHG1Pmq9WHIOlf1742svxQvTYQiuY6oS1qxAZA==}
     deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 
   math-intrinsics@1.1.0:
@@ -1644,7 +1644,7 @@ snapshots:
     optionalDependencies:
       graceful-fs: 4.2.11
 
-  kuzu@0.7.1:
+  kuzu@0.11.3:
     dependencies:
       cmake-js: 7.4.0
       node-addon-api: 6.1.0

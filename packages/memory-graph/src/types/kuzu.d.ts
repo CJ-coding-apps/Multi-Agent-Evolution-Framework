@@ -35,6 +35,8 @@ declare module 'kuzu' {
       preparedStatement: PreparedStatement,
       params?: Record<string, KuzuParameter>,
     ): Promise<QueryResult>;
+    /** Opens the connection's native side before the first query; both 0.7.1 and 0.11.3 have it. */
+    init(): Promise<void>;
     /** `async` in the binding, like `Database.close`. */
     close(): Promise<void>;
   }
@@ -51,5 +53,9 @@ declare module 'kuzu' {
   export interface KuzuModule {
     Database:   typeof Database;
     Connection: typeof Connection;
+    /** The library's version, e.g. `0.11.3`; a getter in the binding, not a plain field. */
+    readonly VERSION: string;
+    /** The on-disk format's version; differs from `VERSION` and changes between releases. */
+    readonly STORAGE_VERSION: bigint;
   }
 }

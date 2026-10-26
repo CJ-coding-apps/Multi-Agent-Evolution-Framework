@@ -13,7 +13,7 @@ reproduction is worth more than a description.
 
 ## Supported versions
 
-MAF is pre-1.0 (currently 0.5.0). Only the most recent release is supported; fixes land there and are not
+MAF is pre-1.0 (currently 0.5.1). Only the most recent release is supported; fixes land there and are not
 backported. Please reproduce against the latest version, on Node 22 — the version CI builds and tests
 on — before reporting.
 
@@ -109,16 +109,21 @@ How a bundle is signed, and what a signature does **not** establish today, state
   keeping the key away from agent code.** maf does not pass `MAF_SIGNING_KEY` or other `MAF_*`
   variables to processes it starts for an agent. Agent code still runs as your user: anything your user
   can read, including maf's own environment, agent code can read. Isolating the key needs a separate
-  user or sandbox, which maf does not provide. What maf does do is give every process it starts for an
-  agent a policy rather than `process.env` (`packages/types/src/childEnv.ts`): the backend CLIs —
-  `claude`, `codex`, `gemini` — get the environment minus every `MAF_*` variable, so `MAF_SIGNING_KEY`
-  is absent and each provider's own key still reaches the backend that needs it; the tools that start a
-  process — `test.run`, `patch.apply`, `grep` (rg or grep) and the `git.*` tools — get a short allowlist
-  (PATH, HOME, the locale, `TMPDIR`, `TERM`, the Windows path variables) that carries no `MAF_*`
-  variable and no provider token. `test.run` runs project code and the tester role can write that code,
-  so the boundary is what the child is handed, not what it can find. A test proves the absence in a real
-  child (`packages/types/src/__tests__/childEnv.test.ts`). The `git.*` tools never run a hook, even one
-  the agent wrote (see *The agent's git tools* below).
+  user or sandbox, which maf does not provide — so an agent that can run a command can still reach the
+  parent process's environment by other means, and a signature only shows that whoever made the bundle
+  held the key. What maf does do is give every process it starts for an agent a policy rather than
+  `process.env` (`packages/types/src/childEnv.ts`): the backend CLIs — `claude`, `codex`, `gemini` —
+  get the environment minus every `MAF_*` variable (`backendEnv`), so `MAF_SIGNING_KEY` is absent and
+  each provider's own key still reaches the backend that needs it; the tools that start a process —
+  `test.run`, `patch.apply`, `grep` (rg or grep) and the `git.*` tools — get a short allowlist
+  (`toolEnv`: PATH, HOME, the locale, `TMPDIR`, `TERM`, the Windows path variables) that carries no
+  `MAF_*` variable and no provider token. `patch.apply` goes further still: its `git apply` runs against
+  an empty throwaway git directory with the system and global git configuration and every extension
+  point disabled, so no filter driver or hook can run, even one the agent wrote into `.gitattributes`
+  (D-59, HS1/HP3). `test.run` runs project code and the tester role can write that code, so the boundary
+  is what the child is handed, not what it can find. A test proves the absence in a real child
+  (`packages/types/src/__tests__/childEnv.test.ts`). The `git.*` tools never run a hook, even one the
+  agent wrote (see *The agent's git tools* below).
 - **It is signed, not sealed.** Anyone who can write to the bundle's directory can replace it with one
   they signed with the same key.
 
@@ -593,8 +598,12 @@ checked path and the executed path are the same value because both come from tha
 what stops a spelling from being confined in one place and not the other. `git.diff` declares and diffs
 one list (`paths`). `git.add` and `patch.apply` are confined by the policy engine only: it checks the
 resolved form of what they declare, and the tool then hands its own input to git (with literal
-pathspecs) or to `patch`. That is the same input, but not one resolved value, and a direct call that
-skips the policy engine gets no confinement from MAF.
+pathspecs, or — for `patch.apply` — the diff itself to `git apply`). For `patch.apply` the declaration and
+the write are git reading the same diff bytes in sealed contexts with the same `-p` — the gate opens one at
+declaration time and `execute` opens its own — and `execute` compares the two declarations and refuses the
+call if they differ, so the two cannot disagree by spelling or by directory; but it is not one resolved
+value, and a direct call that skips the policy engine gets no root confinement from MAF beyond the tool's
+own refusal of absolute and `..` names.
 
 `patch.apply` declares what the command it is about to run will open, not what a git diff happens to
 look like. It parses the diff's `+++`/`---` and `diff --git` headers and strips exactly the `strip`
@@ -624,8 +633,74 @@ Three things this does **not** cover, so none is mistaken for it:
 - It confines paths to the project root (the directory of `ctx.projectRoot`), not to the files a role is
   *allowed* to touch. Which files inside the root are fair game is a policy question — `pathGlob` and
   `allowedPathGlobs`.
-- It applies to the paths a tool **declares** — `ToolPlugin.declaredPaths(input)`, a pure function of the
-  input. For a `cli`-tier role, whose tool calls maf never sees, no path is declared and none is checked.
+- It applies to the paths a tool **declares** — `ToolPlugin.declaredPaths(input, ctx?)`. The paths are a
+  pure function of the input; the optional context only lets the tool's own refusals run against the
+  worktree the apply will use. For a `cli`-tier role, whose tool calls maf never sees, no path is declared
+  and none is checked.
+
+`patch.apply` does not read diff headers. It asks `git apply` which files the diff names — `--numstat -z`
+forward and `-R --numstat -z` reversed — and applies with the same `git apply`, the same diff bytes, the
+same `-p` and the same environment, so the paths the policy is shown are the paths git writes. A gated call
+computes that declaration twice: once for the policy, in a sealed context opened at the project root, and
+once inside `execute` in its own. They are separate git invocations on the same bytes, so `execute` compares
+its set with the one the gate approved and refuses the call on any difference (`builtin:declaration`): the
+agreement is a check, not an assumption. Every git call `execute` makes runs in one sealed context: a fresh
+empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree,
+`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CEILING_DIRECTORIES` at the worktree's parent,
+`toolEnv()`, and `-c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null`. No
+filter driver is defined in that directory, so none can run whatever `.gitattributes` an agent writes, and
+the repository's own config — hooks, fsmonitor, filter drivers — never reaches the apply. Git names the old
+file on the old side and the new one on the new side, so the declaration is the union of the two lists: a
+deletion declares the file that disappears. A name that appears on one side only is an implicit rename —
+`--- a/.env` / `+++ b/notes.txt` with no rename lines — and is refused, because the forward list alone
+would name only the destination while the apply deletes the protected source.
+
+A diff git cannot read, one that names no file, and one git only reports in a form a path list cannot
+describe are refused as a `Deny` under rule id `builtin:declaration` before the policy is asked, because
+an undeclared write is not an allowed one. The forms refused from `--summary` are renames, copies, mode
+changes, symlinks and submodules; a declared path that is already a symlink is refused too, since a plain
+diff rewrites the link in place and the policy would have been asked about its target. That check runs at
+declaration time, so the gate records the `Deny` rather than allowing a call that then fails, and again
+inside `execute`; every parent component is checked as well, so a diff of `d/x.js` is refused when `d` is a
+link. A path that cannot be checked (a component over the name limit — 256 bytes on APFS — gives
+`ENAMETOOLONG`) is a returned refusal, never a raw throw. A declared path below an existing regular file is
+refused too: `README/x` passes `git apply --check` and then fails partway through the apply, after an
+earlier file in the diff has been written, so a parent component that exists and is not a directory is a
+refusal at declaration and nothing is written. The exception is a prefix the *same diff deletes* — `x`
+deleted while `x/y` is created: git removes `x` first, then writes beneath it, and the whole patch applies,
+so a deleted prefix is skipped and the walk stops there. A declared name that is itself an existing
+directory, and that the diff neither creates nor deletes, is refused: a hunk aimed at a directory passes
+`git apply --check` and the apply exits 0 having written nothing, so the agent would be told the hunk landed
+when the tree is unchanged. Creating a mode
+`100755` file is allowed: whether an agent may write a script at a given path is a policy question, not
+one path declaration can answer. Binary patches are refused from their `-` line counts, and a
+`GIT binary patch` marker line is refused wherever it appears, so a binary section's payload cannot hide the
+lines after it from the grammar. What the guarantee is: every path a patch writes is a path the policy saw,
+not atomicity. A patch git rejects outright writes nothing; in a few structural conflicts (`x` and `x/y`
+both created, or a file where a directory exists) git can write some declared, allowed files before failing,
+and maf 0.6.0 restores the declared paths on failure. Absolute names and
+names containing `..` are refused by name, `--check` runs before the apply, so a diff git rejects there
+changes nothing, and `--reject` is never passed, so no `.orig` or `.rej` file is left behind. Nothing is
+loosened relative to `git apply` — there is no `--recount` — so a wrong hunk count fails with git's own
+message and the agent retries. On macOS and Windows, whose filesystems resolve `.ENV` to `.env`, the rules
+are asked twice — once exactly, and once with the paths of Deny and Escalate rules case-folded and
+NFC-normalized — and the stricter verdict decides (`Deny` over `Indeterminate` over `Escalate` over
+`Allow`): a `+++ b/.ENV` header is held to the `**/.env*` rule there, and a folded `docs/**` Escalate can no
+longer pre-empt a Deny below it. `Allow` rules and `allowedPathGlobs` stay exact in both passes, so folding
+never makes a verdict more permissive; on Linux nothing is folded and only the exact pass runs. This is
+stricter than `patch` — a context diff, an `Index:`-only diff, a normal diff, an ed diff, or a section
+start git skips is refused rather than applied, because git applies unified diffs only and skips what it
+does not read while exiting 0. The rule is the diff's line grammar rather than a list of bad patterns:
+every line must be a section header (any `diff ` command line, the `---`/`+++` pair, or a git extended
+header), a hunk header, a hunk body line (` `, `+`, `-` or `\`), or a blank line between files, and any
+other line is refused naming its number. The grammar accepts exactly what `git apply` applies in full: an
+empty line inside a hunk is the blank context git reads it as; a `diff <options> <a> <b>` command line (the
+first line of `diff -ruN` output) is a header that names nothing, so the names still come from the
+`---`/`+++` pair; and a lone carriage return between files is the blank separator a CRLF diff writes. Inside
+a hunk the header's counts decide what is content, so a Helm-rendered YAML file whose unchanged lines read
+` --- # Source: chart/a.yaml` applies, and a hunk with more body lines than its counts is refused rather
+than read past its end. The strictness is the point: a diff whose targets cannot be
+declared is not one whose write may be assumed safe.
 
 ### Configuration is a closed schema
 
