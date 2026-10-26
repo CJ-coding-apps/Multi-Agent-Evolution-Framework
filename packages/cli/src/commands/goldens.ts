@@ -228,7 +228,9 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
         },
       );
     } finally {
-      stack.close();
+      // Awaited: the evaluation directory is removed below, and `close()` now resolves only after
+      // the database it holds is released (WP-3.8 follow-up).
+      await stack.close();
     }
     const bundlePath = path.join(mafDir, 'attestations', `${o.runId}.bundle.json`);
     await mkdir(path.dirname(bundlePath), { recursive: true });
@@ -351,7 +353,7 @@ export function registerGoldensCommand(program: Command): void {
       try {
         await new ScoreRecorder(graph, runId).record(result);
       } finally {
-        graph.close();
+        await graph.close();
       }
 
       const resultsDir = path.join(mafDir, 'goldens', 'results');

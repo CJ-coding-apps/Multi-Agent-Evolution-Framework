@@ -121,14 +121,14 @@ export function demoFailures(o: DemoObservation): string[] {
  * its result block names the bundle as the proof — so the error is not swallowed. A dispatch that
  * already failed is still attested, and its error, the cause, is the one thrown.
  */
-export async function attestAndClose(stack: { close(): void }, attest: () => Promise<unknown>, dispatchError?: unknown): Promise<void> {
+export async function attestAndClose(stack: { close(): Promise<void> }, attest: () => Promise<unknown>, dispatchError?: unknown): Promise<void> {
   try {
     await attest();
   } catch (err) {
     if (dispatchError === undefined) throw err;
     console.error(`[demo] the attestation bundle could not be written either: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
-    stack.close();
+    await stack.close();
   }
   if (dispatchError !== undefined) throw dispatchError;
 }

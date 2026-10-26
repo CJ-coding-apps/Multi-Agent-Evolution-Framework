@@ -7,6 +7,8 @@ import type {
 import { KuzuDriver } from './KuzuDriver.js';
 import { SCHEMA_DDL } from './schema.js';
 import { intLiteral, idListParams } from './cypherText.js';
+import { exportGraph as exportGraphRows, importGraph as importGraphRows } from './GraphTransfer.js';
+import type { GraphExport, ImportReport } from './GraphTransfer.js';
 
 /**
  * What `MemoryGraph` asks of its driver. `KuzuDriver` is the implementation production uses; the
@@ -16,7 +18,8 @@ import { intLiteral, idListParams } from './cypherText.js';
  */
 export interface GraphDriver {
   run(query: GraphQuery): Promise<GraphRow[]>;
-  close(): void;
+  /** Resolves once the backend has released everything; a caller may remove its files after it. */
+  close(): Promise<void>;
 }
 
 export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
@@ -26,18 +29,61 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
    * constructor. Starting it eagerly let `close()` run in the middle of the DDL sequence: the
    * driver released the database between two statements, the next one threw, and the caller then
    * removed a directory whose handles were still open (`ENOTEMPTY` in the M1 stack-cleanup test,
-   * measured at 1 in 20). A graph that is opened and closed without a query now runs no DDL at
-   * all, so that close is deterministic.
+   * measured at 1 in 20). A graph that is opened and closed without a query runs no DDL at all.
+   *
+   * `close()` awaits this before releasing the driver, which is what makes the mid-sequence case
+   * safe even for a graph that *has* queried: the sequence has idle gaps between statements, so
+   * the driver's in-flight count passes through zero between two of them, and releasing on that
+   * count alone would let the next statement reach a closed database.
    */
   private schemaReady: Promise<void> | undefined;
+  /** Set by `close()`; a query issued after it is refused rather than starting a schema run. */
+  private closed = false;
+  /**
+   * Public operations entered but not yet settled. The count is incremented synchronously, before
+   * the method touches `ensureSchema`, so an operation that has passed the `closed` check is
+   * always counted — including one still waiting on schema setup, which the driver cannot see.
+   */
+  private inFlight = 0;
+  /** Resolves the waiters of `whenIdle`, once `inFlight` has reached zero. */
+  private idleWaiters: Array<() => void> = [];
+  /** The one release this graph runs; a second `close()` hands back the same promise. */
+  private closePromise: Promise<void> | undefined;
 
   constructor(dbPath: string, bufferPoolSizeBytes = 128 * 1024 * 1024, driver?: GraphDriver) {
     this.driver = driver ?? new KuzuDriver(dbPath, bufferPoolSizeBytes);
   }
 
-  private ensureSchema(): Promise<void> {
+  private async ensureSchema(): Promise<void> {
+    if (this.closed) throw new Error('This memory graph is closed; a query was issued after close().');
+    return this.ensureSchemaOpen();
+  }
+
+  /**
+   * Schema setup without the `closed` check. The check belongs at the entry of a public operation,
+   * not on every statement inside one: a multi-statement operation that was admitted before
+   * `close()` (its `inFlight` count holds the release open, R2-1) must finish, so its own internal
+   * statements run through this rather than being refused halfway. Entry is still guarded — public
+   * methods call `ensureSchema`, which refuses a call that *starts* after `close()`.
+   */
+  private ensureSchemaOpen(): Promise<void> {
     this.schemaReady ??= this.initSchema();
     return this.schemaReady;
+  }
+
+  /**
+   * One statement of an already-admitted operation: schema is ensured, but the `closed` check is
+   * not re-applied (see `ensureSchemaOpen`). The driver's own close waits on `inFlight`, so the
+   * backend is not released while such a statement is in flight.
+   */
+  private async runOpen(query: GraphQuery): Promise<GraphRow[]> {
+    await this.ensureSchemaOpen();
+    return this.driver.run(query);
+  }
+
+  /** A runner over `runOpen`, so an `exportGraph`/`importGraph` runs as one admitted operation. */
+  private openRunner(): GraphQueryRunner {
+    return { run: (query: GraphQuery) => this.runOpen(query) };
   }
 
   private async initSchema(): Promise<void> {
@@ -57,12 +103,27 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
 
   /** The one way a value reaches a query: named in `params`, never written into `cypher`. */
   async run(query: GraphQuery): Promise<GraphRow[]> {
-    await this.ensureSchema();
-    return this.driver.run(query);
+    return this.track(async () => {
+      await this.ensureSchema();
+      return this.driver.run(query);
+    });
   }
 
   async addNode(n: Omit<MemoryNode, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
-    await this.ensureSchema();
+    return this.track(async () => {
+      await this.ensureSchema();
+      return this.insertNode(n);
+    });
+  }
+
+  /**
+   * The write `addNode` performs, without the entry guard or the operation count. It is called
+   * from inside another admitted operation (`mergeRuns`), whose own `ensureSchema` and `track`
+   * already ran — so routing it through the public `addNode` would re-apply the `closed` check and
+   * refuse the write once `close()` had been called mid-merge (R2-1). The caller has ensured the
+   * schema.
+   */
+  private async insertNode(n: Omit<MemoryNode, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
     const id  = crypto.randomUUID();
     const now = new Date().toISOString();
     await this.driver.run({
@@ -76,7 +137,14 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
   }
 
   async addEdge(e: Omit<MemoryEdge, 'id' | 'createdAt'>): Promise<string> {
-    await this.ensureSchema();
+    return this.track(async () => {
+      await this.ensureSchema();
+      return this.insertEdge(e);
+    });
+  }
+
+  /** The write `addEdge` performs, internal twin of `insertNode` (see it). */
+  private async insertEdge(e: Omit<MemoryEdge, 'id' | 'createdAt'>): Promise<string> {
     const id  = crypto.randomUUID();
     const now = new Date().toISOString();
     await this.driver.run({
@@ -91,50 +159,52 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
   }
 
   async querySubgraph(taskContext: string, maxNodes: number): Promise<MemorySubgraph> {
-    await this.ensureSchema();
-    const keywords = taskContext.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 5);
-    if (keywords.length === 0) return empty(taskContext);
+    return this.track(async () => {
+      await this.ensureSchema();
+      const keywords = taskContext.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 5);
+      if (keywords.length === 0) return empty(taskContext);
 
-    // Scored and ranked in the query, then limited. This took the first `maxNodes * 3` nodes in
-    // storage order and filtered those, so past that size the newest memory was never searched.
-    // A keyword holds no whitespace, so testing each column is the same as testing the old
-    // `label kind properties` text.
-    const params: Record<string, string> = {};
-    const hits = keywords.map((word, i) => {
-      const p = `$kw${i}`;
-      params[`kw${i}`] = word;
-      return `(CASE WHEN lower(n.label) CONTAINS ${p} OR lower(n.kind) CONTAINS ${p} OR lower(n.properties) CONTAINS ${p} THEN 1 ELSE 0 END)`;
-    }).join(' + ');
-    let rows: GraphRow[] = [];
-    try {
-      rows = await this.driver.run({
-        cypher: `MATCH (n:MemoryNode) WITH n, ${hits} AS score WHERE score > 0
-         RETURN n, score ORDER BY score DESC, n.created_at DESC LIMIT ${intLiteral(maxNodes, 'maxNodes')}`,
-        params,
-      });
-    } catch { return empty(taskContext); }
+      // Scored and ranked in the query, then limited. This took the first `maxNodes * 3` nodes in
+      // storage order and filtered those, so past that size the newest memory was never searched.
+      // A keyword holds no whitespace, so testing each column is the same as testing the old
+      // `label kind properties` text.
+      const params: Record<string, string> = {};
+      const hits = keywords.map((word, i) => {
+        const p = `$kw${i}`;
+        params[`kw${i}`] = word;
+        return `(CASE WHEN lower(n.label) CONTAINS ${p} OR lower(n.kind) CONTAINS ${p} OR lower(n.properties) CONTAINS ${p} THEN 1 ELSE 0 END)`;
+      }).join(' + ');
+      let rows: GraphRow[] = [];
+      try {
+        rows = await this.driver.run({
+          cypher: `MATCH (n:MemoryNode) WITH n, ${hits} AS score WHERE score > 0
+           RETURN n, score ORDER BY score DESC, n.created_at DESC LIMIT ${intLiteral(maxNodes, 'maxNodes')}`,
+          params,
+        });
+      } catch { return empty(taskContext); }
 
-    const scored = rows.map((r) => [rowToNode(r), Number(r['score'])] as [MemoryNode, number]);
+      const scored = rows.map((r) => [rowToNode(r), Number(r['score'])] as [MemoryNode, number]);
 
-    if (scored.length === 0) return empty(taskContext);
+      if (scored.length === 0) return empty(taskContext);
 
-    const nodes = scored.map(([n]) => n);
-    const relevanceScores = new Map(scored.map(([n, s]) => [n.id, s]));
-    const ids = idListParams('nid', nodes.map((n) => n.id));
+      const nodes = scored.map(([n]) => n);
+      const relevanceScores = new Map(scored.map(([n, s]) => [n.id, s]));
+      const ids = idListParams('nid', nodes.map((n) => n.id));
 
-    let edges: MemoryEdge[] = [];
-    try {
-      const edgeRows = await this.driver.run({
-        cypher: `MATCH (a:MemoryNode)-[e:MemoryEdge]->(b:MemoryNode)
-         WHERE a.id IN [${ids.placeholders}] OR b.id IN [${ids.placeholders}]
-         RETURN e.id AS eid, e.relation AS rel, e.weight AS w, e.metadata AS meta, e.created_at AS cat, a.id AS from_id, b.id AS to_id
-         LIMIT ${intLiteral(maxNodes * 2, 'maxNodes')}`,
-        params: ids.params,
-      });
-      edges = edgeRows.map(rowToEdge);
-    } catch { /* edges best-effort */ }
+      let edges: MemoryEdge[] = [];
+      try {
+        const edgeRows = await this.driver.run({
+          cypher: `MATCH (a:MemoryNode)-[e:MemoryEdge]->(b:MemoryNode)
+           WHERE a.id IN [${ids.placeholders}] OR b.id IN [${ids.placeholders}]
+           RETURN e.id AS eid, e.relation AS rel, e.weight AS w, e.metadata AS meta, e.created_at AS cat, a.id AS from_id, b.id AS to_id
+           LIMIT ${intLiteral(maxNodes * 2, 'maxNodes')}`,
+          params: ids.params,
+        });
+        edges = edgeRows.map(rowToEdge);
+      } catch { /* edges best-effort */ }
 
-    return { nodes, edges, queryContext: taskContext, relevanceScores };
+      return { nodes, edges, queryContext: taskContext, relevanceScores };
+    });
   }
 
   /**
@@ -143,76 +213,155 @@ export class MemoryGraph implements MemoryGraphApi, FailureRecorder {
    * between writes cannot leave a Task with no Failure, or a Failure no recall can reach.
    */
   async recordFailure(input: NodeFailureRecord): Promise<void> {
-    await this.ensureSchema();
-    const now = new Date().toISOString();
-    await this.driver.run({
-      cypher: `CREATE (:MemoryNode {id: $taskId, kind: 'Task', label: $task, properties: $taskProps, run_id: $runId, created_at: $now, updated_at: $now})
-         -[:MemoryEdge {id: $edgeId, relation: 'CAUSED_FAILURE', weight: 1.0, metadata: '{}', created_at: $now}]->
-         (:MemoryNode {id: $failureId, kind: 'Failure', label: $nodeId, properties: $failureProps, run_id: $runId, created_at: $now, updated_at: $now})`,
-      params: {
-        taskId: crypto.randomUUID(), edgeId: crypto.randomUUID(), failureId: crypto.randomUUID(),
-        task: input.task, nodeId: input.nodeId, runId: input.runId, now,
-        taskProps: JSON.stringify({
-          nodeId: input.nodeId, nodeLabel: input.label, role: input.role,
-          ...(input.runTitle === undefined ? {} : { runTitle: input.runTitle }),
-        }),
-        failureProps: JSON.stringify({
-          nodeId: input.nodeId, role: input.role, reason: input.reason, message: input.message,
-          ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }),
-        }),
-      },
+    return this.track(async () => {
+      await this.ensureSchema();
+      const now = new Date().toISOString();
+      await this.driver.run({
+        cypher: `CREATE (:MemoryNode {id: $taskId, kind: 'Task', label: $task, properties: $taskProps, run_id: $runId, created_at: $now, updated_at: $now})
+           -[:MemoryEdge {id: $edgeId, relation: 'CAUSED_FAILURE', weight: 1.0, metadata: '{}', created_at: $now}]->
+           (:MemoryNode {id: $failureId, kind: 'Failure', label: $nodeId, properties: $failureProps, run_id: $runId, created_at: $now, updated_at: $now})`,
+        params: {
+          taskId: crypto.randomUUID(), edgeId: crypto.randomUUID(), failureId: crypto.randomUUID(),
+          task: input.task, nodeId: input.nodeId, runId: input.runId, now,
+          taskProps: JSON.stringify({
+            nodeId: input.nodeId, nodeLabel: input.label, role: input.role,
+            ...(input.runTitle === undefined ? {} : { runTitle: input.runTitle }),
+          }),
+          failureProps: JSON.stringify({
+            nodeId: input.nodeId, role: input.role, reason: input.reason, message: input.message,
+            ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }),
+          }),
+        },
+      });
     });
   }
 
   recallFailures(filter: FailureRecallFilter): Promise<RecalledFailure[]> {
-    return recallFailures(this, filter);
+    // `recallFailures` runs through `this.run`, so the driver work is counted twice over; the
+    // outer count is what makes `close()` wait for the mapping after the last row has arrived.
+    return this.track(async () => recallFailures(this, filter));
   }
 
   async mergeRuns(sourceRunIds: RunId[], targetRunId: RunId): Promise<MergeReport> {
-    await this.ensureSchema();
-    let nodesCreated = 0, edgesCreated = 0;
-    const conflicts: string[] = [];
+    return this.track(async () => {
+      await this.ensureSchema();
+      let nodesCreated = 0, edgesCreated = 0;
+      const conflicts: string[] = [];
 
-    for (const sourceRunId of sourceRunIds) {
-      let sourceRows: GraphRow[] = [];
-      try {
-        sourceRows = await this.driver.run({
-          cypher: `MATCH (n:MemoryNode {run_id: $runId}) RETURN n LIMIT ${intLiteral(1000, 'limit')}`,
-          params: { runId: sourceRunId },
-        });
-      } catch { continue; }
-
-      for (const node of sourceRows.map(rowToNode)) {
+      for (const sourceRunId of sourceRunIds) {
+        let sourceRows: GraphRow[] = [];
         try {
-          const ex = await this.driver.run({
-            cypher: `MATCH (n:MemoryNode {label: $label, kind: $kind, run_id: $runId}) RETURN n.id LIMIT 1`,
-            params: { label: node.label, kind: node.kind, runId: targetRunId },
+          sourceRows = await this.driver.run({
+            cypher: `MATCH (n:MemoryNode {run_id: $runId}) RETURN n LIMIT ${intLiteral(1000, 'limit')}`,
+            params: { runId: sourceRunId },
           });
-          if (ex.length > 0) { conflicts.push(`${node.kind}:${node.label}`); continue; }
-        } catch { /* treat as no conflict */ }
-        await this.addNode({ kind: node.kind, label: node.label, properties: node.properties, runId: targetRunId });
+        } catch { continue; }
+
+        for (const node of sourceRows.map(rowToNode)) {
+          try {
+            const ex = await this.driver.run({
+              cypher: `MATCH (n:MemoryNode {label: $label, kind: $kind, run_id: $runId}) RETURN n.id LIMIT 1`,
+              params: { label: node.label, kind: node.kind, runId: targetRunId },
+            });
+            if (ex.length > 0) { conflicts.push(`${node.kind}:${node.label}`); continue; }
+          } catch { /* treat as no conflict */ }
+          // `insertNode`, not `addNode`: this write is already inside the admitted `mergeRuns`
+          // operation (counted, past its own `ensureSchema`), so it must not re-check `closed` and
+          // be refused halfway once `close()` has been called mid-merge (R2-1).
+          await this.insertNode({ kind: node.kind, label: node.label, properties: node.properties, runId: targetRunId });
+          nodesCreated++;
+        }
+
+        const mergedId = await this.insertNode({ kind: 'Run' as MemoryNodeKind, label: sourceRunId, properties: { mergedFrom: sourceRunId }, runId: targetRunId });
         nodesCreated++;
+
+        try {
+          const targetRows = await this.driver.run({
+            cypher: `MATCH (n:MemoryNode {kind: 'Run', run_id: $runId}) RETURN n.id LIMIT 1`,
+            params: { runId: targetRunId },
+          });
+          if (targetRows[0]) {
+            await this.insertEdge({ fromId: mergedId, toId: String(targetRows[0]['n.id'] ?? ''), relation: 'MERGED_FROM' as MemoryRelation, weight: 1, metadata: {} });
+            edgesCreated++;
+          }
+        } catch { /* skip edge */ }
       }
 
-      const mergedId = await this.addNode({ kind: 'Run' as MemoryNodeKind, label: sourceRunId, properties: { mergedFrom: sourceRunId }, runId: targetRunId });
-      nodesCreated++;
-
-      try {
-        const targetRows = await this.driver.run({
-          cypher: `MATCH (n:MemoryNode {kind: 'Run', run_id: $runId}) RETURN n.id LIMIT 1`,
-          params: { runId: targetRunId },
-        });
-        if (targetRows[0]) {
-          await this.addEdge({ fromId: mergedId, toId: String(targetRows[0]['n.id'] ?? ''), relation: 'MERGED_FROM' as MemoryRelation, weight: 1, metadata: {} });
-          edgesCreated++;
-        }
-      } catch { /* skip edge */ }
-    }
-
-    return { nodesCreated, edgesCreated, conflictsFound: conflicts, mergedAt: new Date() };
+      return { nodesCreated, edgesCreated, conflictsFound: conflicts, mergedAt: new Date() };
+    });
   }
 
-  close(): void { this.driver.close(); }
+  /**
+   * Export and import are one operation each, like `run` and `mergeRuns`: they are counted (so a
+   * concurrent `close()` waits for them) and their many internal `run`s go through `openRunner`,
+   * which does not re-apply the `closed` check — otherwise a `close()` during an import would
+   * refuse a statement mid-transaction and fail the import (the transaction is rolled back, so the
+   * graph is not half-written, but the work is lost). The free `exportGraph`/`importGraph` stay
+   * backend-neutral and are not part of the package's public surface; these methods are the only
+   * admitted way to run one. A call that *starts* after `close()` is still refused, by
+   * `ensureSchema`.
+   */
+  exportGraph(kuzuVersion: string): Promise<GraphExport> {
+    return this.track(async () => {
+      await this.ensureSchema();
+      return exportGraphRows(this.openRunner(), kuzuVersion);
+    });
+  }
+
+  importGraph(exported: GraphExport): Promise<ImportReport> {
+    return this.track(async () => {
+      await this.ensureSchema();
+      return importGraphRows(this.openRunner(), exported);
+    });
+  }
+
+  /**
+   * Counts a public operation from entry to settlement. The increment happens before the body
+   * runs, and the body is called synchronously, so a method that has returned its promise is
+   * already counted when `close()` runs in the same turn.
+   */
+  private track<T>(work: () => Promise<T>): Promise<T> {
+    this.inFlight++;
+    return work().finally(() => {
+      this.inFlight--;
+      if (this.inFlight === 0) {
+        const waiting = this.idleWaiters;
+        this.idleWaiters = [];
+        for (const resolve of waiting) resolve();
+      }
+    });
+  }
+
+  /** Resolves the next time `inFlight` reaches zero. Called only with work already in flight. */
+  private whenIdle(): Promise<void> {
+    return new Promise<void>((resolve) => { this.idleWaiters.push(resolve); });
+  }
+
+  /**
+   * Closes the graph. Resolves only once the driver has released the database, so a caller may
+   * remove the directory — or open another graph there — after awaiting it (WP-3.8 follow-up).
+   * A second call hands back the same promise; a call made after it is refused at once, by the
+   * `closed` flag in `ensureSchema`.
+   *
+   * Two things are awaited before the driver is let go. The schema sequence first: it has idle
+   * gaps between statements, so the driver's own count passes through zero between two of them.
+   * Then this graph's operations. Waiting on the driver alone was not enough — a query issued
+   * before `close()` but still awaiting schema setup is invisible to the driver, and used to be
+   * refused instead of finishing.
+   */
+  close(): Promise<void> {
+    this.closed = true;
+    this.closePromise ??= this.release();
+    return this.closePromise;
+  }
+
+  private async release(): Promise<void> {
+    // A setup that failed has already handed its rejection to the query that started it; it must
+    // not turn the close into a second failure with nothing left to release.
+    await this.schemaReady?.catch(() => undefined);
+    while (this.inFlight > 0) await this.whenIdle();
+    await this.driver.close();
+  }
 }
 
 /** What `recallFailures` matches. Every filter given must hold; with none, the latest failures. */

@@ -22,9 +22,9 @@ test('a stack whose policy cannot be resolved closes the graph it opened (M1)', 
   // the catch) is what makes this test red.
   const realClose = MemoryGraph.prototype.close;
   let closes = 0;
-  MemoryGraph.prototype.close = function close(this: MemoryGraph): void {
+  MemoryGraph.prototype.close = function close(this: MemoryGraph): Promise<void> {
     closes += 1;
-    realClose.call(this);
+    return realClose.call(this);
   };
   try {
     const mafDir = path.join(root, 'state');

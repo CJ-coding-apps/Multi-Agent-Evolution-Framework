@@ -82,7 +82,7 @@ program
       console.log(`Conflicts (skipped): ${report.conflictsFound.join(', ')}`);
     }
 
-    graph.close();
+    await graph.close();
     lcm.close();
   });
 

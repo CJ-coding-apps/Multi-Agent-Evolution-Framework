@@ -58,7 +58,7 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
         { configSource: { uri: 'test', digest: { sha256: harness.sha } }, parameters: {}, environment: {} },
         [], { status: 'Succeeded', unscheduled: [] });
     } finally {
-      stack.close();
+      await stack.close();
     }
 
     await assert.rejects(access(path.join(repo, 'yarn.lock')), 'the refused call never ran');

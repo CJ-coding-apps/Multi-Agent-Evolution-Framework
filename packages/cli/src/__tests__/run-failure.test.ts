@@ -68,7 +68,7 @@ test('a required review with no reviewer fails closed; the worktree is kept, the
       const failures = await graph.run({ cypher: "MATCH (n:MemoryNode) WHERE n.kind = 'Failure' RETURN count(n) AS c", params: {} });
       assert.equal(Number((failures[0] as { c: unknown } | undefined)?.c), 1, 'one Failure node, the recorder\'s; no unlinked duplicate');
     } finally {
-      graph.close();
+      await graph.close();
     }
   } finally {
     await rm(root, { recursive: true, force: true });

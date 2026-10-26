@@ -2,7 +2,7 @@ export { BaseTool, ToolRegistry } from './ToolPlugin.js';
 export { FsReadTool, FsWriteTool, FsDeleteTool, FsStatTool, FsListTool } from './plugins/fs.js';
 export { GrepTool } from './plugins/grep.js';
 export { GitStatusTool, GitDiffTool, GitAddTool, GitCommitTool, GitLogTool, GitResetTool, RepositoryRoots } from './plugins/git.js';
-export { PatchApplyTool, extractDiffPaths } from './plugins/patch.js';
+export { PatchApplyTool } from './plugins/patch.js';
 export { TestRunnerTool } from './plugins/test-runner.js';
 export { LcmExpandTool } from './plugins/lcm.js';
 export type { LcmExpander, LcmExpansion, LcmExpandedSummary, LcmExpandedMessage } from './plugins/lcm.js';

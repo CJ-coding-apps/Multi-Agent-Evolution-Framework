@@ -147,6 +147,6 @@ export function registerEvolveCommand(program: Command): void {
       await mkdir(path.dirname(reportPath), { recursive: true });
       await writeFile(reportPath, JSON.stringify(report, null, 2), 'utf8');
       console.log(`[maf] evolve done: ships=${report.ships} stop=${report.stopReason} → ${reportPath}`);
-      stack.close();
+      await stack.close();
     });
 }

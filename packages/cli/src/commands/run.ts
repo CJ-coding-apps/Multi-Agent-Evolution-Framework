@@ -4,7 +4,7 @@ import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
 import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
-import type { AdapterName, CliAdapter, DagNode, RetryPolicy } from '@maf/types';
+import type { AdapterName, CliAdapter, Dag, DagNode, PlanSource, RetryPolicy } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
 import type { LcmEngine } from '@maf/lcm';
@@ -16,7 +16,7 @@ import { GIT_EMPTY_TREE, ReviewGate, SecurityReviewGate, WorktreeManager, resolv
 import type { FinishResult, Reviewer, RunWorktree } from '@maf/git-ops';
 import { DagRunner, createWriterLockLedger, withRetry } from '@maf/dag-runner';
 import { GraphAwareInjector } from '@maf/prompt-injector';
-import { RetrievalAugmentedPlanner } from '@maf/planning-agent';
+import { DagSynthesizer, RetrievalAugmentedPlanner } from '@maf/planning-agent';
 import { TranscriptLogger } from '@maf/transcript';
 import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
@@ -24,7 +24,7 @@ import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterR
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { createRunLcm, loadCommandPolicy, resolveRunHarness } from '../wiring.js';
+import { createRunLcm, loadCommandPolicy, planRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
 import type { ResolvedMafConfig } from '../config/ConfigLoader.js';
@@ -49,6 +49,8 @@ export interface RunOptions {
   policy:   string;
   roles:    string;
   harness?: string;
+  /** Read the DAG from a JSON workflow spec instead of asking the planner to make one (WP-3.6). */
+  planFrom?: string;
   /** Let a writer role run on the cli tier, outside MAF's gates (D-01). */
   allowUngoverned?: boolean;
   /** Ask a reviewer to decide each writer change; advisory unless the harness requires review (D-34). */
@@ -77,6 +79,12 @@ export interface RunDeps {
   adapters?: () => Map<AdapterName, CliAdapter>;
   /** Decides review requests in place of the terminal reviewer, which needs a TTY. */
   reviewer?: Reviewer;
+  /**
+   * Builds the planner; `new RetrievalAugmentedPlanner(...)` when unset. A seam, not a policy:
+   * `--plan-from` must not construct one at all, and only a test can see a constructor that is
+   * never called.
+   */
+  createPlanner?: (args: ConstructorParameters<typeof RetrievalAugmentedPlanner>[0]) => RetrievalAugmentedPlanner;
 }
 
 export interface RunContext extends RunDeps {
@@ -95,6 +103,7 @@ export function registerRunCommand(program: Command, deps: RunDeps = {}): void {
     .option('--policy <path>', 'Path to policy YAML file (default: .maf/policy.yaml, else the built-in policy); "none" runs without rules', '.maf/policy.yaml')
     .option('--roles <path>', 'Path to roles YAML file', '.maf/roles.yaml')
     .option('--harness <ref>', 'Harness id, sha, or "current" (default: CURRENT if set, else legacy-default from --roles (overrides --roles when given))')
+    .option('--plan-from <path>', 'Read the DAG from a JSON workflow spec instead of planning it with the model (WP-3.6)')
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .option('--review', 'Ask at the terminal to approve each writer change (advisory unless the harness requires review; D-34)')
     .action(async (taskDescription: string, opts: RunOptions, cmd: Command) => {
@@ -122,8 +131,6 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   // there. Agents work in `cwd`, which is the run's own worktree unless --no-worktree (D-03).
   const dir         = path.resolve(opts.dir);
   const mafDir      = path.join(dir, '.maf');
-  // The stores below open files inside .maf/ and do not create it; a repo maf never ran in has none.
-  await ensureMafDir(mafDir);
 
   // flag > config.yaml > built-in default, per key (WP-2.5). Only a flag the user typed is a flag:
   // commander's `--no-worktree` always sets `worktree`, so its source says whether it was typed.
@@ -159,15 +166,17 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   const baseTools = createDefaultRegistry();
 
   // ── Harness (WP-2.9): --harness, else an operator-set CURRENT, else legacy-default minted from
-  // the roles file now. A typed --roles means that file, so it must not lose to CURRENT.
+  // the roles file now. A typed --roles means that file, so it must not lose to CURRENT. Resolved
+  // without writing: `persist()` below runs once the spec, if there is one, has been accepted (R1).
   const harnessStore = new HarnessStore(mafDir);
-  const { harness, source: harnessSource } = await resolveRunHarness({
+  const harnessPlan = await planRunHarness({
     store:     harnessStore,
     ref:       opts.harness ?? (ctx.given('roles') ? LEGACY_DEFAULT_ID : undefined),
     rolesPath: path.resolve(dir, opts.roles),
     mafDir,
     baseTools,
   });
+  const { harness, source: harnessSource } = harnessPlan;
   // Dispatched FROM the harness, so the sha the attestation names is the content that ran.
   const roles = RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), mafDir, baseTools);
   say(`[maf] harness: ${harness.id} (${shortSha(harness.sha)}) [${harnessSource}]`);
@@ -181,6 +190,30 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       say(`[maf] roles: no ${path.relative(dir, rolesPath)} — using the built-in role set (maf init writes the shipped one)`);
     }
   }
+
+  // ── The plan, when the operator wrote one (WP-3.6, F1): read, validate and synthesize it here —
+  // after the role set, and before anything is written: `.maf/` itself, the harness the role set
+  // came from, `checkForRun`'s `maf/<runId>` branch, the worktree, and the run's own stores
+  // (memory, transcript, LCM). So a refused spec leaves the repository and `.maf/` byte for byte as
+  // it found them (R1). Recall is not applied: a spec is the operator's plan, and memory must not
+  // alter it (F7). A relative path is resolved against `--dir`, as `--roles` and `--policy` are (R2).
+  let specPlan: { dag: Dag; source: { kind: 'spec'; path: string; sha256: string } } | undefined;
+  if (opts.planFrom !== undefined) {
+    const specPath = path.resolve(dir, opts.planFrom);
+    const read = await new DagSynthesizer(roles).fromFile(specPath, runId, { runTitle: taskDescription });
+    specPlan = {
+      dag:    applyDagSettings(read.dag, cfg.dag),
+      source: { kind: 'spec', path: specPath, sha256: read.sha256 },
+    };
+  }
+
+  // ── Nothing above wrote; from here the run is going ahead. The stores below open files inside
+  // .maf/ and do not create it, so a repo maf never ran in gets its directory and its .gitignore
+  // now, and then the harness the resolution above needed stored.
+  await ensureMafDir(mafDir);
+  await harnessPlan.persist();
+  // Where the plan came from, recorded on the Run node, in the bundle and in the transcript (F4).
+  const planSource: PlanSource = specPlan?.source ?? { kind: 'planner' };
 
   // ── Tiers (D-01): the dispatcher refuses an ungoverned writer when its node comes up; refusing
   // here, before planning, saves the planner's tokens and the worktree.
@@ -301,6 +334,9 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     });
 
     await transcript.init();
+    // Where the plan came from, as the run's own first record (F4): the bundle is written at the end
+    // and the transcript as the run goes, so a run that fails still says what it was asked to run.
+    await transcript.append('system', planSourceLine(planSource), { planSource });
     const lcmBridge = new BlackboardToLcmAdapter(board, lcm, sessionId, runId);
     // One gate for the run (D-02): an escalated tool call is put to the operator at the terminal,
     // or refused and left as a pending record when no one can answer; either way it is attested.
@@ -324,15 +360,6 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     });
 
     const injector = new GraphAwareInjector({ graph, lcm, maxNodes: 40, tokenBudget: 4096 });
-    const planner  = new RetrievalAugmentedPlanner({
-      graph, lcm, injector,
-      // The registry is the role set in force: it supplies the default role AND the answer to
-      // "is this name real?". The planner used to carry `defaultRole` plus a `validRoles` set
-      // and *warn* before assigning the default, which was the writer.
-      roles,
-      roleCatalog: roles.catalog(),
-      generatePlan: planGenerator(adapter, { workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry, ...model }),
-    });
 
     // The scheduler's writer lock, as a ledger the dispatcher can read (WP-3.0c, the F7 window):
     // when an in-process reader's bracket shows a change, the dispatcher asks who held the lock
@@ -367,13 +394,32 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // Record run start in memory graph (harness provenance)
     await graph.addNode({
       kind: 'Run', label: runId,
-      properties: { taskDescription, adapter: cfg.adapter, harnessId: harness.id, harness_sha: harness.sha },
+      properties: { taskDescription, adapter: cfg.adapter, harnessId: harness.id, harness_sha: harness.sha, planSource },
       runId,
     });
 
     // Generate DAG; the run's concurrency and retry policy come from the config (WP-2.5).
-    say('[maf] planning...');
-    const dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
+    // `--plan-from` reads a spec the operator wrote (WP-3.6): no model call, and the same file always
+    // yields the same DAG. Otherwise the planner is asked, as before — and it is constructed only
+    // here, so the spec path has no planner to build (F3).
+    let dag: Dag;
+    if (specPlan !== undefined) {
+      say(`[maf] plan: ${specPlan.source.path} (read from spec, no model call)`);
+      dag = specPlan.dag;
+    } else {
+      say('[maf] planning...');
+      const createPlanner = ctx.createPlanner ?? ((args) => new RetrievalAugmentedPlanner(args));
+      const planner = createPlanner({
+        graph, lcm, injector,
+        // The registry is the role set in force: it supplies the default role AND the answer to
+        // "is this name real?". The planner used to carry `defaultRole` plus a `validRoles` set
+        // and *warn* before assigning the default, which was the writer.
+        roles,
+        roleCatalog: roles.catalog(),
+        generatePlan: planGenerator(adapter, { workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry, ...model }),
+      });
+      dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
+    }
 
     // Run DAG
     const dagRunner = new DagRunner();
@@ -407,7 +453,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       { id: componentId(`@maf/adapter-${cfg.adapter}`), modelVersion: cfg.model ?? 'default' },
       {
         configSource: await harnessStore.configSource(harness),
-        parameters:  { harnessId: harness.id },
+        parameters:  { harnessId: harness.id, planSource },
         environment: {},
       },
       [],
@@ -432,7 +478,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   } finally {
     // Reached by a failure or a throw as well, so the worktree is always reported. Never removed.
     if (isolated && run) refusal = await finishWorktree(worktrees, run, succeeded, say, warn);
-    graph?.close();
+    await graph?.close();
     lcm?.close();
   }
   // Only a run that succeeded gets a reason here: its hand-over was refused or could not be finished.
@@ -477,6 +523,13 @@ export function planGenerator(
  */
 export function writerLock(roles: RoleRegistry, adapter: CliAdapter, baseTools: ToolRegistry): (node: DagNode) => boolean {
   return (node) => roles.hasRole(node.agentRole) ? isWriterForLock(roles.getRole(node.agentRole), adapter, baseTools) : true;
+}
+
+/** The transcript's line for where the plan came from (WP-3.6, F4). */
+function planSourceLine(source: PlanSource): string {
+  return source.kind === 'spec'
+    ? `plan source: spec ${source.path} (sha256 ${source.sha256})`
+    : 'plan source: the planner';
 }
 
 /**

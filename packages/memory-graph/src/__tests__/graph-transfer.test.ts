@@ -70,7 +70,7 @@ test('export then import into a fresh graph preserves every node, edge and prope
         const twice = await exportGraph(graph, kuzuVersion());
         assert.deepEqual({ nodes: twice.nodes, edges: twice.edges }, { nodes: exported.nodes, edges: exported.edges });
       } finally {
-        graph.close();
+        await graph.close();
       }
     }
     assert.equal(exported.format, GRAPH_EXPORT_FORMAT);
@@ -83,7 +83,7 @@ test('export then import into a fresh graph preserves every node, edge and prope
       try {
         assert.deepEqual(await importGraph(graph, exported), { nodesCreated: 3, edgesCreated: 2 });
       } finally {
-        graph.close();
+        await graph.close();
       }
     }
 
@@ -98,7 +98,7 @@ test('export then import into a fresh graph preserves every node, edge and prope
       const recalled = await recallFailures(graph, { title: 'Add a token bucket', limit: 5 });
       assert.deepEqual(recalled.map((f) => [f.nodeId, f.reason, f.runId]), [['n1', 'adapter_failed', runId]]);
     } finally {
-      graph.close();
+      await graph.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -140,7 +140,7 @@ test("an export written by Kùzu 0.7.1 imports into 0.11.3 and the planner's fai
         'the 0.7.1 rows are restored byte-for-byte as plain JSON',
       );
     } finally {
-      graph.close();
+      await graph.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -165,7 +165,7 @@ test('import refuses a graph that already holds nodes, naming the count and --db
       );
       assert.deepEqual(await count(graph), { nodes: 1, edges: 0 }, 'a refused import wrote nothing');
     } finally {
-      graph.close();
+      await graph.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -204,7 +204,7 @@ test('import refuses an edge to a node that is not in the file, and writes nothi
       await assert.rejects(() => importGraph(graph, exported), /ends at missing node "ghost"/);
       assert.deepEqual(await count(graph), { nodes: 0, edges: 0 });
     } finally {
-      graph.close();
+      await graph.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -230,7 +230,7 @@ test('an import that fails halfway rolls back, and the graph is usable afterward
       await graph.addNode({ kind: 'Run', label: 'after rollback', properties: {}, runId: makeRunId('after-rollback') });
       assert.deepEqual(await count(graph), { nodes: 1, edges: 0 });
     } finally {
-      graph.close();
+      await graph.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -250,7 +250,7 @@ test('opening a Kùzu 0.7.1 directory refuses it, names the path, and gives the 
         try {
           await graph.run({ cypher: 'MATCH (n:MemoryNode) RETURN count(n) AS c', params: {} });
         } finally {
-          graph.close();
+          await graph.close();
         }
       },
       (err: unknown) => {
@@ -294,7 +294,7 @@ test('export refuses a row the importer would refuse, naming the row and the fie
         },
       );
     } finally {
-      emptyRun.close();
+      await emptyRun.close();
     }
 
     // A non-finite weight: the same rule on the edge side.
@@ -312,7 +312,7 @@ test('export refuses a row the importer would refuse, naming the row and the fie
         },
       );
     } finally {
-      badWeight.close();
+      await badWeight.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -339,7 +339,7 @@ test('export refuses a row whose stored properties are not JSON rather than writ
         },
       );
     } finally {
-      graph.close();
+      await graph.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -352,7 +352,7 @@ test('close() leaves one database file, no write-ahead log beside it, and the ro
     const file = path.join(dir, 'memory.kuzu');
     const graph = new MemoryGraph(file);
     await graph.addNode({ kind: 'Task', label: 'survives close', properties: {}, runId: makeRunId('close') });
-    graph.close(); // does not throw, and the native handles are released now
+    await graph.close(); // resolves only after the native handles are released (WP-3.8 follow-up)
 
     assert.ok((await stat(file)).isFile(), 'Kùzu 0.11.3 writes a single file, which is not the 0.7.x shape');
     assert.deepEqual(await readdir(dir), [path.basename(file)], 'a clean close folds the write-ahead log in');
@@ -361,7 +361,7 @@ test('close() leaves one database file, no write-ahead log beside it, and the ro
     try {
       assert.deepEqual(await count(reopened), { nodes: 1, edges: 0 });
     } finally {
-      reopened.close();
+      await reopened.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
