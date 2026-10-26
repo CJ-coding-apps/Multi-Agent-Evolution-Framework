@@ -19,7 +19,7 @@ function fakeDriver(rejectDdl: (index: number) => Error | undefined): GraphDrive
   const ddl: string[] = [];
   return {
     ddl,
-    close(): void { /* nothing native to release */ },
+    async close(): Promise<void> { /* nothing native to release */ },
     async run(query: GraphQuery): Promise<GraphRow[]> {
       if (!query.cypher.startsWith('CREATE')) return [{ c: 0 }];
       const index = ddl.length;

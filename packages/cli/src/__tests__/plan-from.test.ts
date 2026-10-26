@@ -196,7 +196,7 @@ test('a spec node failure is recorded under the run title, so recall finds it (F
       assert.equal(properties.runTitle, FIRST);
       assert.equal(properties.nodeLabel, FIRST);
     } finally {
-      graph.close();
+      await graph.close();
     }
 
     // R9: that failure is now in the graph under this exact title, which is the state a planner
@@ -445,7 +445,7 @@ async function runNodeProperties(repo: string): Promise<Record<string, unknown>>
     assert.ok(row?.p !== undefined, 'a Run node was written');
     return JSON.parse(row.p) as Record<string, unknown>;
   } finally {
-    graph.close();
+    await graph.close();
   }
 }
 

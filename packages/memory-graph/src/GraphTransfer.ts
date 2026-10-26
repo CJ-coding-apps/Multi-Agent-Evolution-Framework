@@ -174,9 +174,12 @@ export function parseGraphExport(text: string, source: string): GraphExport {
 
 /**
  * Writes a parsed export into `graph`, which must be empty. Every value is bound; the only
- * text assembled is the fixed query skeleton. A transaction means a failure leaves either the
- * whole graph or none of it, and the final count is compared to the file so a silently
- * skipped row (a `MATCH` that wrote nothing, say) is an error rather than a success line.
+ * text assembled is the fixed query skeleton. The rows are written inside a transaction, and the
+ * final count is compared to the file so a silently skipped row (a `MATCH` that wrote nothing,
+ * say) is an error rather than a success line. A statement refused inside the transaction — the
+ * graph being closed mid-import is the reachable one — fails the import: the `ROLLBACK` is
+ * attempted and the original error is what the caller gets. It does not half-write the graph, and
+ * no report is returned over a partial one.
  */
 export async function importGraph(graph: GraphQueryRunner, exported: GraphExport): Promise<ImportReport> {
   if (exported.formatVersion > GRAPH_EXPORT_FORMAT_VERSION) {
