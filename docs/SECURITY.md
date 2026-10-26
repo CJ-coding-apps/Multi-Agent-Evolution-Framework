@@ -390,7 +390,10 @@ A role runs in one of two tiers:
   configuration; `gemini` an MCP allowlist that names no configured server; `codex` no MCP flag.
 
 **The backend is asked once whether it can take that argv.** `maf run` calls the adapter's optional
-`preflight` after resolving the adapter and before anything is planned (WP-3.9). For `claude` this
+`preflight` after resolving the adapter and after a `--plan-from` spec (if one was given) has been
+read, validated and accepted — and before anything is planned (WP-3.9). A malformed spec is
+therefore refused without spawning or probing a backend: the operator's file is answered first, and
+a wrong file is never reported as a wrong binary. For `claude` this
 resolves the binary on PATH, asks it `--version` and `--help` — both with the backend environment,
 both bounded at ten seconds — and refuses to start unless `--help` lists `--tools`, the flag every
 governed turn and both isolated cli-tier sets pass. A binary that does not know the flag would
@@ -717,8 +720,10 @@ goes through — `config.yaml`, `policy.yaml` and `roles.yaml` alike — so it i
 each loader's to remember. The parsed document holds such a key as an **own** key, so the loaded value
 is not itself poisoned; what the refusal prevents is the next reader that copies it with a plain
 assignment. A workflow spec read as JSON does not pass through that parser, so `DagParser.fromYamlText`
-repeats the refusal in a `JSON.parse` reviver, and a key refused there is reported as such rather than
-as a syntax error.
+— and `--plan-from`'s `DagSynthesizer.fromFile` — repeats the refusal in the same `JSON.parse`
+reviver. So does `GraphTransfer` for a graph export file and for the stored properties blobs an
+export reads back, so the key cannot be carried from one graph file into another. A key refused there
+is reported as such rather than as a syntax error.
 
 ### `test.run` executes project code
 
