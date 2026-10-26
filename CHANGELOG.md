@@ -9,6 +9,144 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-22
+
+A patch closing two holes in `patch.apply`'s path declaration, and replacing the design that produced
+them.
+
+`patch.apply` decides which files a diff touches, and the policy engine matches path rules against that
+list. Version 0.5.0 read the diff's headers with its own parser, and the parser was wrong in ways a
+header could choose: a timestamp — the normal output of plain `diff -u`: a `+++` line reading
+`+++ b/Cargo.lock`, then a TAB, then `2026-01-01 …` — declared the name with the tab and the timestamp
+still on it, which `protect-lock-files` does not match; an `Index:`-only header declared nothing at all,
+so every path rule missed, `deny-env-files` included; and five further header forms got past the first
+round of fixes (a space before the timestamp, octal escapes, indented sections, `Index:` with no space,
+`//` in the path prefix). Every one of them was a way to write a file under an `Allow`.
+
+There is no third parser. **`patch.apply` no longer reads headers.** Every git call a gated call makes runs
+in a sealed context: a fresh empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree, the worktree as `cwd`, the
+same `-p`, a 0600 diff file, and an environment with no user, system or repository git configuration, no
+hooks file, no fsmonitor and no `attributesFile`, so a filter driver that an agent selects with
+`.gitattributes` is never defined and cannot run. Inside `execute`, the declaration, its reversal,
+`--summary`, `--check` and the apply all run in **one** such context — the same diff file, the same
+directory, the same environment — so the git that names the files is the git that writes them. A call
+through the gate opens **two**: one to declare the paths the policy is asked about, one inside `execute`,
+each with the properties above and the same diff bytes. Because they are two calls, `execute` does not
+assume the second agrees with the first: it declares the paths again in its own sealed context and
+**refuses** the call if the set differs in any way from the set the gate approved — or if the call arrives
+with no approved set at all, which means it did not come through the gate — recording a `Deny` under
+`builtin:declaration` and writing nothing. The gate hands `execute` a frozen copy of the approved set. The
+declaration is
+`git apply --numstat -z` and its reversal is `git apply -R --numstat -z`: git names the old file on the old
+side and the new one on the new side, so a file that disappears is declared as well as the one that
+appears. The declared set is the union of the two; a name that one direction reports and the other does
+not — an implicit rename, with no rename lines to give it away — is refused, because the forward list
+would name only the destination while the apply deletes the protected source. What git cannot describe as
+a list of paths is refused: renames, copies, mode changes, symlinks, submodules and binary patches (from
+`--summary`), absolute or `..` names, and any declared path that is already a symlink or reaches the name
+through one — checked when the paths are declared, so the gate records a `Deny` instead of allowing a call
+that git would then fail, and checked again inside `execute` for a link created in between. A path that
+cannot be checked at all is a returned refusal, not a raw throw: a component over the filesystem's name
+limit (256 bytes on APFS) gives `ENAMETOOLONG` and is refused at declaration. A name below an existing
+regular file is refused too: `README/x` passes `git apply --check` and then fails partway through the apply,
+after an earlier file in the same diff has already been written, so a declared path with a parent component
+that exists and is not a directory is refused at declaration, and nothing is written. `--check` runs
+before the apply, `--reject` is never passed, so a failed apply leaves no `.orig` and no `.rej`, and
+nothing is loosened: this is exactly as strict as `git apply`, so a hunk count that does not match fails
+with git's own message and the agent retries with the right one.
+
+Path matching changed for the stricter half only. On macOS and Windows, whose filesystems resolve `.ENV` to
+`.env`, the rules are now asked **twice** — once exactly, as on any platform, and once with the path of
+Deny and Escalate rules case-folded and NFC-normalized — and the verdict is the stricter of the two:
+`Deny` above `Indeterminate` above `Escalate` above `Allow`. Two passes are needed because rules are
+first-match by priority: folding alone let a `docs/**` Escalate above a `**/*.env*` Deny match `DOCS/x.env`
+first, so a refusal nobody could lift became one approval away from permitted. Taking the stricter verdict
+keeps the Deny. `Allow` rules and `allowedPathGlobs` are never folded, so a higher-priority `docs/**` Allow
+cannot match `DOCS/x.env` either. On Linux nothing is folded and only the exact pass runs, so Linux is
+unchanged; on macOS and Windows the result is never more permissive than 0.5.0 — the folded pass can only
+add a refusal, or answer a call that was allowed with one of Deny, Escalate or Indeterminate.
+
+This is stricter than `patch`, deliberately: a context diff, an `Index:`-only diff, a normal diff, an ed
+diff, or a section start git skips now fails instead of being applied, because git applies unified diffs
+only — and `git apply` skips what it does not read and exits 0, so the tool refuses a diff it cannot read
+to its end before git is asked. The rule is the diff's line grammar, not a list of known-bad patterns.
+Every line must be a section header (any `diff ` command line, the `---`/`+++` pair, a git extended header,
+`Index:`), a hunk header, a hunk body line (` `, `+`, `-` or `\`; an empty line inside a hunk is blank
+context), or a blank line between files (a lone CR in a CRLF diff); any other line, and a `GIT binary patch`
+line anywhere, is refused naming its number, as is a hunk body line past the point its header's counts run
+out. A hunk that ends
+before its counts are reached is left to git, which refuses the diff as corrupt. Inside a
+hunk the counts decide what is content, so a Helm-rendered YAML file whose unchanged lines read
+` --- # Source: chart/a.yaml` applies, as does any other line the hunk header counts. This closes the eight
+measured shapes in which the hunk header or the whole diff is indented or otherwise prefixed — with a
+space, a TAB, a non-breaking space or a carriage return — where git applies the first section, silently
+skips the rest and exits 0. A diff that cannot be declared is refused before the policy is asked, recorded
+as a `Deny` under `builtin:declaration`, and nothing is written.
+
+**API changes.** `extractDiffPaths` is gone from `@maf/tools`: it was the header parser, and nothing
+outside it should keep a second one. `@maf/types` gains `toolEnv()` — the allowlist of environment
+variables a spawned child is given; in 0.5.1 the only child given it is `git apply` — and
+`ToolDeclarationError`, the throw that says a tool cannot name the paths it would touch.
+`ToolPlugin.declaredPaths` gains an optional second parameter, the calling context, so a declaration can
+be computed where the apply will run; and `ToolContext` gains optional `approvedPaths`, the set the gate
+approved, which `patch.apply` compares its own declaration against. `@maf/policy-engine` gains `caseInsensitiveFilesystem()` and the
+`PolicyEngineOptions` type, and `PolicyLoadOptions` gains `caseInsensitivePaths` and `platform`. A policy
+file of the user's own still parses unchanged, and no verdict it produced becomes more permissive: on
+macOS and Windows its Deny and Escalate rules now also match the case and Unicode variants of the path
+they name, and the two-pass rule above returns either the verdict 0.5.0 would have returned or a stricter
+one. A workflow that fed `patch.apply` a non-unified diff has to feed it a unified one. Creating a mode
+`100755` file is allowed — a `mode change` is refused, and creating an executable is not one; whether an
+agent may write a script at a given path is a policy question (`fs.write` and `patch.apply` alike), not one
+this patch answers.
+
+### Fixed
+
+- **`patch.apply` declares the files `git apply` writes, and refuses what git cannot name** (F1). Every
+  git call `execute` makes runs in one sealed context: `--numstat -z` forward and `-R --numstat -z`
+  reversed, `--summary`, `--check` and the apply, with the same worktree `cwd`, the same `-p`, the same
+  diff file and the same environment — `toolEnv()`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CEILING_DIRECTORIES`
+  at the worktree's parent, `-c core.hooksPath=/dev/null -c core.fsmonitor=false
+  -c core.attributesFile=/dev/null`, and a fresh empty `GIT_DIR` with `GIT_WORK_TREE` at the worktree. So no
+  user, system or repository configuration reaches git, and no filter driver, hook or fsmonitor runs even
+  when `.git/config` defines one and `.gitattributes` selects it. `--check` refuses a diff that would not
+  apply before anything is written. Tests cover every row of the conformance table the 0.5.1 reviews
+  built — 50 header forms plus implicit renames, a deletion and a `-p0` header, each asserted against the
+  shipped `.maf/policy.yaml` through the real gate — and their regression cases, plus
+  rename-away, mode change, symlink creation and `.ENV`; and, in `tools/patch.test.ts`, a repository and a
+  fake global config that define a filter, a hook and an fsmonitor (none runs), a `TMPDIR` inside a work
+  tree (the declared name is unchanged), a diff on an existing symlink (refused, link untouched), a
+  concatenated two-file `diff -u` (applies), and a failing `dryRun` (non-zero, git asked).
+- **Every path a patch writes is a path the policy saw** (HS24, L1–L4, R4). A patch that git rejects
+  outright writes nothing. In a few structural conflicts (a diff that creates both `x` and `x/y`, or writes
+  a file where a directory exists), git can write some files before failing. Every such file was declared
+  and allowed by policy. maf 0.6.0 restores them on failure. The guarantee this restores is that the
+  declared set equals the written set, not atomicity. The checks that hold it: a declared path below an
+  existing regular file (`README/x`) is refused, because it passes `--check` and then fails partway through
+  a multi-file apply after an earlier file is already written; a diff line git silently skips (an indented
+  hunk header, or a wholly indented diff — eight measured shapes, with a space, a TAB, a non-breaking space
+  or a carriage return) is refused by the diff's line grammar, which names the offending line, because git
+  applies such a diff in part and exits 0; and a hunk aimed at an existing directory is refused, because
+  `git apply --check` passes and the apply exits 0 having written nothing, so the agent would be told the
+  hunk landed when the tree is unchanged (R4-H1). The line grammar accepts what git applies in full: an
+  empty line inside a hunk is blank context, a `diff <options> <a> <b>` command line (as `diff -ruN` writes)
+  is a header that names nothing, and a lone carriage return between files in a CRLF diff is the blank
+  separator (R4-M1). A `GIT binary patch` marker is refused wherever it appears, so a binary section cannot
+  hide the lines after it from the grammar (R4-H2). A file the same diff deletes before writing beneath it —
+  `x` deleted while `x/y` is created — applies in full and is allowed. All refusals are recorded as a `Deny`
+  under `builtin:declaration`, nothing written. `execute` also refuses a call that arrives with no approved
+  path set, whether the field is absent or `null` — it did not come through the gate — and the gate hands
+  `execute` a frozen copy of the set, so neither the tool nor anything else holding a handle can widen what
+  was approved. A gate-level test proves a write through a link to `Cargo.lock` is refused at declaration
+  and that no approver is asked. Two conformance rows changed outcome: a `===` line and a `Prereq:` line are
+  now refused, where round 1 accepted diffs git applies only in part.
+- **Case folding and NFC may only make a verdict stricter** (HS5, HS16). `PolicyEngine` folds case and
+  Unicode form for Deny and Escalate rules only, and asks the rules twice — exactly and folded — answering
+  with the stricter verdict, so a folded `docs/**` Escalate can no longer pre-empt a `**/*.env*` Deny for
+  `DOCS/x.env`. `Allow` rules and `allowedPathGlobs` are exact. A `**/.env*` Deny holds `.ENV` on a
+  case-insensitive volume, and a higher-priority `docs/**` Allow no longer matches `DOCS/x.env`. The
+  platform default is tested for darwin, win32 and linux, and forced on and off through both the engine and
+  the loader.
+
 ## [0.5.0] - 2026-10-20
 
 Tagged `v0.5.0`; **not published to npm**, by the maintainer's decision ([D-50](docs/DECISIONS.md)).

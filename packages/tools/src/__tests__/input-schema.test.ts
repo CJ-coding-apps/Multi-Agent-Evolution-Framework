@@ -6,7 +6,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolContext, ToolInput, ToolPlugin, PolicyDecision, PolicyEngineHandle, AttestorHandle } from '@maf/types';
-import { describeToolInput, makeAgentId, makeRunId, makeTaskId } from '@maf/types';
+import { describeToolInput, makeAgentId, makeRunId, makeTaskId, ToolDeclarationError } from '@maf/types';
 import {
   createDefaultRegistry, FsReadTool, FsWriteTool, FsDeleteTool, FsStatTool, FsListTool, GrepTool,
   GitAddTool, GitCommitTool, GitDiffTool, GitResetTool, PatchApplyTool,
@@ -17,7 +17,8 @@ import type { GitExec } from '../plugins/git.js';
 // read an undefined `diff` and threw a TypeError from `writeFile`. Every built-in tool states the
 // input its `execute` reads; `execute` itself answers a missing or mistyped required field with a
 // failed result rather than a throw (the gate answers first; this is for a caller that bypassed it);
-// and `declaredPaths` on such an input still declares nothing it was not given.
+// `declaredPaths` on such an input still declares nothing it was not given — except `patch.apply`,
+// which cannot declare nothing and write anyway: a call it cannot declare is refused (0.5.1).
 
 const ALLOW: PolicyEngineHandle = { async evaluate(): Promise<PolicyDecision> { return { verdict: 'Allow' }; } };
 const NO_ATTESTOR: AttestorHandle = { async record(): Promise<void> {} };
@@ -134,15 +135,18 @@ test('execute checks only what it cannot run without: an unknown field from a di
   assert.deepEqual(await readdir(root), ['a.txt']);
 });
 
-test('declaredPaths on a malformed input still declares nothing it was not given, and does not throw', () => {
+test('declaredPaths on a malformed input declares nothing it was not given; patch.apply refuses instead', () => {
   const malformed: ToolInput[] = [{}, { path: 5 }, { path: ['a'] }, { path: null }, { file: 'a.txt' }];
   const fsTools: ToolPlugin[] = [new FsReadTool(), new FsWriteTool(), new FsDeleteTool(), new FsStatTool(), new FsListTool()];
   for (const tool of fsTools) {
     for (const input of malformed) assert.deepEqual(tool.declaredPaths(input), [], `${tool.id} ${JSON.stringify(input)}`);
   }
+  // `patch.apply` has no such answer: declaring nothing and then writing what the diff names is
+  // exactly the reported bypass. The gate answers the malformed input before this is reached
+  // (above); a caller that bypasses the gate gets a refusal, not an empty declaration.
   const patch: ToolPlugin = new PatchApplyTool();
   for (const input of [{}, { diff: 5 }, { path: 'hello.js', patch: '--- a/hello.js\n+++ b/hello.js\n' }]) {
-    assert.deepEqual(patch.declaredPaths(input), [], JSON.stringify(input));
+    assert.throws(() => patch.declaredPaths(input), ToolDeclarationError, JSON.stringify(input));
   }
   const add: ToolPlugin = new GitAddTool();
   for (const input of [{}, { paths: 'a.txt' }, { paths: [1, null] }]) assert.deepEqual(add.declaredPaths(input), [], JSON.stringify(input));
