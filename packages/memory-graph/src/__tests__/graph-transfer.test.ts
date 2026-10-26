@@ -190,6 +190,35 @@ test('parse refuses a file it cannot import, naming the row and the reason', () 
   }
 });
 
+test('parse refuses an export naming a prototype key as what it is (G5)', () => {
+  const valid = fixtureExport();
+  // An own `__proto__` survives JSON.stringify, so the file on disk can carry one even though the
+  // importer's own writer never would. The reviver refuses the document whole.
+  const poisoned = JSON.stringify({
+    ...valid,
+    nodes: [{ ...valid.nodes[0], properties: JSON.parse('{"__proto__":{"polluted":true}}') }],
+  });
+  assert.match(poisoned, /"__proto__"/, 'the fixture actually carries the key');
+  assert.throws(
+    () => parseGraphExport(poisoned, 'poisoned.json'),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphTransferError, `expected a GraphTransferError, got ${String(err)}`);
+      assert.match(err.message, /^poisoned\.json is refused: the JSON key "__proto__" names a prototype/);
+      assert.doesNotMatch(err.message, /is not valid JSON/, 'it parses; naming a prototype is the objection');
+      return true;
+    },
+  );
+  // Depth does not matter: a key inside an edge's metadata is refused by the same reviver.
+  const deep = JSON.stringify({
+    ...valid,
+    edges: [{ ...valid.edges[0], metadata: { nested: JSON.parse('{"constructor":{}}') } }],
+  });
+  assert.throws(
+    () => parseGraphExport(deep, 'deep.json'),
+    /deep\.json is refused: the JSON key "constructor" names a prototype/,
+  );
+});
+
 test('import refuses an edge to a node that is not in the file, and writes nothing', async () => {
   const dir = await tempDir('maf-transfer-ghost-');
   try {
@@ -313,6 +342,36 @@ test('export refuses a row the importer would refuse, naming the row and the fie
       );
     } finally {
       badWeight.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('export refuses a stored blob naming a prototype key rather than carrying it into the file (G5)', async () => {
+  const dir = await tempDir('maf-transfer-proto-');
+  try {
+    const graph = new MemoryGraph(path.join(dir, 'g.kuzu'));
+    try {
+      // A row written by an older reader (or by hand) can hold the key; the export reads every
+      // stored blob through the shared reviver, so it refuses instead of writing it back out.
+      await graph.run({
+        cypher: `CREATE (:MemoryNode {id: 'poisoned', kind: 'Task', label: 'poisoned',
+                  properties: '{"__proto__":{"polluted":true}}',
+                  run_id: 'r', created_at: '2026-09-30T12:00:00.000Z', updated_at: '2026-09-30T12:00:00.000Z'})`,
+        params: {},
+      });
+      await assert.rejects(
+        () => exportGraph(graph, kuzuVersion()),
+        (err: unknown) => {
+          assert.ok(err instanceof GraphTransferError, `expected a GraphTransferError, got ${String(err)}`);
+          assert.match(err.message, /MemoryNode poisoned properties is refused: the JSON key "__proto__" names a prototype/);
+          assert.match(err.message, /Refusing to continue/);
+          return true;
+        },
+      );
+    } finally {
+      graph.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
