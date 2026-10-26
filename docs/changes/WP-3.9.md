@@ -99,11 +99,12 @@ states each as implemented.
   made to **exit 0** while the runner is live (parent reports `{code: 0, signal: null}`, grandchild
   reaped) — G10, the two exits the F9 change had a hook for but no test. And a real `npm test` suite
   that **passes** and leaves a helper spawned with `stdio: 'inherit'` is answered `exitCode === 0`
-  with no `[TIMEOUT` in stderr, and the helper is reaped (G16b). Measured mutants, each killing
-  exactly the named test and nothing else: delete the `exit` handler → 13/14, failing only G16b
-  (the run answers 124 after the full 8 s budget for a 0.4 s suite); give `process.on('exit')` an
-  empty body → 13/14, failing only the normal-exit test; drop `'SIGTERM'` from the hook's signal
-  list → 13/14, failing only the SIGTERM test (on the reaping assertion: without a listener Node's
+  with no `[TIMEOUT` in stderr, and the helper is reaped (G16b). Measured mutants, re-run in
+  round 3 at this head's budgets because the file grew from 14 tests to 15 with H6: delete the
+  `exit` handler → 13/15, failing G16b **and** H6 (both answer 124 at their 120 s guards for a
+  suite that passed — the handler now owns two tests, not one); give `process.on('exit')` an empty
+  body → 14/15, failing only the normal-exit test; drop `'SIGTERM'` from the hook's signal list →
+  14/15, failing only the SIGTERM test (on the reaping assertion: without a listener Node's
   default action still ends the parent by SIGTERM, so the survivor is the observable).
 - **Proof of the allowlist test itself (round 2, G14).** The env child now **records what it
   observed** to `env.json` and the test asserts on that file, and `NODE_TEST_*` is removed from the
@@ -596,15 +597,36 @@ flag-support check was added afterwards.
 
 ## Verification
 
+Measured at `c178595`, the last commit that changes code; the commits after it are documentation.
+The earlier 1213/1212 count was measured at `4ead112` and predates rounds 2 and 3's tests.
+
 - `pnpm -r build` and `pnpm -r typecheck` clean, and `grep "error TS"` over the build output = 0.
-- Every package suite: `pnpm -r test` — **1213 tests, 1212 passed, 1 skipped, 0 failed**, measured
-  at `4ead112`, the head the count was taken at. Round 2 added 22 of them: `cli` +7, `tools` +3,
-  `adapters/claude` +3, `harness-config` +2, `evolver` +2, `adapters/codex` +2, `types` +2,
-  `policy-engine` +1. (The earlier sentence named `5e17601` as "the last commit that changes code"
-  and said the commits after it were documentation: `9c29b6b` then changed code, so that
-  construction is gone rather than re-worded.)
-- The four repository guards: `check:build-output`, `check:test-scripts`, `check:workspace-deps`,
-  `check:doc-refs`.
+- **Linux (the arbiter): `pnpm -r test` — 1429 tests, 1428 passed, 1 skipped, 0 failed**, in a
+  `node:22` container on a fresh clone of this branch, `pnpm install --frozen-lockfile` against an
+  empty store, then `pnpm -r build`, then the suites (`TEST_RC=0`).
+- **macOS: the suite is red, on one test this branch does not own.** From a clean tree (`dist/` and
+  `*.tsbuildinfo` removed; `pnpm install --frozen-lockfile --offline`; `pnpm -r build`, 37 s), the
+  suite failed twice on the same assertion — `packages/roles/src/__tests__/review-gate.test.ts`,
+  "the reviewer was never asked", its own 5 s bound, reached under `pnpm -r`'s workspace
+  concurrency. That file was last changed by `a0da8d1`, which is an ancestor of this branch's base;
+  this branch changes only `roles-file-loading.test.ts` in that package. Isolated on the same
+  host: the file is 11/11 (5.1 s) and the package 229/229 (132 s). The red stops `pnpm -r` with
+  1218 tests counted (1216 passed, 1 failed, 1 skipped), before the remaining packages. It is
+  recorded rather than edited: the file is another lane's, and every package that ran is green.
+- **The five repository guards, at the same head, on both hosts:** `check:test-scripts` (23/27
+  packages declare a test script that runs their `src/__tests__` tests; four have none),
+  `check:build-output` (27/27 packages emitted the entry point their `main` names),
+  `check:workspace-deps` (27 packages, 94 internal edges, acyclic), `check:doc-refs` (81 `.md`
+  references across 5 dirs + 4 root files, all resolving), and `check:package` (36 files,
+  installed and run).
+- **The spawn-heavy `test.run` fixtures were the other macOS flake, and are fixed here**
+  (`354f24d`, `c178595`). A fixture's own `node` startup took 17.3 s while `patch.test.js` ran
+  beside it, and the G16b call 29.5 s under the nine-file `tools` suite; the fixtures' 2 s pid
+  poll, 2 s timeout guard and 8 s/10 s `npm` guards were below that, so four `tools` tests failed
+  for latencies unrelated to the code under test, while they pass alone and on Linux. The poll is
+  now 120 s, the timeout guard 60 s and the two `npm` guards 120 s — test-only, assertions
+  unchanged, and the three round-2 mutants re-measured above. After: `tools` is 129 tests,
+  128 passed, 1 skipped, 0 failed in the same parallel run.
 
 ## Recorded limits
 
