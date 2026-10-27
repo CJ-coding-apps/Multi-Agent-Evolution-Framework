@@ -154,6 +154,41 @@ test('L1: a transport failure records each attempt, then propagates', async () =
   assert.equal(records.length, 2, 'two attempts, two records');
 });
 
+// L1-S5: an adapter that throws (a missing binary, a permission error) is still a planning call
+// MAF made. Its prompt digests are known, no output came back — so `outputSha256` is absent, not the
+// digest of an empty string — and the record says why with `error: 'thrown'`.
+test('L1-S5: a planner call whose adapter throws still records the attempt, with no output digest', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const calls: AdapterInvokeOptions[] = [];
+  const throwing: TurnAdapter = {
+    name: 'claude',
+    capabilities: () => ({
+      supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: true,
+      inProcessLoop: true, maxConcurrentTasks: 1, nativePlugins: [],
+    }),
+    isAvailable: async () => true,
+    invoke: async (opts) => { calls.push(opts); throw new Error('spawn claude ENOENT'); },
+    stream: async function* () { yield ''; },
+    sendTurn: async () => { throw new Error('no node should run'); },
+  };
+  await assert.rejects(
+    () => planGenerator(throwing, {
+      workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+      recordSurface: (record) => records.push(record),
+    })('system text', 'user text'),
+    /spawn claude ENOENT/,
+  );
+  assert.equal(calls.length, 1, 'a throw is not a transport failure, so it is not retried');
+  assert.equal(records.length, 1);
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1,
+    systemPromptSha256: sha256Hex('system text'),
+    promptSha256: sha256Hex('user text'),
+    toolCatalog: '', argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'planner', error: 'thrown',
+  });
+});
+
 test('L1: a surface the adapter reports is kept rather than reconstructed', async () => {
   const records: ModelSurfaceRecord[] = [];
   const surface = {

@@ -8,6 +8,10 @@ import type { ModelSurface } from './index.js';
  * still holds exactly what was sent and what came back, so their digests are the same evidence a
  * reporting adapter carries: which prompt the model was shown and which answer it returned.
  *
+ * `output` is optional because a call can end without one (L1-S5): an adapter that throws is still
+ * a call MAF made, and `outputSha256` is then absent — never the digest of an empty string, which
+ * would say "the model answered with nothing".
+ *
  * `argv` is `[]` and `toolCatalog` is `''` rather than invented: this call site did not build or
  * elide a command line, and a `cli`-tier surface that named one it did not see would be worse than
  * one that says nothing. An adapter that *does* report a surface keeps it — the callers prefer
@@ -16,13 +20,13 @@ import type { ModelSurface } from './index.js';
 export function callModelSurface(
   systemPrompt: string | undefined,
   prompt: string,
-  output: string,
+  output?: string,
 ): ModelSurface {
   return {
     systemPromptSha256: sha256Hex(systemPrompt ?? ''),
     promptSha256:       sha256Hex(prompt),
     toolCatalog:        '',
-    outputSha256:       sha256Hex(output),
+    ...(output !== undefined ? { outputSha256: sha256Hex(output) } : {}),
     argv:               [],
   };
 }

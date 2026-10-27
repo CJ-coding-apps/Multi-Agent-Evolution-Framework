@@ -217,6 +217,32 @@ test('L1: a transport failure records its attempt before the throw', async () =>
   assert.equal(records[0]?.outputSha256, sha256Hex(''));
 });
 
+// L1-S5: an adapter that throws is still a model call MAF made, and the tokens (if any) were
+// spent. The record says so: the digests of what was sent, `outputSha256` absent rather than the
+// digest of an empty string (Constitution §4: "not recorded" must differ from "recorded as empty"),
+// and `error: 'thrown'`.
+test('L1-S5: a throwing adapter still records the attempt, with no output digest', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const throwing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => { throw new Error('spawn ENOENT'); },
+  };
+  const g = gate(throwing, { recordSurface: (record) => records.push(record) });
+  const diff = 'diff --git a/b.ts b/b.ts\n+x\n';
+  await assert.rejects(() => g.reviewDiff(diff, { nodeId: 'n9' }), /spawn ENOENT/);
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.ok(record);
+  assert.equal(record.error, 'thrown');
+  assert.equal('outputSha256' in record, false, 'no output came back, so no digest is written');
+  assert.equal(record.systemPromptSha256, sha256Hex('You are a security auditor. Respond in strict JSON.'));
+  assert.equal(record.promptSha256, sha256Hex(
+    `Audit this diff for security issues. Respond with the strict JSON schema in your system prompt.\n\`\`\`diff\n${diff}\n\`\`\``,
+  ));
+  assert.equal(record.taskId, 'n9');
+  assert.equal(record.kind, 'security-gate');
+});
+
 test('L1: reviewPaths() records nativeTools full; no model call records nothing', async () => {
   const records: ModelSurfaceRecord[] = [];
   const g = gate(fakeAdapter(CLEAN_RESULT), { recordSurface: (record) => records.push(record) });

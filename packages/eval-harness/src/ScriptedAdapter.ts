@@ -95,6 +95,15 @@ export class ScriptedAdapter implements TurnAdapter {
     const kind = classify(o);
     const answer = (output: string, success = true): AdapterInvokeResult =>
       ({ success, output, toolCallLog: [], exitCode: success ? 0 : 1, duration: 0 });
+    // L1: the exchange is on the record before any effect is applied. The call happened when the
+    // model answered; a write it asked for failing (or an escape out of the working dir) is a fact
+    // about the tree, not a reason for the call that caused it to vanish from the ledger. `output`
+    // is filled in below, so an effect that throws leaves it absent rather than guessed.
+    const exchange: ScriptedExchange = {
+      via: 'invoke', kind, systemPrompt: o.systemPrompt ?? '', prompt: o.prompt,
+      tools: o.tools ?? [],
+    };
+    this.exchanges.push(exchange);
     let result: AdapterInvokeResult;
     if (kind === 'judge') result = answer(formatJudgeVerdict({ passed: false, rationale: SCRIPTED_JUDGE_RATIONALE }));
     else if (kind === 'security-review') result = answer(SCRIPTED_REVIEW);
@@ -108,10 +117,7 @@ export class ScriptedAdapter implements TurnAdapter {
         result = answer(script.final);
       }
     }
-    this.exchanges.push({
-      via: 'invoke', kind, systemPrompt: o.systemPrompt ?? '', prompt: o.prompt,
-      output: result.output, tools: o.tools ?? [],
-    });
+    exchange.output = result.output;
     return result;
   }
 

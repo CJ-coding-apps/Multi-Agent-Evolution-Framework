@@ -4,7 +4,7 @@ import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
 import { callModelSurface, makeRunId, makeTaskId, makeAgentId } from '@maf/types';
-import type { AdapterName, CliAdapter, Dag, DagNode, ModelSurfaceRecord, PlanSource, RetryPolicy, TaskId } from '@maf/types';
+import type { AdapterInvokeResult, AdapterName, CliAdapter, Dag, DagNode, ModelSurfaceRecord, PlanSource, RetryPolicy, TaskId } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine } from '@maf/lcm';
@@ -494,30 +494,37 @@ export function planGenerator(
     /**
      * L1: where the planning call's surface goes. Called once per attempt, before the result is
      * judged, so a failed or timed-out planning call is in the record too — its error text is what
-     * the model was shown back, not a reason to leave the spend unrecorded.
+     * the model was shown back, not a reason to leave the spend unrecorded. A call that threw
+     * (L1-S5) records as well: its prompt digests are known and its output digest is absent.
      */
-    recordSurface?: (record: ModelSurfaceRecord) => void;
+    recordSurface?: (record: ModelSurfaceRecord) => unknown;
     /** The id this call is recorded under. The planner is the run's call, not a node's. */
     taskId?: TaskId;
   },
 ): (systemPrompt: string, userPrompt: string) => Promise<string> {
   return (systemPrompt, userPrompt) => withRetry(async () => {
-    const result = await adapter.invoke({
-      prompt: userPrompt, systemPrompt,
-      workingDir: call.workingDir, timeoutMs: call.timeoutMs,
-      maxOutputBytes: 64 * 1024, // planning only needs a JSON block
-      nativeTools: false,
-      ...(call.model !== undefined ? { model: call.model } : {}),
-    });
-    // L1: record the attempt before any judgement of it. A backend that reports its own surface
-    // keeps it (its argv is evidence this call site cannot reconstruct); one that reports none gets
-    // the digests of what was sent and received, with no argv claimed.
-    call.recordSurface?.({
-      role: 'planner', taskId: call.taskId ?? makeTaskId('planner'), turn: 1,
-      ...(result.modelSurface ?? callModelSurface(systemPrompt, userPrompt, result.output)),
-      tier: 'cli', nativeTools: 'none', kind: 'planner',
-      ...(call.model !== undefined ? { model: call.model } : {}),
-    });
+    let result: AdapterInvokeResult | undefined;
+    try {
+      result = await adapter.invoke({
+        prompt: userPrompt, systemPrompt,
+        workingDir: call.workingDir, timeoutMs: call.timeoutMs,
+        maxOutputBytes: 64 * 1024, // planning only needs a JSON block
+        nativeTools: false,
+        ...(call.model !== undefined ? { model: call.model } : {}),
+      });
+    } finally {
+      // L1: record the attempt before any judgement of it, and whether or not it returned (S5).
+      // A backend that reports its own surface keeps it (its argv is evidence this call site cannot
+      // reconstruct); one that reports none gets the digests of what was sent and received, with no
+      // argv claimed. A throw leaves `outputSha256` absent and says `error: 'thrown'`.
+      await call.recordSurface?.({
+        role: 'planner', taskId: call.taskId ?? makeTaskId('planner'), turn: 1,
+        ...(result?.modelSurface ?? callModelSurface(systemPrompt, userPrompt, result?.output)),
+        tier: 'cli', nativeTools: 'none', kind: 'planner',
+        ...(result === undefined ? { error: 'thrown' as const } : {}),
+        ...(call.model !== undefined ? { model: call.model } : {}),
+      });
+    }
     if (result.transportError !== undefined) throw result.transportError;
     if (!result.success) {
       throw new Error(

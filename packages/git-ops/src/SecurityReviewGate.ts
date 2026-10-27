@@ -1,5 +1,5 @@
 import type {
-  CliAdapter, AdapterInvokeOptions, ModelSurfaceRecord,
+  CliAdapter, AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord,
   SecurityFinding, SecurityReviewResult, SecuritySeverity,
 } from '@maf/types';
 import { GateRefused, callModelSurface, makeTaskId, redactCredentials } from '@maf/types';
@@ -19,10 +19,10 @@ export interface SecurityReviewGateConfig {
   maxDiffChars?:  number;
   /**
    * L1: where each reviewer call's surface goes — one record per attempt, written before the
-   * verdict is parsed, so a call that passed, blocked, or timed out is accounted for. Not called
-   * when no model call was made (an empty diff, no paths, or a diff over the cap).
+   * verdict is parsed, so a call that passed, blocked, timed out or threw (S5) is accounted for.
+   * Not called when no model call was made (an empty diff, no paths, or a diff over the cap).
    */
-  recordSurface?: (record: ModelSurfaceRecord) => void;
+  recordSurface?: (record: ModelSurfaceRecord) => unknown;
 }
 
 const BLOCKING_SEVERITIES: ReadonlySet<SecuritySeverity> = new Set(['critical', 'high']);
@@ -97,17 +97,23 @@ export class SecurityReviewGate {
       ...(this.config.model ? { model: this.config.model } : {}),
       ...(nativeTools ? {} : { nativeTools: false }),
     };
-    const result = await this.config.adapter.invoke(opts);
-    // L1: this is a model call whether or not it judged anything, so its surface is recorded before
-    // the transport check below can throw. `taskId` is the reviewed node's, exactly as the
-    // dispatcher mints it (`makeTaskId(node.id)`), so a reader joins the gate's call to that node's
-    // role records; reviewing outside a node (`goldens`, `evolve`) names the gate itself instead.
-    this.config.recordSurface?.({
-      role: 'security', taskId: makeTaskId(reviewed?.nodeId ?? 'security-gate'), turn: 1,
-      ...(result.modelSurface ?? callModelSurface(opts.systemPrompt, prompt, result.output)),
-      tier: 'cli', nativeTools: nativeTools ? 'full' : 'none', kind: 'security-gate',
-      ...(this.config.model !== undefined ? { model: this.config.model } : {}),
-    });
+    let result: AdapterInvokeResult | undefined;
+    try {
+      result = await this.config.adapter.invoke(opts);
+    } finally {
+      // L1: this is a model call whether or not it judged anything, so its surface is recorded
+      // before the transport check below can throw, and whether or not the adapter returned (S5).
+      // `taskId` is the reviewed node's, exactly as the dispatcher mints it (`makeTaskId(node.id)`),
+      // so a reader joins the gate's call to that node's role records; reviewing outside a node
+      // names the gate itself. A throw leaves `outputSha256` absent and says `error: 'thrown'`.
+      await this.config.recordSurface?.({
+        role: 'security', taskId: makeTaskId(reviewed?.nodeId ?? 'security-gate'), turn: 1,
+        ...(result?.modelSurface ?? callModelSurface(opts.systemPrompt, prompt, result?.output)),
+        tier: 'cli', nativeTools: nativeTools ? 'full' : 'none', kind: 'security-gate',
+        ...(result === undefined ? { error: 'thrown' as const } : {}),
+        ...(this.config.model !== undefined ? { model: this.config.model } : {}),
+      });
+    }
     // A reviewer that timed out or never started has not judged anything: that is a transport
     // failure the node may be retried on (D-06), not a refusal to carry as a verdict.
     if (result.transportError !== undefined) throw result.transportError;
