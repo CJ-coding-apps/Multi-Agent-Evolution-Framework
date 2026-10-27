@@ -139,33 +139,51 @@ cap.
 
 **Compaction failure degrades and is recorded.** Only a `TransportError` is retried (one extra
 attempt by default); a verdict is not. The assembly continues uncompacted, the bundle carries an
-`lcmDegraded` entry, and the transcript says so. *Rejected:* failing the node on a background
-optimization, and the silent catch, which made a failure indistinguishable from compaction that
-ran.
+`lcmDegraded` entry, and the transcript says so. An **upward merge** is a summarization call like
+any other, so its failure degrades the assembly the same way: the roots already stored are intact
+and are what renders, and the entry's reason is `compaction-failed: <message>` (V5). *Rejected:*
+failing the node on a background optimization, and the silent catch, which made a failure
+indistinguishable from compaction that ran.
 
-**A summarizer is given the size it must fit, and a root that still does not fit falls back to
-cues (L3).** Every summarization call made during an assembly is asked for at most half the
-injector's budget — a stated target, not a hope that each level happens to shrink. When the
-archive's single root still exceeds the budget, it is re-summarized once at a quarter of the budget
-(half the normal target); if that root is still too large, the injector renders a cue for it and the
-assembly records `lcmDegraded` with `reason: root-over-budget`, the root's id and its token count,
-and prints one transcript line saying so. *Rejected:* letting the model choose the size, measured
-in the live row where higher levels never shrank and the `<summaries>` sentence was false; and
-dropping an oversized root, which loses context silently.
+**A summarizer is given the size it must fit, and a root that still does not fit is retried once,
+for the whole run (L3).** Every summarization call made during an assembly is asked for at most
+half the injector's budget — a stated target, not a hope that each level happens to shrink. When
+the archive's single root still exceeds the budget, it is re-summarized once at a quarter of the
+budget (half the normal target). "Once" is per root and for the whole run: the claim is written to
+`lcm_root_retries` before the call, under the session lock, so a retry that fails or crashes is
+spent too, a later assembly cannot retry the same root, and a retry's own output is never retried.
+If the root still does not fit, the assembly records `lcmDegraded` with `reason: root-over-budget`,
+the root's id and its token count — once per root, from `lcm_root_degradations`, not once per
+assembly. A retry that itself failed records `reason: root-retry-failed: <message>` instead, so
+the line never claims a tighter retry that produced nothing (V8). A caller that can expand a cue
+(`render: 'cues'`) is offered one; the cli tier cannot call `lcm.expand`, so when its archive
+renders nothing it records `reason: cli-tier-cues` once per root, and the transcript names the
+limit rather than offering an instruction it cannot follow (V10). *Rejected:* letting the model
+choose the size, measured in the live row where higher levels never shrank and the `<summaries>`
+sentence was false; retrying per assembly, which wrote eight lines for one fact and stacked a
+retry on a retry; and dropping an oversized root, which loses context silently.
 
 **One compaction per session, including every upward pass (L4).** A per-session lock serializes
 compaction, and each pass — level-0 and every `fitUpward` merge — re-reads the data after taking
 the lock and skips what another pass already covered. The upward pass used to run unlocked: two
-concurrent assemblies summarized the same roots, paid for them twice and wrote a summary with two
-parents, so the archive was a DAG. *Rejected:* a global lock, which serializes unrelated sessions;
-and no lock, which let concurrent nodes summarize the same messages twice.
+concurrent assemblies summarized the same roots in overlapping calls and paid for them twice —
+duplicate upward compaction, which is the defect the concurrency test's single-parent assertion
+detects on the upward lineage. Two parents is not itself the defect: R11 deliberately splits a
+child too large for one prompt across several parents, and each of those links is legitimate (V11).
+*Rejected:* a global lock, which serializes unrelated sessions; and no lock, which let concurrent
+nodes summarize the same messages twice.
 
 **The archive's schema is versioned, and the parent relation is stored the way its columns are
 named (L2).** `lcm_summary_parents` stores `(summary_id = child, parent_id = parent)`; `LcmSummary`
 reads those rows as `parentIds` — a summary's true parents — and a root is a summary with none.
 The version is SQLite's `user_version`, currently 2. Opening an unversioned (or version-1) archive
-swaps the relation once, in a single transaction, and records the migration in `lcm_migrations`;
-opening an archive newer than this build refuses with a message rather than reading it upside down.
+swaps the relation once, in a `BEGIN IMMEDIATE` transaction that re-reads the version under the
+write lock (two processes opening the same old archive swap once, not twice — V6), and records the
+migration in `lcm_migrations`. Opening an archive newer than this build refuses with a message
+rather than reading it upside down, and refuses **before** creating any table, so a file this
+build cannot read is left exactly as its writer left it (V7). The round-2 bookkeeping tables
+(`lcm_root_retries`, `lcm_root_degradations`) are additive and created empty by any open, so they
+need no version of their own: an earlier version-2 build opening this archive ignores them.
 *Rejected:* rewriting on read (a reader cannot tell the direction without a version), and silent
 best-effort reads of an unknown layout.
 
@@ -421,14 +439,14 @@ range (R7). "Line range" means the hunks this branch writes, not the whole file.
 
 | File | Reason | Where |
 |---|---|---|
-| `packages/roles/src/RoleDispatcher.ts` | The archive is assembled before the node's prompt and its summary calls become records: the summary transcript line, the spend against the triggering node's budget, and the one flag that tells the injector whether the role can call `lcm.expand` (R14). Not this WP's file — it is line-scoped for WP-3.4/3.5 — so the edits sit in one region. | `mafToolsAvailable` :732; the `lcmSummaryCalls` transcript loop :738–754; the summary spend :776–784 |
+| `packages/roles/src/RoleDispatcher.ts` | The archive is assembled before the node's prompt and its summary calls become records: the summary transcript line, the spend against the triggering node's budget, and the one flag that tells the injector whether the role can call `lcm.expand` (R14). Not this WP's file — it is line-scoped for WP-3.4/3.5 — so the edits sit in one region. | `mafToolsAvailable` :732; the `lcmSummaryCalls` transcript loop :738–754 and the `lcmDegraded` loop :755–781; the summary spend :795–803 |
 | `packages/attestation/src/Attestor.ts` | The run's LCM settings are recorded once and emitted in the bundle (R4a), so `lcm.mode: off` is readable in the record rather than inferred. | field :260; `recordLcmSettings` :385–387; `lcmSettings` in the predicate :428 |
 | `packages/tools/src/index.ts` | `LcmExpandTool` is exported and registered in `createDefaultRegistry`, which is what makes the Dolt cue's `lcm.expand("<id>")` callable by every built-in role (F8). | export :7–8; import :11; option :31; construction :45 |
 | `packages/tools/src/plugins/lcm.ts` | New: the read-only, pathless `lcm.expand` tool. Masks the summary text and every source message (F7, R8), and refuses an id that is not in this run's session (R9). | whole file |
 | `packages/roles/src/defaults.ts` | Every built-in role gains `lcm.expand` in `allowedTools`, and the three read-only prompts' "Tools available" lines gain it too — a cue the role cannot follow is a dead reference. | prompts :58, :67, :98; tool lists :71, :78, :82, :86, :101 |
 | `.maf/roles.yaml` and `packages/cli/assets/roles.yaml` | The same one id per role in both copies of the shipped role file: the run loads the first, `maf init` writes the second. | :11, :25, :35, :46, :57 in each |
-| `packages/cli/src/wiring.ts` | `summarizerModelFor` :79 and `createRunLcm` :113 — the single LCM construction (R1), called by `buildRunStack` :244 and by `run` :267. The summary model, the timeout, the operator and the settings record all come from here, once. | :73–160, :244 |
-| `packages/cli/src/commands/run.ts` | `maf run` no longer builds its own LCM; it calls `createRunLcm` and closes the result with the stack. This was the file whose seven mutants survived round 1. | import :27; call :267; close path beside the stack |
+| `packages/cli/src/wiring.ts` | `summarizerModelFor` :79 and `createRunLcm` :113 — the single LCM construction (R1), called by `buildRunStack` :263 and by `run` :300. The summary model, the timeout, the operator and the settings record all come from here, once. | :73–203, :263 |
+| `packages/cli/src/commands/run.ts` | `maf run` no longer builds its own LCM; it calls `createRunLcm` and closes the result with the stack. This was the file whose seven mutants survived round 1. | import :27; call :300; close :482 |
 | `packages/cli/src/commands/{goldens,evolve,inprocessDemo}.ts` | Each passes `lcm: DEFAULT_MAF_CONFIG.lcm` to `buildRunStack` and states that it reads no config file (F12): the stack requires the setting rather than defaulting it, so a command cannot silently run another mode than the one it printed. | goldens :185; evolve :69; inprocessDemo :186 |
 | `packages/cli/src/config/ConfigLoader.ts` | `lcm.model`, `lcm.operator` and `lcm.summaryTimeoutMs` are read, validated by name and in `LCM_FIELDS`; `lcm.mode` accepts `off`. A key that is accepted but unread is how the section became inert before. | the `lcm` section and `LCM_FIELDS` |
 | `packages/cli/src/main.ts` | `merge-runs`' summarizer throws instead of fabricating text. `merge-runs` never assembles a context, so it never summarizes; the placeholder was dead code that could have become a false summary if that changed. | the `merge-runs` summarizer |
@@ -479,7 +497,7 @@ On `wp/3.2-lcm`, after the final edit:
 | `pnpm run check:workspace-deps` | exit 0 |
 | `pnpm run check:doc-refs` | exit 0 |
 | `pnpm -r typecheck` | exit 0, `error TS` = 0 |
-| `pnpm -r test` | exit 0 — **1206 tests, 1204 pass, 0 fail, 2 skipped** |
+| `pnpm -r test` | exit 0 — **1460 tests, 1458 pass, 0 fail, 2 skipped** |
 
 The two skips are `lcm-live` (needs `MAF_LIVE_SUMMARIZATION=1` and a real adapter; it is not run
 as part of the suite) and one pre-existing skip in `@maf/tools`.
@@ -494,6 +512,16 @@ New/expanded tests: `lcm/src/__tests__/adapter-summarizer.test.ts`,
 `roles/src/__tests__/defaults.test.ts` (R13: each prompt's tool list equals the role's tools),
 `tools/src/__tests__/lcm-expand.test.ts` (F7, F8, R8: both halves masked), and the env-gated
 `cli/src/__tests__/lcm-live.test.ts` (F11).
+
+The live round-2 fixes (V1–V11) expanded `lcm/src/__tests__/lcm-engine.test.ts` (V1: one retry
+per root across eight assemblies; V2: the retry decides under the lock against a re-read archive;
+V3: the size target at an upward merge level, for `LlmMap` and `AgenticMap`; V5: a failed merge
+degrades the root instead of failing the node; V6: two concurrent opens of an old archive; V7: a
+newer archive is refused before any table is created; V10: a cli-tier caller offered no cues),
+`lcm/src/__tests__/adapter-summarizer.test.ts` (L3n: the target reaches the prompt),
+`roles/src/__tests__/RoleDispatcher.test.ts` (T1 across the cli, default and
+`policy-audit`-only bundles; L3l: the sentence matches what happened), and
+`cli/src/__tests__/run-lcm-wiring.test.ts` (L3m: the run log uses the transcript's words).
 
 ## Live rows
 
