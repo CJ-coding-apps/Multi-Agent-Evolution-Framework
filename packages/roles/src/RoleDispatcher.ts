@@ -956,7 +956,7 @@ export class RoleDispatcher {
 
   /**
    * Records a cli-tier role call's model-facing surface (WP-3.0c, D-45), the cli-tier twin of F4's
-   * in-process record: the same shape, `tier: 'cli'`, so "every role call is in the record" is one
+   * in-process record: the same shape, `tier: 'cli'`, so "every model call is in the record" is one
    * array rather than two. The adapter assembles it, each from its own argv; an adapter that
    * assembles none — an HTTP backend, which has no argv of its own to report — records nothing
    * rather than an invented surface, exactly as a governed turn with no surface records nothing. A
@@ -978,10 +978,10 @@ export class RoleDispatcher {
       // cannot tell the two apart. It is what was *asked for*: codex ignores `false` and keeps
       // everything, which the reader can see from the adapter it names.
       //
-      // N3 (3.0c review): the `'none'` arm is unreachable from a role call. A role call asks
-      // `'read-only'` (line above) or nothing at all; `false` is asked only by the planner's and the
-      // security reviewer's calls, and neither records a surface. The arm stays for the type's
-      // completeness, not because any entry this line writes is ever `'none'`.
+      // L1: a role call still asks `'read-only'` or nothing at all, so this line writes `'full'` or
+      // `'read-only'`. The `'none'` arm remains for the type's completeness; the calls that ask for
+      // no tools — the planner's and the security gate's — record their own `'none'` surfaces in
+      // `planGenerator` and `SecurityReviewGate`, in this same array.
       nativeTools: askedNativeTools === false ? 'none' : askedNativeTools === 'read-only' ? 'read-only' : 'full',
     };
     this.config.attestor.recordModelSurface?.(record);
@@ -1325,7 +1325,8 @@ export class RoleDispatcher {
     let secRes: SecurityReviewResult;
     let refusal: GateRefused | undefined;
     try {
-      secRes = await securityGate.reviewDiff(diff);
+      // L1: the node is named so the gate's surface record joins this node's role records.
+      secRes = await securityGate.reviewDiff(diff, { nodeId: node.id });
     } catch (err: unknown) {
       if (!(err instanceof GateRefused)) throw err;
       refusal = err;

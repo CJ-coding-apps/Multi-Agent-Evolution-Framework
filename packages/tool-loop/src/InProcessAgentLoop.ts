@@ -278,7 +278,7 @@ export class InProcessAgentLoop {
     if (!surface) return;
     // `tier` names which half of the run produced this call (WP-3.0c): the loop's own governed turn
     // is 'in-process', and a cli-tier `invoke` the dispatcher records is 'cli'. Same record shape
-    // both places, so "every role call is in the record" is one array, not two.
+    // both places, so "every model call is in the record" is one array, not two.
     const record: ModelSurfaceRecord = {
       role: base.role, taskId: base.taskId, turn: stepIndex + 1, ...surface, tier: 'in-process',
     };

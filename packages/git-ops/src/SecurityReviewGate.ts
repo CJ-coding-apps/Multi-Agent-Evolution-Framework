@@ -1,8 +1,13 @@
 import type {
-  CliAdapter, AdapterInvokeOptions,
+  CliAdapter, AdapterInvokeOptions, ModelSurfaceRecord,
   SecurityFinding, SecurityReviewResult, SecuritySeverity,
 } from '@maf/types';
-import { GateRefused, redactCredentials } from '@maf/types';
+import { GateRefused, callModelSurface, makeTaskId, redactCredentials } from '@maf/types';
+
+/** L1: what a review is about, when the caller knows it: the node whose change the gate read. */
+export interface ReviewedNode {
+  nodeId: string;
+}
 
 export interface SecurityReviewGateConfig {
   adapter:        CliAdapter;
@@ -12,6 +17,12 @@ export interface SecurityReviewGateConfig {
   model?:         string;
   /** Longest diff, in characters, the gate will send for review. Default 60,000. */
   maxDiffChars?:  number;
+  /**
+   * L1: where each reviewer call's surface goes — one record per attempt, written before the
+   * verdict is parsed, so a call that passed, blocked, or timed out is accounted for. Not called
+   * when no model call was made (an empty diff, no paths, or a diff over the cap).
+   */
+  recordSurface?: (record: ModelSurfaceRecord) => void;
 }
 
 const BLOCKING_SEVERITIES: ReadonlySet<SecuritySeverity> = new Set(['critical', 'high']);
@@ -39,7 +50,7 @@ export class SecurityReviewGate {
    * change, and the part that was cut would be attested as reviewed — so a diff over the cap
    * throws `GateRefused` before any model call.
    */
-  async reviewDiff(diff: string): Promise<SecurityReviewResult> {
+  async reviewDiff(diff: string, reviewed?: ReviewedNode): Promise<SecurityReviewResult> {
     if (!diff.trim()) {
       return { findings: [], summary: 'No diff to review.', passed: true };
     }
@@ -57,10 +68,10 @@ export class SecurityReviewGate {
       `\`\`\`diff\n${diff}\n\`\`\``;
     // Everything the reviewer needs is in the prompt. With its own tools it could edit the tree it
     // is reviewing, and that edit would reach the branch after the review that passed it.
-    return this.invoke(userPrompt, false);
+    return this.invoke(userPrompt, false, reviewed);
   }
 
-  async reviewPaths(paths: string[], cwd: string): Promise<SecurityReviewResult> {
+  async reviewPaths(paths: string[], cwd: string, reviewed?: ReviewedNode): Promise<SecurityReviewResult> {
     if (paths.length === 0) {
       return { findings: [], summary: 'No paths to review.', passed: true };
     }
@@ -70,10 +81,14 @@ export class SecurityReviewGate {
       `Working directory: ${cwd}\n` +
       `Files:\n${paths.map((p) => ` - ${p}`).join('\n')}`;
     // This review reads the files itself, so the reviewer keeps its tools.
-    return this.invoke(userPrompt, true);
+    return this.invoke(userPrompt, true, reviewed);
   }
 
-  private async invoke(prompt: string, nativeTools: boolean): Promise<SecurityReviewResult> {
+  private async invoke(
+    prompt: string,
+    nativeTools: boolean,
+    reviewed?: ReviewedNode,
+  ): Promise<SecurityReviewResult> {
     const opts: AdapterInvokeOptions = {
       prompt,
       systemPrompt: this.config.securityPrompt,
@@ -83,6 +98,16 @@ export class SecurityReviewGate {
       ...(nativeTools ? {} : { nativeTools: false }),
     };
     const result = await this.config.adapter.invoke(opts);
+    // L1: this is a model call whether or not it judged anything, so its surface is recorded before
+    // the transport check below can throw. `taskId` is the reviewed node's, exactly as the
+    // dispatcher mints it (`makeTaskId(node.id)`), so a reader joins the gate's call to that node's
+    // role records; reviewing outside a node (`goldens`, `evolve`) names the gate itself instead.
+    this.config.recordSurface?.({
+      role: 'security', taskId: makeTaskId(reviewed?.nodeId ?? 'security-gate'), turn: 1,
+      ...(result.modelSurface ?? callModelSurface(opts.systemPrompt, prompt, result.output)),
+      tier: 'cli', nativeTools: nativeTools ? 'full' : 'none', kind: 'security-gate',
+      ...(this.config.model !== undefined ? { model: this.config.model } : {}),
+    });
     // A reviewer that timed out or never started has not judged anything: that is a transport
     // failure the node may be retried on (D-06), not a refusal to carry as a verdict.
     if (result.transportError !== undefined) throw result.transportError;

@@ -1486,6 +1486,13 @@ export interface ModelSurface {
    */
   outputSha256?:      string;
   /**
+   * L1: the model the call named, when it named one. The planner and the security gate are calls
+   * MAF makes directly rather than through a role's dispatcher, so neither carries a node's
+   * `modelOverride`; without this a reader of the surface could not tell which model was asked for.
+   * Absent when the call asked for the adapter's own default.
+   */
+  model?:             string;
+  /**
    * The backend argv. Payload positionals — the system-prompt value and the trailing prompt — are
    * replaced by `<name: N bytes, sha256 H>` markers, so the *flags* (including the empty string that
    * is `--tools ""`) are readable without the record carrying the whole prompt.
@@ -1517,6 +1524,11 @@ export interface ModelSurfaceRecord extends ModelSurface {
    * keep everything whatever was asked. It is what was *asked for*, not what the backend did with it.
    */
   nativeTools?: 'full' | 'read-only' | 'none';
+  // L1: which of MAF's own model calls this record is, when it is not a role's turn. Absent reads
+  // as a role call, so a bundle written before this field parses unchanged. The planner is the
+  // run's call (no node), and the security gate's call names the node whose diff it reviewed in
+  // `taskId`, so both land in the one array rather than in a second record.
+  kind?: 'planner' | 'security-gate';
 }
 
 /**
@@ -1637,3 +1649,11 @@ export {
  * `MAF_*` variable in maf's own environment out of a process a patch an agent wrote controls.
  */
 export { toolEnv } from './childEnv.js';
+
+/**
+ * L1: the surface of a model call an adapter did not describe. The planner (`@maf/cli`) and the
+ * security gate (`@maf/git-ops`) both call `adapter.invoke` directly, and the gate's package is a
+ * leaf on this one by design — so the helper lives here, where both already reach, rather than
+ * giving either a new edge to an adapter package that builds the other kind of surface.
+ */
+export { callModelSurface, sha256Hex } from './surface.js';

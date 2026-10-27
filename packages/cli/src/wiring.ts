@@ -158,6 +158,8 @@ export async function buildRunStack(cfg: {
         await transcript.init();
         const gate = new SecurityReviewGate({
           adapter: cfg.adapter, projectRoot: workDir, securityPrompt: stack.securityPrompt,
+          // L1: a task's gate call is a model call; `runNode` names the node it reviewed.
+          recordSurface: (record) => attestor.recordModelSurface(record),
           ...(cfg.model ? { model: cfg.model } : {}),
         });
         // Bound to this task's directory so the git tools learn its repository root before the agent

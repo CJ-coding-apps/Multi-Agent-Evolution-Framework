@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { CliAdapter, AdapterInvokeOptions, AdapterInvokeResult } from '@maf/types';
-import { GateRefused } from '@maf/types';
+import type { CliAdapter, AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord } from '@maf/types';
+import { GateRefused, TransportError, sha256Hex } from '@maf/types';
 import { SecurityReviewGate } from '../SecurityReviewGate.js';
 
 const CLEAN_RESULT = JSON.stringify({ findings: [], summary: 'clean', passed: true });
@@ -170,4 +170,75 @@ test('unparseable adapter output fails closed', async () => {
   const res = await g.reviewDiff('diff');
   assert.equal(res.passed, false);
   assert.match(res.summary, /Could not parse/);
+});
+
+// L1: the gate's reviewer call is a model call, and the live rows found it outside the record. One
+// record per attempt, written before the verdict is parsed — a review that blocked is as much a
+// model call as one that passed, and a timed-out one spent tokens too.
+test('L1: reviewDiff() records one security-gate surface, naming the reviewed node', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const g = gate(fakeAdapter(CLEAN_RESULT), { recordSurface: (record) => records.push(record) });
+  const diff = 'diff --git a/db.ts b/db.ts\n+exec(userInput)\n';
+  await g.reviewDiff(diff, { nodeId: 'n7' });
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.ok(record);
+  assert.deepEqual(record, {
+    role: 'security', taskId: 'n7', turn: 1,
+    systemPromptSha256: sha256Hex('You are a security auditor. Respond in strict JSON.'),
+    promptSha256: sha256Hex(`Audit this diff for security issues. Respond with the strict JSON schema in your system prompt.\n\`\`\`diff\n${diff}\n\`\`\``),
+    toolCatalog: '', outputSha256: sha256Hex(CLEAN_RESULT), argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'security-gate',
+  });
+});
+
+test('L1: a blocking verdict is recorded too', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const blocking = JSON.stringify({ findings: [{ severity: 'critical', category: 'x', file: 'a.ts', line: 1, rationale: 'r', remediation: 'm' }], summary: 'bad', passed: false });
+  const g = gate(fakeAdapter(blocking), { recordSurface: (record) => records.push(record) });
+  const res = await g.reviewDiff('diff', { nodeId: 'n1' });
+  assert.equal(res.passed, false);
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.outputSha256, sha256Hex(blocking));
+});
+
+test('L1: a transport failure records its attempt before the throw', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const failing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => ({
+      success: false, output: '', toolCallLog: [], exitCode: 124, duration: 1,
+      transportError: new TransportError('timed out'),
+    }),
+  };
+  const g = gate(failing, { recordSurface: (record) => records.push(record) });
+  await assert.rejects(() => g.reviewDiff('diff', { nodeId: 'n2' }), TransportError);
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.outputSha256, sha256Hex(''));
+});
+
+test('L1: reviewPaths() records nativeTools full; no model call records nothing', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const g = gate(fakeAdapter(CLEAN_RESULT), { recordSurface: (record) => records.push(record) });
+  await g.reviewDiff('   ');
+  await g.reviewPaths([], '/repo');
+  assert.equal(records.length, 0, 'a short-circuit made no model call');
+  await g.reviewPaths(['src/a.ts'], '/repo', { nodeId: 'n3' });
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.nativeTools, 'full');
+  assert.equal(records[0]?.taskId, 'n3');
+});
+
+test('L1: a review outside a node names the gate, not a node', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const g = gate(fakeAdapter(CLEAN_RESULT), { recordSurface: (record) => records.push(record) });
+  await g.reviewDiff('diff');
+  assert.equal(records[0]?.taskId, 'security-gate');
+});
+
+test('L1: the model the gate was configured with is on the record', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const g = gate(fakeAdapter(CLEAN_RESULT), { model: 'claude-sonnet', recordSurface: (record) => records.push(record) });
+  await g.reviewDiff('diff', { nodeId: 'n4' });
+  assert.equal(records[0]?.model, 'claude-sonnet');
 });

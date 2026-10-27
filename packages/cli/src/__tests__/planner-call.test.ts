@@ -4,8 +4,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
-import type { AdapterInvokeOptions, AdapterInvokeResult, TurnAdapter } from '@maf/types';
-import { TransportError } from '@maf/types';
+import type { AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord, TurnAdapter } from '@maf/types';
+import { TransportError, sha256Hex } from '@maf/types';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { planGenerator } from '../commands/run.js';
 import { dirtyUserRepo, driveRun, messageOf, needsLcm, registryOf, userState } from './runFixture.js';
@@ -102,4 +102,71 @@ test('maf run stops at a failed planner call instead of running its error text a
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// L1: the planner's call is a model call MAF makes on every run, and it was the one the live rows
+// found outside the record. Every attempt records one surface, including the attempts that fail —
+// a call that spent tokens and returned an error is exactly as worth accounting for as one that
+// planned the DAG.
+test('L1: a successful planner call records one surface with the call\'s digests', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const { adapter } = answering(ok(PLAN));
+  const generate = planGenerator(adapter, {
+    workingDir: '/w', timeoutMs: 1, retry: NO_WAIT, model: 'opus',
+    recordSurface: (record) => records.push(record),
+  });
+  assert.equal(await generate('system text', 'user text'), PLAN);
+  assert.equal(records.length, 1);
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1,
+    systemPromptSha256: sha256Hex('system text'),
+    promptSha256: sha256Hex('user text'),
+    toolCatalog: '', outputSha256: sha256Hex(PLAN), argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'planner', model: 'opus',
+  });
+});
+
+test('L1: a failed planner call records its surface before the error, once', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const { adapter, calls } = answering(failed('Credit balance is too low'));
+  const generate = planGenerator(adapter, {
+    workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+    recordSurface: (record) => records.push(record),
+  });
+  await assert.rejects(() => generate('s', 'u'), /Credit balance is too low/);
+  assert.equal(calls.length, 1);
+  assert.equal(records.length, 1, 'the one attempt is in the record');
+  assert.equal(records[0]?.kind, 'planner');
+  assert.equal(records[0]?.outputSha256, sha256Hex('Credit balance is too low'));
+  assert.equal('model' in (records[0] ?? {}), false, 'the call named no model');
+});
+
+test('L1: a transport failure records each attempt, then propagates', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const { adapter } = answering(dropped(), dropped());
+  await assert.rejects(
+    () => planGenerator(adapter, {
+      workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+      recordSurface: (record) => records.push(record),
+    })('s', 'u'),
+    TransportError,
+  );
+  assert.equal(records.length, 2, 'two attempts, two records');
+});
+
+test('L1: a surface the adapter reports is kept rather than reconstructed', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const surface = {
+    systemPromptSha256: 'sys', promptSha256: 'prompt', toolCatalog: '',
+    outputSha256: 'out', argv: ['claude', '--tools', ''],
+  };
+  const { adapter } = answering({ ...ok(PLAN), modelSurface: surface });
+  await planGenerator(adapter, {
+    workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+    recordSurface: (record) => records.push(record),
+  })('s', 'u');
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1, ...surface,
+    tier: 'cli', nativeTools: 'none', kind: 'planner',
+  });
 });

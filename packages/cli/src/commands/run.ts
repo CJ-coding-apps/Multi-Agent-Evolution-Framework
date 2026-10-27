@@ -3,8 +3,8 @@ import crypto from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
-import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
-import type { AdapterName, CliAdapter, Dag, DagNode, PlanSource, RetryPolicy } from '@maf/types';
+import { callModelSurface, makeRunId, makeTaskId, makeAgentId } from '@maf/types';
+import type { AdapterName, CliAdapter, Dag, DagNode, ModelSurfaceRecord, PlanSource, RetryPolicy, TaskId } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine } from '@maf/lcm';
@@ -339,6 +339,9 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       projectRoot:    cwd,
       securityPrompt,
       timeoutMs:      cfg.timeouts.securityReviewMs,
+      // L1: every gate call is a model call. The gate names the node whose diff it read, so the
+      // record joins that node's role records in the same array.
+      recordSurface:  (record) => attestor.recordModelSurface(record),
       ...model,
     });
 
@@ -399,7 +402,14 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
         // and *warn* before assigning the default, which was the writer.
         roles,
         roleCatalog: roles.catalog(),
-        generatePlan: planGenerator(adapter, { workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry, ...model }),
+        // L1: the planner's call is the run's first model call, and it was the one the live row
+        // found missing from the record. `makeTaskId('planner')` is deliberate: the call belongs to
+        // the run, not to any node the planner has yet written.
+        generatePlan: planGenerator(adapter, {
+          workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry,
+          recordSurface: (record) => attestor.recordModelSurface(record),
+          ...model,
+        }),
       });
       dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
     }
@@ -476,7 +486,20 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
  */
 export function planGenerator(
   adapter: CliAdapter,
-  call: { workingDir: string; timeoutMs: number; retry: RetryPolicy; model?: string },
+  call: {
+    workingDir: string;
+    timeoutMs: number;
+    retry: RetryPolicy;
+    model?: string;
+    /**
+     * L1: where the planning call's surface goes. Called once per attempt, before the result is
+     * judged, so a failed or timed-out planning call is in the record too — its error text is what
+     * the model was shown back, not a reason to leave the spend unrecorded.
+     */
+    recordSurface?: (record: ModelSurfaceRecord) => void;
+    /** The id this call is recorded under. The planner is the run's call, not a node's. */
+    taskId?: TaskId;
+  },
 ): (systemPrompt: string, userPrompt: string) => Promise<string> {
   return (systemPrompt, userPrompt) => withRetry(async () => {
     const result = await adapter.invoke({
@@ -484,6 +507,15 @@ export function planGenerator(
       workingDir: call.workingDir, timeoutMs: call.timeoutMs,
       maxOutputBytes: 64 * 1024, // planning only needs a JSON block
       nativeTools: false,
+      ...(call.model !== undefined ? { model: call.model } : {}),
+    });
+    // L1: record the attempt before any judgement of it. A backend that reports its own surface
+    // keeps it (its argv is evidence this call site cannot reconstruct); one that reports none gets
+    // the digests of what was sent and received, with no argv claimed.
+    call.recordSurface?.({
+      role: 'planner', taskId: call.taskId ?? makeTaskId('planner'), turn: 1,
+      ...(result.modelSurface ?? callModelSurface(systemPrompt, userPrompt, result.output)),
+      tier: 'cli', nativeTools: 'none', kind: 'planner',
       ...(call.model !== undefined ? { model: call.model } : {}),
     });
     if (result.transportError !== undefined) throw result.transportError;
