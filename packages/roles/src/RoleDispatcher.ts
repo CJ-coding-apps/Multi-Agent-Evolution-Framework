@@ -4,7 +4,7 @@ import type {
   AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle, TaskId,
   PolicyDecision, ModelSurfaceRecord, AttributedChange, WriterLockLedger, NodeId,
 } from '@maf/types';
-import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
+import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY, callModelSurface } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -769,7 +769,7 @@ export class RoleDispatcher {
         // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
         // the same evidence shape as F4's governed turn, `tier: 'cli'`. What the dispatcher asked of
         // the backend's own tools goes in with it (F3), because for codex and gemini no argv shows it.
-        await this.recordCliSurface(role, taskId, cliResult, invokeOpts.nativeTools);
+        await this.recordCliSurface(role, taskId, cliResult, invokeOpts);
         outputForMemory = cliResult.output.slice(0, MAX_STORED_OUTPUT_CHARS);
         shortfall = cliShortfall(role, adapter.name, cliResult);
         answer = { tier: 'cli', result: cliResult };
@@ -957,21 +957,24 @@ export class RoleDispatcher {
   /**
    * Records a cli-tier role call's model-facing surface (WP-3.0c, D-45), the cli-tier twin of F4's
    * in-process record: the same shape, `tier: 'cli'`, so "every model call is in the record" is one
-   * array rather than two. The adapter assembles it, each from its own argv; an adapter that
-   * assembles none — an HTTP backend, which has no argv of its own to report — records nothing
-   * rather than an invented surface, exactly as a governed turn with no surface records nothing. A
-   * node's cli-tier call is one turn.
+   * array rather than two. The adapter assembles it from its own argv when it can; an adapter that
+   * assembles none — `ollama`, `openrouter`, which spawn no process — still gets a record built here
+   * from what this call site sent and received (`callModelSurface`), so the call is not dropped for
+   * lack of an argv. A node's cli-tier call is one turn.
    */
   private async recordCliSurface(
     role: RoleConfig,
     taskId: TaskId,
     result: AdapterInvokeResult,
-    askedNativeTools: AdapterInvokeOptions['nativeTools'],
+    invokeOpts: AdapterInvokeOptions,
   ): Promise<void> {
-    const surface = result.modelSurface;
-    if (!surface) return;
+    const askedNativeTools = invokeOpts.nativeTools;
     const record: ModelSurfaceRecord = {
-      role: role.role, taskId, turn: 1, ...surface, tier: 'cli',
+      role: role.role, taskId, turn: 1,
+      // L1: an adapter that reports a surface keeps it (its argv is evidence this layer cannot
+      // reconstruct); one that reports none gets the digests of what was sent and answered.
+      ...(result.modelSurface ?? callModelSurface(invokeOpts.systemPrompt, invokeOpts.prompt, result.output)),
+      tier: 'cli',
       // F3: what the dispatcher asked of the backend's own tools. `undefined` is the default —
       // nothing was asked, and the backend keeps its native tools — and it is recorded as 'full'
       // rather than left out, because codex and gemini pass no flag either way and their argv
@@ -983,6 +986,8 @@ export class RoleDispatcher {
       // no tools — the planner's and the security gate's — record their own `'none'` surfaces in
       // `planGenerator` and `SecurityReviewGate`, in this same array.
       nativeTools: askedNativeTools === false ? 'none' : askedNativeTools === 'read-only' ? 'read-only' : 'full',
+      kind: 'role-call',
+      ...(invokeOpts.model !== undefined ? { model: invokeOpts.model } : {}),
     };
     this.config.attestor.recordModelSurface?.(record);
     await this.config.transcript.append(

@@ -1,4 +1,4 @@
-import { makeAgentId, estimateTokens } from '@maf/types';
+import { makeAgentId, estimateTokens, sha256Hex } from '@maf/types';
 import type {
   RunId, TaskId, TurnAdapter, TurnMessage, ToolPlugin, ToolContext,
   PolicyEngineHandle, AttestorHandle, AssistantTurn, ToolCallRequest, ToolResult, ApprovalGateHandle,
@@ -256,7 +256,7 @@ export class InProcessAgentLoop {
     systemPrompt: string,
   ): Promise<{ turn: AssistantTurn; intercepted: boolean }> {
     const turn = await this.callModel(promptHistory, systemPrompt);
-    await this.recordSurface(base, stepIndex, turn);
+    await this.recordSurface(base, stepIndex, turn, systemPrompt);
     if (!this.deps.pipeline) return { turn, intercepted: false };
     const ev = await this.deps.pipeline.run({ ...base, hook: 'after_model', stepIndex, turn });
     const first = this.firstEvent<{ turn: AssistantTurn }>(ev, 'after_model');
@@ -268,19 +268,28 @@ export class InProcessAgentLoop {
    * Records what this turn showed the model (F4), to the bundle and the transcript. It runs before
    * the `after_model` hook, because the evidence is about what the model *was shown*, which no
    * processor that edits the turn can change after the fact.
+   *
+   * An adapter that reports no surface still gets a record (L1): the system block this loop handed
+   * it is known exactly, so its digest is the same evidence a reporting adapter carries. The prompt
+   * and output are left absent, not hashed as empty strings — a governed turn's prompt is the
+   * serialized history and its answer is a parsed `AssistantTurn`, neither a single byte string, and
+   * "not recorded" must read differently from "recorded as empty".
    */
   private async recordSurface(
     base: { runId: RunId; taskId: TaskId; role: string },
     stepIndex: number,
     turn: AssistantTurn,
+    systemPrompt: string,
   ): Promise<void> {
-    const surface = turn.modelSurface;
-    if (!surface) return;
+    const surface = turn.modelSurface ?? {
+      systemPromptSha256: sha256Hex(systemPrompt), toolCatalog: '', argv: [],
+    };
     // `tier` names which half of the run produced this call (WP-3.0c): the loop's own governed turn
     // is 'in-process', and a cli-tier `invoke` the dispatcher records is 'cli'. Same record shape
     // both places, so "every model call is in the record" is one array, not two.
     const record: ModelSurfaceRecord = {
       role: base.role, taskId: base.taskId, turn: stepIndex + 1, ...surface, tier: 'in-process',
+      kind: 'role-call',
     };
     this.deps.attestor.recordModelSurface?.(record);
     await this.deps.transcript?.append(

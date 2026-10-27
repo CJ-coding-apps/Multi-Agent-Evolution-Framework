@@ -1524,11 +1524,11 @@ export interface ModelSurfaceRecord extends ModelSurface {
    * keep everything whatever was asked. It is what was *asked for*, not what the backend did with it.
    */
   nativeTools?: 'full' | 'read-only' | 'none';
-  // L1: which of MAF's own model calls this record is, when it is not a role's turn. Absent reads
-  // as a role call, so a bundle written before this field parses unchanged. The planner is the
-  // run's call (no node), and the security gate's call names the node whose diff it reviewed in
-  // `taskId`, so both land in the one array rather than in a second record.
-  kind?: 'planner' | 'security-gate';
+  // L1: which of MAF's model calls this record is. A role call says so explicitly; a record from
+  // before this field means the same and still parses. The planner is the run's call (no node), and
+  // the security gate's call names the node whose diff it reviewed in `taskId`, so all three land in
+  // the one array rather than in separate records.
+  kind?: 'role-call' | 'planner' | 'security-gate';
 }
 
 /**

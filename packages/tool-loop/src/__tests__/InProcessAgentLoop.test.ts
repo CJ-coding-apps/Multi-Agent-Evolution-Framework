@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  makeRunId, makeTaskId, makeToolId,
+  makeRunId, makeTaskId, makeToolId, sha256Hex,
 } from '@maf/types';
 import type {
   TurnAdapter, TurnMessage, AssistantTurn, AdapterInvokeOptions, AdapterInvokeResult,
@@ -200,8 +200,8 @@ test('F4: each turn\'s model surface reaches the attestor and the transcript, nu
   await loop.run();
 
   assert.deepEqual(attestor.surfaces, [
-    { role: 'analyst', taskId: makeTaskId('t1'), turn: 1, ...SURFACE, tier: 'in-process' },
-    { role: 'analyst', taskId: makeTaskId('t1'), turn: 2, ...SURFACE, tier: 'in-process' },
+    { role: 'analyst', taskId: makeTaskId('t1'), turn: 1, ...SURFACE, tier: 'in-process', kind: 'role-call' },
+    { role: 'analyst', taskId: makeTaskId('t1'), turn: 2, ...SURFACE, tier: 'in-process', kind: 'role-call' },
   ], 'every turn, in order, with the role, task and 1-based turn number, and its tier (WP-3.0c)');
   assert.equal(appended.length, 2, 'and each is mirrored into the transcript');
   assert.equal(appended[0]?.role, 'system');
@@ -212,7 +212,7 @@ test('F4: each turn\'s model surface reaches the attestor and the transcript, nu
   assert.match(appended[0]?.content ?? '', /\[surface\] turn 1/, 'the transcript line says what it is');
 });
 
-test('F4: a turn the adapter reports no surface for records nothing — the record never invents one', async () => {
+test('L1-S1: a turn the adapter reports no surface for still records the system block it was shown', async () => {
   const attestor = new SpyAttestor();
   const loop = new InProcessAgentLoop(
     { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
@@ -220,5 +220,9 @@ test('F4: a turn the adapter reports no surface for records nothing — the reco
   );
   await loop.run();
 
-  assert.deepEqual(attestor.surfaces, [], 'a cli-tier-shaped turn has no model-facing surface to record');
+  assert.deepEqual(attestor.surfaces, [{
+    role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    systemPromptSha256: sha256Hex(baseOpts.systemPrompt),
+    toolCatalog: '', argv: [], tier: 'in-process', kind: 'role-call',
+  }], 'the prompt and output digests stay absent — a turn has neither as one byte string');
 });

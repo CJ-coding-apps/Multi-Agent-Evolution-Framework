@@ -14,7 +14,7 @@ import type { ScriptedExchange } from '@maf/eval-harness';
 import { Attestor, MAF_RUN_PREDICATE_TYPE, parseBundle } from '@maf/attestation';
 import type { InTotoStatement } from '@maf/attestation';
 import {
-  FIXED_SUM, dirtyUserRepo, driveRun, needsLcm, registryOf,
+  FIXED_SUM, dirtyUserRepo, driveRun, needsLcm, onePlannedNode, registryOf,
 } from './runFixture.js';
 
 // ORACLE (L1 of the WP-3.2 live rows): the bundle's `modelSurfaces` was not a complete account of
@@ -36,6 +36,16 @@ class SurfaceReportingScripted extends ScriptedAdapter {
   }
 }
 
+/**
+ * The scripted model on the cli tier: it reports no surface and cannot run the in-process loop,
+ * which is the shape of `ollama` and `openrouter` (L1-S1). Every call it answers is an `invoke`.
+ */
+class CliTierScripted extends ScriptedAdapter {
+  override capabilities() {
+    return { ...super.capabilities(), inProcessLoop: false };
+  }
+}
+
 type ExchangeKind = 'role-turn' | 'summary' | 'planner' | 'security-gate' | 'other';
 
 /**
@@ -48,6 +58,8 @@ function exchangeKind(e: ScriptedExchange): ExchangeKind {
   if (/^Create a task execution DAG for:/.test(e.prompt)) return 'planner';
   if (/^Audit (this diff|these files) for security issues\./.test(e.prompt)) return 'security-gate';
   if (e.systemPrompt.startsWith('You are a context summarization agent')) return 'summary';
+  // A cli-tier role call (L1-S1): the adapter's own `task` exchange that is neither planner nor gate.
+  if (e.via === 'invoke' && e.kind === 'task') return 'role-turn';
   return 'other';
 }
 
@@ -70,6 +82,51 @@ function surfaceKey(s: ModelSurfaceRecord): string {
 function exchangeKey(e: ScriptedExchange): string {
   if (e.via === 'turn') return `${sha256Hex(e.systemPrompt)}||`;
   return `${sha256Hex(e.systemPrompt)}|${sha256Hex(e.prompt)}|${sha256Hex(e.output ?? '')}`;
+}
+
+/**
+ * The common-setup rule — "every adapter call matches exactly one surface record, none unmatched" —
+ * as a bijection by digests within each kind. Used by every scenario in this file (L1-S6).
+ */
+function assertBijection(surfaces: readonly ModelSurfaceRecord[], exchanges: readonly ScriptedExchange[]): void {
+  const pool = new Map<string, string[]>();
+  for (const s of surfaces) {
+    const kind = surfaceKind(s);
+    pool.set(kind, [...(pool.get(kind) ?? []), surfaceKey(s)]);
+  }
+  for (const e of exchanges) {
+    const kind = exchangeKind(e);
+    assert.notEqual(kind, 'other', `unclassified adapter call: ${e.via} ${JSON.stringify(e.prompt.slice(0, 80))}`);
+    const keys = pool.get(kind) ?? [];
+    const at = keys.indexOf(exchangeKey(e));
+    assert.notEqual(at, -1, `no ${kind} surface matches ${e.via} ${JSON.stringify(e.prompt.slice(0, 80))}`);
+    keys.splice(at, 1);
+    pool.set(kind, keys);
+  }
+  for (const [kind, keys] of pool) {
+    assert.deepEqual(keys, [], `${kind} surface record(s) match no adapter call`);
+  }
+}
+
+/** Drives a run and reads the signed bundle it wrote. */
+async function runAndRead(
+  repo: string,
+  scripted: ScriptedAdapter,
+  extra: readonly string[],
+  task: string = TASK,
+): Promise<{ surfaces: ModelSurfaceRecord[]; exchanges: ScriptedExchange[]; bundleText: string }> {
+  const run = await driveRun([task, '--dir', repo, '--adapter', 'scripted', ...extra], {
+    adapters: registryOf(scripted),
+    io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: KEY } },
+  });
+  assert.equal(run.error, undefined, `${run.out}\n${run.err}`);
+  const runId = /\[maf\] run (\S+) \|/.exec(run.out)?.[1];
+  assert.ok(runId, run.out);
+  const bundleText = await readFile(path.join(repo, '.maf', 'attestations', `${runId}.bundle.json`), 'utf8');
+  const statement = JSON.parse(bundleText) as InTotoStatement<AttestationBundle>;
+  assert.equal(statement.predicateType, MAF_RUN_PREDICATE_TYPE);
+  assert.equal(Attestor.report(parseBundle(bundleText), { secret: KEY }).valid, true);
+  return { surfaces: statement.predicate.modelSurfaces ?? [], exchanges: scripted.exchanges, bundleText };
 }
 
 test('L1: every adapter call of every kind matches exactly one surface record, none unmatched', needsLcm, async () => {
@@ -109,7 +166,7 @@ test('L1: every adapter call of every kind matches exactly one surface record, n
     // The two kinds the live row found missing are present, once each.
     const planners = surfaces.filter((s) => s.kind === 'planner');
     const gates = surfaces.filter((s) => s.kind === 'security-gate');
-    const turns = surfaces.filter((s) => s.kind === undefined);
+    const turns = surfaces.filter((s) => s.kind === undefined || s.kind === 'role-call');
     assert.equal(planners.length, 1, 'one planning call, one record');
     assert.equal(gates.length, 1, 'one gated writer, one review, one record');
     assert.ok(turns.length > 0, 'the coder turns are in the same array');
@@ -136,23 +193,7 @@ test('L1: every adapter call of every kind matches exactly one surface record, n
     // verified the statement's signature over the predicate these arrays were read from.
 
     // ── the common-setup rule: a bijection by digests, within each kind ──
-    const pool = new Map<string, string[]>();
-    for (const s of surfaces) {
-      const kind = surfaceKind(s);
-      pool.set(kind, [...(pool.get(kind) ?? []), surfaceKey(s)]);
-    }
-    for (const e of exchanges) {
-      const kind = exchangeKind(e);
-      assert.notEqual(kind, 'other', `unclassified adapter call: ${e.via} ${JSON.stringify(e.prompt.slice(0, 80))}`);
-      const keys = pool.get(kind) ?? [];
-      const at = keys.indexOf(exchangeKey(e));
-      assert.notEqual(at, -1, `no ${kind} surface matches ${e.via} ${JSON.stringify(e.prompt.slice(0, 80))}`);
-      keys.splice(at, 1);
-      pool.set(kind, keys);
-    }
-    for (const [kind, keys] of pool) {
-      assert.deepEqual(keys, [], `${kind} surface record(s) match no adapter call`);
-    }
+    assertBijection(surfaces, exchanges);
 
     // Sanity: the digest the record carries is the digest of the bytes the adapter saw.
     const plannerCall = exchanges.find((e) => exchangeKind(e) === 'planner');
@@ -166,6 +207,79 @@ test('L1: every adapter call of every kind matches exactly one surface record, n
       crypto.createHash('sha256').update(plannerCall.output ?? '').digest('hex'),
       'the digest form is sha256 hex',
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// L1-S1: the record is not the adapter's to withhold. A governed turn whose adapter reports no
+// surface still gets an entry — the system block the loop handed it is known exactly — and the
+// prompt and output stay absent rather than being hashed as empty strings.
+test('L1-S1: an in-process adapter that reports no surface still records one per turn', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-nosurface-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const scripted = new ScriptedAdapter([onePlannedNode(TASK), {
+      prompt: TASK,
+      steps: [
+        { tool: 'fs.read', input: { path: 'sum.js' } },
+        { tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } },
+      ],
+      final: 'Fixed sum.js: a - b → a + b.',
+    }]);
+    const { surfaces, exchanges } = await runAndRead(repo, scripted, []);
+
+    const turns = surfaces.filter((s) => s.kind === 'role-call');
+    const turnCalls = exchanges.filter((e) => e.via === 'turn');
+    assert.equal(turns.length, turnCalls.length, 'one record per governed turn');
+    assert.ok(turns.length > 0, 'the governed turns happened');
+    const handed = new Set(turnCalls.map((e) => sha256Hex(e.systemPrompt)));
+    for (const turn of turns) {
+      assert.equal(turn.tier, 'in-process');
+      assert.ok(handed.has(turn.systemPromptSha256), 'the digest is of the system block that was sent');
+      assert.equal(turn.promptSha256, undefined, 'a turn has no single prompt string, so none is invented');
+      assert.equal(turn.outputSha256, undefined, 'a turn answers a parsed turn, not one output string');
+      assert.deepEqual(turn.argv, [], 'no argv is invented for an adapter that reported none');
+    }
+    assertBijection(surfaces, exchanges);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// L1-S1: `ollama` and `openrouter` cannot run the loop and report no surface, so before this fix
+// every role call through them was dropped from the record. The call site knows what it sent and
+// what came back, and those digests are the same evidence a reporting adapter carries.
+test('L1-S1: a cli-tier adapter that reports no surface records the planner, the gate and the role call', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-cli-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const scripted = new CliTierScripted([onePlannedNode(TASK), {
+      prompt: TASK,
+      steps: [
+        { tool: 'fs.read', input: { path: 'sum.js' } },
+        { tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } },
+      ],
+      final: 'Fixed sum.js: a - b → a + b.',
+    }]);
+    const { surfaces, exchanges } = await runAndRead(repo, scripted, ['--allow-ungoverned']);
+
+    assert.equal(surfaces.filter((s) => s.kind === 'planner').length, 1, 'one planning call, one record');
+    assert.equal(surfaces.filter((s) => s.kind === 'security-gate').length, 1, 'one review, one record');
+    const roles = surfaces.filter((s) => s.kind === 'role-call');
+    assert.equal(roles.length, 1, 'the cli-tier role call is in the record');
+    const role = roles[0];
+    assert.ok(role);
+    assert.equal(role.tier, 'cli');
+    assert.equal(role.nativeTools, 'full');
+    assert.equal(role.outputSha256, sha256Hex('Fixed sum.js: a - b → a + b.'));
+    const roleCall = exchanges.find((e) => e.via === 'invoke' && e.prompt === TASK);
+    assert.ok(roleCall, 'the role call the adapter answered is the one recorded');
+    assert.equal(role.promptSha256, sha256Hex(roleCall.prompt));
+    assert.equal(role.systemPromptSha256, sha256Hex(roleCall.systemPrompt));
+    assert.deepEqual(role.argv, [], 'no argv is invented for an adapter that reported none');
+
+    assertBijection(surfaces, exchanges);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
