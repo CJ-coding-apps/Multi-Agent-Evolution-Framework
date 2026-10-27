@@ -6,11 +6,12 @@ import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
 import type {
-  AdapterInvokeOptions, AssistantTurn, AttestationBundle, ModelSurfaceRecord, TurnMessage,
+  AdapterInvokeOptions, AdapterInvokeResult, AssistantTurn, AttestationBundle, ModelSurfaceRecord,
+  TurnMessage,
 } from '@maf/types';
-import { sha256Hex } from '@maf/types';
+import { TransportError, sha256Hex } from '@maf/types';
 import { ScriptedAdapter } from '@maf/eval-harness';
-import type { ScriptedExchange } from '@maf/eval-harness';
+import type { ScriptedExchange, ScriptedTask } from '@maf/eval-harness';
 import { Attestor, MAF_RUN_PREDICATE_TYPE, parseBundle } from '@maf/attestation';
 import type { InTotoStatement } from '@maf/attestation';
 import {
@@ -114,19 +115,77 @@ async function runAndRead(
   scripted: ScriptedAdapter,
   extra: readonly string[],
   task: string = TASK,
-): Promise<{ surfaces: ModelSurfaceRecord[]; exchanges: ScriptedExchange[]; bundleText: string }> {
+  /** A refusing gate or a failed planning call ends the run in an error — the bundle is still read. */
+  expect: 'success' | 'failure' = 'success',
+): Promise<{
+  surfaces: ModelSurfaceRecord[];
+  exchanges: ScriptedExchange[];
+  bundleText: string;
+  run: Awaited<ReturnType<typeof driveRun>>;
+}> {
   const run = await driveRun([task, '--dir', repo, '--adapter', 'scripted', ...extra], {
     adapters: registryOf(scripted),
     io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: KEY } },
   });
-  assert.equal(run.error, undefined, `${run.out}\n${run.err}`);
+  if (expect === 'success') assert.equal(run.error, undefined, `${run.out}\n${run.err}`);
+  else assert.notEqual(run.error, undefined, 'the run was expected to fail');
   const runId = /\[maf\] run (\S+) \|/.exec(run.out)?.[1];
   assert.ok(runId, run.out);
   const bundleText = await readFile(path.join(repo, '.maf', 'attestations', `${runId}.bundle.json`), 'utf8');
   const statement = JSON.parse(bundleText) as InTotoStatement<AttestationBundle>;
   assert.equal(statement.predicateType, MAF_RUN_PREDICATE_TYPE);
   assert.equal(Attestor.report(parseBundle(bundleText), { secret: KEY }).valid, true);
-  return { surfaces: statement.predicate.modelSurfaces ?? [], exchanges: scripted.exchanges, bundleText };
+  return { surfaces: statement.predicate.modelSurfaces ?? [], exchanges: scripted.exchanges, bundleText, run };
+}
+
+const PLAN_TEXT = 'One node of the default role does the whole task.';
+const CLEAN_REVIEW = JSON.stringify({ findings: [], summary: 'clean', passed: true });
+const BLOCKING_REVIEW = JSON.stringify({
+  findings: [{ severity: 'critical', category: 'injection', file: 'sum.js', line: 1, rationale: 'exec', remediation: 'drop it' }],
+  summary: 'a critical finding', passed: false,
+});
+
+const answered = (output: string, success = true): AdapterInvokeResult =>
+  ({ success, output, toolCallLog: [], exitCode: success ? 0 : 1, duration: 0 });
+const transportFailure = (): AdapterInvokeResult => ({
+  success: false, output: '', toolCallLog: [], exitCode: 124, duration: 0,
+  transportError: new TransportError('the reviewer did not finish in time'),
+});
+
+/** The coder script the happy path uses: read the buggy file, write the fixed one. */
+const CODER: ScriptedTask = {
+  prompt: TASK,
+  steps: [
+    { tool: 'fs.read', input: { path: 'sum.js' } },
+    { tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } },
+  ],
+  final: 'Fixed sum.js: a - b → a + b.',
+};
+
+/**
+ * The scripted model with a scripted planner and gate (L1-S6). Each queue answers the next call of
+ * that kind; an exhausted queue delegates to the script. The exchange is pushed exactly as
+ * `ScriptedAdapter` pushes one, so the bijection sees a call the adapter really answered — a
+ * failure and a retry are as visible in `exchanges` as a success.
+ */
+class ScriptedCalls extends ScriptedAdapter {
+  private readonly plannerAnswers: Array<AdapterInvokeResult | undefined> = [];
+  private readonly gateAnswers: Array<AdapterInvokeResult | undefined> = [];
+
+  override async invoke(o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    const planner = /^Create a task execution DAG for:/.test(o.prompt);
+    const gate = /^Audit (this diff|these files) for security issues\./.test(o.prompt);
+    const answer = (planner ? this.plannerAnswers : gate ? this.gateAnswers : []).shift();
+    if (answer === undefined) return super.invoke(o);
+    this.exchanges.push({
+      via: 'invoke', kind: planner ? 'task' : 'security-review',
+      systemPrompt: o.systemPrompt ?? '', prompt: o.prompt, output: answer.output, tools: o.tools ?? [],
+    });
+    return answer;
+  }
+
+  planner(...answers: Array<AdapterInvokeResult | undefined>): this { this.plannerAnswers.push(...answers); return this; }
+  gate(...answers: Array<AdapterInvokeResult | undefined>): this { this.gateAnswers.push(...answers); return this; }
 }
 
 test('L1: every adapter call of every kind matches exactly one surface record, none unmatched', needsLcm, async () => {
@@ -289,6 +348,95 @@ test('L1-S1: a cli-tier adapter that reports no surface records the planner, the
     assert.equal(role.systemPromptSha256, sha256Hex(roleCall.systemPrompt));
     assert.deepEqual(role.argv, [], 'no argv is invented for an adapter that reported none');
 
+    assertBijection(surfaces, exchanges);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ── L1-S6: the bijection must be able to fail on every path it claims to cover ────────────────────
+// Each test drives one path the live rows exercise — a retried planner, a judged failure, a gate that
+// refuses, a gate whose call is retried, a repeated review — and asserts the exact number of records.
+// A mutant that records only on success, twice per attempt, or not at all on a failure changes a count.
+
+test('L1-S6: a planner retried after a transport failure records one surface per attempt, then goes on', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-retry-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const scripted = new ScriptedCalls([onePlannedNode(TASK), CODER]);
+    scripted.planner(transportFailure(), answered(PLAN_TEXT));
+    const { surfaces, exchanges } = await runAndRead(repo, scripted, []);
+
+    const planners = surfaces.filter((s) => s.kind === 'planner');
+    assert.equal(planners.length, 2, 'one per attempt: not zero for the failed one, not two for either');
+    assert.equal(planners[0]?.outputSha256, sha256Hex(''), 'the timed-out attempt answered with no bytes');
+    assert.equal(planners[1]?.outputSha256, sha256Hex(PLAN_TEXT));
+    // A retry is a second attempt and its own record: a mutant that pushes twice per attempt leaves
+    // four here, and one that records only a successful call leaves one.
+    assert.equal(new Set(planners.map((p) => p.turn)).size, 1, 'both attempts are turn 1 of the planner');
+    assertBijection(surfaces, exchanges);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('L1-S6: a judged planner failure is recorded once, and the run\'s bundle holds it', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-planner-fail-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const scripted = new ScriptedCalls([onePlannedNode(TASK), CODER]);
+    scripted.planner(answered('Error: Credit balance is too low', false));
+    const { surfaces, exchanges, bundleText } = await runAndRead(repo, scripted, [], TASK, 'failure');
+
+    const planners = surfaces.filter((s) => s.kind === 'planner');
+    assert.equal(planners.length, 1, 'a judged failure is a call, and it is in the record');
+    assert.equal(planners[0]?.outputSha256, sha256Hex('Error: Credit balance is too low'),
+      'the error text is what the model answered, so it is what the output digest covers');
+    const statement = JSON.parse(bundleText) as InTotoStatement<AttestationBundle>;
+    assert.deepEqual(statement.subject, [], 'no node ran, so no subject');
+    assert.equal(statement.predicate.outcome.status, 'Failed');
+    assert.equal(statement.predicate.outcome.failure?.kind, 'planning_failed');
+    assertBijection(surfaces, exchanges);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('L1-S6: a gate that refuses still records its one call, with the finding it answered', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-gate-refuse-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const scripted = new ScriptedCalls([onePlannedNode(TASK), CODER]);
+    scripted.gate(answered(BLOCKING_REVIEW));
+    const { surfaces, exchanges, bundleText } = await runAndRead(repo, scripted, [], TASK, 'failure');
+
+    const gates = surfaces.filter((s) => s.kind === 'security-gate');
+    assert.equal(gates.length, 1, 'a review that blocked is a model call; a pass-only record would lose it');
+    assert.equal(gates[0]?.outputSha256, sha256Hex(BLOCKING_REVIEW));
+    const statement = JSON.parse(bundleText) as InTotoStatement<AttestationBundle>;
+    assert.equal(statement.predicate.outcome.nodes?.[0]?.failure?.kind, 'gate_refused');
+    assertBijection(surfaces, exchanges);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('L1-S6: a gate call retried after a transport failure records both attempts, exactly', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-gate-retry-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const scripted = new ScriptedCalls([onePlannedNode(TASK), CODER]);
+    // Two attempts: the first review times out, the node is retried (D-06), the second review passes.
+    scripted.gate(transportFailure(), answered(CLEAN_REVIEW));
+    const { surfaces, exchanges } = await runAndRead(repo, scripted, []);
+
+    const gates = surfaces.filter((s) => s.kind === 'security-gate');
+    assert.equal(gates.length, 2, 'the timed-out review and the one that passed, and nothing else');
+    assert.equal(gates[0]?.outputSha256, sha256Hex(''));
+    assert.equal(gates[1]?.outputSha256, sha256Hex(CLEAN_REVIEW));
+    // A repeated review is two calls for the same node; each is one record. A mutant that pushes
+    // twice per review leaves four.
+    assert.equal(gates[0]?.taskId, gates[1]?.taskId, 'both reviews name the node that was retried');
     assertBijection(surfaces, exchanges);
   } finally {
     await rm(root, { recursive: true, force: true });
