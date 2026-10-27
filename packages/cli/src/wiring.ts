@@ -175,7 +175,11 @@ export function createRunLcm(input: RunLcmInput): RunLcm {
     // written by the dispatcher from `ctx.degraded`, which is per-node; this one is the run's log,
     // for a background pass that has no node.
     onDegraded: (record) => {
-      console.error(`[lcm] compaction failed: ${record.reason}; continuing uncompacted`);
+      // L3c: an oversized root is not a failed compaction; say which one and what the injector does.
+      console.error(record.reason === 'root-over-budget'
+        ? `[lcm] archive root ${record.summaryId ?? '(unknown)'} still exceeds the injector budget ` +
+          `(${record.tokens ?? '?'} tokens) after a tighter retry; rendering cues instead`
+        : `[lcm] compaction failed: ${record.reason}; continuing uncompacted`);
       input.attestor.recordLcmDegraded(record);
     },
   });

@@ -785,6 +785,12 @@ export interface LcmDegradedRecord {
   nodeId?:   NodeId;
   /** Why compaction stopped, as the summarizer or operator reported it. */
   reason:    string;
+  /**
+   * L3c: the root that could not be made to fit, and its size. Present when `reason` is
+   * `root-over-budget`; the injector renders cues for it instead of the summary.
+   */
+  summaryId?: LcmSummaryId;
+  tokens?:    number;
 }
 
 /**

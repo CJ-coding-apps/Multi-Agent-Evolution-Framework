@@ -41,14 +41,17 @@ export interface AdapterSummarizerOptions {
  */
 export function createAdapterSummarizer(
   options: AdapterSummarizerOptions,
-): (messages: LcmMessage[], depth: number) => Promise<SummaryOutput> {
-  return async (messages, depth) => {
+): (messages: LcmMessage[], depth: number, targetTokens?: number) => Promise<SummaryOutput> {
+  return async (messages, depth, targetTokens) => {
     if (messages.length === 0) {
       throw new Error('LCM summarization was asked to summarize no messages.');
     }
+    // L3: the engine states the size a summary must fit, derived from the injector's budget. Without
+    // it a summarizer returns roughly what it was given and higher levels never shrink.
+    const target = targetTokens === undefined ? '' : `\nAim for at most ${targetTokens} tokens.`;
     const systemPrompt = depth === 0
-      ? SUMMARY_SYSTEM_PROMPT
-      : `${SUMMARY_SYSTEM_PROMPT}\nThese are summaries of earlier summaries: preserve every fact they already compressed.`;
+      ? `${SUMMARY_SYSTEM_PROMPT}${target}`
+      : `${SUMMARY_SYSTEM_PROMPT}\nThese are summaries of earlier summaries: preserve every fact they already compressed.${target}`;
     const prompt = boundedPrompt(
       messages.map((m) => `[${m.role.toUpperCase()}] ${redactCredentials(m.content)}`).join('\n'),
       systemPrompt,

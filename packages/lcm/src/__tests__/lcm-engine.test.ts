@@ -928,26 +928,95 @@ test('a child too large for one prompt is split across parents that each name it
   );
 });
 
-test('a single root too large for the archive is offered as a cue, not silently dropped (R12)', async (t) => {
+test('a single root too large for the archive is offered as a cue, not silently dropped (R12, L3c)', async (t) => {
+  const calls: Array<{ depth: number; target: number | undefined }> = [];
   const { engine } = engineWith({
     contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
-    summarize: async () => 'y'.repeat(20_000),
+    summarize: async (_messages, depth, target) => {
+      calls.push({ depth, target });
+      return 'y'.repeat(20_000);
+    },
   });
   t.after(() => engine.close());
   const [id] = await addMessages(engine, ['m1'], 1);
   const rootId = await engine.summarizeChunk([id!], 'LLM-Map');
+  assert.deepEqual(calls.map((call) => call.target), [undefined], 'a direct compaction has no budget to derive a target from');
 
-  // The root is ~5,000 tokens and the archive has 4,096. Before R12 the prompt carried nothing and
-  // said nothing; a cue is a sentence, so it fits and names an id that expands.
+  // The root is ~5,000 tokens and the archive has 4,096. L3b re-summarizes it once at half the
+  // target before giving up; this summarizer ignores the target, so the retry is still too large
+  // and the archive falls back to a cue (L3c) — one sentence, which fits and names an id that
+  // expands. Before R12 the prompt carried nothing and said nothing.
   const ctx = await engine.assembleContext('s', 4_096, 'Upward');
   assert.deepEqual(ctx.summaries, [], 'the summary itself does not fit');
   assert.equal(ctx.ghosts.length, 1, 'the archive is still offered, as a cue');
-  assert.equal(ctx.ghosts[0]!.summaryId, rootId);
+  const cueId = ctx.ghosts[0]!.summaryId;
+  assert.notEqual(cueId, rootId, 'one tighter retry ran before the cue fallback');
+  assert.deepEqual(calls.at(-1), { depth: 1, target: 1_024 },
+    'the retry is asked for a quarter of the budget (half of the normal target)');
+
+  const degraded = ctx.degraded ?? [];
+  assert.equal(degraded.length, 1, 'the fallback is recorded, not silent');
+  assert.equal(degraded[0]!.reason, 'root-over-budget');
+  assert.equal(degraded[0]!.summaryId, cueId, 'the record names the root the archive gave up on');
+  assert.equal(degraded[0]!.tokens, estimateTokens('y'.repeat(20_000)));
   assert.ok(ctx.totalTokens <= 4_096);
   assert.deepEqual(
-    (await engine.lcm_expand(rootId)).map((m) => m.content),
+    (await engine.lcm_expand(cueId)).map((m) => m.content),
     ['m1'],
     'the cue names an id that expands',
+  );
+});
+
+test('every assembly summarization is asked for a target derived from the injector budget (L3a)', async (t) => {
+  const targets: Array<number | undefined> = [];
+  const { engine } = engineWith({
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async (_messages, _depth, target) => {
+      targets.push(target);
+      return 's';
+    },
+  });
+  t.after(() => engine.close());
+  await addMessages(engine, ['m1', 'm2', 'm3', 'm4'], 10);
+
+  await engine.assembleContext('s', 30, 'Upward');
+
+  assert.ok(targets.length > 0, 'the assembly compacted');
+  for (const target of targets) assert.equal(target, 15, 'half the injector budget, stated to the summarizer');
+});
+
+test('a root that overshoots the archive is re-summarized once at a tighter target (L3b)', async (t) => {
+  const targets: Array<number | undefined> = [];
+  const { engine } = engineWith({
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async (_messages, _depth, target) => {
+      targets.push(target);
+      // The first summary ignores its own size; the retry obeys the tighter target it is given.
+      return targets.length === 1 ? 'y'.repeat(20_000) : 'z'.repeat((target ?? 1) * 4);
+    },
+  });
+  t.after(() => engine.close());
+  const [id] = await addMessages(engine, ['m1'], 1);
+  const hugeRootId = await engine.summarizeChunk([id!], 'LLM-Map');
+
+  const ctx = await engine.assembleContext('s', 4_096, 'Upward');
+
+  assert.equal(ctx.degraded, undefined, 'the retry made the root fit; no fallback was recorded');
+  assert.equal(ctx.summaries?.length, 1, 'the re-summarized root is the archive');
+  const root = ctx.summaries![0]!;
+  assert.equal(root.level, 1, 'the retry is one level above the root it replaced');
+  assert.deepEqual(root.parentIds, [], 'the retried summary is now the root (L2: parents point up)');
+  assert.deepEqual(
+    (await engine.expandSummary(hugeRootId))!.summary.parentIds,
+    [root.id],
+    'the root it replaced now names the retry as its parent (L2)',
+  );
+  assert.ok(root.tokens <= 4_096, `the retried root fits the budget (${root.tokens} tokens)`);
+  assert.deepEqual(targets, [undefined, 1_024], 'the retry is asked for a quarter of the budget');
+  assert.deepEqual(
+    (await engine.lcm_expand(root.id)).map((m) => m.content),
+    ['m1'],
+    'the retried root still expands to the messages it covers',
   );
 });
 

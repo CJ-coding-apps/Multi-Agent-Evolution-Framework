@@ -753,10 +753,19 @@ export class RoleDispatcher {
       );
     }
     for (const record of assembled.lcmDegraded ?? []) {
+      // L3c: a root the archive could not shrink is not a failed compaction — the summaries are
+      // intact, and the injector renders cues for that root instead. Say which happened.
+      const line = record.reason === 'root-over-budget'
+        ? `[lcm] archive root ${record.summaryId ?? '(unknown)'} still exceeds the injector budget ` +
+          `(${record.tokens ?? '?'} tokens) after a tighter retry; rendering cues instead`
+        : `[lcm] compaction failed: ${record.reason}; continuing uncompacted`;
       await this.config.transcript.append(
         'system',
-        `[lcm] compaction failed: ${record.reason}; continuing uncompacted`,
-        { agentRole: role.role, taskId, nodeId: node.id, kind: 'lcm-degraded' },
+        line,
+        { agentRole: role.role, taskId, nodeId: node.id, kind: 'lcm-degraded',
+          reason: record.reason,
+          ...(record.summaryId !== undefined ? { summaryId: record.summaryId } : {}),
+          ...(record.tokens !== undefined ? { tokens: record.tokens } : {}) },
       );
     }
 

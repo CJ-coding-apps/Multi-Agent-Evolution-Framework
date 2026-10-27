@@ -29,17 +29,23 @@ Output in plain prose. Do not include metadata or timestamps.`;
    * caller chooses this operator through `lcm.operator` and gets an error if no sub-agent was
    * supplied — never a silent fall back to LLM-Map.
    */
-  async complete(sources: SummarySource[], _depth = 0): Promise<SummaryOutput> {
+  async complete(sources: SummarySource[], _depth = 0, targetTokens?: number): Promise<SummaryOutput> {
     const formatted = sources.map((source) => `[${source.role.toUpperCase()}] ${source.content}`);
-    return this.config.runSubAgent(AgenticMap.SYSTEM_PROMPT, formatted);
+    // L3: the sub-agent gets the same stated target the LLM-Map path does. It is an instruction,
+    // not a guarantee; the engine decides what to do when the answer still does not fit.
+    const systemPrompt = targetTokens === undefined
+      ? AgenticMap.SYSTEM_PROMPT
+      : `${AgenticMap.SYSTEM_PROMPT}\nAim for at most ${targetTokens} tokens.`;
+    return this.config.runSubAgent(systemPrompt, formatted);
   }
 
   async run(
     messages: LcmMessage[],
     depth = 0,
     childIds: LcmSummaryId[] = [],
+    targetTokens?: number,
   ): Promise<LcmSummaryId> {
-    const output    = await this.complete(messages, depth);
+    const output    = await this.complete(messages, depth, targetTokens);
     const content   = summaryContent(output);
     const tokens    = summaryTokens(output, content);
     const messageIds = messages.map((m) => m.id);

@@ -57,8 +57,13 @@ export interface LcmEngineConfig {
   /**
    * The run's summarizer (WP-3.2). In the CLI this is the run's adapter, with the model the run
    * was given; the engine never invents a summary.
+   *
+   * L3: `targetTokens` is the size the summary is asked to fit, derived from the injector's
+   * budget (half of it for a normal pass, a quarter for the one retry of an oversized root). A
+   * summarizer that cannot honour a target may ignore it; the engine then retries once and
+   * records the fallback rather than pretending the archive fits.
    */
-  summarize(messages: LcmMessage[], depth: number): Promise<SummaryOutput>;
+  summarize(messages: LcmMessage[], depth: number, targetTokens?: number): Promise<SummaryOutput>;
   /**
    * A full sub-agent call for Agentic-Map. When it is absent, asking for Agentic-Map is an
    * error rather than a silent fall back to LLM-Map: the two have different costs, and a caller
@@ -115,6 +120,18 @@ const RECENT_WRAPPER_TOKENS = 8;
 const RECENT_MESSAGE_OVERHEAD_TOKENS = 12;
 
 /**
+ * The size one summary is asked to fit (L3): half the injector's budget. A summarizer left to its
+ * own judgment returns roughly what it was given, so higher levels never shrank and the archive
+ * overflowed a root at a time. Stating a target derived from the budget is what makes each level
+ * able to give the level below room.
+ */
+const SUMMARY_TARGET_SHARE = 0.5;
+
+function summaryTargetTokens(budget: number): number {
+  return Math.max(1, Math.floor(budget * SUMMARY_TARGET_SHARE));
+}
+
+/**
  * How many fit/compact/re-fit rounds an assembly may take before it compacts everything that is
  * still uncovered (V1). Each round summarizes at least one message, so the loop converges; this is
  * a backstop against a summarizer that produces summaries larger than the messages they replace.
@@ -136,7 +153,7 @@ export class LcmEngine implements LcmApi {
     this.store  = new LcmStore(config.dbPath);
     this.llmMap = new LlmMap({
       store: this.store,
-      summarize: (messages, depth) => config.summarize(messages, depth),
+      summarize: (messages, depth, targetTokens) => config.summarize(messages, depth, targetTokens),
     });
     if (config.runSubAgent) {
       this.agenticMap = new AgenticMap({ store: this.store, runSubAgent: config.runSubAgent });
@@ -217,6 +234,11 @@ export class LcmEngine implements LcmApi {
     let compactionTokens = 0;
     let degraded = false;
     const operator = this.config.operator ?? 'LLM-Map';
+    // L3: the size a summary is asked to fit, derived from what the injector can render. Half the
+    // budget leaves the rest for `<recent>` and for a summary that overshoots its target a little.
+    const summaryTarget = summaryTargetTokens(tokenBudget);
+    // One degradation record per root, however many assembly passes find it oversized (L3c).
+    const degradedRoots = new Set<string>();
 
     /** The archive half of one assembly: what the mode offers and what it costs. */
     const fitArchive = async (): Promise<{
@@ -230,10 +252,21 @@ export class LcmEngine implements LcmApi {
       let offerSummaries = mode === 'Upward';
 
       if (mode === 'Upward') {
-        const archive = await this.fitUpward(sessionId, tokenBudget, trigger);
+        const archive = await this.fitUpward(sessionId, tokenBudget, summaryTarget, trigger);
         included = archive.summaries;
         summaryCalls.push(...archive.calls);
         used = included.reduce((s, summary) => s + summary.tokens, 0);
+        if (archive.degradedRoot !== undefined && !degradedRoots.has(archive.degradedRoot.summaryId)) {
+          degradedRoots.add(archive.degradedRoot.summaryId);
+          const record: LcmDegradedRecord = {
+            sessionId, reason: 'root-over-budget',
+            summaryId: archive.degradedRoot.summaryId, tokens: archive.degradedRoot.tokens,
+            ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
+            ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
+          };
+          degradedRecords.push(record);
+          await this.config.onDegraded?.(record);
+        }
         if (included.length === 0 && archive.roots.length > 0) {
           // R12: one root larger than the whole archive used to render nothing and say nothing.
           // A cue is a sentence, so it fits where the summary did not; the model can expand it.
@@ -296,7 +329,7 @@ export class LcmEngine implements LcmApi {
 
     const compactUncovered = async (messageIds: LcmMessageId[]): Promise<void> => {
       const result = await this.serialize(sessionId, () =>
-        this.compactLocked(sessionId, messageIds, operator, trigger));
+        this.compactLocked(sessionId, messageIds, operator, trigger, summaryTarget));
       compactionTokens += result.reportedTokens.reduce((s, n) => s + n, 0);
       summaryCalls.push(...result.calls);
     };
@@ -407,6 +440,7 @@ export class LcmEngine implements LcmApi {
     messageIds: LcmMessageId[],
     operator: 'LLM-Map' | 'Agentic-Map',
     trigger?: LcmTrigger,
+    targetTokens?: number,
   ): Promise<{ summaryId: LcmSummaryId; reportedTokens: number[]; calls: LcmSummarySurface[] }> {
     const fresh = this.store.getMessagesByIds(messageIds);
     if (fresh.length !== messageIds.length) throw this.missing(messageIds, fresh);
@@ -431,7 +465,7 @@ export class LcmEngine implements LcmApi {
     const level0: ParentUnit[] = [];
 
     for (const group of groups) {
-      const output = await this.callBounded(group, 0, operator);
+      const output = await this.callBounded(group, 0, operator, targetTokens);
       // F7: an injected summarizer may return a credential the model echoed, so the store keeps
       // the masked text, not whatever came back. The call's own surface still hashes the true
       // bytes; the archive is the model-facing side.
@@ -453,7 +487,7 @@ export class LcmEngine implements LcmApi {
     // F9: summarize the summaries upward until one root covers everything. Nothing is dropped
     // without a parent: each level records its children and links every descendant message, so
     // `lcm.expand` on the root recovers the whole segment.
-    const rootId = await this.raise(level0, 1, operator, sessionId, trigger, reported, calls);
+    const rootId = await this.raise(level0, 1, operator, sessionId, trigger, reported, calls, targetTokens);
     return { summaryId: rootId, reportedTokens: reported, calls };
   }
 
@@ -466,6 +500,7 @@ export class LcmEngine implements LcmApi {
     trigger: LcmTrigger | undefined,
     reported: number[],
     calls: LcmSummarySurface[],
+    targetTokens?: number,
   ): Promise<LcmSummaryId> {
     if (children.length === 1) return children[0]!.id;
 
@@ -484,7 +519,7 @@ export class LcmEngine implements LcmApi {
     const parents: ParentUnit[] = [];
     for (const chunk of packUnits(units)) {
       const childIds = [...new Set(chunk.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
-      const output = await this.callBounded(chunk, level, operator);
+      const output = await this.callBounded(chunk, level, operator, targetTokens);
       // R10: the same masking as level 0. A model can echo a credential it read, and this text is
       // stored and shown by `lcm.expand` exactly like a level-0 summary's.
       const content = redactCredentials(summaryContent(output));
@@ -502,7 +537,7 @@ export class LcmEngine implements LcmApi {
       if (surface) calls.push(surface);
       parents.push({ id: summaryId, content });
     }
-    return this.raise(parents, level + 1, operator, sessionId, trigger, reported, calls);
+    return this.raise(parents, level + 1, operator, sessionId, trigger, reported, calls, targetTokens);
   }
 
   /**
@@ -514,19 +549,25 @@ export class LcmEngine implements LcmApi {
   private async fitUpward(
     sessionId: string,
     budget: number,
+    targetTokens: number,
     trigger: LcmTrigger | undefined,
-  ): Promise<{ summaries: LcmSummary[]; calls: LcmSummarySurface[]; roots: LcmSummary[] }> {
+  ): Promise<{
+    summaries: LcmSummary[]; calls: LcmSummarySurface[]; roots: LcmSummary[];
+    /** L3c: the root the archive gave up on, when it still exceeds `budget` after the retry. */
+    degradedRoot?: { summaryId: LcmSummaryId; tokens: number };
+  }> {
     const calls: LcmSummarySurface[] = [];
     let roots = this.rootSummaries(sessionId);
     if (roots.length === 0) return { summaries: [], calls, roots };
     // Bounded: each pass halves the root count or stops. A budget too small for even one root
     // stops the loop rather than summarizing forever.
     for (let pass = 0; pass < 8 && roots.length > 1; pass++) {
-      const overflow = overflowNewestFirst(roots, budget);
-      if (overflow.length === 0) break;
+      const current = this.rootSummaries(sessionId);
+      const pending = overflowNewestFirst(current, budget);
+      if (pending.length === 0) break;
       // Summarize the oldest roots — at least two, so the parent covers more than it replaces.
-      const take = Math.max(2, overflow.length);
-      const oldest = roots.slice(0, take);
+      const take = Math.max(2, pending.length);
+      const oldest = current.slice(0, take);
       const operator = this.config.operator ?? 'LLM-Map';
       const level = Math.max(...oldest.map((s) => s.level)) + 1;
       // A group is bounded by the byte cap, so a large set of roots becomes several summaries.
@@ -545,7 +586,7 @@ export class LcmEngine implements LcmApi {
           .map((id) => this.store.getSummary(id))
           .filter((summary): summary is LcmSummary => summary !== undefined);
         const messageIds = [...new Set(children.flatMap((s) => s.messageIds))];
-        const output = await this.callBounded(group, level, operator);
+        const output = await this.callBounded(group, level, operator, targetTokens);
         const content = redactCredentials(summaryContent(output));
         const summaryId = this.store.insertSummary(
           content, estimateTokens(content), level, operator, childIds, messageIds,
@@ -559,9 +600,55 @@ export class LcmEngine implements LcmApi {
       }
       roots = this.rootSummaries(sessionId);
     }
+
+    // L3b: a root still larger than the whole archive gets one more summarization, at half the
+    // target, before the archive gives up and the caller renders cues (L3c). A failed retry leaves
+    // the root as it was; it is the archive's size that decides, not the attempt's success.
+    let degradedRoot: { summaryId: LcmSummaryId; tokens: number } | undefined;
+    if (roots.length === 1 && roots[0]!.tokens > budget) {
+      let retried = false;
+      try {
+        retried = await (async () => {
+          const current = this.rootSummaries(sessionId);
+          if (current.length !== 1) return false;
+          const root = current[0]!;
+          if (root.tokens <= budget) return false;
+          const operator = this.config.operator ?? 'LLM-Map';
+          const level = root.level + 1;
+          const units: Unit[] = splitByBytes(
+            `[Level-${root.level} summary ${root.id}]\n${root.content}`,
+            MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD,
+          ).map((content) => ({ role: 'system', content, summaryId: root.id }));
+          const output = await this.callBounded(
+            units, level, operator, Math.max(1, Math.floor(targetTokens / 2)),
+          );
+          const content = redactCredentials(summaryContent(output));
+          const summaryId = this.store.insertSummary(
+            content, estimateTokens(content), level, operator, [root.id], root.messageIds,
+          );
+          const surface = await this.recordCall({
+            sessionId, summaryId, level, messageIds: root.messageIds, childIds: [root.id],
+            content, contentTokens: estimateTokens(content), output, trigger,
+            inputTokens: promptTokensOf(units),
+          });
+          if (surface) calls.push(surface);
+          return true;
+        })();
+      } catch {
+        // The retry is a second chance, not a guarantee: the fallback below records what remains.
+        retried = false;
+      }
+      if (retried) roots = this.rootSummaries(sessionId);
+      const root = roots[0]!;
+      if (root.tokens > budget) degradedRoot = { summaryId: root.id, tokens: root.tokens };
+    }
+
     const fit = overflowNewestFirst(roots, budget);
     const kept = roots.filter((s) => !fit.includes(s));
-    return { summaries: kept.slice().reverse(), calls, roots }; // chronological for the prompt
+    return {
+      summaries: kept.slice().reverse(), calls, roots, // chronological for the prompt
+      ...(degradedRoot !== undefined ? { degradedRoot } : {}),
+    };
   }
 
   /**
@@ -601,12 +688,13 @@ export class LcmEngine implements LcmApi {
     units: Unit[],
     depth: number,
     operator: 'LLM-Map' | 'Agentic-Map',
+    targetTokens?: number,
   ): Promise<SummaryOutput> {
     const attempts = 1 + Math.max(0, this.config.summaryRetry ?? 1);
     let lastError: unknown;
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
-        return await this.callOperator(units, depth, operator);
+        return await this.callOperator(units, depth, operator, targetTokens);
       } catch (err: unknown) {
         lastError = err;
         if (!isTransport(err)) break;
@@ -619,6 +707,7 @@ export class LcmEngine implements LcmApi {
     units: Unit[],
     depth: number,
     operator: 'LLM-Map' | 'Agentic-Map',
+    targetTokens?: number,
   ): Promise<SummaryOutput> {
     // F7: masked again here, not only at `addMessage`. A summary can be re-summarized at a higher
     // level, and `summaryChunk` accepts ids from any caller, so the input is masked at the one
@@ -628,9 +717,9 @@ export class LcmEngine implements LcmApi {
       if (!this.agenticMap) {
         throw new Error('Agentic-Map was requested but this LcmEngine has no runSubAgent; supply one or use LLM-Map.');
       }
-      return this.agenticMap.complete(sources, depth);
+      return this.agenticMap.complete(sources, depth, targetTokens);
     }
-    return this.llmMap.complete(sources, depth);
+    return this.llmMap.complete(sources, depth, targetTokens);
   }
 
   private async recordCall(call: {

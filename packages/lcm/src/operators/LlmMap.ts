@@ -9,8 +9,11 @@ export interface SummarySource {
 }
 
 export interface LlmMapConfig {
-  /** The run's model call: summarize this chunk of messages. */
-  summarize(messages: LcmMessage[], depth: number): Promise<SummaryOutput>;
+  /**
+   * The run's model call: summarize this chunk of messages. `targetTokens` (L3) is the size the
+   * summary is asked to fit, derived from the injector's budget; a summarizer may ignore it.
+   */
+  summarize(messages: LcmMessage[], depth: number, targetTokens?: number): Promise<SummaryOutput>;
   store: LcmStore;
 }
 
@@ -24,7 +27,7 @@ export class LlmMap {
    * may be a level-0 summary of messages or a level-1 summary of summaries, and only the engine
    * knows which parent ids and which descendant messages the record must carry.
    */
-  async complete(sources: SummarySource[], depth = 0): Promise<SummaryOutput> {
+  async complete(sources: SummarySource[], depth = 0, targetTokens?: number): Promise<SummaryOutput> {
     // The summarizer in production reads only `role` and `content`. Sources built from summaries
     // are given synthetic messages so this seam stays one shape; they never reach the store.
     const messages = sources.map((source, index) => ({
@@ -36,15 +39,16 @@ export class LlmMap {
       tokens:    0,
       createdAt: new Date(0),
     })) as LcmMessage[];
-    return this.config.summarize(messages, depth);
+    return this.config.summarize(messages, depth, targetTokens);
   }
 
   async run(
     messages: LcmMessage[],
     depth = 0,
     childIds: LcmSummaryId[] = [],
+    targetTokens?: number,
   ): Promise<LcmSummaryId> {
-    const output  = await this.complete(messages, depth);
+    const output  = await this.complete(messages, depth, targetTokens);
     const content = summaryContent(output);
     const tokens  = summaryTokens(output, content);
     const messageIds = messages.map((m) => m.id);

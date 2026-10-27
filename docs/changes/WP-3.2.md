@@ -143,6 +143,16 @@ attempt by default); a verdict is not. The assembly continues uncompacted, the b
 optimization, and the silent catch, which made a failure indistinguishable from compaction that
 ran.
 
+**A summarizer is given the size it must fit, and a root that still does not fit falls back to
+cues (L3).** Every summarization call made during an assembly is asked for at most half the
+injector's budget — a stated target, not a hope that each level happens to shrink. When the
+archive's single root still exceeds the budget, it is re-summarized once at a quarter of the budget
+(half the normal target); if that root is still too large, the injector renders a cue for it and the
+assembly records `lcmDegraded` with `reason: root-over-budget`, the root's id and its token count,
+and prints one transcript line saying so. *Rejected:* letting the model choose the size, measured
+in the live row where higher levels never shrank and the `<summaries>` sentence was false; and
+dropping an oversized root, which loses context silently.
+
 **One compaction per session.** A per-session lock serializes compaction; the pass re-reads under
 the lock and skips ids already covered. *Rejected:* a global lock, which serializes unrelated
 sessions; and no lock, which let concurrent nodes summarize the same messages twice.
