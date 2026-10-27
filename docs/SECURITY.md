@@ -412,9 +412,14 @@ what MAF handed the backend and what came back is in the bundle, distinct from t
 backend ran, which MAF still does not see. An adapter that spawns a process — `claude`, `codex`, `gemini` —
 reports the argv it was spawned with; one that does not — `ollama`, `openrouter` — reports no surface, and the
 dispatcher records the digests of the system prompt, prompt and output it sent and received itself, with
-`argv: []` rather than an invented command line. Two `cli`-tier calls are still without a
-surface — the planner's call and the security reviewer's call, which MAF spawns itself rather than through a
-role node, whatever tier the roles run on. One difference: they need only text, so `claude` is spawned for them with `--tools ""`,
+`argv: []` rather than an invented command line. The planner's call and the security reviewer's call,
+which MAF spawns itself rather than through a role node, are in the same array: `kind: "planner"` for the
+run's call and `kind: "security-gate"` for the review, the latter naming the node whose diff it read. They are
+recorded once per attempt, so a judged failure, a transport failure and a call that threw are in the record
+too — a call that threw carries no `outputSha256` and says `error: "thrown"`, because "no output came back" is
+not "the model answered with nothing". A run whose planning call failed writes and signs a bundle with
+`failure.kind: "planning_failed"` and no subjects before it reports the error, so a failed plan is attested
+rather than silent. Both calls need only text, so `claude` is spawned for them with `--tools ""`,
 its own tools off, as for an in-process turn. `codex` and `gemini` have no known flag for that, and keep
 their tools on these calls; a reader's own `cli`-tier call gets `--tools Read,Glob,Grep` on `claude`.
 

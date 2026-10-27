@@ -1505,12 +1505,10 @@ export interface ModelSurface {
    * answer is a parsed `AssistantTurn`, not one stdout string.
    */
   outputSha256?:      string;
-  /**
-   * L1: the model the call named, when it named one. The planner and the security gate are calls
-   * MAF makes directly rather than through a role's dispatcher, so neither carries a node's
-   * `modelOverride`; without this a reader of the surface could not tell which model was asked for.
-   * Absent when the call asked for the adapter's own default.
-   */
+  // L1: the model the call named, when it named one. The planner and the security gate are calls
+  // MAF makes directly rather than through a role's dispatcher, so neither carries a node's
+  // `modelOverride`; without this a reader of the surface could not tell which model was asked for.
+  // Absent when the call asked for the adapter's own default.
   model?:             string;
   /**
    * The backend argv. Payload positionals — the system-prompt value and the trailing prompt — are
@@ -1549,12 +1547,10 @@ export interface ModelSurfaceRecord extends ModelSurface {
   // the security gate's call names the node whose diff it reviewed in `taskId`, so all three land in
   // the one array rather than in separate records.
   kind?: 'role-call' | 'planner' | 'security-gate';
-  /**
-   * L1-S5: how an attempt ended when the adapter threw and returned no result. The record still
-   * carries the digests of what was sent; `outputSha256` is absent, because no output came back —
-   * "not recorded" must read differently from "recorded as empty" (Constitution §4). Absent on a
-   * call that returned, however it judged the work.
-   */
+  // L1-S5: how an attempt ended when the adapter threw and returned no result. The record still
+  // carries the digests of what was sent; `outputSha256` is absent, because no output came back —
+  // "not recorded" must read differently from "recorded as empty" (Constitution §4). Absent on a
+  // call that returned, however it judged the work.
   error?: 'thrown';
 }
 

@@ -9,6 +9,22 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+### Added
+
+- **Every model call `maf run` makes is in its record** ([D-45](docs/DECISIONS.md)). The planner's
+  call now carries `kind: "planner"` and the security gate's `kind: "security-gate"` (its `taskId` is
+  the reviewed node's), beside the role calls that were already there; `kind` and `tier` are additive,
+  so a reader of an older bundle reads what it read before. One record is written per attempt — a
+  planner or node retried on a transport failure reports each attempt — and the record is written even
+  when the call **threw**, in which case `outputSha256` is absent and `error: "thrown"` says why,
+  because "not recorded" must not read as "recorded as empty". A role call on `ollama` or `openrouter`,
+  whose adapters report no surface, is recorded from what the dispatcher sent and received, with
+  `argv: []` rather than an invented command line. Each record is mirrored into the run's transcript
+  as it is made.
+- **A run that fails at planning writes and signs a bundle** ([D-45](docs/DECISIONS.md)). The bundle
+  holds every planner surface, `outcome.failure.kind: "planning_failed"` and no subjects (no node
+  existed to name); `maf run` prints its path and signature, and `maf attest verify` accepts it.
+
 ## [0.5.1] - 2026-10-22
 
 A patch closing two holes in `patch.apply`'s path declaration, and replacing the design that produced
