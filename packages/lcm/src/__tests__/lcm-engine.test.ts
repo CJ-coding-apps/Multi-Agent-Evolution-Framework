@@ -4,13 +4,19 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { TransportError, makeLcmMessageId, makeNodeId, makeRunId, makeTaskId } from '@maf/types';
-import type { LcmDegradedRecord, LcmMessage, LcmMessageId, LcmSummary } from '@maf/types';
+import type {
+  LcmDegradedRecord, LcmMessage, LcmMessageId, LcmSummary, LcmSummaryId,
+} from '@maf/types';
 import { LcmEngine } from '../LcmEngine.js';
 import type { LcmEngineConfig, LcmSummaryCall } from '../LcmEngine.js';
 import { LcmStore } from '../LcmStore.js';
 import { SessionMerger } from '../SessionMerger.js';
+import { AgenticMap } from '../operators/AgenticMap.js';
 import {
   estimateTokens, byteLength, MAX_SUMMARY_ARGV_BYTES, MAX_SUMMARY_PROMPT_BYTES,
   SUMMARY_ARGV_ALLOWANCE_BYTES,
@@ -35,6 +41,7 @@ import {
 //   - the engine never invents a summary, and an id it does not hold is an error, not silence.
 
 const RUN = makeRunId('run-lcm-test');
+const execFileAsync = promisify(execFile);
 
 function engineWith(overrides: Partial<LcmEngineConfig> = {}) {
   const summarized: LcmMessage[][] = [];
@@ -1254,4 +1261,295 @@ test('an archive newer than this build is refused, not read upside down (L2)', a
     /schema version 99, newer than this build understands \(2\).*Refusing to open it/s,
     'a build that does not know the layout says so instead of guessing',
   );
+
+  // V7: the refusal is read-only. `exec(SCHEMA)` used to run before the version check, so opening
+  // an archive this build cannot read still created its tables in that archive.
+  const raw = new Database(legacy.dbPath, { readonly: true });
+  try {
+    const tables = (raw.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all() as
+      Array<{ name: string }>).map((row) => row.name);
+    assert.ok(!tables.includes('lcm_migrations'),
+      `the refusal created no tables (found ${tables.join(', ')})`);
+    assert.ok(!tables.includes('lcm_root_retries'));
+    assert.equal(raw.pragma('user_version', { simple: true }), 99, 'and left the stamp alone');
+  } finally {
+    raw.close();
+  }
+});
+
+test('a migration that cannot be recorded leaves the archive exactly as it was (L2e)', async (t) => {
+  // L2e: the swap and the migration row are one transaction. A view under the migration table's
+  // name makes the INSERT fail *after* the swap has been written, which is the only place an
+  // outside test can interrupt it. Inside the transaction the whole migration rolls back; outside
+  // one (the mutant) the archive is left swapped with no version stamp.
+  const legacy = await legacyDatabase(t);
+  t.after(legacy.close);
+  const seed = new Database(legacy.dbPath);
+  seed.exec(`CREATE VIEW lcm_migrations AS SELECT 1 AS from_version, 2 AS to_version, '' AS applied_at`);
+  seed.close();
+
+  assert.throws(() => new LcmStore(legacy.dbPath), /cannot modify lcm_migrations because it is a view/);
+
+  const raw = new Database(legacy.dbPath, { readonly: true });
+  try {
+    assert.equal(raw.pragma('user_version', { simple: true }), 0, 'the stamp was not half-applied');
+    assert.deepEqual(
+      raw.prepare(`SELECT summary_id, parent_id FROM lcm_summary_parents`).all(),
+      [{ summary_id: 'P', parent_id: 'C' }],
+      'the relation is untouched: the swap rolled back with the failure',
+    );
+    const leftovers = raw.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='lcm_summary_parents_v1'`,
+    ).all();
+    assert.deepEqual(leftovers, [], 'and the rename rolled back too');
+  } finally {
+    raw.close();
+  }
+});
+
+test('two processes opening an old archive migrate it exactly once (V6)', async (t) => {
+  // V6: the migration is `BEGIN IMMEDIATE` and re-reads the version inside it. Two openers that
+  // both read 0 used to both swap, and the second swap restored the inversion the first removed.
+  const legacy = await legacyDatabase(t);
+  t.after(legacy.close);
+  // This package compiles to CommonJS; the child imports the built module by file URL.
+  const moduleUrl = pathToFileURL(path.join(__dirname, '..', 'LcmStore.js')).href;
+  const script = `
+    const { LcmStore } = await import(process.env.LCM_MODULE);
+    new LcmStore(process.env.LCM_DB).close();
+  `;
+  await Promise.all(Array.from({ length: 6 }, () => execFileAsync(
+    process.execPath,
+    ['--input-type=module', '-e', script],
+    { env: { ...process.env, LCM_MODULE: moduleUrl, LCM_DB: legacy.dbPath } },
+  )));
+
+  const raw = new Database(legacy.dbPath, { readonly: true });
+  try {
+    assert.equal(raw.pragma('user_version', { simple: true }), 2);
+    assert.deepEqual(
+      raw.prepare(`SELECT summary_id, parent_id FROM lcm_summary_parents`).all(),
+      [{ summary_id: 'C', parent_id: 'P' }],
+      'six concurrent opens swapped the relation once, not six times',
+    );
+    const migrations = raw.prepare(`SELECT COUNT(*) AS n FROM lcm_migrations`).get() as { n: number };
+    assert.equal(migrations.n, 1, 'and recorded one migration');
+  } finally {
+    raw.close();
+  }
+});
+
+// ─── Round 3: the live row's findings (V1, V2, V3, V5, V8, V10) ──────────────────────────────
+
+const SECRET = 'sk-ant-api03-ROUND3SECRETSECRETSECRETSECRETSECRET';
+
+/** Seeds `contents.length` roots, each claiming one message and sized at `tokens`. */
+async function seedRoots(
+  engine: LcmEngine, store: LcmStore, contents: string[], tokens: number,
+): Promise<LcmSummaryId[]> {
+  const ids = await addMessages(engine, contents, 1);
+  return ids.map((id, i) => {
+    const summaryId = store.insertSummary(`root-${i}`, tokens, 0, 'LLM-Map', [], [id]);
+    store.markSummarized([id], summaryId);
+    return summaryId;
+  });
+}
+
+test('a root is retried once for the whole run, and degraded once (V1)', async (t) => {
+  const calls: Array<{ depth: number; target: number | undefined }> = [];
+  const recorded: LcmSummaryCall[] = [];
+  const { engine, store } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async (_messages, depth, target) => {
+      calls.push({ depth, target });
+      // A credential the model echoes, then text large enough to stay over budget: the key is
+      // delimited, so the redactor masks it rather than swallowing the whole summary.
+      return `key: ${SECRET}\n${'y'.repeat(20_000)}`;   // ignores its target, every time
+    },
+    recordSummaryCall: (call) => { recorded.push(call); },
+  });
+  const [id] = await addMessages(engine, ['m1'], 1);
+  const firstRoot = await engine.summarizeChunk([id!], 'LLM-Map');
+  calls.length = 0;
+  recorded.length = 0;
+
+  let degraded = 0;
+  for (let assembly = 0; assembly < 8; assembly++) {
+    const ctx = await engine.assembleContext('s', 4_096, 'Upward');
+    degraded += ctx.degraded?.length ?? 0;
+  }
+
+  assert.equal(calls.length, 1, 'exactly one retry, for the whole run — not one per assembly');
+  assert.equal(calls[0]!.depth, 1);
+  assert.equal(degraded, 1, 'one degraded record for the root, not one per assembly');
+  assert.equal(recorded.length, 1, 'the retry is a recorded model call like any other (L3k)');
+  assert.deepEqual(recorded[0]!.childIds, [firstRoot], 'and it names the root it retried');
+
+  const all = store.getSummariesForSession('s');
+  assert.equal(all.length, 2, 'the root and its one retry — no stacked chain');
+  assert.equal(Math.max(...all.map((summary) => summary.level)), 1);
+  for (const summary of all) {
+    assert.ok(!summary.content.includes(SECRET), 'the retry output is masked like every other (L3h)');
+  }
+});
+
+test('concurrent assemblies cannot retry one root twice (V2: L4b, L4g)', async (t) => {
+  const calls: string[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const { engine, store } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async (messages) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      inFlight -= 1;
+      calls.push(messages.map((message) => message.content).join(' '));
+      return 'y'.repeat(20_000);
+    },
+  });
+  const [id] = await addMessages(engine, ['m1'], 1);
+  await engine.summarizeChunk([id!], 'LLM-Map');   // one root, too large
+  calls.length = 0;
+
+  // Four assemblies arrive together, all seeing the same over-budget root. L4b removed the lock
+  // (overlapping calls); L4g replaced the re-read with the stale root. V1's persisted claim —
+  // written under the lock, before the call — makes a second assembly's attempt a no-op whatever
+  // it read, so this pins the property both mutants broke: one retry, one parent.
+  await Promise.all(Array.from({ length: 4 }, () => engine.assembleContext('s', 4_096, 'Upward')));
+
+  assert.equal(maxInFlight, 1, 'summary calls never overlap: the retry holds the session lock');
+  assert.equal(calls.length, 1, 'one retry call for four assemblies');
+
+  const all = store.getSummariesForSession('s');
+  assert.equal(all.filter((summary) => summary.parentIds.length === 0).length, 1, 'exactly one root');
+  // V11: the single-parent rule is about the upward lineage. R11 deliberately splits an oversized
+  // level-0 child across several parents, so only summaries above level 0 are asserted here.
+  for (const summary of all.filter((entry) => entry.level >= 1)) {
+    assert.ok(
+      summary.parentIds.length <= 1,
+      `summary ${summary.id} has ${summary.parentIds.length} parents; the upward lineage is a tree`,
+    );
+  }
+});
+
+test('the retry decides under the lock, against a re-read archive (V2: L4b, L4g)', async (t) => {
+  // The retry is a compaction pass, and the property is the same one L4 states for every pass: it
+  // runs under the session lock and decides on the roots as they are *now*, not as the assembly
+  // read them before queueing. Here a level-0 compaction takes the lock first and, by the time it
+  // releases it, the archive has two roots — so a single-root retry is no longer what is called
+  // for. Removing the lock (L4b) lets the retry overlap the compaction; removing the re-read
+  // (L4g) lets it retry against the stale one-root view. Each writes a level-1 call that should
+  // not exist, which the assertions below see.
+  const calls: Array<{ depth: number }> = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const { engine } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async (_messages, depth) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      inFlight -= 1;
+      calls.push({ depth });
+      return 'y'.repeat(20_000);
+    },
+  });
+  const [m1] = await addMessages(engine, ['m1'], 1);
+  await engine.summarizeChunk([m1!], 'LLM-Map');      // one root, too large
+  const [m2] = await addMessages(engine, ['m2'], 1);  // not yet covered by any summary
+  calls.length = 0;
+
+  const compacting = engine.summarizeChunk([m2!], 'LLM-Map');       // holds the lock first
+  const assembling = engine.assembleContext('s', 4_096, 'Upward');  // sees one root, then queues
+  const [, ctx] = await Promise.all([compacting, assembling]);
+
+  assert.equal(maxInFlight, 1, 'the retry never overlaps another compaction call of the session');
+  assert.deepEqual(calls.map((call) => call.depth), [0],
+    'the archive had two roots under the lock, so the single-root retry was not made');
+  assert.deepEqual(ctx.degraded ?? [], [], 'and nothing is reported degraded');
+});
+
+test('an upward merge is asked for a target too, and its output is masked (V3/L3b, L3i)', async (t) => {
+  const calls: Array<{ depth: number; target: number | undefined }> = [];
+  const { engine, store } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async (_messages, depth, target) => {
+      calls.push({ depth, target });
+      return `key: ${SECRET}\n${'z'.repeat(400)}`;
+    },
+  });
+  await seedRoots(engine, store, ['a', 'b'], 100);
+
+  const ctx = await engine.assembleContext('s', 150, 'Upward');
+
+  assert.deepEqual(calls, [{ depth: 1, target: 75 }],
+    'the upward merge is asked for half the budget, like every assembly call (L3b)');
+  assert.equal(ctx.summaries?.length, 1, 'the merge left one root that fits');
+  const merged = store.getSummariesForSession('s').find((summary) => summary.level === 1);
+  assert.ok(merged, 'the merged summary is stored');
+  assert.ok(!merged.content.includes(SECRET), 'the upward-merge output is masked (L3i)');
+});
+
+test('Agentic-Map states the target to its sub-agent too (V3)', async () => {
+  // V3: the same instruction on the other operator. A sub-agent left to choose its size returns
+  // roughly what it was given, which is the failure L3 measured in the live row.
+  const prompts: string[] = [];
+  const store = new LcmStore(':memory:');
+  try {
+    const map = new AgenticMap({
+      store,
+      runSubAgent: async (systemPrompt, userMessages) => {
+        prompts.push(systemPrompt);
+        return userMessages.join('\n');
+      },
+    });
+    await map.complete([{ role: 'user', content: 'x' }], 0, 321);
+    await map.complete([{ role: 'user', content: 'x' }], 0);
+
+    assert.match(prompts[0]!, /Aim for at most 321 tokens\./);
+    assert.doesNotMatch(prompts[1]!, /Aim for at most/);
+  } finally {
+    store.close();
+  }
+});
+
+test('a failed upward merge degrades the assembly instead of failing it (V5)', async (t) => {
+  const { engine, store } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async () => { throw new Error('summarizer exploded'); },
+  });
+  await seedRoots(engine, store, ['a', 'b'], 100);
+
+  const ctx = await engine.assembleContext('s', 150, 'Upward');
+
+  assert.equal(ctx.degraded?.[0]?.reason, 'compaction-failed: summarizer exploded',
+    'the failed merge is recorded with its own reason');
+  assert.equal(ctx.degraded!.length, 1);
+  assert.equal(ctx.summaries?.length, 1, 'the roots that fit are still rendered; the node runs');
+  assert.deepEqual(ctx.summaryCalls, undefined, 'and no call is claimed that did not complete');
+});
+
+test('a cli-tier reader that gets no archive is told so, once per root (V10)', async (t) => {
+  for (const mode of ['Dolt', 'Upward'] as const) {
+    const { engine } = engineWith({
+      contextThreshold: 1, freshTailCount: 0, mode,
+      summarize: async () => 'y'.repeat(20_000),
+    });
+    t.after(() => engine.close());
+    const ids = await addMessages(engine, ['m1'], 1);
+    await engine.summarizeChunk([ids[0]!], 'LLM-Map');
+
+    const first = await engine.assembleContext('s', 100, mode, undefined, 'summaries');
+    assert.deepEqual(first.summaries, [], `${mode}: the root does not fit`);
+    const record = (first.degraded ?? []).find((entry) => entry.reason === 'cli-tier-cues');
+    assert.ok(record, `${mode}: the omission is recorded as the cli tier's limit`);
+    assert.notEqual(record.summaryId, undefined);
+
+    const second = await engine.assembleContext('s', 100, mode, undefined, 'summaries');
+    assert.equal(
+      (second.degraded ?? []).some((entry) => entry.reason === 'cli-tier-cues'), false,
+      `${mode}: recorded once per root, not once per assembly`,
+    );
+  }
 });

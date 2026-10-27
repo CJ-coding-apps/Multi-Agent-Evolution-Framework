@@ -237,8 +237,28 @@ export class LcmEngine implements LcmApi {
     // L3: the size a summary is asked to fit, derived from what the injector can render. Half the
     // budget leaves the rest for `<recent>` and for a summary that overshoots its target a little.
     const summaryTarget = summaryTargetTokens(tokenBudget);
-    // One degradation record per root, however many assembly passes find it oversized (L3c).
-    const degradedRoots = new Set<string>();
+
+    /** Records a degradation the caller hears about, and returns it. */
+    const pushDegraded = async (record: LcmDegradedRecord): Promise<void> => {
+      degradedRecords.push(record);
+      await this.config.onDegraded?.(record);
+    };
+
+    /**
+     * L3/V1: one record per root and reason, across every assembly of the run. The store is the
+     * record, not a set local to this call: eight assemblies of one oversized root used to write
+     * eight transcript lines for the same fact.
+     */
+    const degradeRoot = async (
+      summaryId: LcmSummaryId, tokens: number, reason: string,
+    ): Promise<void> => {
+      if (!this.store.markRootDegraded(summaryId, reason, tokens)) return;
+      await pushDegraded({
+        sessionId, reason, summaryId, tokens,
+        ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
+        ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
+      });
+    };
 
     /** The archive half of one assembly: what the mode offers and what it costs. */
     const fitArchive = async (): Promise<{
@@ -256,29 +276,49 @@ export class LcmEngine implements LcmApi {
         included = archive.summaries;
         summaryCalls.push(...archive.calls);
         used = included.reduce((s, summary) => s + summary.tokens, 0);
-        if (archive.degradedRoot !== undefined && !degradedRoots.has(archive.degradedRoot.summaryId)) {
-          degradedRoots.add(archive.degradedRoot.summaryId);
-          const record: LcmDegradedRecord = {
-            sessionId, reason: 'root-over-budget',
-            summaryId: archive.degradedRoot.summaryId, tokens: archive.degradedRoot.tokens,
+        if (archive.mergeFailure !== undefined) {
+          // V5 (D-52 F5): an upward merge is a summarization call like any other, so its failure
+          // degrades the assembly rather than failing the node. The roots already stored are
+          // intact; the archive renders the ones that fit and the node runs.
+          await pushDegraded({
+            sessionId, reason: `compaction-failed: ${messageOf(archive.mergeFailure)}`,
             ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
             ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
-          };
-          degradedRecords.push(record);
-          await this.config.onDegraded?.(record);
+          });
+        }
+        // A cue fallback is only the story when cues are what this caller renders; a cli-tier
+        // reader gets `cli-tier-cues` below, which is the limit that actually applied (V10).
+        if (archive.degradedRoot !== undefined && render !== 'summaries') {
+          await degradeRoot(
+            archive.degradedRoot.summaryId, archive.degradedRoot.tokens, archive.degradedRoot.reason,
+          );
         }
         if (included.length === 0 && archive.roots.length > 0) {
-          // R12: one root larger than the whole archive used to render nothing and say nothing.
-          // A cue is a sentence, so it fits where the summary did not; the model can expand it.
-          used = this.fitCues(archive.roots, Math.max(0, tokenBudget - used), ghosts);
+          if (render === 'summaries') {
+            // V10: the caller cannot expand a cue, so rendering one would be an instruction it
+            // cannot follow. Say what was omitted instead of offering it uselessly, once per root.
+            const newest = archive.roots[archive.roots.length - 1]!;
+            await degradeRoot(newest.id, newest.tokens, 'cli-tier-cues');
+          } else {
+            // R12: one root larger than the whole archive used to render nothing and say nothing.
+            // A cue is a sentence, so it fits where the summary did not; the model can expand it.
+            used = this.fitCues(archive.roots, Math.max(0, tokenBudget - used), ghosts);
+          }
         }
       } else if (render === 'summaries') {
         // R14: no cues the backend cannot act on. The roots are fitted newest-first, exactly as the
         // cues would be, without the extra compaction Upward's fit performs.
-        const fitted = fitRootsNewestFirst(this.rootSummaries(sessionId), tokenBudget);
+        const roots = this.rootSummaries(sessionId);
+        const fitted = fitRootsNewestFirst(roots, tokenBudget);
         included = fitted.summaries;
         used = fitted.used;
         offerSummaries = true;
+        if (included.length === 0 && roots.length > 0) {
+          // V10: under Dolt with `render: 'summaries'` an over-budget root used to vanish silently
+          // for the caller least able to cope with it.
+          const newest = roots[roots.length - 1]!;
+          await degradeRoot(newest.id, newest.tokens, 'cli-tier-cues');
+        }
       } else {
         // Cues are sentences, newest first: the most recent archive is the most relevant, and a cue
         // the budget cannot hold is skipped rather than crowding out the rest.
@@ -318,13 +358,11 @@ export class LcmEngine implements LcmApi {
       // F5: a failed compaction degrades. The node continues and the failure is recorded; throwing
       // here would turn a background optimization into a node failure.
       degraded = true;
-      const record = {
-        sessionId, reason: err instanceof Error ? err.message : String(err),
+      await pushDegraded({
+        sessionId, reason: messageOf(err),
         ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
         ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
-      };
-      degradedRecords.push(record);
-      await this.config.onDegraded?.(record);
+      });
     };
 
     const compactUncovered = async (messageIds: LcmMessageId[]): Promise<void> => {
@@ -553,12 +591,18 @@ export class LcmEngine implements LcmApi {
     trigger: LcmTrigger | undefined,
   ): Promise<{
     summaries: LcmSummary[]; calls: LcmSummarySurface[]; roots: LcmSummary[];
-    /** L3c: the root the archive gave up on, when it still exceeds `budget` after the retry. */
-    degradedRoot?: { summaryId: LcmSummaryId; tokens: number };
+    /**
+     * L3c: the root the archive gave up on, when it still exceeds `budget`. `reason` distinguishes
+     * a root that was retried and did not shrink from one whose retry failed (V8).
+     */
+    degradedRoot?: { summaryId: LcmSummaryId; tokens: number; reason: string };
+    /** V5: the upward merge that failed, if one did. The assembly degrades; the node runs. */
+    mergeFailure?: unknown;
   }> {
     const calls: LcmSummarySurface[] = [];
     let roots = this.rootSummaries(sessionId);
     if (roots.length === 0) return { summaries: [], calls, roots };
+    let mergeFailure: unknown;
     // Bounded: each pass halves the root count or stops. A budget too small for even one root
     // stops the loop rather than summarizing forever.
     for (let pass = 0; pass < 8 && roots.length > 1; pass++) {
@@ -607,51 +651,85 @@ export class LcmEngine implements LcmApi {
           if (surface) calls.push(surface);
         }
         return true;
+      }).catch((err: unknown) => {
+        // V5 (D-52 F5): a failed upward merge is a background optimization failing, not the node
+        // failing. Whatever the passes inserted before this one stays; the caller records the
+        // failure and renders the roots that fit.
+        mergeFailure = err;
+        return false;
       });
       roots = this.rootSummaries(sessionId);
+      if (mergeFailure !== undefined) break;
       if (!progressed) break;
     }
 
     // L3b: a root still larger than the whole archive gets one more summarization, at half the
-    // target, before the archive gives up and the caller renders cues (L3c). A failed retry leaves
-    // the root as it was; it is the archive's size that decides, not the attempt's success.
-    let degradedRoot: { summaryId: LcmSummaryId; tokens: number } | undefined;
-    if (roots.length === 1 && roots[0]!.tokens > budget) {
-      let retried = false;
-      try {
-        retried = await this.serialize(sessionId, async () => {
-          const current = this.rootSummaries(sessionId);
-          if (current.length !== 1) return false;
-          const root = current[0]!;
-          if (root.tokens <= budget) return false;
-          const operator = this.config.operator ?? 'LLM-Map';
-          const level = root.level + 1;
-          const units: Unit[] = splitByBytes(
-            `[Level-${root.level} summary ${root.id}]\n${root.content}`,
-            MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD,
-          ).map((content) => ({ role: 'system', content, summaryId: root.id }));
-          const output = await this.callBounded(
-            units, level, operator, Math.max(1, Math.floor(targetTokens / 2)),
-          );
-          const content = redactCredentials(summaryContent(output));
-          const summaryId = this.store.insertSummary(
-            content, estimateTokens(content), level, operator, [root.id], root.messageIds,
-          );
-          const surface = await this.recordCall({
-            sessionId, summaryId, level, messageIds: root.messageIds, childIds: [root.id],
-            content, contentTokens: estimateTokens(content), output, trigger,
-            inputTokens: promptTokensOf(units),
+    // target, before the archive gives up (L3c). The retry is allowed once per root **for the
+    // whole run** (V1): it is claimed in the store before the call, so no later assembly retries
+    // the same root — not after a failure, and not when the root is the output of a retry.
+    let degradedRoot: { summaryId: LcmSummaryId; tokens: number; reason: string } | undefined;
+    if (mergeFailure === undefined && roots.length === 1 && roots[0]!.tokens > budget) {
+      let retryFailure: unknown;
+      const rootId = roots[0]!.id;
+      if (!this.store.hasRootRetry(rootId) && !this.store.isRootRetryOutput(rootId)) {
+        try {
+          await this.serialize(sessionId, async () => {
+            const current = this.rootSummaries(sessionId);
+            if (current.length !== 1) return;
+            const root = current[0]!;
+            if (root.tokens <= budget) return;
+            if (this.store.hasRootRetry(root.id) || this.store.isRootRetryOutput(root.id)) return;
+            // Claim before the call: a retry that fails is still the root's one retry.
+            if (!this.store.claimRootRetry(root.id)) return;
+            let summaryId: LcmSummaryId | undefined;
+            try {
+              const operator = this.config.operator ?? 'LLM-Map';
+              const level = root.level + 1;
+              const units: Unit[] = splitByBytes(
+                `[Level-${root.level} summary ${root.id}]\n${root.content}`,
+                MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD,
+              ).map((content) => ({ role: 'system', content, summaryId: root.id }));
+              const output = await this.callBounded(
+                units, level, operator, Math.max(1, Math.floor(targetTokens / 2)),
+              );
+              const content = redactCredentials(summaryContent(output));
+              summaryId = this.store.insertSummary(
+                content, estimateTokens(content), level, operator, [root.id], root.messageIds,
+              );
+              const surface = await this.recordCall({
+                sessionId, summaryId, level, messageIds: root.messageIds, childIds: [root.id],
+                content, contentTokens: estimateTokens(content), output, trigger,
+                inputTokens: promptTokensOf(units),
+              });
+              if (surface) calls.push(surface);
+            } finally {
+              this.store.finishRootRetry(root.id, summaryId);
+            }
           });
-          if (surface) calls.push(surface);
-          return true;
-        });
-      } catch {
-        // The retry is a second chance, not a guarantee: the fallback below records what remains.
-        retried = false;
+        } catch (err: unknown) {
+          // The retry is a second chance, not a guarantee. V8: what remains is reported as what
+          // happened — a failed retry (`root-retry-failed`) is not "after a tighter retry".
+          retryFailure = err;
+        }
       }
-      if (retried) roots = this.rootSummaries(sessionId);
-      const root = roots[0]!;
-      if (root.tokens > budget) degradedRoot = { summaryId: root.id, tokens: root.tokens };
+      // V2: the roots are re-read whatever the retry block decided. Another pass may have changed
+      // the archive while this assembly queued for the lock (a second root, or a root already
+      // retried); reporting degradation from the pre-lock view would name a root the archive no
+      // longer has as its single one.
+      roots = this.rootSummaries(sessionId);
+      const root = roots.length === 1 ? roots[0]! : undefined;
+      if (root !== undefined && root.tokens > budget) {
+        // A summary written by the retry (even if the record callback then threw) means the retry
+        // happened and produced text; the archive's size is what failed, not the call.
+        const produced = this.store.isRootRetryOutput(root.id);
+        degradedRoot = {
+          summaryId: root.id,
+          tokens: root.tokens,
+          reason: retryFailure === undefined || produced
+            ? 'root-over-budget'
+            : `root-retry-failed: ${messageOf(retryFailure)}`,
+        };
+      }
     }
 
     const fit = overflowNewestFirst(roots, budget);
@@ -659,15 +737,16 @@ export class LcmEngine implements LcmApi {
     return {
       summaries: kept.slice().reverse(), calls, roots, // chronological for the prompt
       ...(degradedRoot !== undefined ? { degradedRoot } : {}),
+      ...(mergeFailure !== undefined ? { mergeFailure } : {}),
     };
   }
 
   /**
    * Roots: summaries with no parent, oldest first (L2). The archive is a tree grown upward, so a
-   * root is precisely a summary nothing else was built from — reading `parentIds` as the children
-   * this summary ingested is what makes the test the field's name. The inverted version computed
-   * the same set from inverted edges, so the engine stayed self-consistent while every outside
-   * reader of the table saw the relation upside down.
+   * root is precisely a summary nothing else was built from — `LcmSummary.parentIds` names the
+   * summaries a summary was built INTO (its parents), so a root's list is empty. The inverted
+   * version computed the same set from inverted edges, so the engine stayed self-consistent while
+   * every outside reader of the table saw the relation upside down.
    */
   private rootSummaries(sessionId: string): LcmSummary[] {
     return this.store.getSummariesForSession(sessionId).filter((summary) => summary.parentIds.length === 0);
@@ -824,6 +903,10 @@ export class LcmEngine implements LcmApi {
     this.sessionLocks.set(sessionId, next.then(() => undefined, () => undefined));
     return next;
   }
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function isTransport(err: unknown): boolean {

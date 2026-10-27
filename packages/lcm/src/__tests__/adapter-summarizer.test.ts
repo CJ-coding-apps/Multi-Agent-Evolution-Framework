@@ -136,6 +136,24 @@ test('the summarizer measures bytes, not characters, and refuses what the OS wou
   assert.equal(adapter.calls.length, 1);
 });
 
+// L3n: the target the engine derives from the injector's budget only reaches a real model through
+// this sentence. Dropping it leaves the summarizer guessing, which is the defect L3 was written to
+// remove; both depths carry it, because a raised summary must shrink too.
+test('the summarizer states the size target it was given, at both depths (L3n)', async () => {
+  const adapter = new ScriptedAdapter({});
+  const summarize = createAdapterSummarizer({ adapter, workingDir: '/tmp/work' });
+
+  await summarize([message('x')], 0, 123);
+  await summarize([message('x')], 1, 456);
+  await summarize([message('x')], 0);
+
+  assert.match(adapter.calls[0]!.systemPrompt ?? '', /Aim for at most 123 tokens\./);
+  assert.match(adapter.calls[1]!.systemPrompt ?? '', /Aim for at most 456 tokens\./,
+    'a raised summary is asked for its own, tighter target');
+  assert.doesNotMatch(adapter.calls[2]!.systemPrompt ?? '', /Aim for at most/,
+    'no target, no claim about one: a direct compaction has no budget to derive it from');
+});
+
 test('without a model the call leaves the choice to the adapter', async () => {
   const adapter = new ScriptedAdapter({});
   await createAdapterSummarizer({ adapter, workingDir: '/tmp/work' })([message('x')], 0);

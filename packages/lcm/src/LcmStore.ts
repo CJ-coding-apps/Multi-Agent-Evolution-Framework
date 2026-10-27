@@ -63,6 +63,27 @@ CREATE TABLE IF NOT EXISTS lcm_migrations (
   applied_at   TEXT NOT NULL,
   PRIMARY KEY(from_version, to_version)
 );
+
+-- L3/V1: the one retry a root is allowed, for the whole run. A row is written when an assembly
+-- claims the retry, before the call, so a failed or crashed retry is not attempted again either;
+-- retry_id is the summary it produced and outcome says whether it did.
+CREATE TABLE IF NOT EXISTS lcm_root_retries (
+  root_id     TEXT PRIMARY KEY,
+  retry_id    TEXT NOT NULL DEFAULT '',
+  outcome     TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_root_retry_output ON lcm_root_retries(retry_id);
+
+-- L3/V1: each degradation is recorded once per root and reason, however many assemblies later
+-- find the same root. A transcript line per assembly would report one fact as many.
+CREATE TABLE IF NOT EXISTS lcm_root_degradations (
+  summary_id  TEXT NOT NULL,
+  reason      TEXT NOT NULL,
+  tokens      INTEGER NOT NULL,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY(summary_id, reason)
+);
 `;
 
 type MsgRow = {
@@ -81,7 +102,10 @@ export class LcmStore {
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
-    this.db.exec(SCHEMA);
+    // V7: read the version before writing anything. `exec(SCHEMA)` used to run first, so refusing
+    // a newer archive still created this build's five tables in it and switched its journal to
+    // WAL — a refusal that modified the file it refused. A file this build cannot read is left
+    // exactly as its writer left it.
     const from = this.db.pragma('user_version', { simple: true }) as number;
     if (from > LCM_SCHEMA_VERSION) {
       this.db.close();
@@ -91,7 +115,8 @@ export class LcmStore {
         `upside down rather than fail.`,
       );
     }
-    if (from < LCM_SCHEMA_VERSION) this.migrate(from);
+    this.db.exec(SCHEMA);
+    if (from < LCM_SCHEMA_VERSION) this.migrate();
   }
 
   /**
@@ -101,10 +126,17 @@ export class LcmStore {
    * `lcm_migrations`, so a reader can tell an archive that was rewritten from one written new.
    *
    * A fresh database has no rows to swap and is simply stamped: there is no migration to record.
+   *
+   * V6: the transaction is `BEGIN IMMEDIATE`, and the version is re-read inside it. Two processes
+   * opening the same old archive both used to read 0 and both swap — the second swap restores the
+   * inversion the first removed. Under the write lock the second opener waits, re-reads the stamp
+   * the first wrote, and does nothing.
    */
-  private migrate(from: number): void {
-    const hadRows = (this.db.prepare(`SELECT COUNT(*) AS n FROM lcm_summary_parents`).get() as { n: number }).n > 0;
+  private migrate(): void {
     const txn = this.db.transaction(() => {
+      const from = this.db.pragma('user_version', { simple: true }) as number;
+      if (from >= LCM_SCHEMA_VERSION) return;
+      const hadRows = (this.db.prepare(`SELECT COUNT(*) AS n FROM lcm_summary_parents`).get() as { n: number }).n > 0;
       if (hadRows) {
         this.db.exec(`
           ALTER TABLE lcm_summary_parents RENAME TO lcm_summary_parents_v1;
@@ -125,7 +157,7 @@ export class LcmStore {
       }
       this.db.pragma(`user_version = ${LCM_SCHEMA_VERSION}`);
     });
-    txn();
+    txn.immediate();
   }
 
   insertMessage(msg: Omit<LcmMessage, 'id' | 'createdAt'>): LcmMessageId {
@@ -288,6 +320,48 @@ export class LcmStore {
       for (const id of messageIds) stmt.run(summaryId, id);
     });
     txn();
+  }
+
+  /**
+   * L3/V1: claims the one retry `rootId` is allowed, for the whole run and every assembly after
+   * it. The row is written before the call, so a retry that fails is spent too — "retried once"
+   * cannot mean "retried once per failure". Returns false when another assembly, in this process
+   * or another, already claimed it.
+   */
+  claimRootRetry(rootId: LcmSummaryId): boolean {
+    const inserted = this.db.prepare(
+      `INSERT OR IGNORE INTO lcm_root_retries (root_id, retry_id, outcome, created_at) VALUES (?,?,?,?)`,
+    ).run(rootId, '', 'attempted', new Date().toISOString());
+    return inserted.changes === 1;
+  }
+
+  /** Records what a claimed retry produced, so the new root is not itself retried (L3/V1). */
+  finishRootRetry(rootId: LcmSummaryId, retryId?: LcmSummaryId): void {
+    this.db.prepare(`UPDATE lcm_root_retries SET retry_id=?, outcome=? WHERE root_id=?`)
+      .run(retryId ?? '', retryId === undefined ? 'failed' : 'succeeded', rootId);
+  }
+
+  /** Whether `rootId` has already had its one retry, whatever the outcome (L3/V1). */
+  hasRootRetry(rootId: LcmSummaryId): boolean {
+    return this.db.prepare(`SELECT 1 AS found FROM lcm_root_retries WHERE root_id=?`)
+      .get(rootId) !== undefined;
+  }
+
+  /** Whether `id` is the summary a retry produced — never retried again (L3/V1). */
+  isRootRetryOutput(id: LcmSummaryId): boolean {
+    return this.db.prepare(`SELECT 1 AS found FROM lcm_root_retries WHERE retry_id=? AND retry_id<>''`)
+      .get(id) !== undefined;
+  }
+
+  /**
+   * L3/V1: records one degradation per root and reason. Returns true when this call is the one
+   * that recorded it, so the caller writes the transcript line once rather than once per assembly.
+   */
+  markRootDegraded(summaryId: LcmSummaryId, reason: string, tokens: number): boolean {
+    const inserted = this.db.prepare(
+      `INSERT OR IGNORE INTO lcm_root_degradations (summary_id, reason, tokens, created_at) VALUES (?,?,?,?)`,
+    ).run(summaryId, reason, tokens, new Date().toISOString());
+    return inserted.changes === 1;
   }
 
   close(): void { this.db.close(); }
