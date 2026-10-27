@@ -5,6 +5,15 @@ import type {
 } from '@maf/types';
 import { makeLcmMessageId, makeLcmSummaryId } from '@maf/types';
 
+/**
+ * The archive's schema version, stamped in SQLite's own `user_version` (L2). Version 1 is the
+ * unversioned layout every earlier build wrote: `lcm_summary_parents` stored the **parent** in
+ * `summary_id` and the **child** in `parent_id`, the reverse of the column names. Version 2 stores
+ * the relation the names describe — `summary_id` is the child, `parent_id` is the parent — so a
+ * reader that trusts the columns gets the tree the engine has.
+ */
+const LCM_SCHEMA_VERSION = 2;
+
 const SCHEMA = `
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -47,6 +56,13 @@ CREATE TABLE IF NOT EXISTS lcm_summary_messages (
   FOREIGN KEY(summary_id) REFERENCES lcm_summaries(id),
   FOREIGN KEY(message_id) REFERENCES lcm_messages(id)
 );
+
+CREATE TABLE IF NOT EXISTS lcm_migrations (
+  from_version INTEGER NOT NULL,
+  to_version   INTEGER NOT NULL,
+  applied_at   TEXT NOT NULL,
+  PRIMARY KEY(from_version, to_version)
+);
 `;
 
 type MsgRow = {
@@ -66,6 +82,50 @@ export class LcmStore {
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.exec(SCHEMA);
+    const from = this.db.pragma('user_version', { simple: true }) as number;
+    if (from > LCM_SCHEMA_VERSION) {
+      this.db.close();
+      throw new Error(
+        `The LCM database at ${dbPath} has schema version ${from}, newer than this build understands ` +
+        `(${LCM_SCHEMA_VERSION}). Refusing to open it: an older engine would read the parent relation ` +
+        `upside down rather than fail.`,
+      );
+    }
+    if (from < LCM_SCHEMA_VERSION) this.migrate(from);
+  }
+
+  /**
+   * L2: bring an older archive to the current relation in one transaction. An unversioned database
+   * with parent rows stores `(parent, child)` under the column names `(summary_id, parent_id)`;
+   * the swap rewrites each row as `(child, parent)`. The migration is recorded in
+   * `lcm_migrations`, so a reader can tell an archive that was rewritten from one written new.
+   *
+   * A fresh database has no rows to swap and is simply stamped: there is no migration to record.
+   */
+  private migrate(from: number): void {
+    const hadRows = (this.db.prepare(`SELECT COUNT(*) AS n FROM lcm_summary_parents`).get() as { n: number }).n > 0;
+    const txn = this.db.transaction(() => {
+      if (hadRows) {
+        this.db.exec(`
+          ALTER TABLE lcm_summary_parents RENAME TO lcm_summary_parents_v1;
+          CREATE TABLE lcm_summary_parents (
+            summary_id  TEXT NOT NULL,
+            parent_id   TEXT NOT NULL,
+            PRIMARY KEY(summary_id, parent_id),
+            FOREIGN KEY(summary_id) REFERENCES lcm_summaries(id),
+            FOREIGN KEY(parent_id)  REFERENCES lcm_summaries(id)
+          );
+          INSERT INTO lcm_summary_parents (summary_id, parent_id)
+            SELECT parent_id, summary_id FROM lcm_summary_parents_v1;
+          DROP TABLE lcm_summary_parents_v1;
+        `);
+        this.db.prepare(
+          `INSERT OR IGNORE INTO lcm_migrations (from_version, to_version, applied_at) VALUES (?,?,?)`,
+        ).run(from, LCM_SCHEMA_VERSION, new Date().toISOString());
+      }
+      this.db.pragma(`user_version = ${LCM_SCHEMA_VERSION}`);
+    });
+    txn();
   }
 
   insertMessage(msg: Omit<LcmMessage, 'id' | 'createdAt'>): LcmMessageId {
@@ -83,7 +143,7 @@ export class LcmStore {
     tokens: number,
     level: number,
     operator: 'LLM-Map' | 'Agentic-Map',
-    parentIds: LcmSummaryId[],
+    childIds: LcmSummaryId[],
     messageIds: LcmMessageId[],
   ): LcmSummaryId {
     const id = makeLcmSummaryId(crypto.randomUUID());
@@ -97,7 +157,9 @@ export class LcmStore {
 
     const txn = this.db.transaction(() => {
       insertSummary.run(id, content, tokens, level, operator, now);
-      for (const p of parentIds)  insertParent.run(id, p);
+      // L2: the relation is (child, parent) under the column names. `id` is the parent this call
+      // created; each child is one of the summaries it was built from.
+      for (const child of childIds) insertParent.run(child, id);
       for (const m of messageIds) insertMsgLink.run(id, m);
     });
     txn();
@@ -148,6 +210,8 @@ export class LcmStore {
   getSummary(id: LcmSummaryId): LcmSummary | undefined {
     const row = this.db.prepare(`SELECT * FROM lcm_summaries WHERE id=?`).get(id) as SumRow | undefined;
     if (!row) return undefined;
+    // L2: `summary_id` names the child, so this row's parents are the summaries that name it as a
+    // child. The column reads as it is named, and `parentIds` is what the field says it is.
     const parentIds = (this.db.prepare(`SELECT parent_id FROM lcm_summary_parents WHERE summary_id=?`).all(id) as Array<{parent_id:string}>).map(r => makeLcmSummaryId(r.parent_id));
     const messageIds = (this.db.prepare(`SELECT message_id FROM lcm_summary_messages WHERE summary_id=?`).all(id) as Array<{message_id:string}>).map(r => makeLcmMessageId(r.message_id));
     return rowToSummary(row, parentIds, messageIds);

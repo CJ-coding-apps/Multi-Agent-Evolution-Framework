@@ -37,13 +37,13 @@ Output in plain prose. Do not include metadata or timestamps.`;
   async run(
     messages: LcmMessage[],
     depth = 0,
-    parentIds: LcmSummaryId[] = [],
+    childIds: LcmSummaryId[] = [],
   ): Promise<LcmSummaryId> {
     const output    = await this.complete(messages, depth);
     const content   = summaryContent(output);
     const tokens    = summaryTokens(output, content);
     const messageIds = messages.map((m) => m.id);
-    const summaryId  = this.config.store.insertSummary(content, tokens, depth, 'Agentic-Map', parentIds, messageIds);
+    const summaryId  = this.config.store.insertSummary(content, tokens, depth, 'Agentic-Map', childIds, messageIds);
     this.config.store.markSummarized(messageIds, summaryId);
     return summaryId;
   }

@@ -19,7 +19,8 @@ export interface LcmSummaryCall {
   summaryId:       LcmSummaryId;
   level:           number;
   messageIds:      LcmMessageId[];
-  parentIds:       LcmSummaryId[];
+  /** L2: the summaries whose text this call ingested — the new summary's children. */
+  childIds:        LcmSummaryId[];
   content:         string;
   /** The content's own estimate — the size the summary occupies in a prompt (F10). */
   contentTokens:   number;
@@ -442,7 +443,7 @@ export class LcmEngine implements LcmApi {
       const spent = reportedTokensOf(output, content);
       reported.push(spent);
       const surface = await this.recordCall({
-        sessionId, summaryId, level: 0, messageIds: messageIdsInGroup, parentIds: [],
+        sessionId, summaryId, level: 0, messageIds: messageIdsInGroup, childIds: [],
         content, contentTokens, output, trigger, inputTokens: promptTokensOf(group),
       });
       if (surface) calls.push(surface);
@@ -450,8 +451,8 @@ export class LcmEngine implements LcmApi {
     }
 
     // F9: summarize the summaries upward until one root covers everything. Nothing is dropped
-    // without a parent: each level names its children as `parentIds` and links every descendant
-    // message, so `lcm.expand` on the root recovers the whole segment.
+    // without a parent: each level records its children and links every descendant message, so
+    // `lcm.expand` on the root recovers the whole segment.
     const rootId = await this.raise(level0, 1, operator, sessionId, trigger, reported, calls);
     return { summaryId: rootId, reportedTokens: reported, calls };
   }
@@ -495,7 +496,7 @@ export class LcmEngine implements LcmApi {
       const summaryId = this.store.insertSummary(content, contentTokens, level, operator, childIds, messageIds);
       reported.push(reportedTokensOf(output, content));
       const surface = await this.recordCall({
-        sessionId, summaryId, level, messageIds, parentIds: childIds,
+        sessionId, summaryId, level, messageIds, childIds,
         content, contentTokens, output, trigger, inputTokens: promptTokensOf(chunk),
       });
       if (surface) calls.push(surface);
@@ -539,18 +540,18 @@ export class LcmEngine implements LcmApi {
         }
       }
       for (const group of packUnits(units)) {
-        const parentIds = [...new Set(group.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
-        const children = parentIds
+        const childIds = [...new Set(group.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
+        const children = childIds
           .map((id) => this.store.getSummary(id))
           .filter((summary): summary is LcmSummary => summary !== undefined);
         const messageIds = [...new Set(children.flatMap((s) => s.messageIds))];
         const output = await this.callBounded(group, level, operator);
         const content = redactCredentials(summaryContent(output));
         const summaryId = this.store.insertSummary(
-          content, estimateTokens(content), level, operator, parentIds, messageIds,
+          content, estimateTokens(content), level, operator, childIds, messageIds,
         );
         const surface = await this.recordCall({
-          sessionId, summaryId, level, messageIds, parentIds,
+          sessionId, summaryId, level, messageIds, childIds,
           content, contentTokens: estimateTokens(content), output, trigger,
           inputTokens: promptTokensOf(group),
         });
@@ -563,11 +564,15 @@ export class LcmEngine implements LcmApi {
     return { summaries: kept.slice().reverse(), calls, roots }; // chronological for the prompt
   }
 
-  /** Roots: summaries no other summary names as a parent, oldest first. */
+  /**
+   * Roots: summaries with no parent, oldest first (L2). The archive is a tree grown upward, so a
+   * root is precisely a summary nothing else was built from — reading `parentIds` as the children
+   * this summary ingested is what makes the test the field's name. The inverted version computed
+   * the same set from inverted edges, so the engine stayed self-consistent while every outside
+   * reader of the table saw the relation upside down.
+   */
   private rootSummaries(sessionId: string): LcmSummary[] {
-    const all = this.store.getSummariesForSession(sessionId);
-    const parents = new Set(all.flatMap((summary) => summary.parentIds));
-    return all.filter((summary) => !parents.has(summary.id));
+    return this.store.getSummariesForSession(sessionId).filter((summary) => summary.parentIds.length === 0);
   }
 
   /**
@@ -633,7 +638,7 @@ export class LcmEngine implements LcmApi {
     summaryId: LcmSummaryId;
     level: number;
     messageIds: LcmMessageId[];
-    parentIds: LcmSummaryId[];
+    childIds: LcmSummaryId[];
     content: string;
     contentTokens: number;
     output: SummaryOutput;
@@ -672,7 +677,7 @@ export class LcmEngine implements LcmApi {
       summaryId: call.summaryId,
       level: call.level,
       messageIds: call.messageIds,
-      parentIds: call.parentIds,
+      childIds: call.childIds,
       content: call.content,
       contentTokens: call.contentTokens,
       tokenBudgetCharged: charged,

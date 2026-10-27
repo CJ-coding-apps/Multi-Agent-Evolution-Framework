@@ -147,6 +147,15 @@ ran.
 the lock and skips ids already covered. *Rejected:* a global lock, which serializes unrelated
 sessions; and no lock, which let concurrent nodes summarize the same messages twice.
 
+**The archive's schema is versioned, and the parent relation is stored the way its columns are
+named (L2).** `lcm_summary_parents` stores `(summary_id = child, parent_id = parent)`; `LcmSummary`
+reads those rows as `parentIds` — a summary's true parents — and a root is a summary with none.
+The version is SQLite's `user_version`, currently 2. Opening an unversioned (or version-1) archive
+swaps the relation once, in a single transaction, and records the migration in `lcm_migrations`;
+opening an archive newer than this build refuses with a message rather than reading it upside down.
+*Rejected:* rewriting on read (a reader cannot tell the direction without a version), and silent
+best-effort reads of an unknown layout.
+
 **Credentials are masked into and out of the archive.** `addMessage` redacts before storing; the
 summarizer input is redacted at the one place every prompt passes through; level-0 output is
 redacted before it is stored; a raised summary's output is redacted too; and `lcm.expand` redacts
@@ -160,10 +169,11 @@ engine filters every lookup by its session id, so an id from another run is refu
 that says so. *Rejected:* leaving the Dolt cue naming a tool that does not exist; and looking a
 summary up by id alone, because `.maf/lcm.db` outlives the run that wrote it.
 
-**Compaction is hierarchical.** Level-0 summaries rise into level+1 summaries that name their
-`parentIds` and link every descendant message, until one root covers the segment. Nothing is
-dropped without an ancestor covering it. *Rejected:* keeping only level 0, where the archive grows
-without bound and the budget trims the oldest context permanently.
+**Compaction is hierarchical.** Level-0 summaries rise into level+1 summaries that record the
+summaries they ingested (as their children) and link every descendant message, until one root
+covers the segment; `LcmSummary.parentIds` names a summary's parents, so the root is the one with
+none. Nothing is dropped without an ancestor covering it. *Rejected:* keeping only level 0, where
+the archive grows without bound and the budget trims the oldest context permanently.
 
 **Two token counts, two questions.** A summary's stored context size is the content's own
 estimate; the backend's reported count goes on the call's record. *Rejected:* using the reported
@@ -319,9 +329,10 @@ silent.
 ### F9 — hierarchical compaction
 
 - **`packages/lcm/src/LcmEngine.ts`** — after level 0, `raise` summarizes children into level+1
-  summaries that name their `parentIds` and link every descendant message, until one root covers
+  summaries that record those children and link every descendant message, until one root covers
   the segment. Nothing is dropped without an ancestor covering it; `lcm.expand` on the root
-  recovers the whole segment.
+  recovers the whole segment. L2: a summary's `parentIds` names its parents (the summaries above
+  it), so the root is the summary with none.
 
 ### F10 and F11 — token semantics and the live test
 

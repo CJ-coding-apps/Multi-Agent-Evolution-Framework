@@ -1,8 +1,10 @@
 import { test } from 'node:test';
+import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { TransportError, makeLcmMessageId, makeNodeId, makeRunId, makeTaskId } from '@maf/types';
 import type { LcmDegradedRecord, LcmMessage, LcmMessageId, LcmSummary } from '@maf/types';
 import { LcmEngine } from '../LcmEngine.js';
@@ -59,18 +61,51 @@ async function addMessages(engine: LcmEngine, contents: string[], tokens = 10): 
   return ids;
 }
 
-/** Every summary reachable from `id` by following `parentIds`, keyed by id. */
-async function summaryTree(engine: LcmEngine, id: string): Promise<Map<string, LcmSummary>> {
-  const seen = new Map<string, LcmSummary>();
-  const visit = async (summaryId: string): Promise<void> => {
-    if (seen.has(summaryId)) return;
-    const found = await engine.expandSummary(summaryId);
-    assert.ok(found, `summary ${summaryId} expands`);
-    seen.set(summaryId, found.summary);
-    for (const parentId of found.summary.parentIds) await visit(parentId);
-  };
-  await visit(id);
-  return seen;
+/**
+ * A file-backed engine plus a second connection to the same archive (L2). The engine's store is
+ * private, and a test that inspects the tree needs to enumerate summaries — which an engine scoped
+ * to a session can no longer do once `parentIds` points up. The archive is the interface.
+ */
+async function fileEngineWith(
+  t: TestContext,
+  overrides: Partial<LcmEngineConfig> = {},
+): Promise<{ engine: LcmEngine; summarized: LcmMessage[][]; store: LcmStore }> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lcm-engine-'));
+  const dbPath = path.join(dir, 'lcm.db');
+  const { engine, summarized } = engineWith({ dbPath, ...overrides });
+  const store = new LcmStore(dbPath);
+  t.after(async () => {
+    engine.close();
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  return { engine, summarized, store };
+}
+
+/**
+ * Every summary `id` was eventually built into — `id` itself and its ancestors' descendants in the
+ * tree. L2: `parentIds` points from a summary to what summarized it, so a descendant is found by
+ * walking each summary's parent chain until it reaches `id`.
+ */
+function descendantsOf(all: readonly LcmSummary[], id: string): LcmSummary[] {
+  const byId = new Map(all.map((summary) => [summary.id as string, summary]));
+  const found: LcmSummary[] = [];
+  for (const summary of all) {
+    let current: LcmSummary | undefined = summary;
+    const seen = new Set<string>();
+    while (current !== undefined && !seen.has(current.id as string)) {
+      if (current.id === id) { found.push(summary); break; }
+      seen.add(current.id as string);
+      const parent: LcmSummary['parentIds'][number] | undefined = current.parentIds[0];
+      current = parent === undefined ? undefined : byId.get(parent as string);
+    }
+  }
+  return found;
+}
+
+/** The summaries that ingested `id` directly — the children of `id` (L2 reads these off `parentIds`). */
+function childrenOf(all: readonly LcmSummary[], id: string): LcmSummary[] {
+  return all.filter((summary) => summary.parentIds.some((parent) => (parent as string) === id));
 }
 
 test('the fresh tail is the newest messages, in reading order, with ties broken by insertion (D-17)', () => {
@@ -186,8 +221,9 @@ test('Upward mode returns summaries, Dolt mode returns cues — never both', asy
 });
 
 test('hierarchical compaction: levels rise, and every level-0 summary is covered by an ancestor (F9)', async (t) => {
-  const { engine, summarized } = engineWith({ contextThreshold: 1, freshTailCount: 0, mode: 'Upward' });
-  t.after(() => engine.close());
+  const { engine, summarized, store } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+  });
   const ids = await addMessages(engine, ['m1', 'm2', 'm3', 'm4', 'm5', 'm6'], 1);
 
   // Three level-0 roots first, so fitting the archive has to raise them.
@@ -203,15 +239,20 @@ test('hierarchical compaction: levels rise, and every level-0 summary is covered
   assert.equal(ctx.summaries?.length, 1, 'one root survives the fit');
   const root = ctx.summaries![0]!;
   assert.equal(root.level, 2, 'the roots were raised twice');
+  assert.deepEqual(root.parentIds, [], 'the root has no parent (L2: the field points up)');
 
-  const tree = await summaryTree(engine, root.id);
-  const levels = [...tree.values()].map((summary) => summary.level);
+  const all = store.getSummariesForSession('s');
+  const tree = descendantsOf(all, root.id);
+  const levels = tree.map((summary) => summary.level);
   assert.deepEqual([...new Set(levels)].sort(), [0, 1, 2], 'all three levels exist');
 
-  const parentsOf = new Set([...tree.values()].flatMap((summary) => summary.parentIds));
-  for (const summary of tree.values()) {
+  for (const summary of all) {
     if (summary.level !== 0) continue;
-    assert.ok(parentsOf.has(summary.id), `level-0 summary ${summary.id} has a covering ancestor`);
+    assert.ok(
+      tree.some((covered) => covered.id === summary.id),
+      `level-0 summary ${summary.id} has a covering ancestor`,
+    );
+    assert.ok(summary.parentIds.length > 0, `level-0 summary ${summary.id} names the summary it was raised into`);
   }
 
   const expanded = await engine.expandSummary(root.id);
@@ -836,7 +877,7 @@ test('a credential the model echoes at a raise level is masked too (R10)', async
 
 test('a child too large for one prompt is split across parents that each name it (R11)', async (t) => {
   let call = 0;
-  const { engine } = engineWith({
+  const { engine, store } = await fileEngineWith(t, {
     contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
     summarize: async (_messages, depth) => {
       if (depth > 0) return 'parent summary';
@@ -844,7 +885,6 @@ test('a child too large for one prompt is split across parents that each name it
       return call === 1 ? 'x'.repeat(150_000) : 'small child';
     },
   });
-  t.after(() => engine.close());
 
   // Two prompts make two level-0 summaries: the first is 150,000 bytes (three bounded units), the
   // second is small (one). The split is real — each parent names exactly the children whose text
@@ -855,23 +895,28 @@ test('a child too large for one prompt is split across parents that each name it
   const root = (await engine.expandSummary(rootId))!.summary;
   assert.equal(root.level, 2, 'the level-1 parents were raised to one root');
 
-  const tree = await summaryTree(engine, rootId);
-  const hugeChild = [...tree.values()].find((s) => s.level === 0 && s.content.length === 150_000);
+  const all = store.getSummariesForSession('s');
+  const tree = descendantsOf(all, rootId);
+  const hugeChild = tree.find((s) => s.level === 0 && s.content.length === 150_000);
   assert.ok(hugeChild, 'the oversized level-0 summary is in the tree');
-  const smallChild = [...tree.values()].find((s) => s.level === 0 && s.id !== hugeChild.id);
+  const smallChild = tree.find((s) => s.level === 0 && s.id !== hugeChild.id);
   assert.ok(smallChild, 'the small level-0 summary is in the tree too');
 
-  const level1 = [...tree.values()].filter((s) => s.level === 1);
-  const namingHuge = level1.filter((s) => s.parentIds.includes(hugeChild.id));
+  const level1 = tree.filter((s) => s.level === 1);
+  // L2: the relation points up, so "this parent ingested that child" is asked of the child's
+  // `parentIds` (or, equivalently, of the parent's children), never of the parent's `parentIds`.
+  const namingHuge = level1.filter((parent) => childrenOf(all, parent.id).some((child) => child.id === hugeChild.id));
   assert.equal(namingHuge.length, 3, 'the child is split across three parents, not truncated into one');
-  assert.equal(
-    namingHuge.flatMap((s) => s.parentIds).filter((id) => id === hugeChild.id).length,
-    3,
-    'each of those parents names it exactly once — no parent claims text it never saw',
-  );
-  const namingSmall = level1.filter((s) => s.parentIds.includes(smallChild.id));
+  for (const parent of namingHuge) {
+    assert.equal(
+      childrenOf(all, parent.id).filter((child) => child.id === hugeChild.id).length,
+      1,
+      'each of those parents names it exactly once — no parent claims text it never saw',
+    );
+  }
+  const namingSmall = level1.filter((parent) => childrenOf(all, parent.id).some((child) => child.id === smallChild.id));
   assert.equal(namingSmall.length, 1, 'the small child fits one prompt, so one parent names it');
-  assert.equal(root.parentIds.length, 3, 'the root names all three level-1 parents');
+  assert.equal(childrenOf(all, root.id).length, 3, 'the root ingests all three level-1 parents');
 
   const covered = new Set(
     [...namingHuge, ...namingSmall].flatMap((s) => s.messageIds),
@@ -952,4 +997,143 @@ test('a merged run keeps its summaries and can expand them from the target sessi
   } finally {
     store.close();
   }
+});
+
+// ─── L2: the parent relation reads as its column names say ───────────────────────────────────
+
+const V1_SCHEMA = `
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+CREATE TABLE lcm_messages (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL, role TEXT NOT NULL,
+  content TEXT NOT NULL, tokens INTEGER NOT NULL, created_at TEXT NOT NULL,
+  parent_id TEXT, summary_id TEXT,
+  FOREIGN KEY(summary_id) REFERENCES lcm_summaries(id)
+);
+CREATE TABLE lcm_summaries (
+  id TEXT PRIMARY KEY, content TEXT NOT NULL, tokens INTEGER NOT NULL, level INTEGER NOT NULL,
+  operator TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE lcm_summary_parents (
+  summary_id TEXT NOT NULL, parent_id TEXT NOT NULL, PRIMARY KEY(summary_id, parent_id),
+  FOREIGN KEY(summary_id) REFERENCES lcm_summaries(id),
+  FOREIGN KEY(parent_id)  REFERENCES lcm_summaries(id)
+);
+CREATE TABLE lcm_summary_messages (
+  summary_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(summary_id, message_id),
+  FOREIGN KEY(summary_id) REFERENCES lcm_summaries(id),
+  FOREIGN KEY(message_id) REFERENCES lcm_messages(id)
+);
+`;
+
+async function legacyDatabase(t: TestContext): Promise<{ dbPath: string; close: () => Promise<void> }> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lcm-legacy-'));
+  const dbPath = path.join(dir, 'lcm.db');
+  const db = new Database(dbPath);
+  db.exec(V1_SCHEMA);
+  // The old layout stored (parent, child) under the names (summary_id, parent_id).
+  db.prepare(`INSERT INTO lcm_summaries VALUES (?,?,?,?,?,?)`).run('P', 'parent text', 3, 1, 'LLM-Map', new Date().toISOString());
+  db.prepare(`INSERT INTO lcm_summaries VALUES (?,?,?,?,?,?)`).run('C', 'child text', 2, 0, 'LLM-Map', new Date().toISOString());
+  db.prepare(`INSERT INTO lcm_summary_parents VALUES (?,?)`).run('P', 'C');
+  db.close();
+  return {
+    dbPath,
+    close: async () => { await rm(dir, { recursive: true, force: true }); },
+  };
+}
+
+test('the parent relation is stored as (child, parent) and read back the same way (L2)', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lcm-relation-'));
+  const dbPath = path.join(dir, 'lcm.db');
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  const store = new LcmStore(dbPath);
+  const childA = store.insertSummary('a', 1, 0, 'LLM-Map', [], []);
+  const childB = store.insertSummary('b', 1, 0, 'LLM-Map', [], []);
+  const parent = store.insertSummary('parent', 2, 1, 'LLM-Map', [childA, childB], []);
+  store.close();
+
+  // Read the table by its column names, the way an outside reader would.
+  const raw = new Database(dbPath, { readonly: true });
+  try {
+    const rows = raw.prepare(
+      `SELECT summary_id, parent_id FROM lcm_summary_parents`,
+    ).all() as Array<{ summary_id: string; parent_id: string }>;
+    const byChild = (x: { summary_id: string }, y: { summary_id: string }) =>
+      x.summary_id.localeCompare(y.summary_id);
+    assert.deepEqual(
+      rows.slice().sort(byChild),
+      [
+        { summary_id: childA as string, parent_id: parent as string },
+        { summary_id: childB as string, parent_id: parent as string },
+      ].sort(byChild),
+      'summary_id names the child; parent_id names the summary that ingested it',
+    );
+    assert.equal(raw.pragma('user_version', { simple: true }), 2, 'a fresh archive is stamped with the schema version');
+    const migrations = raw.prepare(`SELECT COUNT(*) AS n FROM lcm_migrations`).get() as { n: number };
+    assert.equal(migrations.n, 0, 'a fresh archive needed no migration, so none is recorded');
+  } finally {
+    raw.close();
+  }
+
+  const reopened = new LcmStore(dbPath);
+  try {
+    assert.deepEqual(reopened.getSummary(childA)!.parentIds, [parent], 'the child names the parent');
+    assert.deepEqual(reopened.getSummary(parent)!.parentIds, [], 'the parent has no parent of its own');
+  } finally {
+    reopened.close();
+  }
+});
+
+test('opening an older archive swaps the relation once, in one transaction, and records it (L2)', async (t) => {
+  const legacy = await legacyDatabase(t);
+  t.after(legacy.close);
+
+  const store = new LcmStore(legacy.dbPath);
+  try {
+    const child = store.getSummary('C' as never);
+    assert.ok(child, 'the child survives the migration');
+    assert.deepEqual(child.parentIds, ['P'], 'the old (parent, child) row now reads as (child, parent)');
+    const parent = store.getSummary('P' as never);
+    assert.deepEqual(parent!.parentIds, [], 'the parent is a root, as it was');
+  } finally {
+    store.close();
+  }
+
+  const raw = new Database(legacy.dbPath, { readonly: true });
+  try {
+    assert.equal(raw.pragma('user_version', { simple: true }), 2, 'the archive is stamped with the new version');
+    const rows = raw.prepare(`SELECT summary_id, parent_id FROM lcm_summary_parents`).all() as
+      Array<{ summary_id: string; parent_id: string }>;
+    assert.deepEqual(rows, [{ summary_id: 'C', parent_id: 'P' }], 'the swap happened once in the table itself');
+    const migrations = raw.prepare(`SELECT from_version, to_version FROM lcm_migrations`).all() as
+      Array<{ from_version: number; to_version: number }>;
+    assert.deepEqual(migrations, [{ from_version: 0, to_version: 2 }], 'the migration is recorded');
+  } finally {
+    raw.close();
+  }
+
+  // Opening it again is a no-op: the version stamp is what prevents a second swap (which would
+  // restore the inversion).
+  const again = new LcmStore(legacy.dbPath);
+  try {
+    assert.deepEqual(again.getSummary('C' as never)!.parentIds, ['P']);
+  } finally {
+    again.close();
+  }
+});
+
+test('an archive newer than this build is refused, not read upside down (L2)', async (t) => {
+  const legacy = await legacyDatabase(t);
+  t.after(legacy.close);
+
+  const db = new Database(legacy.dbPath);
+  db.pragma('user_version = 99');
+  db.close();
+
+  assert.throws(
+    () => new LcmStore(legacy.dbPath),
+    /schema version 99, newer than this build understands \(2\).*Refusing to open it/s,
+    'a build that does not know the layout says so instead of guessing',
+  );
 });
