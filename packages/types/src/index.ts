@@ -787,7 +787,9 @@ export interface LcmDegradedRecord {
   reason:    string;
   /**
    * L3c: the root that could not be made to fit, and its size. Present when `reason` is
-   * `root-over-budget`; the injector renders cues for it instead of the summary.
+   * `root-over-budget`, `root-retry-failed: <message>` (the one retry itself failed) or
+   * `cli-tier-cues` (a caller that cannot expand a cue was offered none); the injector renders
+   * cues for it where the caller can use them.
    */
   summaryId?: LcmSummaryId;
   tokens?:    number;
@@ -822,6 +824,12 @@ export interface LcmMessage {
 
 export interface LcmSummary {
   id:         LcmSummaryId;
+  /**
+   * The summaries this one was built into — its parents, pointing up (WP-3.2 L2). The archive is
+   * grown upward from level 0, so a root has none. A child too large for one prompt is split
+   * across several parents (R11), so more than one entry is legitimate here; a parent has one
+   * entry per summary it ingested, and its own children are the summaries that name it.
+   */
   parentIds:  LcmSummaryId[];
   messageIds: LcmMessageId[];
   content:    string;

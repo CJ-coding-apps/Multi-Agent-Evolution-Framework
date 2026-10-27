@@ -753,12 +753,23 @@ export class RoleDispatcher {
       );
     }
     for (const record of assembled.lcmDegraded ?? []) {
-      // L3c: a root the archive could not shrink is not a failed compaction — the summaries are
-      // intact, and the injector renders cues for that root instead. Say which happened.
+      // L3c/V8/V10: say which thing happened. A root too large is not a failed compaction (its
+      // summaries are intact, and it is omitted or offered as a cue); a retry that itself failed
+      // says so rather than claiming the archive tried a tighter one; and a cli-tier reader gets
+      // the limit named, because a cue it cannot expand is not an offer.
+      const root = record.summaryId ?? '(unknown)';
+      const tokens = record.tokens ?? '?';
       const line = record.reason === 'root-over-budget'
-        ? `[lcm] archive root ${record.summaryId ?? '(unknown)'} still exceeds the injector budget ` +
-          `(${record.tokens ?? '?'} tokens) after a tighter retry; rendering cues instead`
-        : `[lcm] compaction failed: ${record.reason}; continuing uncompacted`;
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) ` +
+          `after the one retry it is allowed; the archive omits it`
+        : record.reason.startsWith('root-retry-failed')
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) and its ` +
+          `one retry failed (${record.reason.replace(/^root-retry-failed:\s*/, '')}); the archive omits it`
+        : record.reason === 'cli-tier-cues'
+        ? `[lcm] the cli tier cannot act on a cue; archive root ${root} (${tokens} tokens) is ` +
+          `omitted rather than offered as one it could not expand`
+        : `[lcm] compaction failed: ${record.reason.replace(/^compaction-failed:\s*/, '')}; ` +
+          `continuing uncompacted`;
       await this.config.transcript.append(
         'system',
         line,

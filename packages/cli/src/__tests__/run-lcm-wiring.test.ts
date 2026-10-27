@@ -9,7 +9,8 @@ import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, CliAdapter,
 } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
-import { buildRunStack } from '../wiring.js';
+import type { Attestor } from '@maf/attestation';
+import { buildRunStack, createRunLcm } from '../wiring.js';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import type { ResolvedMafConfig } from '../config/ConfigLoader.js';
@@ -47,7 +48,11 @@ class RecordingAdapter implements CliAdapter {
    * A backend whose summarization calls fail, for F5. `transport` is the retryable class
    * (`TransportError`); `error` is a judgement, which must not be retried.
    */
-  constructor(private readonly failSummary?: 'transport' | 'error') {}
+  constructor(
+    private readonly failSummary?: 'transport' | 'error',
+    /** What a summary call answers; a test about an oversized archive makes it huge. */
+    private readonly summaryOutput = SUMMARY_TEXT,
+  ) {}
 
   capabilities(): AdapterCapabilities {
     return {
@@ -69,7 +74,7 @@ class RecordingAdapter implements CliAdapter {
           : {}),
       };
     }
-    const output = summary ? SUMMARY_TEXT : `answer ${++this.taskCount}`;
+    const output = summary ? this.summaryOutput : `answer ${++this.taskCount}`;
     return {
       success: true, output, exitCode: 0, duration: 1, toolCallLog: [],
       ...(summary ? { tokensUsed: REPORTED_TOKENS } : {}),
@@ -327,4 +332,87 @@ test('a summarizer that answers with a failure is not retried (F5)', needsLcm, a
     assert.equal(bundle.lcmDegraded?.length, summaryCalls.length,
       'one call per failed compaction — the judgement was not retried');
   }, adapter);
+});
+
+// L3m/V8: the run's log line says which fact applied. An operator who sees "compaction failed"
+// for an archive whose summaries are intact is told the wrong thing, and a retry that itself
+// failed must not be reported as one that ran with a tighter target. `createRunLcm` is driven
+// directly so the engine (not a dispatcher) is the caller: this is the background-pass path.
+test('the run log names what degraded, in the same words the transcript uses (L3m)', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-lcm-degraded-'));
+  const logged: string[] = [];
+  const degraded: Array<{ reason: string }> = [];
+  const attestor = {
+    recordLcmSettings: () => {},
+    recordModelSurface: () => {},
+    recordLcmDegraded: (record: { reason: string }) => { degraded.push(record); },
+  } as unknown as Attestor;
+  const original = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+  // A summary far larger than any budget this test uses: the root cannot fit, and the retry's
+  // own output cannot either.
+  const huge = new RecordingAdapter(undefined, 'word '.repeat(12_000));
+  const runId = makeRunId(crypto.randomUUID());
+  try {
+    const mafDir = path.join(root, 'over-budget'); await mkdir(mafDir, { recursive: true });
+    const seeded = createRunLcm({
+      mafDir, cwd: root, adapter: huge, lcm: settings(), sessionId: 'sess-a', attestor,
+    });
+    let rootId: string;
+    try {
+      const ids = [];
+      for (const content of ['one', 'two']) {
+        ids.push(await seeded.engine.addMessage({ sessionId: 'sess-a', runId, role: 'user', content, tokens: 1 }));
+      }
+      rootId = await seeded.engine.summarizeChunk(ids, 'LLM-Map');
+      await seeded.engine.assembleContext('sess-a', 10, 'Upward');
+    } finally {
+      seeded.close();
+    }
+    assert.equal(logged.length, 1);
+    const overBudget = /^\[lcm\] archive root (\S+) still exceeds the injector budget \((\d+) tokens\) after the one retry it is allowed; the archive omits it$/.exec(logged[0]!);
+    assert.ok(overBudget, `the line names an oversized root: ${logged[0]!}`);
+    assert.notEqual(overBudget[1], rootId,
+      'the retry did produce a new root; it is the one that still does not fit');
+    assert.equal(overBudget[2], '15000', 'the size is the root\'s own, not the budget');
+    assert.equal(degraded.length, 1, 'and the run record carries the same fact');
+
+    // A second archive, seeded but never assembled, opened with a summarizer that answers "no":
+    // the one retry runs and fails.
+    logged.length = 0; degraded.length = 0;
+    const mafDirB = path.join(root, 'retry-failed'); await mkdir(mafDirB, { recursive: true });
+    const seedB = createRunLcm({
+      mafDir: mafDirB, cwd: root, adapter: huge, lcm: settings(), sessionId: 'sess-b', attestor,
+    });
+    let rootIdB: string;
+    try {
+      const idsB = [];
+      for (const content of ['one', 'two']) {
+        idsB.push(await seedB.engine.addMessage({ sessionId: 'sess-b', runId, role: 'user', content, tokens: 1 }));
+      }
+      rootIdB = await seedB.engine.summarizeChunk(idsB, 'LLM-Map');
+    } finally {
+      seedB.close();
+    }
+    const failing = createRunLcm({
+      mafDir: mafDirB, cwd: root, adapter: new RecordingAdapter('error'),
+      lcm: settings(), sessionId: 'sess-b', attestor,
+    });
+    try {
+      await failing.engine.assembleContext('sess-b', 10, 'Upward');
+    } finally {
+      failing.close();
+    }
+    assert.equal(logged.length, 1);
+    assert.match(logged[0]!, new RegExp(
+      `^\\[lcm\\] archive root ${rootIdB} still exceeds the injector budget \\(\\d+ tokens\\) ` +
+      'and its one retry failed \\(LCM summarization failed',
+    ), 'the failed retry is reported as failed, against the root that remains');
+    assert.doesNotMatch(logged[0]!, /after a tighter retry|tighter retry/,
+      'it did not report a retry that never produced anything');
+    assert.equal(degraded.length, 1);
+  } finally {
+    console.error = original;
+    await rm(root, { recursive: true, force: true });
+  }
 });

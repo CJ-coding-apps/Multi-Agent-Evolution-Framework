@@ -1709,3 +1709,110 @@ test('the dispatcher tells the injector whether the node can call MAF tools (R14
   assert.deepEqual(seen[1], { role: 'analyst', mafToolsAvailable: true },
     'an in-process role can call lcm.expand, so a cue is an instruction it can follow');
 });
+
+// T1: a node's answer reaches the transcript exactly once, on every path that produces one.
+// The in-process transcript processor writes every step's assistant text at `step_end`; appending
+// the final answer again here stored it twice — in the transcript and in `lcm_messages`, where it
+// was summarized and charged twice. But the cli tier has no pipeline, and a custom bundle may
+// leave the transcript processor out, so deleting the append entirely would lose the answer there.
+// Each half below pins one direction: the unconditional append (T1b) and its removal (T1c).
+test('a node answer reaches the transcript exactly once, on every tier (T1)', async () => {
+  // The cli tier: no pipeline runs, so the dispatcher's append is the only writer.
+  const cli = await makeFixture({
+    roleExecution: 'cli', adapter: new CliOnlyAdapter(), policyHandler: ALLOW,
+  });
+  try {
+    await cli.dispatcher.runNode(makeNode(ANALYST));
+    const answers = cli.transcript.entries.filter((e) => e.role === 'assistant');
+    assert.equal(answers.length, 1, 'the cli tier has no processor to record the answer');
+    assert.equal(answers[0]!.content, 'CLI-PATH');
+  } finally {
+    await cli.cleanup();
+  }
+
+  // An in-process reader must execute a call, or D-46's `no_work` fails it before the answer is
+  // written; the read is not what this test is about.
+  const readerWithOneCall = (): StubTurnAdapter => {
+    const adapter = new StubTurnAdapter();
+    adapter.turnsToServe = [
+      { text: 'reading', toolCalls: [{ toolUseId: 'u1', toolName: 'fs.read', input: { path: 'hello.txt' } }] },
+      { text: 'done reading', toolCalls: [] },
+    ];
+    return adapter;
+  };
+
+  // The default bundle: the transcript processor recorded each step, and only it.
+  const recorded = await makeFixture({
+    roleExecution: 'in-process', adapter: readerWithOneCall(), policyHandler: ALLOW,
+  });
+  try {
+    await recorded.dispatcher.runNode(makeNode(ANALYST));
+    const answers = recorded.transcript.entries.filter((e) => e.role === 'assistant');
+    assert.deepEqual(answers.map((e) => e.content), ['reading', 'done reading'],
+      'one line per step; the final answer was not appended a second time');
+  } finally {
+    await recorded.cleanup();
+  }
+
+  // A custom bundle without the transcript processor: nobody in the pipeline writes the answer,
+  // so the dispatcher still must.
+  const bare = await makeFixture({
+    roleExecution: 'in-process', adapter: readerWithOneCall(), policyHandler: ALLOW,
+    bundles: mintHarnessConfig({
+      id: 'no-transcript',
+      roleSet: {
+        version: 1, defaultRole: ANALYST,
+        roles: [{ role: ANALYST, allowedTools: ['fs.read'], execution: 'in-process' }],
+      },
+      processorBundles: [{ name: 'policy-audit' }],
+    }),
+  });
+  try {
+    await bare.dispatcher.runNode(makeNode(ANALYST));
+    const answers = bare.transcript.entries.filter((e) => e.role === 'assistant');
+    assert.deepEqual(answers.map((e) => e.content), ['done reading'],
+      'a bundle with no transcript processor still gets the final answer, once');
+  } finally {
+    await bare.cleanup();
+  }
+});
+
+// L3c/V8: each degraded-archive line says which thing happened. Three distinct facts used to share
+// one sentence — a root too large was reported as a failed compaction, and a retry that itself
+// failed claimed the engine had "retried after a tighter" target that never ran.
+test('each degraded archive is reported for what happened, not as one generic line (L3l)', async () => {
+  const injector = {
+    assemble: async () => ({
+      systemPromptPrefix: '',
+      estimatedTokens: 0,
+      lcmDegraded: [
+        { sessionId: 's1', reason: 'root-over-budget', summaryId: makeLcmSummaryId('root-a'), tokens: 900 },
+        {
+          sessionId: 's1', reason: 'root-retry-failed: backend refused',
+          summaryId: makeLcmSummaryId('root-b'), tokens: 901,
+        },
+        { sessionId: 's1', reason: 'cli-tier-cues', summaryId: makeLcmSummaryId('root-c'), tokens: 902 },
+      ],
+    }),
+  } as unknown as GraphAwareInjector;
+  const f = await makeFixture({
+    roleExecution: 'cli', adapter: new CliOnlyAdapter(), policyHandler: ALLOW, injector,
+  });
+  try {
+    await f.dispatcher.runNode(makeNode(ANALYST));
+    const lines = f.transcript.entries
+      .filter((e) => e.metadata['kind'] === 'lcm-degraded')
+      .map((e) => e.content);
+    assert.deepEqual(lines, [
+      '[lcm] archive root root-a still exceeds the injector budget (900 tokens) after the one retry it is allowed; the archive omits it',
+      '[lcm] archive root root-b still exceeds the injector budget (901 tokens) and its one retry failed (backend refused); the archive omits it',
+      '[lcm] the cli tier cannot act on a cue; archive root root-c (902 tokens) is omitted rather than offered as one it could not expand',
+    ]);
+    assert.ok(
+      lines.every((l) => !l.includes('tighter retry')),
+      'a retry that failed is not reported as one that ran',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});

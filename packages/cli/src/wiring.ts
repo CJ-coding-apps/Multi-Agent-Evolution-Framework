@@ -175,11 +175,23 @@ export function createRunLcm(input: RunLcmInput): RunLcm {
     // written by the dispatcher from `ctx.degraded`, which is per-node; this one is the run's log,
     // for a background pass that has no node.
     onDegraded: (record) => {
-      // L3c: an oversized root is not a failed compaction; say which one and what the injector does.
+      // L3c/V8/V10: an oversized root is not a failed compaction; say which one and what the
+      // injector does. A failed retry says so, and the cli tier's limit is named rather than
+      // reported as a cue it was handed. The dispatcher writes the same sentences to the
+      // transcript for a node's assembly; this one is the run's log.
+      const root = record.summaryId ?? '(unknown)';
+      const tokens = record.tokens ?? '?';
       console.error(record.reason === 'root-over-budget'
-        ? `[lcm] archive root ${record.summaryId ?? '(unknown)'} still exceeds the injector budget ` +
-          `(${record.tokens ?? '?'} tokens) after a tighter retry; rendering cues instead`
-        : `[lcm] compaction failed: ${record.reason}; continuing uncompacted`);
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) ` +
+          `after the one retry it is allowed; the archive omits it`
+        : record.reason.startsWith('root-retry-failed')
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) and its ` +
+          `one retry failed (${record.reason.replace(/^root-retry-failed:\s*/, '')}); the archive omits it`
+        : record.reason === 'cli-tier-cues'
+        ? `[lcm] the cli tier cannot act on a cue; archive root ${root} (${tokens} tokens) is ` +
+          `omitted rather than offered as one it could not expand`
+        : `[lcm] compaction failed: ${record.reason.replace(/^compaction-failed:\s*/, '')}; ` +
+          `continuing uncompacted`);
       input.attestor.recordLcmDegraded(record);
     },
   });
