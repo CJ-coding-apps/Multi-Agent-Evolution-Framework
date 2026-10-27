@@ -765,11 +765,20 @@ export class RoleDispatcher {
         shortfall = loopShortfall(role, loop);
         if (loop.outcome === 'completed') answer = { tier: 'in-process', finalText: loop.finalText, turns: loop.steps };
       } else {
-        const cliResult = await adapter.invoke(invokeOpts);
-        // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
-        // the same evidence shape as F4's governed turn, `tier: 'cli'`. What the dispatcher asked of
-        // the backend's own tools goes in with it (F3), because for codex and gemini no argv shows it.
-        await this.recordCliSurface(role, taskId, cliResult, invokeOpts);
+        let cliResult: AdapterInvokeResult | undefined;
+        try {
+          cliResult = await adapter.invoke(invokeOpts);
+        } finally {
+          // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
+          // the same evidence shape as F4's governed turn, `tier: 'cli'`. What the dispatcher asked
+          // of the backend's own tools goes in with it (F3), because for codex and gemini no argv
+          // shows it. The record is written whether the call returned or threw (R2-S1): a backend
+          // that times out or never starts still took a turn this run asked for, and omitting it
+          // would leave that governed writer's failed turn out of the evidence entirely.
+          await this.recordCliSurface(role, taskId, cliResult, invokeOpts);
+        }
+        // The `finally` above records on both paths; a returned result is the only way here.
+        if (cliResult === undefined) throw new Error('unreachable: adapter.invoke returned no result');
         outputForMemory = cliResult.output.slice(0, MAX_STORED_OUTPUT_CHARS);
         shortfall = cliShortfall(role, adapter.name, cliResult);
         answer = { tier: 'cli', result: cliResult };
@@ -921,6 +930,9 @@ export class RoleDispatcher {
         runId:     this.config.runId,
         taskId,
         pipeline,
+        // R2-L2: where the loop reports a surface record it could not write. Same channel as the
+        // dispatcher's own warning and the ungoverned banner.
+        stderr: this.config.stderr ?? process.stderr,
       },
     );
 
@@ -961,11 +973,16 @@ export class RoleDispatcher {
    * assembles none — `ollama`, `openrouter`, which spawn no process — still gets a record built here
    * from what this call site sent and received (`callModelSurface`), so the call is not dropped for
    * lack of an argv. A node's cli-tier call is one turn.
+   *
+   * `result` is absent when the call threw (R2-S1): the surface sent is still known exactly, so the
+   * record carries the digests of what was sent, no `outputSha256` (there was no answer to hash),
+   * and `error: 'thrown'`. The write itself never changes the call's outcome (R2-L2): a recorder
+   * that fails is reported on stderr, and the call's own result or error still decides the node.
    */
   private async recordCliSurface(
     role: RoleConfig,
     taskId: TaskId,
-    result: AdapterInvokeResult,
+    result: AdapterInvokeResult | undefined,
     invokeOpts: AdapterInvokeOptions,
   ): Promise<void> {
     const askedNativeTools = invokeOpts.nativeTools;
@@ -973,7 +990,7 @@ export class RoleDispatcher {
       role: role.role, taskId, turn: 1,
       // L1: an adapter that reports a surface keeps it (its argv is evidence this layer cannot
       // reconstruct); one that reports none gets the digests of what was sent and answered.
-      ...(result.modelSurface ?? callModelSurface(invokeOpts.systemPrompt, invokeOpts.prompt, result.output)),
+      ...(result?.modelSurface ?? callModelSurface(invokeOpts.systemPrompt, invokeOpts.prompt, result?.output)),
       tier: 'cli',
       // F3: what the dispatcher asked of the backend's own tools. `undefined` is the default —
       // nothing was asked, and the backend keeps its native tools — and it is recorded as 'full'
@@ -987,23 +1004,38 @@ export class RoleDispatcher {
       // `planGenerator` and `SecurityReviewGate`, in this same array.
       nativeTools: askedNativeTools === false ? 'none' : askedNativeTools === 'read-only' ? 'read-only' : 'full',
       kind: 'role-call',
+      ...(result === undefined ? { error: 'thrown' as const } : {}),
       ...(invokeOpts.model !== undefined ? { model: invokeOpts.model } : {}),
     };
-    this.config.attestor.recordModelSurface?.(record);
-    await this.config.transcript.append(
-      'system',
-      `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; ` +
-      `prompt sha256 ${record.promptSha256 ?? '(none)'}; output sha256 ${record.outputSha256 ?? '(none)'}; ` +
-      `native tools ${record.nativeTools ?? '(unrecorded)'}; argv ${JSON.stringify(record.argv)}`,
-      { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
-        systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
-        // F7: both digests, so the transcript alone ties the argv's elided markers to what was sent
-        // and ties the output to what came back, without the prompt or the output themselves.
-        ...(record.promptSha256 !== undefined ? { promptSha256: record.promptSha256 } : {}),
-        ...(record.outputSha256 !== undefined ? { outputSha256: record.outputSha256 } : {}),
-        ...(record.stdinSha256 !== undefined ? { stdinSha256: record.stdinSha256 } : {}),
-        nativeTools: record.nativeTools },
-    );
+    try {
+      this.config.attestor.recordModelSurface?.(record);
+      await this.config.transcript.append(
+        'system',
+        `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; ` +
+        `prompt sha256 ${record.promptSha256 ?? '(none)'}; output sha256 ${record.outputSha256 ?? '(none)'}; ` +
+        `native tools ${record.nativeTools ?? '(unrecorded)'}; argv ${JSON.stringify(record.argv)}` +
+        (record.error !== undefined ? `; error ${record.error}` : ''),
+        { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
+          systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
+          // F7: both digests, so the transcript alone ties the argv's elided markers to what was sent
+          // and ties the output to what came back, without the prompt or the output themselves.
+          ...(record.promptSha256 !== undefined ? { promptSha256: record.promptSha256 } : {}),
+          ...(record.outputSha256 !== undefined ? { outputSha256: record.outputSha256 } : {}),
+          ...(record.stdinSha256 !== undefined ? { stdinSha256: record.stdinSha256 } : {}),
+          ...(record.error !== undefined ? { error: record.error } : {}),
+          nativeTools: record.nativeTools },
+      );
+    } catch (err: unknown) {
+      // R2-L2: this runs in the call's `finally`, so letting the recorder's failure out would
+      // replace the transport error with "the transcript could not append" — the node's real
+      // failure lost behind the evidence trail's. The record is best-effort; the call's outcome
+      // is not. Say on stderr what could not be written, and let the call's own result or error
+      // through.
+      (this.config.stderr ?? process.stderr).write(
+        `[maf] warning: could not record the model surface for role "${role.role}" ` +
+        `(turn ${record.turn}): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   }
 
   /**

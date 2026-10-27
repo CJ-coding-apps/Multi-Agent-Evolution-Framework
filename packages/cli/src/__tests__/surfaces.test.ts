@@ -47,6 +47,34 @@ class CliTierScripted extends ScriptedAdapter {
   }
 }
 
+/**
+ * The cli-tier model whose governed role call throws (R2-S1): the backend takes the call and exits
+ * without answering, the way a timeout or a non-zero exit reaches the dispatcher. The exchange is
+ * pushed before the throw, exactly as `ScriptedAdapter` pushes one, so the bijection sees a call
+ * the adapter really took.
+ */
+class CliTierThrowsOnRole extends CliTierScripted {
+  override async invoke(o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    if (o.prompt !== TASK) return super.invoke(o);
+    this.exchanges.push({
+      via: 'invoke', kind: 'task', systemPrompt: o.systemPrompt ?? '', prompt: o.prompt, tools: o.tools ?? [],
+    });
+    throw new Error('the backend exited before answering');
+  }
+}
+
+/** The in-process model whose first governed turn throws (R2-S1). */
+class InProcessThrowsOnTurn extends ScriptedAdapter {
+  override async sendTurn(history: TurnMessage[], o: AdapterInvokeOptions): Promise<AssistantTurn> {
+    const first = history.find((m) => m.kind === 'user');
+    this.exchanges.push({
+      via: 'turn', kind: 'task', systemPrompt: o.systemPrompt ?? '',
+      prompt: first && first.kind === 'user' ? first.text : '', tools: o.tools ?? [],
+    });
+    throw new Error('the backend exited mid-turn');
+  }
+}
+
 type ExchangeKind = 'role-turn' | 'summary' | 'planner' | 'security-gate' | 'other';
 
 /**
@@ -79,10 +107,15 @@ function surfaceKey(s: ModelSurfaceRecord): string {
   return `${s.systemPromptSha256}|${s.promptSha256 ?? ''}|${s.outputSha256 ?? ''}`;
 }
 
-/** The same key, computed from what the adapter was handed and answered. */
+/**
+ * The same key, computed from what the adapter was handed and answered. An `invoke` that threw
+ * answered with no text at all, so its output component is absent — the same thing
+ * `surfaceKey`'s `outputSha256 ?? ''` says — not the digest of an empty string, which is what an
+ * adapter that answered `''` carries (R2-S1).
+ */
 function exchangeKey(e: ScriptedExchange): string {
   if (e.via === 'turn') return `${sha256Hex(e.systemPrompt)}||`;
-  return `${sha256Hex(e.systemPrompt)}|${sha256Hex(e.prompt)}|${sha256Hex(e.output ?? '')}`;
+  return `${sha256Hex(e.systemPrompt)}|${sha256Hex(e.prompt)}|${e.output === undefined ? '' : sha256Hex(e.output)}`;
 }
 
 /**
@@ -347,6 +380,67 @@ test('L1-S1: a cli-tier adapter that reports no surface records the planner, the
     assert.equal(role.promptSha256, sha256Hex(roleCall.prompt));
     assert.equal(role.systemPromptSha256, sha256Hex(roleCall.systemPrompt));
     assert.deepEqual(role.argv, [], 'no argv is invented for an adapter that reported none');
+
+    assertBijection(surfaces, exchanges);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ── R2-S1: a call that throws is a call ────────────────────────────────────────────────────────────
+// The record is written from the call's `finally`, not after it. A backend that times out or exits
+// non-zero took the turn this run asked for; recording only on return drops exactly the turn a
+// reader most needs to see. The surface sent is known, the answer is not, so `error: 'thrown'` and
+// no `outputSha256`.
+
+test('R2-S1: a cli-tier role call that throws is recorded once, with what was sent and no output digest', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-cli-throw-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const scripted = new CliTierThrowsOnRole([onePlannedNode(TASK)]);
+    const { surfaces, exchanges } = await runAndRead(repo, scripted, ['--allow-ungoverned'], TASK, 'failure');
+
+    const roles = surfaces.filter((s) => s.kind === 'role-call');
+    assert.equal(roles.length, 1, 'one call that threw, one record: not zero, and not one per attempt');
+    const role = roles[0];
+    assert.ok(role);
+    assert.equal(role.tier, 'cli');
+    assert.equal(role.error, 'thrown');
+    assert.equal(role.outputSha256, undefined, 'the call answered with no bytes, so none are hashed');
+
+    const call = exchanges.find((e) => e.via === 'invoke' && e.prompt === TASK);
+    assert.ok(call, 'the adapter took the role call before throwing');
+    assert.equal(role.systemPromptSha256, sha256Hex(call.systemPrompt), 'the surface sent is still known');
+    assert.equal(role.promptSha256, sha256Hex(call.prompt));
+
+    // A mutant that records only on return leaves the throwing call unmatched: the exchange has no
+    // surface, and the bijection fails in both directions it checks.
+    assertBijection(surfaces, exchanges);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('R2-S1: an in-process turn that throws is recorded once, with the system digest and no output digest', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-turn-throw-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const scripted = new InProcessThrowsOnTurn([onePlannedNode(TASK)]);
+    const { surfaces, exchanges } = await runAndRead(repo, scripted, [], TASK, 'failure');
+
+    const roles = surfaces.filter((s) => s.kind === 'role-call');
+    assert.equal(roles.length, 1, 'one governed turn that threw, one record');
+    const role = roles[0];
+    assert.ok(role);
+    assert.equal(role.tier, 'in-process');
+    assert.equal(role.error, 'thrown');
+    assert.equal(role.outputSha256, undefined, 'the turn answered with no parsed surface');
+    assert.equal(role.promptSha256, undefined, 'a turn has no single prompt string, so none is invented');
+
+    const call = exchanges.find((e) => e.via === 'turn');
+    assert.ok(call, 'the adapter took the turn before throwing');
+    assert.equal(role.systemPromptSha256, sha256Hex(call.systemPrompt), 'the system block sent is known');
+    assert.deepEqual(role.argv, []);
 
     assertBijection(surfaces, exchanges);
   } finally {

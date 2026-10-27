@@ -327,8 +327,17 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // written still says which calls it made. The planner's and the gate's call sites both record
     // through here, so neither can reach one store and miss the other.
     const recordSurface = async (record: ModelSurfaceRecord): Promise<void> => {
-      attestor.recordModelSurface(record);
-      await transcript.append('system', surfaceLine(record), surfaceMetadata(record));
+      try {
+        attestor.recordModelSurface(record);
+        await transcript.append('system', surfaceLine(record), surfaceMetadata(record));
+      } catch (err: unknown) {
+        // R2-L2: the planner and the gate call this from a `finally`, so a write failure that
+        // escaped would replace the call's own error — or turn a valid result into a throw — with
+        // a transcript error. The surface record is evidence about the call; it does not outrank
+        // the call. Report what could not be written and keep the outcome.
+        warn(`[maf] warning: could not record the ${record.kind ?? 'call'} surface ` +
+          `(turn ${record.turn}): ${err instanceof Error ? err.message : String(err)}`);
+      }
     };
 
     // L1-S2: the bundle a finished run writes, and the one a run whose planning call failed writes

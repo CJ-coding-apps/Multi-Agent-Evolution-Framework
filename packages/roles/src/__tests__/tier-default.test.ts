@@ -65,6 +65,19 @@ class TurnStub implements TurnAdapter {
   }
 }
 
+/** A cli-only backend whose call throws, the way a timeout or a non-zero exit reaches the dispatcher. */
+class CliThrows implements CliAdapter {
+  readonly name = 'cli-throws';
+  invoked = 0;
+  capabilities(): AdapterCapabilities { return { ...CAPS, inProcessLoop: false }; }
+  async isAvailable(): Promise<boolean> { return true; }
+  async invoke(): Promise<AdapterInvokeResult> {
+    this.invoked++;
+    throw new TransportError('the backend did not finish in time');
+  }
+  async *stream(): AsyncGenerator<string> { yield 'x'; }
+}
+
 /** A backend with no in-process loop (Gemini's shape). */
 class CliOnly implements CliAdapter {
   readonly name = 'cli-only';
@@ -518,6 +531,43 @@ test('a tool that throws while running is answered: the node goes on, and what i
     assert.deepEqual(taskEnds(fx), ['task_end: completed']);
     assert.equal(fx.reviewed.length, 1);
     assert.match(fx.reviewed[0] ?? '', /halfway\.txt/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('R2-S1: a cli-tier call that throws is still recorded, once, with error thrown and no output digest', async () => {
+  const adapter = new CliThrows();
+  const fx = await makeFixture({ adapter, role: role('coder', WRITE_TOOLS, 'cli'), allowUngoverned: true });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), TransportError);
+    // The fixture's attestor is a stub without `recordModelSurface`, so the transcript mirror is
+    // what this test can read: one line for the call that threw, and it says how it ended.
+    const lines = fx.transcript.filter((e) => e.role === 'system' && e.content.startsWith('[surface]'));
+    assert.equal(lines.length, 1, 'the call that threw is recorded exactly once');
+    assert.match(lines[0]?.content ?? '', /error thrown/);
+    assert.match(lines[0]?.content ?? '', /output sha256 \(none\)/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('R2-L2: a surface record the transcript refuses does not replace the cli call\'s own error', async () => {
+  const adapter = new CliThrows();
+  const fx = await makeFixture({
+    adapter, role: role('coder', WRITE_TOOLS, 'cli'), allowUngoverned: true,
+    transcriptThrows: (c) => c.startsWith('[surface]'),
+  });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), (err: unknown) => {
+      assert.ok(err instanceof TransportError, 'the backend\'s own failure is what the caller sees');
+      assert.match(err.message, /the backend did not finish in time/);
+      return true;
+    });
+    assert.ok(
+      fx.stderr.some((l) => l.includes('could not record the model surface for role "coder"')),
+      'the recording failure is reported, not swallowed silently',
+    );
   } finally {
     await fx.cleanup();
   }

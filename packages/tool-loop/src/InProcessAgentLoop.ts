@@ -50,6 +50,8 @@ export interface InProcessLoopDeps {
   transcript?: TranscriptSink;
   /** Asked when the policy escalates a call (D-02); reaches executeToolGated with these deps. */
   approvalGate?: ApprovalGateHandle | undefined;
+  /** Where a failure to write the surface record is reported; `process.stderr` when unset. */
+  stderr?: { write(text: string): unknown };
 }
 
 export interface InProcessLoopResult {
@@ -255,8 +257,18 @@ export class InProcessAgentLoop {
     promptHistory: TurnMessage[],
     systemPrompt: string,
   ): Promise<{ turn: AssistantTurn; intercepted: boolean }> {
-    const turn = await this.callModel(promptHistory, systemPrompt);
-    await this.recordSurface(base, stepIndex, turn, systemPrompt);
+    // The turn and its record are one call, whether it returns or throws (R2-S1): an adapter that
+    // times out or exits non-zero still took a turn this run asked for, and the surface it was
+    // shown is known exactly. Recording only on return would drop the failed turn from the
+    // evidence — the one turn a reader most wants to see.
+    let turn: AssistantTurn | undefined;
+    try {
+      turn = await this.callModel(promptHistory, systemPrompt);
+    } finally {
+      await this.recordSurface(base, stepIndex, turn, systemPrompt);
+    }
+    // The `finally` above records on both paths; a returned turn is the only way here.
+    if (turn === undefined) throw new Error('unreachable: adapter.sendTurn returned no turn');
     if (!this.deps.pipeline) return { turn, intercepted: false };
     const ev = await this.deps.pipeline.run({ ...base, hook: 'after_model', stepIndex, turn });
     const first = this.firstEvent<{ turn: AssistantTurn }>(ev, 'after_model');
@@ -274,14 +286,20 @@ export class InProcessAgentLoop {
    * and output are left absent, not hashed as empty strings — a governed turn's prompt is the
    * serialized history and its answer is a parsed `AssistantTurn`, neither a single byte string, and
    * "not recorded" must read differently from "recorded as empty".
+   *
+   * `turn` is absent when the model call threw (R2-S1): the system block and the prompt history
+   * this loop handed the adapter are still known, so the record is written with the surface's
+   * fallback digest, no `outputSha256`, and `error: 'thrown'`. The write is best-effort (R2-L2):
+   * this runs in the call's `finally`, so a recorder that throws would replace the adapter's
+   * error; it is reported on stderr instead, and the call's own outcome stands.
    */
   private async recordSurface(
     base: { runId: RunId; taskId: TaskId; role: string },
     stepIndex: number,
-    turn: AssistantTurn,
+    turn: AssistantTurn | undefined,
     systemPrompt: string,
   ): Promise<void> {
-    const surface = turn.modelSurface ?? {
+    const surface = turn?.modelSurface ?? {
       systemPromptSha256: sha256Hex(systemPrompt), toolCatalog: '', argv: [],
     };
     // `tier` names which half of the run produced this call (WP-3.0c): the loop's own governed turn
@@ -290,14 +308,24 @@ export class InProcessAgentLoop {
     const record: ModelSurfaceRecord = {
       role: base.role, taskId: base.taskId, turn: stepIndex + 1, ...surface, tier: 'in-process',
       kind: 'role-call',
+      ...(turn === undefined ? { error: 'thrown' as const } : {}),
     };
-    this.deps.attestor.recordModelSurface?.(record);
-    await this.deps.transcript?.append(
-      'system',
-      `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; argv ${JSON.stringify(record.argv)}`,
-      { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
-        systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv },
-    );
+    try {
+      this.deps.attestor.recordModelSurface?.(record);
+      await this.deps.transcript?.append(
+        'system',
+        `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; argv ${JSON.stringify(record.argv)}` +
+        (record.error !== undefined ? `; error ${record.error}` : ''),
+        { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
+          systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
+          ...(record.error !== undefined ? { error: record.error } : {}) },
+      );
+    } catch (err: unknown) {
+      (this.deps.stderr ?? process.stderr).write(
+        `[maf] warning: could not record the model surface for role "${base.role}" ` +
+        `(turn ${record.turn}): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   }
 
   private async callModel(history: TurnMessage[], systemPrompt: string): Promise<AssistantTurn> {

@@ -212,6 +212,61 @@ test('F4: each turn\'s model surface reaches the attestor and the transcript, nu
   assert.match(appended[0]?.content ?? '', /\[surface\] turn 1/, 'the transcript line says what it is');
 });
 
+/** A backend whose governed turn throws, the way a timeout or an exit reaches the loop. */
+class ThrowingAdapter extends ScriptedAdapter {
+  override async sendTurn(): Promise<AssistantTurn> {
+    throw new Error('the backend exited mid-turn');
+  }
+}
+
+test('R2-S1: a turn that throws is recorded once, with the system digest and no output digest', async () => {
+  const attestor = new SpyAttestor();
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    { ...baseDeps(new ThrowingAdapter([]), attestor), transcript: { append: async () => {} } },
+  );
+  await assert.rejects(loop.run(), /the backend exited mid-turn/);
+
+  assert.deepEqual(attestor.surfaces, [{
+    role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    systemPromptSha256: sha256Hex(baseOpts.systemPrompt),
+    toolCatalog: '', argv: [], tier: 'in-process', kind: 'role-call', error: 'thrown',
+  }], 'the failed turn is in the record exactly once, and it carries no output digest');
+});
+
+test('R2-L2: a surface record that cannot be written does not replace the turn\'s own error', async () => {
+  const attestor = new SpyAttestor();
+  const stderr: string[] = [];
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    {
+      ...baseDeps(new ThrowingAdapter([]), attestor),
+      transcript: { append: async () => { throw new Error('the transcript is full'); } },
+      stderr: { write: (text: string) => { stderr.push(text); return true; } },
+    },
+  );
+  await assert.rejects(loop.run(), /the backend exited mid-turn/);
+  assert.equal(attestor.surfaces.length, 1, 'the bundle copy was written before the transcript failed');
+  assert.match(stderr.join(''), /could not record the model surface for role "analyst"/);
+});
+
+test('R2-L2: a surface record that cannot be written does not turn a completed turn into a throw', async () => {
+  const attestor = new SpyAttestor();
+  const stderr: string[] = [];
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    {
+      ...baseDeps(new ScriptedAdapter([{ text: 'done', toolCalls: [] }]), attestor),
+      transcript: { append: async () => { throw new Error('the transcript is full'); } },
+      stderr: { write: (text: string) => { stderr.push(text); return true; } },
+    },
+  );
+  const res = await loop.run();
+  assert.equal(res.outcome, 'completed', 'the model answered, so the run completes');
+  assert.equal(res.finalText, 'done');
+  assert.match(stderr.join(''), /could not record the model surface for role "analyst"/);
+});
+
 test('L1-S1: a turn the adapter reports no surface for still records the system block it was shown', async () => {
   const attestor = new SpyAttestor();
   const loop = new InProcessAgentLoop(
