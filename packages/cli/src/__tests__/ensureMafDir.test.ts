@@ -68,12 +68,20 @@ test('run creates .maf/ before it constructs any store that opens a file inside 
   const call = source.indexOf('await ensureMafDir(mafDir)');
   assert.ok(call >= 0, 'run.ts must call `await ensureMafDir(mafDir)`');
 
-  for (const store of ['new LcmEngine(', 'new MemoryGraph(']) {
-    const at = source.indexOf(store);
-    assert.ok(at >= 0,
-      `run.ts no longer contains \`${store}\`; point this test at wherever the store is now constructed`);
-    assert.ok(call < at, `\`${store}\` opens a file under .maf/ and must come after ensureMafDir(mafDir)`);
-  }
+  // R1 moved the engine's construction out of `run.ts` into the one factory in wiring.ts. The
+  // ordering obligation moves with it: `run` must call the factory after the directory exists,
+  // and the factory is the place that opens `lcm.db`.
+  const factory = source.indexOf('createRunLcm(');
+  assert.ok(factory >= 0,
+    'run.ts no longer calls `createRunLcm`; point this test at wherever the engine is now constructed');
+  assert.ok(call < factory, '`createRunLcm` opens a file under .maf/ and must come after ensureMafDir(mafDir)');
+
+  const graph = source.indexOf('new MemoryGraph(');
+  assert.ok(graph >= 0, 'run.ts no longer constructs the memory graph');
+  assert.ok(call < graph, '`new MemoryGraph(` opens a file under .maf/ and must come after ensureMafDir(mafDir)');
+
+  const wiring = await readFile(path.join(PACKAGE_ROOT, 'src', 'wiring.ts'), 'utf8');
+  assert.match(wiring, /new LcmEngine\(/, 'the single factory is where `lcm.db` is opened');
 });
 
 // ORACLE (F9 of the 0.3.0 release audit): after a run the user's `git status` showed `?? .maf/`, and
@@ -85,7 +93,7 @@ test('run creates .maf/ before it constructs any store that opens a file inside 
 async function leaveRunState(mafDir: string): Promise<void> {
   for (const entry of MAF_RUNTIME_STATE) {
     const at = path.join(mafDir, entry);
-    if (/\.(db|kuzu)|-wal$|-shm$/.test(entry)) {
+    if (/\.(db|kuzu)$|\.wal$|\.db-wal$|\.db-shm$|-wal$|-shm$/.test(entry)) {
       await writeFile(at, 'state', 'utf8');
     } else {
       await mkdir(at, { recursive: true });

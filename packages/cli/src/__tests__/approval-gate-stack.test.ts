@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -9,6 +9,7 @@ import type { AttestationBundle } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { buildRunStack } from '../wiring.js';
+import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { needsLcm } from './runFixture.js';
 
@@ -25,6 +26,12 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
   try {
     const repo = await createDemoFixture(root);
     const mafDir = path.join(root, 'state');
+    // `buildRunStack`'s contract is that the caller has created `mafDir` (run and goldens call
+    // `ensureMafDir`); the stores inside it open files and do not create it. This test passed only
+    // because Kùzu 0.7.1 creates the parent directory as a side effect of the schema query, and
+    // 0.11.3 does not — measured, `new Database(<missing parent>)` then a query: 0.7.1 creates it,
+    // 0.11.3 fails. Create it so the test proves the stack, not a library's side effect.
+    await mkdir(mafDir, { recursive: true });
     const policyPath = path.join(root, 'policy.yaml');
     await writeFile(policyPath, JSON.stringify({ rules: [
       { id: 'lock-files-need-a-human', description: 'lock files', priority: 95,
@@ -43,7 +50,7 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
     const runId = makeRunId(crypto.randomUUID());
     const stack = await buildRunStack({
       cwd: repo, mafDir, policy: { value: policyPath, typed: true }, adapter, runId,
-      harnessSha: harness.sha, headless: true,
+      harnessSha: harness.sha, headless: true, lcm: DEFAULT_MAF_CONFIG.lcm,
     });
     try {
       await stack.dispatchTask(harness, 'coder', PROMPT, repo, 60_000, 0);

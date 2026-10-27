@@ -721,10 +721,64 @@ export class RoleDispatcher {
     const roleTools = new RoleToolRegistry(this.config.baseTools, role.allowedTools);
     const rolePrompt = await this.config.roles.loadPrompt(role);
 
-    const { systemPromptPrefix } = await this.config.injector.assemble(
-      node.label, this.config.sessionId, role.role,
+    // The node whose assembly this is: a summary call made while preparing its prompt is a model
+    // call MAF made on this node's behalf, and it is attributed and charged here (WP-3.2 F1). A
+    // background compaction with no node passes no trigger and is attributed to the session.
+    const assembled = await this.config.injector.assemble(
+      node.label, this.config.sessionId, role.role, { taskId, nodeId: node.id },
+      // R14: a Dolt cue says "call lcm.expand", and only an in-process turn has MAF's tool registry
+      // to call it with. A cli-tier role gets the archive as summaries instead of an instruction it
+      // cannot follow.
+      { mafToolsAvailable: resolved.tier === 'in-process' },
     );
-    const systemPrompt = [systemPromptPrefix, rolePrompt].filter(Boolean).join('\n');
+    const systemPrompt = [assembled.systemPromptPrefix, rolePrompt].filter(Boolean).join('\n');
+    // The archive's own transcript lines: the calls it made, and any compaction that could not
+    // finish (F1, F5). Written before the node's turn so the call is recorded whether or not the
+    // turn that follows it fails.
+    for (const call of assembled.lcmSummaryCalls ?? []) {
+      await this.config.transcript.append(
+        'system',
+        `[surface] lcm summary ${call.summaryId} (level ${call.level}, ${call.messages} message(s)): ` +
+        `model ${call.model ?? '(unrecorded)'}; system sha256 ${call.systemPromptSha256 ?? '(none)'}; ` +
+        `prompt sha256 ${call.promptSha256 ?? '(none)'}; output sha256 ${call.outputSha256 ?? '(none)'}; ` +
+        `content tokens ${call.contentTokens}; reported tokens ${call.reportedTokens ?? '(none)'}`,
+        { agentRole: role.role, taskId, nodeId: node.id, tier: 'cli', kind: 'lcm-summary',
+          summaryId: call.summaryId, level: call.level, messages: call.messages,
+          contentTokens: call.contentTokens,
+          ...(call.reportedTokens !== undefined ? { reportedTokens: call.reportedTokens } : {}),
+          ...(call.model !== undefined ? { model: call.model } : {}),
+          ...(call.systemPromptSha256 !== undefined ? { systemPromptSha256: call.systemPromptSha256 } : {}),
+          ...(call.promptSha256 !== undefined ? { promptSha256: call.promptSha256 } : {}),
+          ...(call.outputSha256 !== undefined ? { outputSha256: call.outputSha256 } : {}) },
+      );
+    }
+    for (const record of assembled.lcmDegraded ?? []) {
+      // L3c/V8/V10: say which thing happened. A root too large is not a failed compaction (its
+      // summaries are intact, and it is omitted or offered as a cue); a retry that itself failed
+      // says so rather than claiming the archive tried a tighter one; and a cli-tier reader gets
+      // the limit named, because a cue it cannot expand is not an offer.
+      const root = record.summaryId ?? '(unknown)';
+      const tokens = record.tokens ?? '?';
+      const line = record.reason === 'root-over-budget'
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) ` +
+          `after the one retry it is allowed; the archive omits it`
+        : record.reason.startsWith('root-retry-failed')
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) and its ` +
+          `one retry failed (${record.reason.replace(/^root-retry-failed:\s*/, '')}); the archive omits it`
+        : record.reason === 'cli-tier-cues'
+        ? `[lcm] the cli tier cannot act on a cue; archive root ${root} (${tokens} tokens) is ` +
+          `omitted rather than offered as one it could not expand`
+        : `[lcm] compaction failed: ${record.reason.replace(/^compaction-failed:\s*/, '')}; ` +
+          `continuing uncompacted`;
+      await this.config.transcript.append(
+        'system',
+        line,
+        { agentRole: role.role, taskId, nodeId: node.id, kind: 'lcm-degraded',
+          reason: record.reason,
+          ...(record.summaryId !== undefined ? { summaryId: record.summaryId } : {}),
+          ...(record.tokens !== undefined ? { tokens: record.tokens } : {}) },
+      );
+    }
 
     const nodeTask = (node.metadata as Record<string, unknown>)['taskDescription'];
     const userPrompt = typeof nodeTask === 'string' && nodeTask ? nodeTask : node.label;
@@ -739,7 +793,15 @@ export class RoleDispatcher {
     };
     const modelChoice = role.model ?? this.config.modelOverride;
     if (modelChoice) invokeOpts.model = modelChoice;
-    if (role.tokenBudget) invokeOpts.tokenBudget = role.tokenBudget;
+    if (role.tokenBudget) {
+      // F1/R5: the summary call was made for this node, so it spends this node's budget. The engine
+      // records `tokenBudgetCharged` on every call — the backend's reported count when it gave one,
+      // else input plus output — and that is what is subtracted. Recorded always, enforced here,
+      // where a budget exists; no built-in role sets one, and D-52 says so.
+      const summarySpend = (assembled.lcmSummaryCalls ?? [])
+        .reduce((sum, call) => sum + (call.tokenBudgetCharged ?? call.reportedTokens ?? call.contentTokens), 0);
+      invokeOpts.tokenBudget = Math.max(0, role.tokenBudget - summarySpend);
+    }
     if (this.config.temperature !== undefined) invokeOpts.temperature = this.config.temperature;
     // A reader on the cli tier does not get the backend's write tools (F7). The in-process tier
     // needs nothing here — MAF runs every tool through the registry, and a reader's registry holds
@@ -758,12 +820,18 @@ export class RoleDispatcher {
     // completed. A loop that stopped any other way has its own failure, and keeps it.
     let answer: Answer | undefined;
     const ranInProcess = resolved.tier === 'in-process';
+    // T1: whether the in-process pipeline's transcript processor already wrote this turn's
+    // assistant text at `step_end`.
+    let recordedInPipeline = false;
     try {
       if (ranInProcess) {
         const loop = await this.runInProcess(role, invokeOpts, taskId, review);
-        outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
-        shortfall = loopShortfall(role, loop);
-        if (loop.outcome === 'completed') answer = { tier: 'in-process', finalText: loop.finalText, turns: loop.steps };
+        outputForMemory = loop.result.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
+        shortfall = loopShortfall(role, loop.result);
+        if (loop.result.outcome === 'completed') {
+          answer = { tier: 'in-process', finalText: loop.result.finalText, turns: loop.result.steps };
+        }
+        recordedInPipeline = loop.transcriptRecorded;
       } else {
         const cliResult = await adapter.invoke(invokeOpts);
         // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
@@ -793,7 +861,13 @@ export class RoleDispatcher {
       throw err;
     }
 
-    await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
+    // T1: the in-process transcript processor records every step's assistant text, the final one
+    // included, at `step_end`. Appending the final answer again here stored it twice in the
+    // transcript and in `lcm_messages`, so it was summarized and charged twice. The cli tier has no
+    // pipeline, and a custom bundle may leave the transcript processor out; those still append here.
+    if (!recordedInPipeline) {
+      await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
+    }
     await this.config.lcmBridge.flush();
 
     // Every writer's diff is reviewed, once per attempt. In-process that normally happened at
@@ -869,7 +943,7 @@ export class RoleDispatcher {
     invokeOpts: AdapterInvokeOptions,
     taskId: ReturnType<typeof makeTaskId>,
     review: AttemptReview | undefined,
-  ): Promise<InProcessLoopResult> {
+  ): Promise<{ result: InProcessLoopResult; transcriptRecorded: boolean }> {
     const adapter = this.config.adapter;
     if (!isTurnAdapter(adapter)) throw new Error('unreachable: gated by caller');
 
@@ -951,7 +1025,10 @@ export class RoleDispatcher {
     }
     // budget_exhausted is returned, not thrown: whether it fails the node depends on the node's
     // allowPartial, which the caller decides after the transcript has the output.
-    return result;
+    //
+    // T1: whether the bundle records step output itself. The dispatcher appends the final answer for
+    // the cli tier, and must not do it again for a pipeline that already wrote every step.
+    return { result, transcriptRecorded: pipeline.names().includes('transcript') };
   }
 
   /**

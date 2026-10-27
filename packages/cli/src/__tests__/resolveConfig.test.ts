@@ -95,11 +95,14 @@ checkPrecedence<number>({
   flag: 0, file: 128, dflt: 64,
 });
 
-test('the defaults are the values maf run hard-codes today, so a run without a config file is unchanged', () => {
+test('a run with no config file gets the documented defaults, unchanged', () => {
   assert.deepEqual(DEFAULT_MAF_CONFIG, {
     adapter:  'claude',
     worktree: true,
-    lcm:      { mode: 'Upward', contextThreshold: 0.75, freshTailCount: 64 },
+    lcm:      {
+      mode: 'Upward', contextThreshold: 0.75, freshTailCount: 64,
+      operator: 'llm-map', summaryTimeoutMs: 120_000,
+    },
     dag:      { maxConcurrent: 4, retry: { ...DEFAULT_RETRY_POLICY } },
     timeouts: { planMs: 120_000, securityReviewMs: 120_000 },
   });
