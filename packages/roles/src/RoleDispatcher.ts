@@ -809,12 +809,18 @@ export class RoleDispatcher {
     // completed. A loop that stopped any other way has its own failure, and keeps it.
     let answer: Answer | undefined;
     const ranInProcess = resolved.tier === 'in-process';
+    // T1: whether the in-process pipeline's transcript processor already wrote this turn's
+    // assistant text at `step_end`.
+    let recordedInPipeline = false;
     try {
       if (ranInProcess) {
         const loop = await this.runInProcess(role, invokeOpts, taskId, review);
-        outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
-        shortfall = loopShortfall(role, loop);
-        if (loop.outcome === 'completed') answer = { tier: 'in-process', finalText: loop.finalText, turns: loop.steps };
+        outputForMemory = loop.result.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
+        shortfall = loopShortfall(role, loop.result);
+        if (loop.result.outcome === 'completed') {
+          answer = { tier: 'in-process', finalText: loop.result.finalText, turns: loop.result.steps };
+        }
+        recordedInPipeline = loop.transcriptRecorded;
       } else {
         const cliResult = await adapter.invoke(invokeOpts);
         // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
@@ -844,7 +850,13 @@ export class RoleDispatcher {
       throw err;
     }
 
-    await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
+    // T1: the in-process transcript processor records every step's assistant text, the final one
+    // included, at `step_end`. Appending the final answer again here stored it twice in the
+    // transcript and in `lcm_messages`, so it was summarized and charged twice. The cli tier has no
+    // pipeline, and a custom bundle may leave the transcript processor out; those still append here.
+    if (!recordedInPipeline) {
+      await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
+    }
     await this.config.lcmBridge.flush();
 
     // Every writer's diff is reviewed, once per attempt. In-process that normally happened at
@@ -920,7 +932,7 @@ export class RoleDispatcher {
     invokeOpts: AdapterInvokeOptions,
     taskId: ReturnType<typeof makeTaskId>,
     review: AttemptReview | undefined,
-  ): Promise<InProcessLoopResult> {
+  ): Promise<{ result: InProcessLoopResult; transcriptRecorded: boolean }> {
     const adapter = this.config.adapter;
     if (!isTurnAdapter(adapter)) throw new Error('unreachable: gated by caller');
 
@@ -1002,7 +1014,10 @@ export class RoleDispatcher {
     }
     // budget_exhausted is returned, not thrown: whether it fails the node depends on the node's
     // allowPartial, which the caller decides after the transcript has the output.
-    return result;
+    //
+    // T1: whether the bundle records step output itself. The dispatcher appends the final answer for
+    // the cli tier, and must not do it again for a pipeline that already wrote every step.
+    return { result, transcriptRecorded: pipeline.names().includes('transcript') };
   }
 
   /**

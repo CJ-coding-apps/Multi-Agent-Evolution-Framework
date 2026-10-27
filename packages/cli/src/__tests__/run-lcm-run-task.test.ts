@@ -65,6 +65,16 @@ const PARALLEL_PLAN = [
   '```',
 ].join('\n');
 
+/** One node, whose in-process loop reads once and answers: the shape T1 counts. */
+const SOLO_PLAN = [
+  'Here is the plan.',
+  '```json',
+  JSON.stringify({
+    nodes: [{ id: 'p1', label: 'node one', description: 'node one', agentRole: 'reader' }],
+  }),
+  '```',
+].join('\n');
+
 const CONFIG = `adapter: round-two-recorder
 model: run-model
 worktree: false
@@ -192,6 +202,9 @@ class ParallelReaderAdapter implements TurnAdapter {
   turns = 0;
   private taskCount = 0;
 
+  /** The plan this run's planner returns; two independent nodes unless a test asks for one. */
+  constructor(private readonly runPlan: string = PARALLEL_PLAN) {}
+
   capabilities(): AdapterCapabilities {
     return {
       supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: false,
@@ -203,16 +216,16 @@ class ParallelReaderAdapter implements TurnAdapter {
 
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const summary = (options.systemPrompt ?? '').startsWith('You are a context summarization agent.');
-    const plan = !summary && options.prompt.startsWith('Create a task execution DAG for:');
+    const isPlan = !summary && options.prompt.startsWith('Create a task execution DAG for:');
     const startedAt = performance.now();
     // The lock's property needs a call that is still in flight when the second assembly arrives,
     // so the fixture's summary takes real time. A tick is not enough: without a duration the two
     // calls can never intersect, and dropping the lock would go unnoticed (measured: a tick put
     // the second call 3ms after the first, and the mutant survived).
     if (summary) await new Promise<void>((resolve) => setTimeout(resolve, 25));
-    const output = summary ? SUMMARY_TEXT : plan ? PARALLEL_PLAN : `answer ${++this.taskCount}`;
+    const output = summary ? SUMMARY_TEXT : isPlan ? this.runPlan : `answer ${++this.taskCount}`;
     this.calls.push({
-      kind: summary ? 'summary' : plan ? 'plan' : 'task', options, startedAt, endedAt: performance.now(),
+      kind: summary ? 'summary' : isPlan ? 'plan' : 'task', options, startedAt, endedAt: performance.now(),
     });
     return {
       success: true, output, exitCode: 0, duration: 1, toolCallLog: [],
@@ -411,6 +424,69 @@ test('maf run: nodes dispatched at once never overlap their summary calls (D-52 
     assert.equal(adapter.turns, 4, 'both independent nodes reached the backend');
     assert.ok(summaries.length >= 1, 'the concurrent assemblies compacted');
     assertSummaryCallsDoNotOverlap(summaries);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an in-process final answer is stored once, in the transcript and the LCM (T1)', needsLcm, async () => {
+  // The loop's transcript processor writes every step's assistant text at `step_end`; the
+  // dispatcher used to append the final answer again. The user's evidence was messages 7/9 and
+  // 59/61 in the live row: the same answer twice, summarized and charged twice.
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-run-task-once-'));
+  try {
+    const repo = await createDemoFixture(root);
+    const mafDir = path.join(repo, '.maf');
+    await mkdir(mafDir, { recursive: true });
+    await writeFile(path.join(mafDir, 'config.yaml'),
+      CONFIG.replace('adapter: round-two-recorder', 'adapter: parallel-reader'), 'utf8');
+    await writeFile(path.join(mafDir, 'roles.yaml'), PARALLEL_ROLES, 'utf8');
+
+    const adapter = new ParallelReaderAdapter(SOLO_PLAN);
+    const opts: RunOptions = {
+      adapter: adapter.name,
+      dir: repo,
+      worktree: false,
+      policy: '.maf/policy.yaml',
+      roles: '.maf/roles.yaml',
+    };
+    const given = (flag: GivenFlag): boolean => flag === 'adapter' || flag === 'roles';
+
+    await runTask('one node, answered once', opts, {
+      adapters: registryOf(adapter),
+      given,
+      io: { stdout: collector(), stderr: collector(), isTTY: false },
+    });
+
+    const FINAL_ANSWER = 'read complete';
+    const bundles = (await readdir(path.join(mafDir, 'attestations'))).filter((f) => f.endsWith('.bundle.json'));
+    assert.equal(bundles.length, 1, 'the run was attested once');
+    const runId = bundles[0]!.slice(0, -'.bundle.json'.length);
+
+    const entries = (await readFile(
+      path.join(mafDir, 'transcripts', `${runId}.jsonl`), 'utf8',
+    )).trim().split('\n').map((line) => JSON.parse(line) as { role: string; content: string });
+    assert.equal(
+      entries.filter((entry) => entry.role === 'assistant' && entry.content === FINAL_ANSWER).length,
+      1,
+      'the final answer appears in the transcript exactly once',
+    );
+
+    const engine = new LcmEngine({
+      dbPath: path.join(mafDir, 'lcm.db'),
+      sessionId: runId,
+      contextThreshold: 0.75,
+      freshTailCount: 64,
+      mode: 'Upward',
+      summarize: async () => 'unused',
+    });
+    try {
+      const stored = (await engine.lcm_grep(FINAL_ANSWER, runId))
+        .filter((message) => message.content === FINAL_ANSWER);
+      assert.equal(stored.length, 1, 'and in lcm_messages exactly once, so it is summarized and charged once');
+    } finally {
+      engine.close();
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

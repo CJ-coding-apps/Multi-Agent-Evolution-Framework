@@ -188,6 +188,15 @@ covers the segment; `LcmSummary.parentIds` names a summary's parents, so the roo
 none. Nothing is dropped without an ancestor covering it. *Rejected:* keeping only level 0, where
 the archive grows without bound and the budget trims the oldest context permanently.
 
+**A node's final answer is recorded once (T1).** The in-process pipeline's transcript processor
+writes each step's assistant text at `step_end`, the final step included; the dispatcher appends
+the final answer only when the pipeline did not, and the cli tier (which has no pipeline) still
+does. The version this replaces appended it again for an in-process turn, so the same answer sat in
+the transcript and in `lcm_messages` twice and was summarized and charged twice.
+*Rejected:* removing the `step_end` record, which would lose every intermediate step, and removing
+the dispatcher append unconditionally, which would lose a cli-tier result and a custom bundle's
+output.
+
 **Two token counts, two questions.** A summary's stored context size is the content's own
 estimate; the backend's reported count goes on the call's record. *Rejected:* using the reported
 count as the context size, which charges a later prompt for tokens the text does not occupy; and
