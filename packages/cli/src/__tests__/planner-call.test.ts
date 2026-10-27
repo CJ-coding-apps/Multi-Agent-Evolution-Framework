@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
@@ -8,6 +8,7 @@ import type { AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord, Tur
 import { TransportError, sha256Hex } from '@maf/types';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { planGenerator } from '../commands/run.js';
+import { attestVerify } from '../commands/attest.js';
 import { dirtyUserRepo, driveRun, messageOf, needsLcm, registryOf, userState } from './runFixture.js';
 
 // ORACLE (F4 and F6 of the 0.3.0 release audit). The planner's call is a cli-tier `invoke` that needs
@@ -80,18 +81,40 @@ test('a transport failure is retried once; a second one is the error', async () 
   assert.equal(lost.calls.length, 2, 'two attempts, as a node gets');
 });
 
-test('maf run stops at a failed planner call instead of running its error text as a plan', needsLcm, async () => {
+/**
+ * Drives `maf run` through a planning failure with `adapter` standing in for `scripted`, and reads
+ * back the three things L1-S2 promises: the printed bundle path, the signed statement on disk (which
+ * `maf attest verify` — `attestVerify` is that command minus the process — accepts), and the
+ * transcript written before the failure.
+ */
+async function failingPlanningRun(adapter: TurnAdapter, root: string) {
+  const repo = await dirtyUserRepo(root);
+  const before = await userState(repo);
+  const scripted = new ScriptedAdapter([]);
+  const run = await driveRun(['Fix the failing sum test', '--dir', repo, '--adapter', 'scripted'], {
+    adapters: registryOf({ ...adapter, name: scripted.name }),
+    io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: 'planner-key' } },
+  });
+  const printed = /Attestation: (.+\.bundle\.json)/.exec(run.out);
+  assert.ok(printed?.[1], `a failed planning run prints the path of its bundle; it printed: ${run.out}`);
+  const bundlePath = printed[1];
+  const statement = JSON.parse(await readFile(bundlePath, 'utf8')) as {
+    subject:   unknown[];
+    predicate: { outcome: Record<string, unknown>; modelSurfaces?: Array<Record<string, unknown>> };
+  };
+  const verdict = await attestVerify(bundlePath, { secret: 'planner-key' });
+  const logDir = path.join(repo, '.maf', 'transcripts');
+  const transcript = (await Promise.all(
+    (await readdir(logDir)).map((file) => readFile(path.join(logDir, file), 'utf8')),
+  )).join('');
+  return { repo, before, run, bundlePath, statement, verdict, transcript };
+}
+
+test('L1-S2: a judged planner failure stops the run, keeps the tree, and writes a signed planning_failed bundle', needsLcm, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-planner-fail-'));
   try {
-    const repo = await dirtyUserRepo(root);
-    const before = await userState(repo);
-    // `scripted` for the run's adapter name; its turns would run a node, which must not happen.
-    const scripted = new ScriptedAdapter([]);
     const { adapter, calls } = answering(failed('Error: Credit balance is too low'));
-    const run = await driveRun(['Fix the failing sum test', '--dir', repo, '--adapter', 'scripted'], {
-      adapters: registryOf({ ...adapter, name: scripted.name }),
-      io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: 'planner-key' } },
-    });
+    const { repo, before, run, statement, verdict, transcript } = await failingPlanningRun(adapter, root);
     assert.match(messageOf(run.error), /the planner's call to adapter "scripted" was expected to succeed, but it reported failure \(exit code 1\)/);
     assert.match(messageOf(run.error), /Credit balance is too low/);
     assert.doesNotMatch(run.out, /node .* started/, 'no node ran');
@@ -99,6 +122,70 @@ test('maf run stops at a failed planner call instead of running its error text a
     assert.equal(calls[0]?.nativeTools, false);
     assert.match(run.err, /the run's worktree is kept for inspection/);
     assert.deepEqual(await userState(repo), before);
+
+    // L1-S2: the run is attested like any other — status, verdict and no subjects, since no node ran.
+    assert.deepEqual(statement.predicate.outcome, {
+      status: 'Failed', unscheduled: [], failure: { kind: 'planning_failed' },
+    });
+    assert.deepEqual(statement.subject, [], 'no diff, so no subject: the run had nothing to review');
+    assert.deepEqual(verdict.lines, [
+      'valid: true',
+      'keySource: env (checked against MAF_SIGNING_KEY)',
+      'subjects: 0',
+    ], '`maf attest verify` accepts a planning-failure bundle, signed with the key the run used');
+    assert.equal(verdict.failure, undefined);
+    // S9: the surface reached the transcript as the call was made, before the bundle existed.
+    assert.match(transcript, /\[surface\] planner turn 1: system sha256 /);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('L1-S2: transport failures that exhaust the retries write the same bundle, holding every attempt', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-planner-transport-'));
+  try {
+    const { adapter, calls } = answering(dropped(), dropped());
+    const { run, statement, verdict } = await failingPlanningRun(adapter, root);
+    assert.ok(run.error instanceof TransportError, 'the transport failure is what the run reports');
+    assert.equal(calls.length, 2, 'the planner was retried once under the default policy');
+    assert.deepEqual(statement.predicate.outcome, {
+      status: 'Failed', unscheduled: [], failure: { kind: 'planning_failed' },
+    });
+    assert.equal(statement.predicate.modelSurfaces?.length, 2, 'both attempts are in the bundle');
+    assert.deepEqual(statement.predicate.modelSurfaces?.map((s) => s['kind']), ['planner', 'planner']);
+    assert.equal(verdict.failure, undefined, 'and the bundle verifies');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('L1-S2: a planner call whose adapter throws writes the same bundle, with no output digest', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-planner-throw-'));
+  try {
+    const calls: AdapterInvokeOptions[] = [];
+    const throwing: TurnAdapter = {
+      name: 'claude',
+      capabilities: () => ({
+        supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: true,
+        inProcessLoop: true, maxConcurrentTasks: 1, nativePlugins: [],
+      }),
+      isAvailable: async () => true,
+      invoke: async (opts) => { calls.push(opts); throw new Error('spawn claude ENOENT'); },
+      stream: async function* () { yield ''; },
+      sendTurn: async () => { throw new Error('no node should run'); },
+    };
+    const { run, statement, verdict } = await failingPlanningRun(throwing, root);
+    assert.match(messageOf(run.error), /spawn claude ENOENT/);
+    assert.equal(calls.length, 1, 'a throw is not a transport failure, so it is not retried');
+    assert.deepEqual(statement.predicate.outcome, {
+      status: 'Failed', unscheduled: [], failure: { kind: 'planning_failed' },
+    });
+    const [surface] = statement.predicate.modelSurfaces ?? [];
+    assert.ok(surface, 'the attempt is in the bundle');
+    assert.equal(surface['kind'], 'planner');
+    assert.equal(surface['error'], 'thrown');
+    assert.equal('outputSha256' in surface, false, 'no output came back, so none is claimed');
+    assert.equal(verdict.failure, undefined, 'and the bundle verifies');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

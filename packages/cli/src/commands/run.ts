@@ -4,7 +4,7 @@ import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
 import { callModelSurface, makeRunId, makeTaskId, makeAgentId } from '@maf/types';
-import type { AdapterInvokeResult, AdapterName, CliAdapter, Dag, DagNode, ModelSurfaceRecord, PlanSource, RetryPolicy, TaskId } from '@maf/types';
+import type { AdapterInvokeResult, AdapterName, CliAdapter, Dag, DagNode, ModelSurfaceRecord, PlanSource, RetryPolicy, RunOutcome, TaskId } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine } from '@maf/lcm';
@@ -321,6 +321,29 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     await transcript.append('system', planSourceLine(planSource), { planSource });
     const lcmBridge = new BlackboardToLcmAdapter(board, lcm, sessionId, runId);
     const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
+
+    // L1-S9: one model call's surface goes to the bundle's array and to the transcript, in that
+    // order. The transcript is written as the run goes, so a run that fails before its bundle is
+    // written still says which calls it made. The planner's and the gate's call sites both record
+    // through here, so neither can reach one store and miss the other.
+    const recordSurface = async (record: ModelSurfaceRecord): Promise<void> => {
+      attestor.recordModelSurface(record);
+      await transcript.append('system', surfaceLine(record), surfaceMetadata(record));
+    };
+
+    // L1-S2: the bundle a finished run writes, and the one a run whose planning call failed writes
+    // before it rethrows. Same builder, same harness config source, so `maf attest verify` reads
+    // either the same way.
+    const writeBundle = async (outcome: RunOutcome) => attestor.bundle(
+      { id: componentId(`@maf/adapter-${cfg.adapter}`), modelVersion: cfg.model ?? 'default' },
+      {
+        configSource: await harnessStore.configSource(harness),
+        parameters:  { harnessId: harness.id, planSource },
+        environment: {},
+      },
+      [],
+      outcome,
+    );
     // One gate for the run (D-02): an escalated tool call is put to the operator at the terminal,
     // or refused and left as a pending record when no one can answer; either way it is attested.
     const approvalGate = createApprovalGate({ recorder: attestor, mafDir, env, ...(terminal ? { terminal } : {}) });
@@ -340,8 +363,8 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       securityPrompt,
       timeoutMs:      cfg.timeouts.securityReviewMs,
       // L1: every gate call is a model call. The gate names the node whose diff it read, so the
-      // record joins that node's role records in the same array.
-      recordSurface:  (record) => attestor.recordModelSurface(record),
+      // record joins that node's role records in the same array; S9 mirrors it into the transcript.
+      recordSurface,
       ...model,
     });
 
@@ -404,14 +427,33 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
         roleCatalog: roles.catalog(),
         // L1: the planner's call is the run's first model call, and it was the one the live row
         // found missing from the record. `makeTaskId('planner')` is deliberate: the call belongs to
-        // the run, not to any node the planner has yet written.
+        // the run, not to any node the planner has yet written; S9 mirrors it into the transcript.
         generatePlan: planGenerator(adapter, {
           workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry,
-          recordSurface: (record) => attestor.recordModelSurface(record),
+          recordSurface,
           ...model,
         }),
       });
-      dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
+      // L1-S2: a planning failure — a judged failure, a transport failure after its retries, or an
+      // adapter that threw — ends the run before any node exists. The model calls it made are still
+      // spend, and the surface records still hold them, so the run is attested like any other: one
+      // signed bundle with `planning_failed` and no subjects, and its path printed. A failure to
+      // write that bundle is a warning, never a replacement for the planning error.
+      try {
+        dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
+      } catch (planError) {
+        try {
+          const bundle = await writeBundle({ status: 'Failed', unscheduled: [], failure: { kind: 'planning_failed' } });
+          say(`[maf] planning failed. Attestation: ${path.join(mafDir, 'attestations', runId + '.bundle.json')}`);
+          say(`[maf] signature: ${bundle.signature.slice(0, 16)}... (keySource: ${bundle.keySource})`);
+        } catch (attestError) {
+          warn(
+            `[maf] warning: planning failed and its attestation could not be written: ` +
+            `${attestError instanceof Error ? attestError.message : String(attestError)}`,
+          );
+        }
+        throw planError;
+      }
     }
 
     // Run DAG
@@ -442,16 +484,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     // Bundle attestation — the harness IS the build's config source (signed): the stored file and
     // its sha, re-verified now, so the digest names what was dispatched.
-    const bundle = await attestor.bundle(
-      { id: componentId(`@maf/adapter-${cfg.adapter}`), modelVersion: cfg.model ?? 'default' },
-      {
-        configSource: await harnessStore.configSource(harness),
-        parameters:  { harnessId: harness.id, planSource },
-        environment: {},
-      },
-      [],
-      outcome,
-    );
+    const bundle = await writeBundle(outcome);
 
     say(`[maf] done. Attestation: ${path.join(mafDir, 'attestations', runId + '.bundle.json')}`);
     say(`[maf] signature: ${bundle.signature.slice(0, 16)}... (keySource: ${bundle.keySource})`);
@@ -552,6 +585,32 @@ function planSourceLine(source: PlanSource): string {
   return source.kind === 'spec'
     ? `plan source: spec ${source.path} (sha256 ${source.sha256})`
     : 'plan source: the planner';
+}
+
+/**
+ * The transcript's line for one model-facing surface (F4, L1-S9): digests and the argv the call was
+ * run with, never the prompt or the output themselves, so the transcript ties a bundle's
+ * `modelSurfaces` entry to the run without holding a second copy of model text.
+ */
+function surfaceLine(record: ModelSurfaceRecord): string {
+  return `[surface] ${record.kind ?? 'call'} turn ${record.turn}: system sha256 ${record.systemPromptSha256}; ` +
+    `prompt sha256 ${record.promptSha256 ?? '(none)'}; output sha256 ${record.outputSha256 ?? '(none)'}; ` +
+    `native tools ${record.nativeTools ?? '(unrecorded)'}; argv ${JSON.stringify(record.argv)}` +
+    (record.error !== undefined ? `; error ${record.error}` : '');
+}
+
+/** What rides with that line, field for field: the digests, the tier, and the call's identity. */
+function surfaceMetadata(record: ModelSurfaceRecord): Record<string, unknown> {
+  return {
+    agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
+    ...(record.kind !== undefined ? { kind: record.kind } : {}),
+    systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
+    ...(record.promptSha256 !== undefined ? { promptSha256: record.promptSha256 } : {}),
+    ...(record.outputSha256 !== undefined ? { outputSha256: record.outputSha256 } : {}),
+    ...(record.stdinSha256 !== undefined ? { stdinSha256: record.stdinSha256 } : {}),
+    ...(record.error !== undefined ? { error: record.error } : {}),
+    nativeTools: record.nativeTools,
+  };
 }
 
 /**

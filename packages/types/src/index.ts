@@ -303,6 +303,12 @@ export interface RunOutcome {
   unscheduled: NodeId[];
   /** Nodes held back because another writer held the working tree at the time. */
   deferredWriters?: NodeId[];
+  /**
+   * Why the run failed before any node existed (L1-S2): the planner's call failed, so there is no
+   * DAG, no node verdict, and nothing unscheduled. Absent on every run that reached its DAG — a
+   * failed node carries its own `failure`, and a run with a DAG but no node failure is not this.
+   */
+  failure?:    RunFailureDetail;
 }
 
 /**
@@ -500,6 +506,20 @@ export type OutcomeFailureKind =
   | 'gate_refused'
   | 'review_refused'
   | 'policy_violation';
+
+/**
+ * Every kind a failed *run* can carry (L1-S2): the node verdicts above, plus `planning_failed` for
+ * a run whose one model call — the planner's — failed, leaving no node to blame. Kept apart from
+ * `OutcomeFailureKind` so a node's failure field cannot claim a kind no node can have.
+ */
+export type RunFailureKind = OutcomeFailureKind | 'planning_failed';
+
+/** The machine-checkable half of a run failure: the kind, and a refusal's rule and tool when named. */
+export interface RunFailureDetail {
+  kind:    RunFailureKind;
+  ruleId?: string;
+  toolId?: string;
+}
 
 /**
  * The machine-checkable half of a node failure (L3): the `kind`, and — when a policy refusal caused

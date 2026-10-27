@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
@@ -194,6 +194,16 @@ test('L1: every adapter call of every kind matches exactly one surface record, n
 
     // ── the common-setup rule: a bijection by digests, within each kind ──
     assertBijection(surfaces, exchanges);
+
+    // L1-S9: both direct calls are mirrored into the transcript as they happen, so the run says
+    // which calls it made even before (or without) its bundle. The line is the record's, not a
+    // second copy of model text: the digests and the call's kind.
+    const logDir = path.join(repo, '.maf', 'transcripts');
+    const transcript = (await Promise.all(
+      (await readdir(logDir)).map((file) => readFile(path.join(logDir, file), 'utf8')),
+    )).join('');
+    assert.match(transcript, /\[surface\] planner turn 1: system sha256 /);
+    assert.match(transcript, /\[surface\] security-gate turn 1: system sha256 /);
 
     // Sanity: the digest the record carries is the digest of the bytes the adapter saw.
     const plannerCall = exchanges.find((e) => exchangeKind(e) === 'planner');
