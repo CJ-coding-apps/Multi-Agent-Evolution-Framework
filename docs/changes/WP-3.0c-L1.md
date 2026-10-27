@@ -20,15 +20,22 @@ that retried reports both. The record is written in a `finally`, so it survives 
 that matter: the call answered and judged, the call answered and refused, and the call **threw**. A
 throw carries no output to digest, and the record says so rather than saying nothing: `outputSha256`
 is **absent** and `error: "thrown"` is set. Absent is not the digest of an empty string — that would
-say the model answered with nothing.
+say the model answered with nothing. This holds for a role call on either tier as well as for the
+planner and the gate: the call and its record are one `try/finally`, so a backend that times out or
+exits non-zero still leaves the turn it took in the record. A record that cannot be *written* is
+reported on stderr and changes nothing about the call: it does not replace the call's error, and it
+does not turn a returned answer into a failed node.
 
 **A planning failure is attested, not just reported.** When the planning call fails — judged a
-failure by the planner, exhausted its transport retries, or threw — the run writes and signs
+failure by the planner, exhausted its transport retries, threw, or the plan it returned is
+refused (an unknown `agentRole` names no role the harness has) — the run writes and signs
 `<mafDir>/attestations/<runId>.bundle.json` before it reports the error: every planner surface it
 made, `outcome.failure.kind: "planning_failed"` (a new `RunFailureKind`; `RunFailureDetail` is
 `RunOutcome.failure`), and **no subjects**, because no node existed to name. `maf run` prints the
 bundle path and the signature, and `maf attest verify` accepts it. An attestation failure does not
-replace the planning error: the original error is what the run reports.
+replace the planning error: the original error is what the run reports. A plan the model returned
+is a call that answered, so its surface is an ordinary planner record with the plan's digest as
+`outputSha256`; the refusal is the run's `planning_failed` failure, not a surface.
 
 **The transcript is a mirror, not a second source.** Every surface — role call, planner, gate — is
 appended to the run's transcript as it is recorded (`[surface] planner turn 1: system sha256 …;
