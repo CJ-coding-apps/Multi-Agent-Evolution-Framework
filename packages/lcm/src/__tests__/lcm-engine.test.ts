@@ -1020,6 +1020,55 @@ test('a root that overshoots the archive is re-summarized once at a tighter targ
   );
 });
 
+test('concurrent assemblies of one session summarize each prompt once, and leave one tree (L4)', async (t) => {
+  const calls: string[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const { engine, store } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async (messages) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      calls.push(messages.map((message) => message.content).join('\u0000'));
+      return `summary-${calls.length}`;
+    },
+  });
+  const ids = await addMessages(engine, ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l'], 1);
+
+  // Six level-0 roots, so every assembly that fits the archive has to raise the oldest ones.
+  for (let i = 0; i < ids.length; i += 2) {
+    await engine.summarizeChunk([ids[i]!, ids[i + 1]!], 'LLM-Map');
+  }
+  calls.length = 0;
+
+  // Four assemblies arrive together, all seeing the same six roots. Without the lock in the
+  // upward pass each summarizes the same roots: duplicate prompts, a summary with two parents.
+  await Promise.all(Array.from({ length: 4 }, () => engine.assembleContext('s', 4, 'Upward')));
+
+  assert.equal(maxInFlight, 1, 'summary calls never overlap: each pass holds the session lock');
+  assert.equal(new Set(calls).size, calls.length, 'no prompt was summarized twice');
+
+  const all = store.getSummariesForSession('s');
+  for (const summary of all) {
+    assert.ok(
+      summary.parentIds.length <= 1,
+      `summary ${summary.id} has ${summary.parentIds.length} parents; the archive is a tree`,
+    );
+  }
+  const roots = all.filter((summary) => summary.parentIds.length === 0);
+  assert.equal(roots.length, 1, 'exactly one root remains');
+  const tree = descendantsOf(all, roots[0]!.id);
+  for (const summary of all) {
+    if (summary.level !== 0) continue;
+    assert.ok(
+      tree.some((covered) => covered.id === summary.id),
+      `level-0 summary ${summary.id} reaches the single root`,
+    );
+  }
+});
+
 test('a caller that cannot expand a cue is given summaries instead (R14)', async (t) => {
   // A cli-tier role has no `lcm.expand` tool (MAF tools are in-process only), so a Dolt cue telling
   // it to call one is an instruction it cannot follow. The dispatcher asks for `summaries` there.

@@ -153,9 +153,12 @@ and prints one transcript line saying so. *Rejected:* letting the model choose t
 in the live row where higher levels never shrank and the `<summaries>` sentence was false; and
 dropping an oversized root, which loses context silently.
 
-**One compaction per session.** A per-session lock serializes compaction; the pass re-reads under
-the lock and skips ids already covered. *Rejected:* a global lock, which serializes unrelated
-sessions; and no lock, which let concurrent nodes summarize the same messages twice.
+**One compaction per session, including every upward pass (L4).** A per-session lock serializes
+compaction, and each pass — level-0 and every `fitUpward` merge — re-reads the data after taking
+the lock and skips what another pass already covered. The upward pass used to run unlocked: two
+concurrent assemblies summarized the same roots, paid for them twice and wrote a summary with two
+parents, so the archive was a DAG. *Rejected:* a global lock, which serializes unrelated sessions;
+and no lock, which let concurrent nodes summarize the same messages twice.
 
 **The archive's schema is versioned, and the parent relation is stored the way its columns are
 named (L2).** `lcm_summary_parents` stores `(summary_id = child, parent_id = parent)`; `LcmSummary`

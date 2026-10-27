@@ -562,43 +562,54 @@ export class LcmEngine implements LcmApi {
     // Bounded: each pass halves the root count or stops. A budget too small for even one root
     // stops the loop rather than summarizing forever.
     for (let pass = 0; pass < 8 && roots.length > 1; pass++) {
-      const current = this.rootSummaries(sessionId);
-      const pending = overflowNewestFirst(current, budget);
-      if (pending.length === 0) break;
-      // Summarize the oldest roots — at least two, so the parent covers more than it replaces.
-      const take = Math.max(2, pending.length);
-      const oldest = current.slice(0, take);
-      const operator = this.config.operator ?? 'LLM-Map';
-      const level = Math.max(...oldest.map((s) => s.level)) + 1;
-      // A group is bounded by the byte cap, so a large set of roots becomes several summaries.
-      // A root whose text exceeds one prompt is split into byte-bounded units carrying its id,
-      // exactly as `raise` does (R11); no summary's text is truncated and no prompt overflows.
-      const units: Unit[] = [];
-      for (const summary of oldest) {
-        const rendered = `[Level-${summary.level} summary ${summary.id}]\n${summary.content}`;
-        for (const content of splitByBytes(rendered, MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD)) {
-          units.push({ role: 'system', content, summaryId: summary.id });
+      const overflow = overflowNewestFirst(roots, budget);
+      if (overflow.length === 0) break;
+
+      // L4: every compaction pass runs under the session lock, and re-reads the roots after taking
+      // it. Assemblies of one session used to reach here together, summarize the same roots twice
+      // (double charge, duplicate calls) and write a summary with two parents into what should be a
+      // tree. Under the lock the second assembly finds the merge already done and does nothing.
+      const progressed = await this.serialize(sessionId, async () => {
+        const current = this.rootSummaries(sessionId);
+        const pending = overflowNewestFirst(current, budget);
+        if (pending.length === 0) return false;
+        // Summarize the oldest roots — at least two, so the parent covers more than it replaces.
+        const take = Math.max(2, pending.length);
+        const oldest = current.slice(0, take);
+        const operator = this.config.operator ?? 'LLM-Map';
+        const level = Math.max(...oldest.map((s) => s.level)) + 1;
+        // A group is bounded by the byte cap, so a large set of roots becomes several summaries.
+        // A root whose text exceeds one prompt is split into byte-bounded units carrying its id,
+        // exactly as `raise` does (R11); no summary's text is truncated and no prompt overflows.
+        const units: Unit[] = [];
+        for (const summary of oldest) {
+          const rendered = `[Level-${summary.level} summary ${summary.id}]\n${summary.content}`;
+          for (const content of splitByBytes(rendered, MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD)) {
+            units.push({ role: 'system', content, summaryId: summary.id });
+          }
         }
-      }
-      for (const group of packUnits(units)) {
-        const childIds = [...new Set(group.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
-        const children = childIds
-          .map((id) => this.store.getSummary(id))
-          .filter((summary): summary is LcmSummary => summary !== undefined);
-        const messageIds = [...new Set(children.flatMap((s) => s.messageIds))];
-        const output = await this.callBounded(group, level, operator, targetTokens);
-        const content = redactCredentials(summaryContent(output));
-        const summaryId = this.store.insertSummary(
-          content, estimateTokens(content), level, operator, childIds, messageIds,
-        );
-        const surface = await this.recordCall({
-          sessionId, summaryId, level, messageIds, childIds,
-          content, contentTokens: estimateTokens(content), output, trigger,
-          inputTokens: promptTokensOf(group),
-        });
-        if (surface) calls.push(surface);
-      }
+        for (const group of packUnits(units)) {
+          const childIds = [...new Set(group.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
+          const children = childIds
+            .map((id) => this.store.getSummary(id))
+            .filter((summary): summary is LcmSummary => summary !== undefined);
+          const messageIds = [...new Set(children.flatMap((s) => s.messageIds))];
+          const output = await this.callBounded(group, level, operator, targetTokens);
+          const content = redactCredentials(summaryContent(output));
+          const summaryId = this.store.insertSummary(
+            content, estimateTokens(content), level, operator, childIds, messageIds,
+          );
+          const surface = await this.recordCall({
+            sessionId, summaryId, level, messageIds, childIds,
+            content, contentTokens: estimateTokens(content), output, trigger,
+            inputTokens: promptTokensOf(group),
+          });
+          if (surface) calls.push(surface);
+        }
+        return true;
+      });
       roots = this.rootSummaries(sessionId);
+      if (!progressed) break;
     }
 
     // L3b: a root still larger than the whole archive gets one more summarization, at half the
@@ -608,7 +619,7 @@ export class LcmEngine implements LcmApi {
     if (roots.length === 1 && roots[0]!.tokens > budget) {
       let retried = false;
       try {
-        retried = await (async () => {
+        retried = await this.serialize(sessionId, async () => {
           const current = this.rootSummaries(sessionId);
           if (current.length !== 1) return false;
           const root = current[0]!;
@@ -633,7 +644,7 @@ export class LcmEngine implements LcmApi {
           });
           if (surface) calls.push(surface);
           return true;
-        })();
+        });
       } catch {
         // The retry is a second chance, not a guarantee: the fallback below records what remains.
         retried = false;
