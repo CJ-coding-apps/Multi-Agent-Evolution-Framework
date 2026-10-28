@@ -67,7 +67,7 @@ export class GeminiAdapter extends BaseAdapter {
       cwd: options.workingDir,
       timeoutMs: options.timeoutMs,
       env: { ...process.env },
-    }).catch((err: unknown): never => { throw attach(err, surface); });
+    }).catch((err: unknown): never => { throw attach(err, surface, false); });
     return {
       success:     result.exitCode === 0,
       output:      result.stdout,
@@ -125,6 +125,6 @@ function elideGeminiPayloads(argv: readonly string[]): string[] {
  * gemini was actually sent. A value that is not an `Error` cannot carry a field; it is rethrown
  * untouched and the caller records its own fallback, marked as one.
  */
-function attach(err: unknown, surface: ModelSurface): unknown {
-  return err instanceof Error ? withModelSurface(err, surface) : err;
+function attach(err: unknown, surface: ModelSurface, sent = true): unknown {
+  return err instanceof Error ? withModelSurface(err, surface, sent) : err;
 }

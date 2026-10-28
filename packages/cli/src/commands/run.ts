@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
-import { attachedModelSurface, callModelSurface, makeRunId, makeTaskId, makeAgentId } from '@maf/types';
+import { attachedModelSurface, callModelSurface, makeRunId, makeTaskId, makeAgentId, modelSurfaceWasSent } from '@maf/types';
 import type { AdapterInvokeResult, AdapterName, CliAdapter, Dag, DagNode, ModelSurfaceRecord, PlanSource, RetryPolicy, RunOutcome, TaskId } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
@@ -361,7 +361,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       timeoutMs:      cfg.timeouts.securityReviewMs,
       // L1: every gate call is a model call. The gate names the node whose diff it read, so the
       // record joins that node's role records in the same array; S9 mirrors it into the transcript.
-      recordSurface,
+      recordSurface, warn,
       ...model,
     });
 
@@ -427,7 +427,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
         // the run, not to any node the planner has yet written; S9 mirrors it into the transcript.
         generatePlan: planGenerator(adapter, {
           workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry,
-          recordSurface,
+          recordSurface, warn,
           ...model,
         }),
       });
@@ -530,6 +530,8 @@ export function planGenerator(
     recordSurface?: (record: ModelSurfaceRecord) => unknown;
     /** The id this call is recorded under. The planner is the run's call, not a node's. */
     taskId?: TaskId;
+    /** R4-L1: where a warning about a malformed attached surface goes. Defaults to silence. */
+    warn?: (line: string) => void;
   },
 ): (systemPrompt: string, userPrompt: string) => Promise<string> {
   return (systemPrompt, userPrompt) => withRetry(async () => {
@@ -554,13 +556,14 @@ export function planGenerator(
       // its error; only an adapter that attached none falls back to this call site, and that record
       // is marked `surfaceSource: 'fallback'` — the system prompt here is the planner's role prompt,
       // not the block a backend that composes one was sent. A throw leaves `outputSha256` absent and
-      // says `error: 'thrown'`.
-      const reported = result?.modelSurface ?? attachedModelSurface(failure);
+      // says `error: 'thrown'` — or `'not-sent'` (R4-L2) when the adapter marks that the failure came
+      // before any request left it.
+      const reported = result?.modelSurface ?? attachedModelSurface(failure, call.warn);
       await call.recordSurface?.({
         role: 'planner', taskId: call.taskId ?? makeTaskId('planner'), turn: 1,
         ...(reported ?? callModelSurface(systemPrompt, userPrompt, result?.output)),
         tier: 'cli', nativeTools: 'none', kind: 'planner',
-        ...(result === undefined ? { error: 'thrown' as const } : {}),
+        ...(result === undefined ? { error: (modelSurfaceWasSent(failure) ? 'thrown' : 'not-sent') as 'thrown' | 'not-sent' } : {}),
         ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
         ...(call.model !== undefined ? { model: call.model } : {}),
       });

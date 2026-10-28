@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
 import type { AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord, TurnAdapter } from '@maf/types';
-import { TransportError, sha256Hex } from '@maf/types';
+import { TransportError, attachedModelSurface, callModelSurface, sha256Hex, withModelSurface } from '@maf/types';
 import { ScriptedAdapter } from '@maf/eval-harness';
+import { OllamaAdapter } from '@maf/adapter-ollama';
+import { OpenRouterAdapter } from '@maf/adapter-openrouter';
 import { planGenerator } from '../commands/run.js';
 import { attestVerify } from '../commands/attest.js';
 import { dirtyUserRepo, driveRun, messageOf, needsLcm, registryOf, userState } from './runFixture.js';
@@ -299,4 +301,177 @@ test('L1: a surface the adapter reports is kept rather than reconstructed', asyn
     role: 'planner', taskId: 'planner', turn: 1, ...surface,
     tier: 'cli', nativeTools: 'none', kind: 'planner',
   });
+});
+
+// R4-M1/R4-M2: the adapters that describe a surface must have that description recorded, not the
+// call site's reconstruction. These drive the real adapters (with `fetch` stubbed) through the
+// planner, so the record is the one a run would write and its digests are checked against what the
+// stub received.
+
+type FetchInit = Parameters<typeof fetch>[1];
+
+/** Replaces global `fetch` with `reply`, recording each request's init, and restores it. */
+async function withFetchReply(
+  reply: (init: FetchInit) => Response | Promise<Response>,
+  body: (sent: FetchInit[]) => Promise<void>,
+): Promise<void> {
+  const original = globalThis.fetch;
+  const sent: FetchInit[] = [];
+  globalThis.fetch = async (_input: Parameters<typeof fetch>[0], init?: FetchInit): Promise<Response> => {
+    if (init !== undefined) sent.push(init);
+    return reply(init as FetchInit);
+  };
+  try {
+    await body(sent);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+/** The system and user text a chat-completions request body carries. */
+function chatTexts(init: FetchInit): { systemPrompt: string | undefined; prompt: string } {
+  const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+  const system = body.messages.find((m) => m.role === 'system');
+  const user = body.messages.find((m) => m.role === 'user');
+  assert.ok(user, 'the request carries the prompt as a user message');
+  return { systemPrompt: system?.content, prompt: user.content };
+}
+
+test('R4-M2: a successful ollama planning call records the adapter\'s own surface, not a fallback', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const reply = (): Response => new Response(
+    JSON.stringify({ message: { role: 'assistant', content: PLAN }, done: true }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+  await withFetchReply(reply, async (sent) => {
+    const generate = planGenerator(new OllamaAdapter({ baseUrl: 'http://ollama.invalid:11434' }), {
+      workingDir: '/w', timeoutMs: 5_000, retry: NO_WAIT, model: 'llama3',
+      recordSurface: (record) => records.push(record),
+    });
+    assert.equal(await generate('system text', 'user text'), PLAN);
+    assert.equal(sent.length, 1);
+    const texts = chatTexts(sent[0] as FetchInit);
+    assert.deepEqual(records[0], {
+      role: 'planner', taskId: 'planner', turn: 1,
+      ...callModelSurface(texts.systemPrompt, texts.prompt, PLAN),
+      tier: 'cli', nativeTools: 'none', kind: 'planner', model: 'llama3',
+    });
+    assert.equal('surfaceSource' in (records[0] ?? {}), false, 'the adapter described the call');
+  });
+});
+
+test('R4-M2: a successful openrouter planning call records the adapter\'s own surface, not a fallback', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const reply = (): Response => new Response(
+    JSON.stringify({ choices: [{ message: { role: 'assistant', content: PLAN }, finish_reason: 'stop' }] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+  await withFetchReply(reply, async (sent) => {
+    const generate = planGenerator(new OpenRouterAdapter({ apiKey: 'test-key' }), {
+      workingDir: '/w', timeoutMs: 5_000, retry: NO_WAIT, model: 'vendor/model',
+      recordSurface: (record) => records.push(record),
+    });
+    assert.equal(await generate('system text', 'user text'), PLAN);
+    assert.equal(sent.length, 1);
+    const texts = chatTexts(sent[0] as FetchInit);
+    assert.deepEqual(records[0], {
+      role: 'planner', taskId: 'planner', turn: 1,
+      ...callModelSurface(texts.systemPrompt, texts.prompt, PLAN),
+      tier: 'cli', nativeTools: 'none', kind: 'planner', model: 'vendor/model',
+    });
+    assert.equal('surfaceSource' in (records[0] ?? {}), false, 'the adapter described the call');
+  });
+});
+
+test('R4-M1: an attached surface is what the planner records, not its fallback', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const surface = {
+    systemPromptSha256: 'sys', promptSha256: 'prompt', toolCatalog: '',
+    outputSha256: 'out', argv: ['claude', '--tools', ''],
+  };
+  const adapter: TurnAdapter = {
+    name: 'claude',
+    capabilities: () => ({
+      supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: true,
+      inProcessLoop: true, maxConcurrentTasks: 1, nativePlugins: [],
+    }),
+    isAvailable: async () => true,
+    invoke: async () => { throw withModelSurface(new Error('the turn failed'), surface); },
+    stream: async function* () { yield ''; },
+    sendTurn: async () => { throw new Error('no node should run'); },
+  };
+  await assert.rejects(
+    () => planGenerator(adapter, {
+      workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+      recordSurface: (record) => records.push(record),
+    })('system text', 'user text'),
+    /the turn failed/,
+  );
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1, ...surface,
+    tier: 'cli', nativeTools: 'none', kind: 'planner', error: 'thrown',
+  });
+});
+
+test('R4-L1: a malformed attached surface is ignored, the fallback is recorded, and a warning is emitted', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const warnings: string[] = [];
+  const malformed = Object.assign(new Error('the turn failed'), {
+    modelSurface: { systemPromptSha256: 42, toolCatalog: '', argv: [] },
+  });
+  const adapter: TurnAdapter = {
+    name: 'claude',
+    capabilities: () => ({
+      supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: true,
+      inProcessLoop: true, maxConcurrentTasks: 1, nativePlugins: [],
+    }),
+    isAvailable: async () => true,
+    invoke: async () => { throw malformed; },
+    stream: async function* () { yield ''; },
+    sendTurn: async () => { throw new Error('no node should run'); },
+  };
+  await assert.rejects(
+    () => planGenerator(adapter, {
+      workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+      recordSurface: (record) => records.push(record),
+      warn: (line) => warnings.push(line),
+    })('system text', 'user text'),
+    /the turn failed/,
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? '', /not a valid model surface/);
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1,
+    systemPromptSha256: sha256Hex('system text'),
+    promptSha256: sha256Hex('user text'),
+    toolCatalog: '', argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'planner', error: 'thrown',
+    surfaceSource: 'fallback',
+  });
+});
+
+test('R4-L2: a planning call refused before any request leaves is recorded as not-sent', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const previous = process.env['OLLAMA_MODEL'];
+  delete process.env['OLLAMA_MODEL'];
+  try {
+    await withFetchReply(() => new Response('unreachable', { status: 500 }), async (sent) => {
+      const generate = planGenerator(new OllamaAdapter({ baseUrl: 'http://ollama.invalid:11434' }), {
+        workingDir: '/w', timeoutMs: 5_000, retry: NO_WAIT,
+        recordSurface: (record) => records.push(record),
+      });
+      await assert.rejects(() => generate('system text', 'user text'), /No request was sent/);
+      assert.equal(sent.length, 0, 'nothing left the adapter');
+    });
+  } finally {
+    if (previous !== undefined) process.env['OLLAMA_MODEL'] = previous;
+  }
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1,
+    systemPromptSha256: sha256Hex('system text'),
+    promptSha256: sha256Hex('user text'),
+    toolCatalog: '', argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'planner', error: 'not-sent',
+  });
+  assert.equal('outputSha256' in (records[0] ?? {}), false, 'no answer came back, so none is claimed');
 });

@@ -120,6 +120,9 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     // error if the turn fails (R3-S1): the loop holds only the role prompt, and a record built
     // from *that* would name bytes claude was never sent — no protocol, no catalogue, no argv.
     const surface = modelSurfaceOf(systemPrompt, opts.tools, args);
+    // R4-L2: a spawn that rejects never ran the binary, so nothing was sent; a turn that ran and
+    // failed is a sent attempt. The flag rides the attached record so the loop can tell them apart.
+    let sent = false;
     try {
       const result = await this.spawn('claude', args, {
         cwd: opts.workingDir,
@@ -127,12 +130,13 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
         env: { ...process.env },
         ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
       });
+      sent = true;
       // The turn fails in two places — the spawn rejects when the binary cannot run, and `turnStdout`
       // throws when it ran and did not finish cleanly — so both are inside the `try`: a record of a
       // failed turn is the one a reader most wants, and it must not depend on which way it failed.
       return { ...parseTurn(turnStdout(this.name, result)), modelSurface: surface };
     } catch (err: unknown) {
-      throw attach(err, surface);
+      throw attach(err, surface, sent);
     }
   }
 
@@ -159,7 +163,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       timeoutMs: options.timeoutMs,
       env: { ...process.env },
       ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
-    }).catch((err: unknown): never => { throw attach(err, surface); });
+    }).catch((err: unknown): never => { throw attach(err, surface, false); });
 
     return {
       success:     result.exitCode === 0,
@@ -215,8 +219,8 @@ function cliTierIsolation(options: AdapterInvokeOptions): readonly string[] {
  * was actually sent. An error that is not an `Error` cannot carry a field; it is rethrown untouched
  * and the caller records its own fallback, marked as one.
  */
-function attach(err: unknown, surface: ModelSurface): unknown {
-  return err instanceof Error ? withModelSurface(err, surface) : err;
+function attach(err: unknown, surface: ModelSurface, sent = true): unknown {
+  return err instanceof Error ? withModelSurface(err, surface, sent) : err;
 }
 
 /** The governed turn's model-facing surface: the system block's digest, the catalogue, the argv. */

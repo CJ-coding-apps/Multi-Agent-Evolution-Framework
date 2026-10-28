@@ -46,22 +46,60 @@ export function callModelSurface(
  */
 export interface ModelSurfaceCarrier {
   readonly modelSurface: ModelSurface;
+  /**
+   * R4-L2: `false` when the call failed before any request left the adapter — no model was
+   * configured, or the binary could not be started. Absent (i.e. sent) otherwise, including a
+   * timeout and a non-zero exit: those attempts were made, and the model may have seen the prompt.
+   */
+  readonly modelSurfaceSent?: boolean;
 }
 
-/** The error, with the surface of the call that failed attached. Same object, same class. */
-export function withModelSurface<T extends Error>(err: T, surface: ModelSurface): T & ModelSurfaceCarrier {
-  return Object.assign(err, { modelSurface: surface });
+/**
+ * The error, with the surface of the call that failed attached. Same object, same class.
+ *
+ * `sent` is `false` only for a failure that happened before the adapter sent anything (R4-L2): the
+ * surface still describes what the call *would* have sent, but the record says `not-sent` rather
+ * than `thrown`, because "the model was shown this and failed" and "the model was never reached"
+ * are different facts about the spend.
+ */
+export function withModelSurface<T extends Error>(
+  err: T,
+  surface: ModelSurface,
+  sent = true,
+): T & ModelSurfaceCarrier {
+  return Object.assign(err, sent ? { modelSurface: surface } : { modelSurface: surface, modelSurfaceSent: false });
 }
 
 /**
  * The surface a thrown value carries, when it carries a well-formed one. `undefined` for anything
  * else — a plain `Error`, or a foreign throw whose `modelSurface` is not the shape this record
- * promises — so a caller falls back rather than recording a field it cannot vouch for.
+ * promises — so a caller falls back rather than recording a field it cannot vouch for. A present
+ * but malformed surface is reported through `warn` when a caller supplies one (R4-L1): it is a
+ * defect in the adapter, not a reason to fail the call, but silence would hide it.
  */
-export function attachedModelSurface(err: unknown): ModelSurface | undefined {
+export function attachedModelSurface(
+  err: unknown,
+  warn?: (message: string) => void,
+): ModelSurface | undefined {
   if (typeof err !== 'object' || err === null || !('modelSurface' in err)) return undefined;
   const surface: unknown = err.modelSurface;
-  return isModelSurface(surface) ? surface : undefined;
+  if (isModelSurface(surface)) return surface;
+  warn?.(
+    'the error carries a `modelSurface` that is not a valid model surface ' +
+    '(systemPromptSha256 and toolCatalog must be strings, argv an array of strings); ' +
+    "the call site's own surface is recorded as a fallback",
+  );
+  return undefined;
+}
+
+/**
+ * R4-L2: whether the failed call reached the backend. `false` only when the adapter marked it as
+ * having failed before sending anything; `true` for a plain `Error` (no claim either way, and the
+ * record treats it as a call that threw) and for a sent attempt.
+ */
+export function modelSurfaceWasSent(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return true;
+  return (err as { modelSurfaceSent?: unknown }).modelSurfaceSent !== false;
 }
 
 function isModelSurface(value: unknown): value is ModelSurface {

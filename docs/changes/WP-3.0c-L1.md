@@ -19,8 +19,9 @@ are retried (D-06), so one node can be reviewed twice; each attempt is its own r
 that retried reports both. The record is written in a `finally`, so it survives the three endings
 that matter: the call answered and judged, the call answered and refused, and the call **threw**. A
 throw carries no output to digest, and the record says so rather than saying nothing: `outputSha256`
-is **absent** and `error: "thrown"` is set. Absent is not the digest of an empty string — that would
-say the model answered with nothing. This holds for a role call on either tier as well as for the
+is **absent** and `error: "thrown"` is set — or `error: "not-sent"` when the adapter marked that the
+failure came before any request left it (below). Absent is not the digest of an empty string — that
+would say the model answered with nothing. This holds for a role call on either tier as well as for the
 planner and the gate: the call and its record are one `try/finally`, so a backend that times out or
 exits non-zero still leaves the turn it took in the record. A record that cannot be *written* is
 reported on stderr and changes nothing about the call: it does not replace the call's error, and it
@@ -52,10 +53,21 @@ retried under D-06). The loop, the dispatcher, the planner and the gate record t
 surface when it is on the result or on the error; only an adapter that attached none falls back to
 `callModelSurface` — the system-prompt digest, the prompt digest, the answer's digest, `argv: []`,
 `toolCatalog: ''` — and that record is marked **`surfaceSource: "fallback"`**, because the role
-prompt is not the block a composing backend was sent. `ollama` and `openrouter` attach the surface
-of their request (system message plus user message, `argv: []`), so they are in the record without
-the marker; `claude` attaches the composed block and its elided argv, `codex` the composed block and
-the `stdinSha256` of the blob it wrote, `gemini` its elided argv.
+prompt is not the block a composing backend was sent. An adapter that describes a surface returns it
+on **success** as well as attaching it to a throw, so the fallback marker appears only for an adapter
+that describes nothing: `ollama` and `openrouter` return the surface of their request on success and
+attach it on failure (system message plus user message, `argv: []`); `claude` attaches the composed
+block and its elided argv, `codex` the composed block and the `stdinSha256` of the blob it wrote,
+`gemini` its elided argv. A foreign throw whose `modelSurface` does not validate is ignored and warned
+about, and the call site records its own surface, marked as the fallback.
+
+**A call that never left the adapter says so.** Some failures happen before a request exists: `ollama`
+and `openrouter` refuse when no model is configured, and a CLI binary can fail to start. The surface
+still describes what the call *would* have sent — it was composed before the failure — but the record
+says `error: "not-sent"`, with no `outputSha256`: "the model was shown this and failed" and "the model
+was never reached" are different facts about the spend. A timeout or a non-zero exit stays `"thrown"`:
+the attempt was made and the model may have seen the prompt. An adapter marks the distinction with
+`withModelSurface(err, surface, false)`; the call sites read it with `modelSurfaceWasSent`.
 
 ## Scope
 

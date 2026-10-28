@@ -1,4 +1,4 @@
-import { makeAgentId, estimateTokens, sha256Hex, attachedModelSurface } from '@maf/types';
+import { makeAgentId, estimateTokens, sha256Hex, attachedModelSurface, modelSurfaceWasSent } from '@maf/types';
 import type {
   RunId, TaskId, TurnAdapter, TurnMessage, ToolPlugin, ToolContext,
   PolicyEngineHandle, AttestorHandle, AssistantTurn, ToolCallRequest, ToolResult, ApprovalGateHandle,
@@ -272,7 +272,7 @@ export class InProcessAgentLoop {
       // A failed turn records the surface the adapter attached to its error (R3-S1): an adapter
       // composes the system block (role prompt + wire protocol + catalogue) and the argv, and this
       // loop holds only the role prompt. Recording *that* would name bytes the backend never saw.
-      await this.recordSurface(base, stepIndex, turn, systemPrompt, attachedModelSurface(failure));
+      await this.recordSurface(base, stepIndex, turn, systemPrompt, failure);
     }
     // The `finally` above records on both paths; a returned turn is the only way here.
     if (turn === undefined) throw new Error('unreachable: adapter.sendTurn returned no turn');
@@ -308,12 +308,15 @@ export class InProcessAgentLoop {
     stepIndex: number,
     turn: AssistantTurn | undefined,
     systemPrompt: string,
-    thrownSurface: ModelSurface | undefined,
+    failure: unknown,
   ): Promise<void> {
+    const warn = (message: string): void => {
+      (this.deps.stderr ?? process.stderr).write(`[maf] warning: ${message}\n`);
+    };
     // What the adapter described wins: its result's surface, or the one it attached to the error it
     // threw (R3-S1). Only when it described neither does the loop build one — and that one is
     // marked, because the role prompt and the system block the backend was sent are different text.
-    const reported = turn?.modelSurface ?? thrownSurface;
+    const reported = turn?.modelSurface ?? attachedModelSurface(failure, warn);
     const surface = reported ?? {
       systemPromptSha256: sha256Hex(systemPrompt), toolCatalog: '', argv: [],
     };
@@ -323,7 +326,9 @@ export class InProcessAgentLoop {
     const record: ModelSurfaceRecord = {
       role: base.role, taskId: base.taskId, turn: stepIndex + 1, ...surface, tier: 'in-process',
       kind: 'role-call',
-      ...(turn === undefined ? { error: 'thrown' as const } : {}),
+      // R4-L2: a call the adapter never sent (no model configured, a binary that could not start)
+      // is still recorded, but it is not a turn the model saw: `not-sent`, not `thrown`.
+      ...(turn === undefined ? { error: (modelSurfaceWasSent(failure) ? 'thrown' : 'not-sent') as 'thrown' | 'not-sent' } : {}),
       ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
     };
     try {

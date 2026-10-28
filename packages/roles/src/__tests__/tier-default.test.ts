@@ -83,6 +83,8 @@ class CliThrows implements CliAdapter {
 
 /** A cli-only backend that throws a surface of its own: what it composed, not what was asked for. */
 class CliThrowsWithSurface extends CliThrows {
+  /** R4-L2: `false` stands in for a failure before any request left the adapter. */
+  constructor(private readonly sentFlag = true) { super(); }
   readonly sent = {
     systemPromptSha256: sha256Hex('COMPOSED SYSTEM BLOCK'),
     promptSha256:       sha256Hex('COMPOSED PROMPT'),
@@ -91,7 +93,7 @@ class CliThrowsWithSurface extends CliThrows {
   };
   override async invoke(): Promise<AdapterInvokeResult> {
     this.invoked++;
-    throw withModelSurface(new TransportError('the backend did not finish in time'), this.sent);
+    throw withModelSurface(new TransportError('the backend did not finish in time'), this.sent, this.sentFlag);
   }
 }
 
@@ -809,6 +811,20 @@ test('R3-M2: a surface record the transcript refuses leaves a successful cli cal
       fx.stderr.some((l) => l.includes('could not record the model surface for role "coder"')),
       'the recording failure is reported, not swallowed silently',
     );
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('R4-L2: a cli-tier call that never left the adapter is recorded as not-sent', async () => {
+  const adapter = new CliThrowsWithSurface(false);
+  const fx = await makeFixture({ adapter, role: role('coder', WRITE_TOOLS, 'cli'), allowUngoverned: true });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), TransportError);
+    assert.deepEqual(fx.surfaces, [{
+      role: 'coder', taskId: makeTaskId('n1'), turn: 1, ...adapter.sent,
+      tier: 'cli', nativeTools: 'full', kind: 'role-call', error: 'not-sent',
+    }], 'the model was never reached, though the surface says what the call would have sent');
   } finally {
     await fx.cleanup();
   }

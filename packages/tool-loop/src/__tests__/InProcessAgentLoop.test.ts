@@ -321,3 +321,30 @@ test('R3-S1: a thrown turn records the surface the adapter attached, not a diges
   );
   assert.equal('surfaceSource' in (attestor.surfaces[0] ?? {}), false, 'an adapter-described record is not marked');
 });
+
+/**
+ * R4-L2: some failures happen before the adapter sends anything — a binary that cannot start. The
+ * surface still describes what the turn would have sent, but the record must say the model was
+ * never reached, not that a turn threw.
+ */
+class UnsentThrowAdapter extends ComposingThrowAdapter {
+  override async sendTurn(): Promise<AssistantTurn> {
+    throw withModelSurface(new TransportError('Could not run "claude": spawn claude ENOENT'), this.sent, false);
+  }
+}
+
+test('R4-L2: a turn that never left the adapter is recorded as not-sent', async () => {
+  const attestor = new SpyAttestor();
+  const adapter = new UnsentThrowAdapter([]);
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    { ...baseDeps(adapter, attestor), transcript: { append: async () => {} } },
+  );
+  await assert.rejects(loop.run(), /Could not run "claude"/);
+
+  assert.deepEqual(attestor.surfaces, [{
+    role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    ...adapter.sent, tier: 'in-process', kind: 'role-call', error: 'not-sent',
+  }], 'the record names what the turn would have sent, and says the model was never reached');
+  assert.equal('surfaceSource' in (attestor.surfaces[0] ?? {}), false, 'the adapter described this call');
+});

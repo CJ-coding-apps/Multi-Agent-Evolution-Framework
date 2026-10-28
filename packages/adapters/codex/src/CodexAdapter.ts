@@ -80,6 +80,9 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
     // the system block this adapter built and the blob codex was written — the loop holds only the
     // role prompt and would otherwise name bytes codex was never sent.
     const surface = cliModelSurface(systemBlock, historyText, args, undefined, input);
+    // R4-L2: a spawn that rejects never ran the binary, so nothing was sent; a turn that ran and
+    // failed is a sent attempt. The flag rides the attached record so the loop can tell them apart.
+    let sent = false;
     try {
       const result = await this.spawn('codex', args, {
         cwd:       opts.workingDir,
@@ -88,12 +91,13 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
         env:       { ...process.env },
         ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
       });
+      sent = true;
       // Both ways a turn fails — the spawn rejects, or `turnStdout` throws on a run that did not
       // finish cleanly — are inside the `try`, so the error a failed turn throws always carries its
       // surface (R3-S1).
       return { ...parseTurn(turnStdout(this.name, result)), modelSurface: surface };
     } catch (err: unknown) {
-      throw attach(err, surface);
+      throw attach(err, surface, sent);
     }
   }
 
@@ -125,7 +129,7 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       timeoutMs: options.timeoutMs,
       input:     fullPrompt,
       env:       { ...process.env },
-    }).catch((err: unknown): never => { throw attach(err, surface); });
+    }).catch((err: unknown): never => { throw attach(err, surface, false); });
     return {
       success:     result.exitCode === 0,
       output:      result.stdout,
@@ -160,6 +164,6 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
  * codex was actually sent. A value that is not an `Error` cannot carry a field; it is rethrown
  * untouched and the caller records its own fallback, marked as one.
  */
-function attach(err: unknown, surface: ModelSurface): unknown {
-  return err instanceof Error ? withModelSurface(err, surface) : err;
+function attach(err: unknown, surface: ModelSurface, sent = true): unknown {
+  return err instanceof Error ? withModelSurface(err, surface, sent) : err;
 }

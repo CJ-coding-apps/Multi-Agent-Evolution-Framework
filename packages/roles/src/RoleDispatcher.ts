@@ -4,7 +4,7 @@ import type {
   AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle, TaskId,
   PolicyDecision, ModelSurface, ModelSurfaceRecord, AttributedChange, WriterLockLedger, NodeId,
 } from '@maf/types';
-import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY, callModelSurface, attachedModelSurface } from '@maf/types';
+import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY, callModelSurface, attachedModelSurface, modelSurfaceWasSent } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -779,7 +779,7 @@ export class RoleDispatcher {
           // shows it. The record is written whether the call returned or threw (R2-S1): a backend
           // that times out or never starts still took a turn this run asked for, and omitting it
           // would leave that governed writer's failed turn out of the evidence entirely.
-          await this.recordCliSurface(role, taskId, cliResult, invokeOpts, attachedModelSurface(cliFailure));
+          await this.recordCliSurface(role, taskId, cliResult, invokeOpts, cliFailure);
         }
         // The `finally` above records on both paths; a returned result is the only way here.
         if (cliResult === undefined) throw new Error('unreachable: adapter.invoke returned no result');
@@ -980,15 +980,17 @@ export class RoleDispatcher {
    *
    * `result` is absent when the call threw (R2-S1): the surface sent is still known exactly, so the
    * record carries the digests of what was sent, no `outputSha256` (there was no answer to hash),
-   * and `error: 'thrown'`. The write itself never changes the call's outcome (R2-L2): a recorder
-   * that fails is reported on stderr, and the call's own result or error still decides the node.
+   * and `error: 'thrown'` — or `'not-sent'` (R4-L2) when the adapter marks that no request left it,
+   * as with no model configured or a binary that could not start. The write itself never changes
+   * the call's outcome (R2-L2): a recorder that fails is reported on stderr, and the call's own
+   * result or error still decides the node.
    */
   private async recordCliSurface(
     role: RoleConfig,
     taskId: TaskId,
     result: AdapterInvokeResult | undefined,
     invokeOpts: AdapterInvokeOptions,
-    thrownSurface: ModelSurface | undefined,
+    failure: unknown,
   ): Promise<void> {
     const askedNativeTools = invokeOpts.nativeTools;
     // L1: an adapter that reports a surface keeps it (its argv is evidence this layer cannot
@@ -996,7 +998,10 @@ export class RoleDispatcher {
     // R3-S1: a call that threw reports through the surface attached to its error, if it attached
     // one; the fallback is marked, because `invokeOpts` is what the dispatcher asked for, not
     // necessarily the system block or argv the adapter actually composed.
-    const reported = result?.modelSurface ?? thrownSurface;
+    const warn = (message: string): void => {
+      (this.config.stderr ?? process.stderr).write(`[maf] warning: ${message}\n`);
+    };
+    const reported = result?.modelSurface ?? attachedModelSurface(failure, warn);
     const record: ModelSurfaceRecord = {
       role: role.role, taskId, turn: 1,
       ...(reported ?? callModelSurface(invokeOpts.systemPrompt, invokeOpts.prompt, result?.output)),
@@ -1013,7 +1018,7 @@ export class RoleDispatcher {
       // `planGenerator` and `SecurityReviewGate`, in this same array.
       nativeTools: askedNativeTools === false ? 'none' : askedNativeTools === 'read-only' ? 'read-only' : 'full',
       kind: 'role-call',
-      ...(result === undefined ? { error: 'thrown' as const } : {}),
+      ...(result === undefined ? { error: (modelSurfaceWasSent(failure) ? 'thrown' : 'not-sent') as 'thrown' | 'not-sent' } : {}),
       ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
       ...(invokeOpts.model !== undefined ? { model: invokeOpts.model } : {}),
     };

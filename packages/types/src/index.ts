@@ -1550,8 +1550,10 @@ export interface ModelSurfaceRecord extends ModelSurface {
   // L1-S5: how an attempt ended when the adapter threw and returned no result. The record still
   // carries the digests of what was sent; `outputSha256` is absent, because no output came back —
   // "not recorded" must read differently from "recorded as empty" (Constitution §4). Absent on a
-  // call that returned, however it judged the work.
-  error?: 'thrown';
+  // call that returned, however it judged the work. R4-L2: `'not-sent'` is a call that failed
+  // before any request left the adapter — no model configured, a binary that could not start — so
+  // the surface describes what it *would* have sent; `'thrown'` is a call that was sent and failed.
+  error?: 'thrown' | 'not-sent';
   // R3-S1: where this surface came from. `'fallback'` means the call site built it from the bytes it
   // held (`callModelSurface`) because the adapter reported none and attached none — a call site can
   // describe the role prompt it passed, but it cannot describe a system block or an argv an adapter
@@ -1687,6 +1689,6 @@ export { toolEnv } from './childEnv.js';
  * giving either a new edge to an adapter package that builds the other kind of surface.
  */
 export {
-  callModelSurface, sha256Hex, withModelSurface, attachedModelSurface,
+  callModelSurface, sha256Hex, withModelSurface, attachedModelSurface, modelSurfaceWasSent,
 } from './surface.js';
 export type { ModelSurfaceCarrier } from './surface.js';

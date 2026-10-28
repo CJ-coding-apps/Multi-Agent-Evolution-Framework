@@ -23,7 +23,11 @@ is entitled to know which of their own code stops compiling.
   system block and its own argv — rather than the role prompt the call site happens to hold. Only an
   adapter that attaches nothing falls back to the call site's digests, with `argv: []` and
   `toolCatalog: ''` rather than an invented command line, and that record is marked
-  `surfaceSource: "fallback"`. Each record is mirrored into the run's transcript as it is made.
+  `surfaceSource: "fallback"`. An adapter that describes a surface returns it on success too, so the
+  marker appears only for an adapter that describes nothing. A call that failed before any request left
+  the adapter — no model configured, a binary that would not start — records `error: "not-sent"` with
+  `outputSha256` absent, distinct from a turn the model was sent and failed (`error: "thrown"`). Each
+  record is mirrored into the run's transcript as it is made.
 - **A run that fails at planning writes and signs a bundle** ([D-45](docs/DECISIONS.md)). The bundle
   holds every planner surface, `outcome.failure.kind: "planning_failed"` and no subjects (no node
   existed to name); `maf run` prints its path and signature, and `maf attest verify` accepts it.

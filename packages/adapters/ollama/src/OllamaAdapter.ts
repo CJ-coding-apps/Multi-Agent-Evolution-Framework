@@ -105,24 +105,29 @@ export class OllamaAdapter extends BaseAdapter {
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const start = Date.now();
     const messages = this.buildMessages(options);
-    const body: OllamaRequest = {
-      model:   this.resolveModel(options),
-      messages,
-      stream:  false,
-      ...this.optionsBag(options),
-    };
-
-    const url = `${this.baseUrl}/api/chat`;
-    const controller = new AbortController();
-    const deadline: Deadline = { signal: controller.signal, ms: options.timeoutMs };
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs);
     // R3-S1: this backend sends the system prompt and the prompt as the request's messages and no
     // argv at all, so the surface the call site can rebuild from `options` *is* what was about to
     // be sent. Composed before the request goes out, and attached to whatever the request throws,
     // so a timeout or a 5xx still records the call — and records it as the adapter's own account,
-    // not as a fallback the recorder had to reconstruct.
+    // not as a fallback the recorder had to reconstruct. R4-M2: the same surface comes back on
+    // success (with the answer's digest), so the fallback marker is reserved for an adapter that
+    // describes nothing.
     const surface = callModelSurface(options.systemPrompt, options.prompt);
+    const url = `${this.baseUrl}/api/chat`;
+    const controller = new AbortController();
+    const deadline: Deadline = { signal: controller.signal, ms: options.timeoutMs };
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+    // R4-L2: `resolveModel` throws before the request exists (no model configured). That is a call
+    // that never left this adapter, and the record says `not-sent` rather than `thrown`.
+    let sent = false;
     try {
+      const body: OllamaRequest = {
+        model:   this.resolveModel(options),
+        messages,
+        stream:  false,
+        ...this.optionsBag(options),
+      };
+      sent = true;
       const res = await answered(url, fetch(url, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -134,7 +139,10 @@ export class OllamaAdapter extends BaseAdapter {
       if (!res.ok) {
         // A 4xx is the server judging the request (an unknown model is a 404). Classifying those
         // is D-05's (0.6.0); until then it is a failed result, not a retry.
-        return { success: false, output: text, toolCallLog: [], exitCode: res.status, duration: Date.now() - start };
+        return {
+          success: false, output: text, toolCallLog: [], exitCode: res.status, duration: Date.now() - start,
+          modelSurface: callModelSurface(options.systemPrompt, options.prompt, text),
+        };
       }
       const data = JSON.parse(text) as OllamaResponse;
       return {
@@ -144,9 +152,10 @@ export class OllamaAdapter extends BaseAdapter {
         toolCallLog: [] as ToolCallRecord[],
         exitCode:    0,
         duration:    Date.now() - start,
+        modelSurface: callModelSurface(options.systemPrompt, options.prompt, data.message.content),
       };
     } catch (err: unknown) {
-      throw err instanceof Error ? withModelSurface(err, surface) : err;
+      throw err instanceof Error ? withModelSurface(err, surface, sent) : err;
     } finally {
       clearTimeout(timer);
     }

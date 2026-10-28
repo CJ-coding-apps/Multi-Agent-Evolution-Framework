@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CliAdapter, AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord } from '@maf/types';
-import { GateRefused, TransportError, sha256Hex } from '@maf/types';
+import { GateRefused, TransportError, sha256Hex, withModelSurface } from '@maf/types';
 import { SecurityReviewGate } from '../SecurityReviewGate.js';
 
 const CLEAN_RESULT = JSON.stringify({ findings: [], summary: 'clean', passed: true });
@@ -270,4 +270,67 @@ test('L1: the model the gate was configured with is on the record', async () => 
   const g = gate(fakeAdapter(CLEAN_RESULT), { model: 'claude-sonnet', recordSurface: (record) => records.push(record) });
   await g.reviewDiff('diff', { nodeId: 'n4' });
   assert.equal(records[0]?.model, 'claude-sonnet');
+});
+
+// R4-M1: the gate's thrown path prefers the surface the adapter attached — the reviewer's own
+// account of the call — and only falls back to what the gate asked for. R4-L1: a foreign surface
+// that does not validate is ignored, the fallback is recorded and marked, and the defect is warned
+// about rather than silently dropped.
+
+test('R4-M1: a throwing adapter\'s attached surface is what the gate records, not its fallback', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const surface = {
+    systemPromptSha256: 'reviewer-sys', promptSha256: 'reviewer-prompt', toolCatalog: '',
+    argv: ['claude', '--print', '--system-prompt', '<--system-prompt: 9 bytes, sha256 abc>'],
+  };
+  const throwing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => {
+      throw withModelSurface(new Error('the reviewer failed'), surface);
+    },
+  };
+  const g = gate(throwing, { recordSurface: (record) => records.push(record) });
+  await assert.rejects(() => g.reviewDiff('diff --git a/b.ts b/b.ts\n+x\n', { nodeId: 'n9' }), /the reviewer failed/);
+  assert.deepEqual(records[0], {
+    role: 'security', taskId: 'n9', turn: 1, ...surface,
+    tier: 'cli', nativeTools: 'none', kind: 'security-gate', error: 'thrown',
+  });
+  assert.equal('surfaceSource' in (records[0] ?? {}), false, 'the adapter described the call');
+});
+
+test('R4-L1: a malformed attached surface is ignored, the fallback is recorded, and a warning is emitted', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const warnings: string[] = [];
+  const malformed = Object.assign(new Error('the reviewer failed'), {
+    modelSurface: { systemPromptSha256: 'sys', toolCatalog: '', argv: 'not-an-array' },
+  });
+  const throwing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => { throw malformed; },
+  };
+  const g = gate(throwing, {
+    recordSurface: (record) => records.push(record),
+    warn: (line) => warnings.push(line),
+  });
+  await assert.rejects(() => g.reviewDiff('diff --git a/b.ts b/b.ts\n+x\n'), /the reviewer failed/);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? '', /not a valid model surface/);
+  assert.equal(records[0]?.surfaceSource, 'fallback');
+  assert.equal(records[0]?.error, 'thrown');
+  assert.equal(records[0]?.systemPromptSha256, sha256Hex('You are a security auditor. Respond in strict JSON.'));
+});
+
+test('R4-L2: a gate call that never left the adapter is recorded as not-sent', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const unsent = new Error('no model configured; no request was sent');
+  const throwing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => { throw withModelSurface(unsent, {
+      systemPromptSha256: 'sys', promptSha256: 'prompt', toolCatalog: '', argv: [],
+    }, false); },
+  };
+  const g = gate(throwing, { recordSurface: (record) => records.push(record) });
+  await assert.rejects(() => g.reviewDiff('diff --git a/b.ts b/b.ts\n+x\n'), /no model configured/);
+  assert.equal(records[0]?.error, 'not-sent');
+  assert.equal('outputSha256' in (records[0] ?? {}), false);
 });

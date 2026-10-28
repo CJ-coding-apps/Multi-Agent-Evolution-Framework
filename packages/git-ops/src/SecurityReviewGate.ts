@@ -2,7 +2,7 @@ import type {
   CliAdapter, AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord,
   SecurityFinding, SecurityReviewResult, SecuritySeverity,
 } from '@maf/types';
-import { GateRefused, attachedModelSurface, callModelSurface, makeTaskId, redactCredentials } from '@maf/types';
+import { GateRefused, attachedModelSurface, callModelSurface, makeTaskId, modelSurfaceWasSent, redactCredentials } from '@maf/types';
 
 /** L1: what a review is about, when the caller knows it: the node whose change the gate read. */
 export interface ReviewedNode {
@@ -23,6 +23,8 @@ export interface SecurityReviewGateConfig {
    * Not called when no model call was made (an empty diff, no paths, or a diff over the cap).
    */
   recordSurface?: (record: ModelSurfaceRecord) => unknown;
+  /** R4-L1: where a warning about a malformed attached surface goes. Defaults to process.stderr. */
+  warn?: (line: string) => void;
 }
 
 const BLOCKING_SEVERITIES: ReadonlySet<SecuritySeverity> = new Set(['critical', 'high']);
@@ -109,15 +111,17 @@ export class SecurityReviewGate {
       // before the transport check below can throw, and whether or not the adapter returned (S5).
       // `taskId` is the reviewed node's, exactly as the dispatcher mints it (`makeTaskId(node.id)`),
       // so a reader joins the gate's call to that node's role records; reviewing outside a node
-      // names the gate itself. A throw leaves `outputSha256` absent and says `error: 'thrown'`.
+      // names the gate itself. A throw leaves `outputSha256` absent and says `error: 'thrown'` — or
+      // `'not-sent'` (R4-L2) when the adapter marks that no request left it.
       // R3-S1: a throw reports through the surface the adapter attached to its error; an adapter
       // that attached none falls back to this call site, and that record says so.
-      const reported = result?.modelSurface ?? attachedModelSurface(failure);
+      const warn = this.config.warn ?? ((line: string): void => { process.stderr.write(`[maf] warning: ${line}\n`); });
+      const reported = result?.modelSurface ?? attachedModelSurface(failure, warn);
       await this.config.recordSurface?.({
         role: 'security', taskId: makeTaskId(reviewed?.nodeId ?? 'security-gate'), turn: 1,
         ...(reported ?? callModelSurface(opts.systemPrompt, prompt, result?.output)),
         tier: 'cli', nativeTools: nativeTools ? 'full' : 'none', kind: 'security-gate',
-        ...(result === undefined ? { error: 'thrown' as const } : {}),
+        ...(result === undefined ? { error: (modelSurfaceWasSent(failure) ? 'thrown' : 'not-sent') as 'thrown' | 'not-sent' } : {}),
         ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
         ...(this.config.model !== undefined ? { model: this.config.model } : {}),
       });
