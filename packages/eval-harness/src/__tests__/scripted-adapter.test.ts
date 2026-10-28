@@ -64,6 +64,12 @@ test('invoked as a CLI agent it applies the script\'s writes and deletes itself,
     await mkdir(path.join(dir, 'inner'));
     await assert.rejects(() => escape.invoke(opts({ prompt: 'p', workingDir: path.join(dir, 'inner') })), /must stay inside the working directory/);
     await assert.rejects(() => access(path.join(dir, 'outside.js')), 'nothing may be written outside the working dir');
+    // L1-S11: the call is recorded before the effect is applied, so the refused write does not erase
+    // the call that asked for it; no answer came back, so the exchange carries no output.
+    assert.equal(escape.exchanges.length, 1);
+    assert.equal(escape.exchanges[0]?.kind, 'task');
+    assert.equal(escape.exchanges[0]?.prompt, 'p');
+    assert.equal(escape.exchanges[0]?.output, undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

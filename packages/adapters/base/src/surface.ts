@@ -31,19 +31,23 @@ export function elided(name: string, value: string): string {
  * an adapter that writes its prompt to the child's stdin — codex joins the system block and the
  * prompt into one blob there (F7), so the two part-digests above do not by themselves say what was
  * sent; an adapter with no stdin leaves it undefined and the field is absent.
+ *
+ * `output` is optional because the surface is built *before* the call is made (R3-S1): an adapter
+ * attaches it to the error it throws, so the record of a failed call describes what was sent even
+ * though nothing came back. `outputSha256` is then absent, never the digest of `''`.
  */
 export function cliModelSurface(
   systemPrompt: string | undefined,
   prompt: string,
   argv: readonly string[],
-  output: string,
+  output?: string,
   stdin?: string,
 ): ModelSurface {
   return {
     systemPromptSha256: sha256Hex(systemPrompt ?? ''),
     promptSha256:       sha256Hex(prompt),
     toolCatalog:        '',
-    outputSha256:       sha256Hex(output),
+    ...(output !== undefined ? { outputSha256: sha256Hex(output) } : {}),
     ...(stdin !== undefined ? { stdinSha256: sha256Hex(stdin) } : {}),
     argv:               [...argv],
   };

@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { TransportError, makeToolId } from '@maf/types';
+import { TransportError, attachedModelSurface, makeToolId, modelSurfaceWasSent } from '@maf/types';
 import type { AdapterInvokeOptions, TurnMessage, ToolPlugin } from '@maf/types';
 import type { SpawnResult, spawnAndCollect } from '@maf/adapter-base';
-import { serializeTools } from '@maf/adapter-base';
+import { serializeHistory, serializeTools } from '@maf/adapter-base';
 import { ClaudeAdapter } from '../index.js';
 
 // ORACLE (F4, F8; D-04, D-06).
@@ -408,4 +408,98 @@ test('a recorded digest is over the exact bytes sent: leading and trailing white
   assert.equal(surface.promptSha256, sha256Hex(prompt), 'the digest is over the untrimmed prompt');
   assert.notEqual(surface.promptSha256, sha256Hex(prompt.trim()), 'a digest over trimmed bytes would show here');
   assert.equal(surface.promptSha256, markerSha(surface.argv.at(-1) ?? ''), 'and the marker carries that same digest');
+});
+
+// R3-S1: a failed turn used to leave the loop to reconstruct the surface from the role prompt it
+// holds — which is not what claude was sent. The adapter composes the system block (role prompt,
+// protocol, catalogue) and the argv *before* it spawns, and attaches that surface to the error it
+// throws, so the record of a failed turn names the bytes the backend actually received.
+
+/** Runs `fn` and returns the value it threw, asserting that it threw one. */
+async function thrownBy(fn: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await fn();
+  } catch (err: unknown) {
+    return err;
+  }
+  assert.fail('the call was expected to throw');
+}
+
+test('R3-S1: a failed sendTurn carries the composed system block and argv, not the role prompt', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: '', stderr: 'error: session expired', exitCode: 1, duration: 1 });
+  const err = await thrownBy(() => new ClaudeAdapter({ spawn }).sendTurn(
+    HISTORY, { ...CALL, systemPrompt: 'be brief', model: 'opus', tools: TOOLS },
+  ));
+
+  assert.ok(err instanceof Error);
+  const surface = attachedModelSurface(err);
+  assert.ok(surface, 'the error says what the failed turn was sent');
+  const args = calls[0]?.args ?? [];
+  const asSent = args[args.indexOf('--system-prompt') + 1] ?? '';
+  assert.equal(surface.systemPromptSha256, sha256Hex(asSent),
+    'the digest is of the system block the binary received');
+  assert.notEqual(surface.systemPromptSha256, sha256Hex('be brief'),
+    'the role prompt alone is not what claude was shown — the block also carries the protocol and catalogue');
+  assert.equal(surface.toolCatalog, serializeTools(TOOLS), 'the catalogue is what the model was shown');
+  assert.deepEqual(surface.argv, [
+    '--print', '--system-prompt', elided('--system-prompt', asSent),
+    '--model', 'opus', '--tools', '',
+    ...MCP_ISOLATION,
+    '-p', '--', elided('prompt', args.at(-1) ?? ''),
+  ], 'the argv it spawned with, payloads elided as on a returned turn');
+  assert.equal('outputSha256' in surface, false, 'nothing came back, so there is no output digest');
+  assert.equal(modelSurfaceWasSent(err), true, 'the binary ran, so the attempt was sent');
+});
+
+// R4-L2: a spawn that rejects never ran the binary — nothing reached the model. The surface still
+// says what the turn would have sent, but the record must not call it a thrown turn.
+test('R4-L2: a sendTurn whose binary cannot start carries its surface and is marked not-sent', async () => {
+  const failure = new TransportError('Could not run "claude": spawn claude ENOENT');
+  const spawn: typeof spawnAndCollect = async () => { throw failure; };
+  const err = await thrownBy(() => new ClaudeAdapter({ spawn }).sendTurn(
+    HISTORY, { ...CALL, systemPrompt: 'be brief', tools: TOOLS },
+  ));
+
+  assert.equal(err, failure, 'the same error object, so its class and message survive');
+  const surface = attachedModelSurface(err);
+  assert.ok(surface, 'the failed turn says what it was asked to send');
+  assert.deepEqual(surface.argv.slice(-2), ['--', elided('prompt', serializeHistory(HISTORY))],
+    'the prompt is the serialized history the turn would have spawned with');
+  assert.equal(modelSurfaceWasSent(err), false, 'the binary never ran');
+});
+
+test('R3-S1: an invoke whose binary cannot start carries the argv it was asked to run', async () => {
+  const failure = new TransportError('Could not run "claude": spawn claude ENOENT');
+  const spawn: typeof spawnAndCollect = async () => { throw failure; };
+  const err = await thrownBy(() => new ClaudeAdapter({ spawn }).invoke({ ...CALL, systemPrompt: 'be brief' }));
+
+  assert.equal(err, failure, 'the same error object, so its class and message survive');
+  const surface = attachedModelSurface(err);
+  assert.ok(surface, 'the failed call says what it was asked to run');
+  assert.equal(surface.systemPromptSha256, sha256Hex('be brief'));
+  assert.equal(surface.promptSha256, sha256Hex('say hi'));
+  assert.equal('outputSha256' in surface, false);
+  assert.deepEqual(surface.argv, [
+    '--print', '--system-prompt', elided('--system-prompt', 'be brief'),
+    ...MCP_ISOLATION,
+    '-p', '--', elided('prompt', 'say hi'),
+  ], 'the flags are the ones it would have spawned with');
+  assert.equal(modelSurfaceWasSent(err), false, 'the binary never started, so nothing was sent');
+});
+
+// R4-M1: a turn the binary ran and failed is a sent attempt, whether it timed out or exited with an
+// error. The surface is what the argv held, and the distinction matters to the record's `error`.
+test('R4-M1: a timed-out sendTurn attaches its surface and is a sent attempt', async () => {
+  const { spawn, calls } = stubSpawn(timedOut());
+  const err = await thrownBy(() => new ClaudeAdapter({ spawn }).sendTurn(
+    HISTORY, { ...CALL, systemPrompt: 'be brief', model: 'opus', tools: TOOLS },
+  ));
+
+  const surface = attachedModelSurface(err);
+  assert.ok(surface);
+  const args = calls[0]?.args ?? [];
+  const asSent = args[args.indexOf('--system-prompt') + 1] ?? '';
+  assert.equal(surface.systemPromptSha256, sha256Hex(asSent));
+  assert.equal('outputSha256' in surface, false);
+  assert.equal(modelSurfaceWasSent(err), true);
 });

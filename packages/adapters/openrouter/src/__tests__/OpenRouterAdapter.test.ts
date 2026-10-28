@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AdapterInvokeOptions } from '@maf/types';
+import { attachedModelSurface, callModelSurface, modelSurfaceWasSent, sha256Hex } from '@maf/types';
 import { OpenRouterAdapter } from '../index.js';
 
 // ORACLE (audit P0 #9; WP-1.8, D-25).
@@ -141,5 +142,37 @@ test('HTTP-Referer is this repository and X-Title stays MAF', async () => {
     const headers = new Headers(sent[0]?.init?.headers);
     assert.equal(headers.get('HTTP-Referer'), REPOSITORY_URL);
     assert.equal(headers.get('X-Title'), 'MAF');
+  });
+});
+
+// R4-M2: the adapter describes the call it made on success too. The record then has the adapter's
+// own account — the messages it actually sent and the digest of the answer it got — rather than a
+// fallback the recorder rebuilt from the role prompt.
+test('R4-M2: a successful call returns the surface it sent, with the answer digest', async () => {
+  await withStubFetch(async (sent) => {
+    const adapter = construct('vendor/model');
+    const result = await adapter.invoke({ ...CALL, systemPrompt: 'be brief' });
+    assert.equal(sent.length, 1);
+    const body = JSON.parse(String(sent[0]?.init?.body)) as { messages: Array<{ role: string; content: string }> };
+    const system = body.messages.find((m) => m.role === 'system');
+    const user = body.messages.find((m) => m.role === 'user');
+    assert.ok(user);
+    assert.deepEqual(result.modelSurface, callModelSurface(system?.content, user.content, 'hi'));
+    assert.equal(result.modelSurface?.outputSha256, sha256Hex('hi'));
+    assert.equal('surfaceSource' in (result.modelSurface ?? {}), false, 'a surface is not a fallback marker');
+  });
+});
+
+// R4-L2: `resolveModel` refuses before the request exists. The call is still recorded — the surface
+// says what it would have sent — but it is `not-sent`, not a turn the model saw.
+test('R4-L2: a call refused before the request exists carries its surface and is marked not-sent', async () => {
+  await withStubFetch(async (sent) => {
+    const adapter = construct(undefined);
+    await assert.rejects(adapter.invoke({ ...CALL, systemPrompt: 'be brief' }), (err: unknown) => {
+      assert.deepEqual(attachedModelSurface(err), callModelSurface('be brief', 'say hi'));
+      assert.equal(modelSurfaceWasSent(err), false);
+      return true;
+    });
+    assert.equal(sent.length, 0, 'nothing left the adapter');
   });
 });

@@ -9,6 +9,29 @@ is entitled to know which of their own code stops compiling.
 
 ## [Unreleased]
 
+### Added
+
+- **Every model call `maf run` makes is in its record** ([D-45](docs/DECISIONS.md)). The planner's
+  call now carries `kind: "planner"` and the security gate's `kind: "security-gate"` (its `taskId` is
+  the reviewed node's), beside the role calls that were already there; `kind` and `tier` are additive,
+  so a reader of an older bundle reads what it read before. One record is written per attempt — a
+  planner or node retried on a transport failure reports each attempt — and the record is written even
+  when the call **threw**, in which case `outputSha256` is absent and `error: "thrown"` says why,
+  because "not recorded" must not read as "recorded as empty". What a record says the model saw is the
+  adapter's own account: each adapter composes its surface before it spawns and attaches it to any
+  error it throws, so a failed turn names the bytes the backend was actually sent — its composed
+  system block and its own argv — rather than the role prompt the call site happens to hold. Only an
+  adapter that attaches nothing falls back to the call site's digests, with `argv: []` and
+  `toolCatalog: ''` rather than an invented command line, and that record is marked
+  `surfaceSource: "fallback"`. An adapter that describes a surface returns it on success too, so the
+  marker appears only for an adapter that describes nothing. A call that failed before any request left
+  the adapter — no model configured, a binary that would not start — records `error: "not-sent"` with
+  `outputSha256` absent, distinct from a turn the model was sent and failed (`error: "thrown"`). Each
+  record is mirrored into the run's transcript as it is made.
+- **A run that fails at planning writes and signs a bundle** ([D-45](docs/DECISIONS.md)). The bundle
+  holds every planner surface, `outcome.failure.kind: "planning_failed"` and no subjects (no node
+  existed to name); `maf run` prints its path and signature, and `maf attest verify` accepts it.
+
 ## [0.5.1] - 2026-10-22
 
 A patch closing two holes in `patch.apply`'s path declaration, and replacing the design that produced

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  makeRunId, makeTaskId, makeToolId,
+  makeRunId, makeTaskId, makeToolId, sha256Hex, TransportError, withModelSurface,
 } from '@maf/types';
 import type {
   TurnAdapter, TurnMessage, AssistantTurn, AdapterInvokeOptions, AdapterInvokeResult,
@@ -200,8 +200,8 @@ test('F4: each turn\'s model surface reaches the attestor and the transcript, nu
   await loop.run();
 
   assert.deepEqual(attestor.surfaces, [
-    { role: 'analyst', taskId: makeTaskId('t1'), turn: 1, ...SURFACE, tier: 'in-process' },
-    { role: 'analyst', taskId: makeTaskId('t1'), turn: 2, ...SURFACE, tier: 'in-process' },
+    { role: 'analyst', taskId: makeTaskId('t1'), turn: 1, ...SURFACE, tier: 'in-process', kind: 'role-call' },
+    { role: 'analyst', taskId: makeTaskId('t1'), turn: 2, ...SURFACE, tier: 'in-process', kind: 'role-call' },
   ], 'every turn, in order, with the role, task and 1-based turn number, and its tier (WP-3.0c)');
   assert.equal(appended.length, 2, 'and each is mirrored into the transcript');
   assert.equal(appended[0]?.role, 'system');
@@ -212,7 +212,65 @@ test('F4: each turn\'s model surface reaches the attestor and the transcript, nu
   assert.match(appended[0]?.content ?? '', /\[surface\] turn 1/, 'the transcript line says what it is');
 });
 
-test('F4: a turn the adapter reports no surface for records nothing — the record never invents one', async () => {
+/** A backend whose governed turn throws, the way a timeout or an exit reaches the loop. */
+class ThrowingAdapter extends ScriptedAdapter {
+  override async sendTurn(): Promise<AssistantTurn> {
+    throw new Error('the backend exited mid-turn');
+  }
+}
+
+test('R2-S1: a turn that throws is recorded once, with the system digest and no output digest', async () => {
+  const attestor = new SpyAttestor();
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    { ...baseDeps(new ThrowingAdapter([]), attestor), transcript: { append: async () => {} } },
+  );
+  await assert.rejects(loop.run(), /the backend exited mid-turn/);
+
+  assert.deepEqual(attestor.surfaces, [{
+    role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    systemPromptSha256: sha256Hex(baseOpts.systemPrompt),
+    toolCatalog: '', argv: [], tier: 'in-process', kind: 'role-call', error: 'thrown',
+    // R3-S1: this adapter attached no surface to its error, so the loop's record is its own account
+    // of the role prompt — and says so. The role prompt is not the system block claude would compose.
+    surfaceSource: 'fallback',
+  }], 'the failed turn is in the record exactly once, and it carries no output digest');
+});
+
+test('R2-L2: a surface record that cannot be written does not replace the turn\'s own error', async () => {
+  const attestor = new SpyAttestor();
+  const stderr: string[] = [];
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    {
+      ...baseDeps(new ThrowingAdapter([]), attestor),
+      transcript: { append: async () => { throw new Error('the transcript is full'); } },
+      stderr: { write: (text: string) => { stderr.push(text); return true; } },
+    },
+  );
+  await assert.rejects(loop.run(), /the backend exited mid-turn/);
+  assert.equal(attestor.surfaces.length, 1, 'the bundle copy was written before the transcript failed');
+  assert.match(stderr.join(''), /could not record the model surface for role "analyst"/);
+});
+
+test('R2-L2: a surface record that cannot be written does not turn a completed turn into a throw', async () => {
+  const attestor = new SpyAttestor();
+  const stderr: string[] = [];
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    {
+      ...baseDeps(new ScriptedAdapter([{ text: 'done', toolCalls: [] }]), attestor),
+      transcript: { append: async () => { throw new Error('the transcript is full'); } },
+      stderr: { write: (text: string) => { stderr.push(text); return true; } },
+    },
+  );
+  const res = await loop.run();
+  assert.equal(res.outcome, 'completed', 'the model answered, so the run completes');
+  assert.equal(res.finalText, 'done');
+  assert.match(stderr.join(''), /could not record the model surface for role "analyst"/);
+});
+
+test('L1-S1: a turn the adapter reports no surface for still records the system block it was shown', async () => {
   const attestor = new SpyAttestor();
   const loop = new InProcessAgentLoop(
     { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
@@ -220,5 +278,73 @@ test('F4: a turn the adapter reports no surface for records nothing — the reco
   );
   await loop.run();
 
-  assert.deepEqual(attestor.surfaces, [], 'a cli-tier-shaped turn has no model-facing surface to record');
+  assert.deepEqual(attestor.surfaces, [{
+    role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    systemPromptSha256: sha256Hex(baseOpts.systemPrompt),
+    toolCatalog: '', argv: [], tier: 'in-process', kind: 'role-call',
+    surfaceSource: 'fallback',
+  }], 'the prompt and output digests stay absent — a turn has neither as one byte string');
+});
+
+/**
+ * R3-S1: a backend that composes its own system block (role prompt + protocol + catalogue) and its
+ * own argv, and then fails. The loop holds only the role prompt; the adapter holds what it sent.
+ * The record must be the adapter's account, not the loop's reconstruction.
+ */
+class ComposingThrowAdapter extends ScriptedAdapter {
+  readonly sent = {
+    systemPromptSha256: sha256Hex('role prompt\n\nwire protocol\n\nAVAILABLE TOOLS: echo'),
+    toolCatalog:        'AVAILABLE TOOLS (use the id as "toolName"):\n- echo [read]: echo echo',
+    argv:               ['--print', '--tools', '', '-p', '--', '<prompt: 12 bytes, sha256 ' + 'c'.repeat(64) + '>'],
+  };
+  override async sendTurn(): Promise<AssistantTurn> {
+    throw withModelSurface(new TransportError('claude exited 1 mid-turn'), this.sent);
+  }
+}
+
+test('R3-S1: a thrown turn records the surface the adapter attached, not a digest of the role prompt', async () => {
+  const attestor = new SpyAttestor();
+  const adapter = new ComposingThrowAdapter([]);
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    { ...baseDeps(adapter, attestor), transcript: { append: async () => {} } },
+  );
+  await assert.rejects(loop.run(), /claude exited 1 mid-turn/);
+
+  assert.deepEqual(attestor.surfaces, [{
+    role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    ...adapter.sent, tier: 'in-process', kind: 'role-call', error: 'thrown',
+  }], 'the record names what claude was sent — the composed block and the argv — and is not a fallback');
+  assert.notEqual(
+    attestor.surfaces[0]?.systemPromptSha256, sha256Hex(baseOpts.systemPrompt),
+    'the role prompt the loop holds is not what the backend was shown',
+  );
+  assert.equal('surfaceSource' in (attestor.surfaces[0] ?? {}), false, 'an adapter-described record is not marked');
+});
+
+/**
+ * R4-L2: some failures happen before the adapter sends anything — a binary that cannot start. The
+ * surface still describes what the turn would have sent, but the record must say the model was
+ * never reached, not that a turn threw.
+ */
+class UnsentThrowAdapter extends ComposingThrowAdapter {
+  override async sendTurn(): Promise<AssistantTurn> {
+    throw withModelSurface(new TransportError('Could not run "claude": spawn claude ENOENT'), this.sent, false);
+  }
+}
+
+test('R4-L2: a turn that never left the adapter is recorded as not-sent', async () => {
+  const attestor = new SpyAttestor();
+  const adapter = new UnsentThrowAdapter([]);
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    { ...baseDeps(adapter, attestor), transcript: { append: async () => {} } },
+  );
+  await assert.rejects(loop.run(), /Could not run "claude"/);
+
+  assert.deepEqual(attestor.surfaces, [{
+    role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    ...adapter.sent, tier: 'in-process', kind: 'role-call', error: 'not-sent',
+  }], 'the record names what the turn would have sent, and says the model was never reached');
+  assert.equal('surfaceSource' in (attestor.surfaces[0] ?? {}), false, 'the adapter described this call');
 });

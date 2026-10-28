@@ -407,14 +407,19 @@ What the `cli` tier records is the call's **surface**, not its tool calls ([D-45
 MAF composed, of the prompt and of the output, and the argv the backend was spawned with, its payload
 positionals each replaced by their byte length and sha256 exactly as an in-process turn's are. The record
 also carries `nativeTools` — `full`, `read-only` or `none` — which is the posture MAF **asked** of the
-backend's own tools, not what the backend then did. So a `cli`-tier role call through `claude`, `codex` or
-`gemini` — the three adapters that spawn a process and so have an argv to record — is no longer unrecorded:
+backend's own tools, not what the backend then did. So a `cli`-tier role call is no longer unrecorded:
 what MAF handed the backend and what came back is in the bundle, distinct from the individual tool calls the
-backend ran, which MAF still does not see. A role call routed to `ollama` or `openrouter` is **not** covered:
-those adapters compose no argv and fill no `modelSurface`, so a `cli`-tier call through them is still
-unrecorded — the tier is not by itself the thing being claimed. Two `cli`-tier calls are still without a
-surface — the planner's call and the security reviewer's call, which MAF spawns itself rather than through a
-role node, whatever tier the roles run on. One difference: they need only text, so `claude` is spawned for them with `--tools ""`,
+backend ran, which MAF still does not see. An adapter that spawns a process — `claude`, `codex`, `gemini` —
+reports the argv it was spawned with; one that does not — `ollama`, `openrouter` — reports no surface, and the
+dispatcher records the digests of the system prompt, prompt and output it sent and received itself, with
+`argv: []` rather than an invented command line. The planner's call and the security reviewer's call,
+which MAF spawns itself rather than through a role node, are in the same array: `kind: "planner"` for the
+run's call and `kind: "security-gate"` for the review, the latter naming the node whose diff it read. They are
+recorded once per attempt, so a judged failure, a transport failure and a call that threw are in the record
+too — a call that threw carries no `outputSha256` and says `error: "thrown"`, because "no output came back" is
+not "the model answered with nothing". A run whose planning call failed writes and signs a bundle with
+`failure.kind: "planning_failed"` and no subjects before it reports the error, so a failed plan is attested
+rather than silent. Both calls need only text, so `claude` is spawned for them with `--tools ""`,
 its own tools off, as for an in-process turn. `codex` and `gemini` have no known flag for that, and keep
 their tools on these calls; a reader's own `cli`-tier call gets `--tools Read,Glob,Grep` on `claude`.
 

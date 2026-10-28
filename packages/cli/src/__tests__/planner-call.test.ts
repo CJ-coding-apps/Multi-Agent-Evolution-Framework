@@ -1,13 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
-import type { AdapterInvokeOptions, AdapterInvokeResult, TurnAdapter } from '@maf/types';
-import { TransportError } from '@maf/types';
+import type { AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord, TurnAdapter } from '@maf/types';
+import { TransportError, attachedModelSurface, callModelSurface, sha256Hex, withModelSurface } from '@maf/types';
 import { ScriptedAdapter } from '@maf/eval-harness';
+import { OllamaAdapter } from '@maf/adapter-ollama';
+import { OpenRouterAdapter } from '@maf/adapter-openrouter';
 import { planGenerator } from '../commands/run.js';
+import { attestVerify } from '../commands/attest.js';
 import { dirtyUserRepo, driveRun, messageOf, needsLcm, registryOf, userState } from './runFixture.js';
 
 // ORACLE (F4 and F6 of the 0.3.0 release audit). The planner's call is a cli-tier `invoke` that needs
@@ -80,18 +83,40 @@ test('a transport failure is retried once; a second one is the error', async () 
   assert.equal(lost.calls.length, 2, 'two attempts, as a node gets');
 });
 
-test('maf run stops at a failed planner call instead of running its error text as a plan', needsLcm, async () => {
+/**
+ * Drives `maf run` through a planning failure with `adapter` standing in for `scripted`, and reads
+ * back the three things L1-S2 promises: the printed bundle path, the signed statement on disk (which
+ * `maf attest verify` — `attestVerify` is that command minus the process — accepts), and the
+ * transcript written before the failure.
+ */
+async function failingPlanningRun(adapter: TurnAdapter, root: string) {
+  const repo = await dirtyUserRepo(root);
+  const before = await userState(repo);
+  const scripted = new ScriptedAdapter([]);
+  const run = await driveRun(['Fix the failing sum test', '--dir', repo, '--adapter', 'scripted'], {
+    adapters: registryOf({ ...adapter, name: scripted.name }),
+    io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: 'planner-key' } },
+  });
+  const printed = /Attestation: (.+\.bundle\.json)/.exec(run.out);
+  assert.ok(printed?.[1], `a failed planning run prints the path of its bundle; it printed: ${run.out}`);
+  const bundlePath = printed[1];
+  const statement = JSON.parse(await readFile(bundlePath, 'utf8')) as {
+    subject:   unknown[];
+    predicate: { outcome: Record<string, unknown>; modelSurfaces?: Array<Record<string, unknown>> };
+  };
+  const verdict = await attestVerify(bundlePath, { secret: 'planner-key' });
+  const logDir = path.join(repo, '.maf', 'transcripts');
+  const transcript = (await Promise.all(
+    (await readdir(logDir)).map((file) => readFile(path.join(logDir, file), 'utf8')),
+  )).join('');
+  return { repo, before, run, bundlePath, statement, verdict, transcript };
+}
+
+test('L1-S2: a judged planner failure stops the run, keeps the tree, and writes a signed planning_failed bundle', needsLcm, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-planner-fail-'));
   try {
-    const repo = await dirtyUserRepo(root);
-    const before = await userState(repo);
-    // `scripted` for the run's adapter name; its turns would run a node, which must not happen.
-    const scripted = new ScriptedAdapter([]);
     const { adapter, calls } = answering(failed('Error: Credit balance is too low'));
-    const run = await driveRun(['Fix the failing sum test', '--dir', repo, '--adapter', 'scripted'], {
-      adapters: registryOf({ ...adapter, name: scripted.name }),
-      io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: 'planner-key' } },
-    });
+    const { repo, before, run, statement, verdict, transcript } = await failingPlanningRun(adapter, root);
     assert.match(messageOf(run.error), /the planner's call to adapter "scripted" was expected to succeed, but it reported failure \(exit code 1\)/);
     assert.match(messageOf(run.error), /Credit balance is too low/);
     assert.doesNotMatch(run.out, /node .* started/, 'no node ran');
@@ -99,7 +124,354 @@ test('maf run stops at a failed planner call instead of running its error text a
     assert.equal(calls[0]?.nativeTools, false);
     assert.match(run.err, /the run's worktree is kept for inspection/);
     assert.deepEqual(await userState(repo), before);
+
+    // L1-S2: the run is attested like any other — status, verdict and no subjects, since no node ran.
+    assert.deepEqual(statement.predicate.outcome, {
+      status: 'Failed', unscheduled: [], failure: { kind: 'planning_failed' },
+    });
+    assert.deepEqual(statement.subject, [], 'no diff, so no subject: the run had nothing to review');
+    assert.deepEqual(verdict.lines, [
+      'valid: true',
+      'keySource: env (checked against MAF_SIGNING_KEY)',
+      'subjects: 0',
+    ], '`maf attest verify` accepts a planning-failure bundle, signed with the key the run used');
+    assert.equal(verdict.failure, undefined);
+    // S9: the surface reached the transcript as the call was made, before the bundle existed.
+    assert.match(transcript, /\[surface\] planner turn 1: system sha256 /);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('L1-S2: transport failures that exhaust the retries write the same bundle, holding every attempt', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-planner-transport-'));
+  try {
+    const { adapter, calls } = answering(dropped(), dropped());
+    const { run, statement, verdict } = await failingPlanningRun(adapter, root);
+    assert.ok(run.error instanceof TransportError, 'the transport failure is what the run reports');
+    assert.equal(calls.length, 2, 'the planner was retried once under the default policy');
+    assert.deepEqual(statement.predicate.outcome, {
+      status: 'Failed', unscheduled: [], failure: { kind: 'planning_failed' },
+    });
+    assert.equal(statement.predicate.modelSurfaces?.length, 2, 'both attempts are in the bundle');
+    assert.deepEqual(statement.predicate.modelSurfaces?.map((s) => s['kind']), ['planner', 'planner']);
+    assert.equal(verdict.failure, undefined, 'and the bundle verifies');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('L1-S2: a planner call whose adapter throws writes the same bundle, with no output digest', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-planner-throw-'));
+  try {
+    const calls: AdapterInvokeOptions[] = [];
+    const throwing: TurnAdapter = {
+      name: 'claude',
+      capabilities: () => ({
+        supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: true,
+        inProcessLoop: true, maxConcurrentTasks: 1, nativePlugins: [],
+      }),
+      isAvailable: async () => true,
+      invoke: async (opts) => { calls.push(opts); throw new Error('spawn claude ENOENT'); },
+      stream: async function* () { yield ''; },
+      sendTurn: async () => { throw new Error('no node should run'); },
+    };
+    const { run, statement, verdict } = await failingPlanningRun(throwing, root);
+    assert.match(messageOf(run.error), /spawn claude ENOENT/);
+    assert.equal(calls.length, 1, 'a throw is not a transport failure, so it is not retried');
+    assert.deepEqual(statement.predicate.outcome, {
+      status: 'Failed', unscheduled: [], failure: { kind: 'planning_failed' },
+    });
+    const [surface] = statement.predicate.modelSurfaces ?? [];
+    assert.ok(surface, 'the attempt is in the bundle');
+    assert.equal(surface['kind'], 'planner');
+    assert.equal(surface['error'], 'thrown');
+    assert.equal('outputSha256' in surface, false, 'no output came back, so none is claimed');
+    assert.equal(verdict.failure, undefined, 'and the bundle verifies');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// L1: the planner's call is a model call MAF makes on every run, and it was the one the live rows
+// found outside the record. Every attempt records one surface, including the attempts that fail —
+// a call that spent tokens and returned an error is exactly as worth accounting for as one that
+// planned the DAG.
+test('L1: a successful planner call records one surface with the call\'s digests', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const { adapter } = answering(ok(PLAN));
+  const generate = planGenerator(adapter, {
+    workingDir: '/w', timeoutMs: 1, retry: NO_WAIT, model: 'opus',
+    recordSurface: (record) => records.push(record),
+  });
+  assert.equal(await generate('system text', 'user text'), PLAN);
+  assert.equal(records.length, 1);
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1,
+    systemPromptSha256: sha256Hex('system text'),
+    promptSha256: sha256Hex('user text'),
+    toolCatalog: '', outputSha256: sha256Hex(PLAN), argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'planner',
+    // R3-S1: this adapter reports no surface, so the call site's digests are recorded and marked
+    // as the fallback — the planner's role prompt is not the block a composing backend was sent.
+    surfaceSource: 'fallback',
+    model: 'opus',
+  });
+});
+
+test('L1: a failed planner call records its surface before the error, once', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const { adapter, calls } = answering(failed('Credit balance is too low'));
+  const generate = planGenerator(adapter, {
+    workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+    recordSurface: (record) => records.push(record),
+  });
+  await assert.rejects(() => generate('s', 'u'), /Credit balance is too low/);
+  assert.equal(calls.length, 1);
+  assert.equal(records.length, 1, 'the one attempt is in the record');
+  assert.equal(records[0]?.kind, 'planner');
+  assert.equal(records[0]?.outputSha256, sha256Hex('Credit balance is too low'));
+  assert.equal('model' in (records[0] ?? {}), false, 'the call named no model');
+});
+
+test('L1: a transport failure records each attempt, then propagates', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const { adapter } = answering(dropped(), dropped());
+  await assert.rejects(
+    () => planGenerator(adapter, {
+      workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+      recordSurface: (record) => records.push(record),
+    })('s', 'u'),
+    TransportError,
+  );
+  assert.equal(records.length, 2, 'two attempts, two records');
+});
+
+// L1-S5: an adapter that throws (a missing binary, a permission error) is still a planning call
+// MAF made. Its prompt digests are known, no output came back — so `outputSha256` is absent, not the
+// digest of an empty string — and the record says why with `error: 'thrown'`.
+test('L1-S5: a planner call whose adapter throws still records the attempt, with no output digest', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const calls: AdapterInvokeOptions[] = [];
+  const throwing: TurnAdapter = {
+    name: 'claude',
+    capabilities: () => ({
+      supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: true,
+      inProcessLoop: true, maxConcurrentTasks: 1, nativePlugins: [],
+    }),
+    isAvailable: async () => true,
+    invoke: async (opts) => { calls.push(opts); throw new Error('spawn claude ENOENT'); },
+    stream: async function* () { yield ''; },
+    sendTurn: async () => { throw new Error('no node should run'); },
+  };
+  await assert.rejects(
+    () => planGenerator(throwing, {
+      workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+      recordSurface: (record) => records.push(record),
+    })('system text', 'user text'),
+    /spawn claude ENOENT/,
+  );
+  assert.equal(calls.length, 1, 'a throw is not a transport failure, so it is not retried');
+  assert.equal(records.length, 1);
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1,
+    systemPromptSha256: sha256Hex('system text'),
+    promptSha256: sha256Hex('user text'),
+    toolCatalog: '', argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'planner', error: 'thrown',
+    // R3-S1: this adapter attached no surface to its error, so the call site's own digests are
+    // recorded and marked as the fallback — they are the planner's role prompt, not a block a
+    // backend composed.
+    surfaceSource: 'fallback',
+  });
+});
+
+test('L1: a surface the adapter reports is kept rather than reconstructed', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const surface = {
+    systemPromptSha256: 'sys', promptSha256: 'prompt', toolCatalog: '',
+    outputSha256: 'out', argv: ['claude', '--tools', ''],
+  };
+  const { adapter } = answering({ ...ok(PLAN), modelSurface: surface });
+  await planGenerator(adapter, {
+    workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+    recordSurface: (record) => records.push(record),
+  })('s', 'u');
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1, ...surface,
+    tier: 'cli', nativeTools: 'none', kind: 'planner',
+  });
+});
+
+// R4-M1/R4-M2: the adapters that describe a surface must have that description recorded, not the
+// call site's reconstruction. These drive the real adapters (with `fetch` stubbed) through the
+// planner, so the record is the one a run would write and its digests are checked against what the
+// stub received.
+
+type FetchInit = Parameters<typeof fetch>[1];
+
+/** Replaces global `fetch` with `reply`, recording each request's init, and restores it. */
+async function withFetchReply(
+  reply: (init: FetchInit) => Response | Promise<Response>,
+  body: (sent: FetchInit[]) => Promise<void>,
+): Promise<void> {
+  const original = globalThis.fetch;
+  const sent: FetchInit[] = [];
+  globalThis.fetch = async (_input: Parameters<typeof fetch>[0], init?: FetchInit): Promise<Response> => {
+    if (init !== undefined) sent.push(init);
+    return reply(init as FetchInit);
+  };
+  try {
+    await body(sent);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+/** The system and user text a chat-completions request body carries. */
+function chatTexts(init: FetchInit): { systemPrompt: string | undefined; prompt: string } {
+  const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+  const system = body.messages.find((m) => m.role === 'system');
+  const user = body.messages.find((m) => m.role === 'user');
+  assert.ok(user, 'the request carries the prompt as a user message');
+  return { systemPrompt: system?.content, prompt: user.content };
+}
+
+test('R4-M2: a successful ollama planning call records the adapter\'s own surface, not a fallback', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const reply = (): Response => new Response(
+    JSON.stringify({ message: { role: 'assistant', content: PLAN }, done: true }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+  await withFetchReply(reply, async (sent) => {
+    const generate = planGenerator(new OllamaAdapter({ baseUrl: 'http://ollama.invalid:11434' }), {
+      workingDir: '/w', timeoutMs: 5_000, retry: NO_WAIT, model: 'llama3',
+      recordSurface: (record) => records.push(record),
+    });
+    assert.equal(await generate('system text', 'user text'), PLAN);
+    assert.equal(sent.length, 1);
+    const texts = chatTexts(sent[0] as FetchInit);
+    assert.deepEqual(records[0], {
+      role: 'planner', taskId: 'planner', turn: 1,
+      ...callModelSurface(texts.systemPrompt, texts.prompt, PLAN),
+      tier: 'cli', nativeTools: 'none', kind: 'planner', model: 'llama3',
+    });
+    assert.equal('surfaceSource' in (records[0] ?? {}), false, 'the adapter described the call');
+  });
+});
+
+test('R4-M2: a successful openrouter planning call records the adapter\'s own surface, not a fallback', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const reply = (): Response => new Response(
+    JSON.stringify({ choices: [{ message: { role: 'assistant', content: PLAN }, finish_reason: 'stop' }] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+  await withFetchReply(reply, async (sent) => {
+    const generate = planGenerator(new OpenRouterAdapter({ apiKey: 'test-key' }), {
+      workingDir: '/w', timeoutMs: 5_000, retry: NO_WAIT, model: 'vendor/model',
+      recordSurface: (record) => records.push(record),
+    });
+    assert.equal(await generate('system text', 'user text'), PLAN);
+    assert.equal(sent.length, 1);
+    const texts = chatTexts(sent[0] as FetchInit);
+    assert.deepEqual(records[0], {
+      role: 'planner', taskId: 'planner', turn: 1,
+      ...callModelSurface(texts.systemPrompt, texts.prompt, PLAN),
+      tier: 'cli', nativeTools: 'none', kind: 'planner', model: 'vendor/model',
+    });
+    assert.equal('surfaceSource' in (records[0] ?? {}), false, 'the adapter described the call');
+  });
+});
+
+test('R4-M1: an attached surface is what the planner records, not its fallback', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const surface = {
+    systemPromptSha256: 'sys', promptSha256: 'prompt', toolCatalog: '',
+    outputSha256: 'out', argv: ['claude', '--tools', ''],
+  };
+  const adapter: TurnAdapter = {
+    name: 'claude',
+    capabilities: () => ({
+      supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: true,
+      inProcessLoop: true, maxConcurrentTasks: 1, nativePlugins: [],
+    }),
+    isAvailable: async () => true,
+    invoke: async () => { throw withModelSurface(new Error('the turn failed'), surface); },
+    stream: async function* () { yield ''; },
+    sendTurn: async () => { throw new Error('no node should run'); },
+  };
+  await assert.rejects(
+    () => planGenerator(adapter, {
+      workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+      recordSurface: (record) => records.push(record),
+    })('system text', 'user text'),
+    /the turn failed/,
+  );
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1, ...surface,
+    tier: 'cli', nativeTools: 'none', kind: 'planner', error: 'thrown',
+  });
+});
+
+test('R4-L1: a malformed attached surface is ignored, the fallback is recorded, and a warning is emitted', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const warnings: string[] = [];
+  const malformed = Object.assign(new Error('the turn failed'), {
+    modelSurface: { systemPromptSha256: 42, toolCatalog: '', argv: [] },
+  });
+  const adapter: TurnAdapter = {
+    name: 'claude',
+    capabilities: () => ({
+      supportsStreaming: false, supportsToolCalling: true, supportsWorktrees: true,
+      inProcessLoop: true, maxConcurrentTasks: 1, nativePlugins: [],
+    }),
+    isAvailable: async () => true,
+    invoke: async () => { throw malformed; },
+    stream: async function* () { yield ''; },
+    sendTurn: async () => { throw new Error('no node should run'); },
+  };
+  await assert.rejects(
+    () => planGenerator(adapter, {
+      workingDir: '/w', timeoutMs: 1, retry: NO_WAIT,
+      recordSurface: (record) => records.push(record),
+      warn: (line) => warnings.push(line),
+    })('system text', 'user text'),
+    /the turn failed/,
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? '', /not a valid model surface/);
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1,
+    systemPromptSha256: sha256Hex('system text'),
+    promptSha256: sha256Hex('user text'),
+    toolCatalog: '', argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'planner', error: 'thrown',
+    surfaceSource: 'fallback',
+  });
+});
+
+test('R4-L2: a planning call refused before any request leaves is recorded as not-sent', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const previous = process.env['OLLAMA_MODEL'];
+  delete process.env['OLLAMA_MODEL'];
+  try {
+    await withFetchReply(() => new Response('unreachable', { status: 500 }), async (sent) => {
+      const generate = planGenerator(new OllamaAdapter({ baseUrl: 'http://ollama.invalid:11434' }), {
+        workingDir: '/w', timeoutMs: 5_000, retry: NO_WAIT,
+        recordSurface: (record) => records.push(record),
+      });
+      await assert.rejects(() => generate('system text', 'user text'), /No request was sent/);
+      assert.equal(sent.length, 0, 'nothing left the adapter');
+    });
+  } finally {
+    if (previous !== undefined) process.env['OLLAMA_MODEL'] = previous;
+  }
+  assert.deepEqual(records[0], {
+    role: 'planner', taskId: 'planner', turn: 1,
+    systemPromptSha256: sha256Hex('system text'),
+    promptSha256: sha256Hex('user text'),
+    toolCatalog: '', argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'planner', error: 'not-sent',
+  });
+  assert.equal('outputSha256' in (records[0] ?? {}), false, 'no answer came back, so none is claimed');
 });

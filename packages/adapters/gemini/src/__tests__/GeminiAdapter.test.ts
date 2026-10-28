@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { TransportError } from '@maf/types';
+import { TransportError, attachedModelSurface, modelSurfaceWasSent } from '@maf/types';
 import type { AdapterInvokeOptions } from '@maf/types';
 import type { SpawnResult, spawnAndCollect } from '@maf/adapter-base';
 import { GeminiAdapter } from '../index.js';
@@ -156,4 +156,42 @@ test('invoke records the cli-tier model surface, its own argv elided (WP-3.0c)',
     'no payload text in the record',
   );
   assert.equal(calls[0]?.args.at(-1), '--prompt=say hi', 'the binary itself still got the prompt');
+});
+
+// R4-M1/R4-L2: the attach path. Gemini has no sendTurn, so a failed call is always the spawn: what
+// the error carries must be the argv the child was given, with the prompt elided exactly as on a
+// returned call, and the record must say the binary never started (not sent).
+
+test('R4-M1: a call whose binary cannot start attaches the argv it was given, and is not-sent', async () => {
+  const failure = new TransportError('Could not run "gemini": spawn gemini ENOENT');
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const spawn: typeof spawnAndCollect = async (cmd, args) => {
+    calls.push({ cmd, args: [...args] });
+    throw failure;
+  };
+  let err: unknown;
+  try {
+    await new GeminiAdapter({ spawn }).invoke({ ...CALL, systemPrompt: 'be brief' });
+    assert.fail('the call was expected to throw');
+  } catch (thrown: unknown) {
+    err = thrown;
+  }
+
+  assert.equal(err, failure, 'the same error object, so its class and message survive');
+  const surface = attachedModelSurface(err);
+  assert.ok(surface, 'the failed call says what it was asked to run');
+  assert.equal(surface.systemPromptSha256, sha256Hex('be brief'));
+  assert.equal(surface.promptSha256, sha256Hex('say hi'));
+  const args = calls[0]?.args ?? [];
+  const asSent = args.find((a) => a.startsWith('--prompt='))?.slice('--prompt='.length) ?? '';
+  assert.equal(surface.promptSha256, sha256Hex(asSent), 'the digest is of the prompt the child was given');
+  const asRecorded = args.map((arg, i) => {
+    if (args[i - 1] === '--system-instruction') return elided('--system-instruction', arg);
+    if (arg.startsWith('--prompt=')) return `--prompt=${elided('prompt', arg.slice('--prompt='.length))}`;
+    return arg;
+  });
+  assert.deepEqual(surface.argv, asRecorded,
+    'the same argv the child received, with the payloads elided as on a returned call');
+  assert.equal('outputSha256' in surface, false);
+  assert.equal(modelSurfaceWasSent(err), false, 'the binary never ran');
 });

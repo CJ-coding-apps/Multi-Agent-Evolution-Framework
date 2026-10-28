@@ -8,9 +8,12 @@ import path from 'node:path';
 import type {
   CliAdapter, TurnAdapter, AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult,
   TurnMessage, AssistantTurn, DagNode, ToolPlugin, ToolContext, ToolResult, SecurityReviewResult,
-  ToolId, ExecutionTierRecord, ToolCallRecord, TaskId,
+  ToolId, ExecutionTierRecord, ToolCallRecord, TaskId, ModelSurfaceRecord,
 } from '@maf/types';
-import { makeNodeId, makeRunId, makeToolId, GateRefused, NodeFailure, TransportError } from '@maf/types';
+import {
+  makeNodeId, makeRunId, makeTaskId, makeToolId, GateRefused, NodeFailure, TransportError,
+  withModelSurface, sha256Hex,
+} from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
 import { mintHarnessConfig } from '@maf/harness-config';
@@ -62,6 +65,35 @@ class TurnStub implements TurnAdapter {
     const next = this.turns.shift() ?? { text: 'final', toolCalls: [] };
     if (next instanceof Error) throw next;
     return next;
+  }
+}
+
+/** A cli-only backend whose call throws, the way a timeout or a non-zero exit reaches the dispatcher. */
+class CliThrows implements CliAdapter {
+  readonly name = 'cli-throws';
+  invoked = 0;
+  capabilities(): AdapterCapabilities { return { ...CAPS, inProcessLoop: false }; }
+  async isAvailable(): Promise<boolean> { return true; }
+  async invoke(): Promise<AdapterInvokeResult> {
+    this.invoked++;
+    throw new TransportError('the backend did not finish in time');
+  }
+  async *stream(): AsyncGenerator<string> { yield 'x'; }
+}
+
+/** A cli-only backend that throws a surface of its own: what it composed, not what was asked for. */
+class CliThrowsWithSurface extends CliThrows {
+  /** R4-L2: `false` stands in for a failure before any request left the adapter. */
+  constructor(private readonly sentFlag = true) { super(); }
+  readonly sent = {
+    systemPromptSha256: sha256Hex('COMPOSED SYSTEM BLOCK'),
+    promptSha256:       sha256Hex('COMPOSED PROMPT'),
+    toolCatalog:        '',
+    argv:               ['--print', '--system-prompt', '<--system-prompt: 21 bytes, sha256 ' + 'd'.repeat(64) + '>', '-p', '--', '<prompt: 15 bytes, sha256 ' + 'e'.repeat(64) + '>'],
+  };
+  override async invoke(): Promise<AdapterInvokeResult> {
+    this.invoked++;
+    throw withModelSurface(new TransportError('the backend did not finish in time'), this.sent, this.sentFlag);
   }
 }
 
@@ -159,6 +191,8 @@ interface Fixture {
   transcript: Array<{ role: string; content: string }>;
   /** Every tier record the dispatcher handed the attestor (F7). */
   tiers:      ExecutionTierRecord[];
+  /** Every model-surface record the dispatcher handed the attestor (WP-3.0c). */
+  surfaces:   ModelSurfaceRecord[];
   cleanup:    () => Promise<void>;
 }
 
@@ -189,6 +223,9 @@ async function makeFixture(opts: {
   const stderr: string[] = [];
   const transcript: Array<{ role: string; content: string }> = [];
   const tiers: ExecutionTierRecord[] = [];
+  // R3-S1: the surface records as the dispatcher hands them to the bundle, so a test can see what a
+  // record says as well as what the transcript mirror renders.
+  const surfaces: ModelSurfaceRecord[] = [];
   // Every call the loop attests, so `toolCallsForTask` can answer as the real Attestor does — the
   // reader's executed-call count (D-46) is read from here.
   const calls: Array<Omit<ToolCallRecord, 'id'>> = [];
@@ -203,6 +240,7 @@ async function makeFixture(opts: {
       toolCallsForTask: (taskId: TaskId): ToolCallRecord[] =>
         calls.filter((c) => c.taskId === taskId).map((c, i) => ({ id: `rec-${i}`, ...c })),
       recordSecurityFindings: () => {},
+      recordModelSurface: (record: ModelSurfaceRecord) => { surfaces.push(record); },
       recordExecutionTier: (record: ExecutionTierRecord) => { tiers.push(record); },
     } as unknown as Attestor,
     graph: { addNode: async () => 'n' } as unknown as MemoryGraph,
@@ -231,7 +269,7 @@ async function makeFixture(opts: {
     ...(opts.allowUngoverned !== undefined ? { allowUngoverned: opts.allowUngoverned } : {}),
   });
   return {
-    dispatcher, workDir, reviewed, stderr, transcript, tiers,
+    dispatcher, workDir, reviewed, stderr, transcript, tiers, surfaces,
     cleanup: () => rm(workDir, { recursive: true, force: true }),
   };
 }
@@ -523,6 +561,43 @@ test('a tool that throws while running is answered: the node goes on, and what i
   }
 });
 
+test('R2-S1: a cli-tier call that throws is still recorded, once, with error thrown and no output digest', async () => {
+  const adapter = new CliThrows();
+  const fx = await makeFixture({ adapter, role: role('coder', WRITE_TOOLS, 'cli'), allowUngoverned: true });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), TransportError);
+    // The fixture's attestor is a stub without `recordModelSurface`, so the transcript mirror is
+    // what this test can read: one line for the call that threw, and it says how it ended.
+    const lines = fx.transcript.filter((e) => e.role === 'system' && e.content.startsWith('[surface]'));
+    assert.equal(lines.length, 1, 'the call that threw is recorded exactly once');
+    assert.match(lines[0]?.content ?? '', /error thrown/);
+    assert.match(lines[0]?.content ?? '', /output sha256 \(none\)/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('R2-L2: a surface record the transcript refuses does not replace the cli call\'s own error', async () => {
+  const adapter = new CliThrows();
+  const fx = await makeFixture({
+    adapter, role: role('coder', WRITE_TOOLS, 'cli'), allowUngoverned: true,
+    transcriptThrows: (c) => c.startsWith('[surface]'),
+  });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), (err: unknown) => {
+      assert.ok(err instanceof TransportError, 'the backend\'s own failure is what the caller sees');
+      assert.match(err.message, /the backend did not finish in time/);
+      return true;
+    });
+    assert.ok(
+      fx.stderr.some((l) => l.includes('could not record the model surface for role "coder"')),
+      'the recording failure is reported, not swallowed silently',
+    );
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 test('a backend turn that throws inside the in-process loop still fires task_end', async () => {
   const adapter = new TurnStub();
   adapter.turns = [new TransportError('the backend closed the connection mid-turn')];
@@ -704,5 +779,53 @@ test('roles.yaml: an execution other than cli or in-process is refused, naming t
     });
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('R3-S1: a thrown cli-tier call records the surface the adapter attached, and is not marked a fallback', async () => {
+  const adapter = new CliThrowsWithSurface();
+  const fx = await makeFixture({ adapter, role: role('coder', WRITE_TOOLS, 'cli'), allowUngoverned: true });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), TransportError);
+    assert.deepEqual(fx.surfaces, [{
+      role: 'coder', taskId: makeTaskId('n1'), turn: 1, ...adapter.sent,
+      tier: 'cli', nativeTools: 'full', kind: 'role-call', error: 'thrown',
+    }], 'what the backend composed, not the role prompt and argv the dispatcher asked for');
+    assert.equal('surfaceSource' in (fx.surfaces[0] ?? {}), false, 'the adapter described this call');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('R3-M2: a surface record the transcript refuses leaves a successful cli call successful', async () => {
+  const adapter = new CliOnly();
+  const fx = await makeFixture({
+    adapter, role: role('coder', WRITE_TOOLS, 'cli'), allowUngoverned: true,
+    transcriptThrows: (c) => c.startsWith('[surface]'),
+  });
+  try {
+    const out = await fx.dispatcher.runNode(nodeFor('coder'));
+    assert.deepEqual(out['output'], { kind: 'string', value: 'CLI-PATH' },
+      'the call answered, and a record that could not be written does not turn that into a failed node');
+    assert.ok(
+      fx.stderr.some((l) => l.includes('could not record the model surface for role "coder"')),
+      'the recording failure is reported, not swallowed silently',
+    );
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('R4-L2: a cli-tier call that never left the adapter is recorded as not-sent', async () => {
+  const adapter = new CliThrowsWithSurface(false);
+  const fx = await makeFixture({ adapter, role: role('coder', WRITE_TOOLS, 'cli'), allowUngoverned: true });
+  try {
+    await assert.rejects(fx.dispatcher.runNode(nodeFor('coder')), TransportError);
+    assert.deepEqual(fx.surfaces, [{
+      role: 'coder', taskId: makeTaskId('n1'), turn: 1, ...adapter.sent,
+      tier: 'cli', nativeTools: 'full', kind: 'role-call', error: 'not-sent',
+    }], 'the model was never reached, though the surface says what the call would have sent');
+  } finally {
+    await fx.cleanup();
   }
 });

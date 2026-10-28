@@ -14,7 +14,7 @@ import type {
   RoleName, PartialNodeOutcome, ExecutionTierRecord, ModelSurfaceRecord, AttributedChange,
   WriterLockLedger, ToolCallRecord, TaskId,
 } from '@maf/types';
-import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, NodeFailure, TransportError } from '@maf/types';
+import { makeNodeId, makeRunId, makeTaskId, makeAgentId, makeToolId, NodeFailure, TransportError, sha256Hex } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -62,6 +62,8 @@ class CliOnlyAdapter implements CliAdapter {
   invoked = 0;
   /** The `nativeTools` the dispatcher set on the last call: `'read-only'` for a reader, else `undefined`. */
   lastNativeTools: AdapterInvokeOptions['nativeTools'] = undefined;
+  /** What the dispatcher handed the backend on the last call (L1-S1). */
+  lastOptions: AdapterInvokeOptions | undefined;
   /** What the CLI call comes back with; a test that needs a failed call replaces it. */
   reply: AdapterInvokeResult = { success: true, output: 'CLI-PATH', toolCallLog: [], exitCode: 0, duration: 1 };
   capabilities(): AdapterCapabilities { return { ...CAPS, inProcessLoop: false }; }
@@ -69,6 +71,7 @@ class CliOnlyAdapter implements CliAdapter {
   async invoke(o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     this.invoked++;
     this.lastNativeTools = o.nativeTools;
+    this.lastOptions = o;
     return this.reply;
   }
   async *stream(): AsyncGenerator<string> { yield 'x'; }
@@ -687,7 +690,7 @@ test('cli tier: a role call records its model surface with tier "cli", and mirro
 
     assert.deepEqual(
       f.attestor.surfaces,
-      [{ role: 'analyst', taskId: makeTaskId('n1'), turn: 1, ...SURFACE, tier: 'cli', nativeTools: 'read-only' }],
+      [{ role: 'analyst', taskId: makeTaskId('n1'), turn: 1, ...SURFACE, tier: 'cli', nativeTools: 'read-only', kind: 'role-call' }],
       'the same evidence shape as a governed turn, one record, marked cli — and what the dispatcher ' +
         'asked of the backend\'s own tools (F3), which for codex and gemini no argv can show',
     );
@@ -708,15 +711,28 @@ test('cli tier: a role call records its model surface with tier "cli", and mirro
   }
 });
 
-test('cli tier: an adapter that reports no model surface records none — absent, not empty (WP-3.0c)', async () => {
+test('cli tier: an adapter that reports no model surface gets one built from what was sent and received (L1-S1)', async () => {
   const adapter = new CliOnlyAdapter(); // `reply` defaults to one with no modelSurface
   const f = await makeFixture({ roleExecution: 'cli', adapter, policyHandler: ALLOW });
   try {
     await f.dispatcher.runNode(makeNode(ANALYST));
-    assert.equal(f.attestor.surfaces.length, 0, 'nothing is invented for a call that reported no surface');
-    assert.equal(
-      f.transcript.entries.some((e) => e.content.startsWith('[surface]')), false,
-      'and no transcript line either',
+    const sent = adapter.lastOptions;
+    assert.ok(sent, 'the adapter was invoked');
+    assert.deepEqual(f.attestor.surfaces, [{
+      role: 'analyst', taskId: makeTaskId('n1'), turn: 1,
+      systemPromptSha256: sha256Hex(sent.systemPrompt ?? ''),
+      promptSha256:       sha256Hex(sent.prompt),
+      toolCatalog:        '',
+      outputSha256:       sha256Hex('CLI-PATH'),
+      argv:               [],
+      tier:               'cli',
+      nativeTools:        'read-only',
+      kind:               'role-call',
+      surfaceSource:      'fallback',
+    }], 'the call site records the digests it holds; no argv is invented for an adapter that has none');
+    assert.ok(
+      f.transcript.entries.some((e) => e.content.startsWith('[surface]')),
+      'and the record reaches the transcript too',
     );
   } finally {
     await f.cleanup();
