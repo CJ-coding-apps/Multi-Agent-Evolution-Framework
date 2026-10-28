@@ -1552,6 +1552,13 @@ export interface ModelSurfaceRecord extends ModelSurface {
   // "not recorded" must read differently from "recorded as empty" (Constitution §4). Absent on a
   // call that returned, however it judged the work.
   error?: 'thrown';
+  // R3-S1: where this surface came from. `'fallback'` means the call site built it from the bytes it
+  // held (`callModelSurface`) because the adapter reported none and attached none — a call site can
+  // describe the role prompt it passed, but it cannot describe a system block or an argv an adapter
+  // composed. Absent means the adapter described the call, either on its result or on the error it
+  // threw, so the record names what the backend was actually sent. A reader who needs to know
+  // whether a failed turn's digests cover the composed block must check this field.
+  surfaceSource?: 'fallback';
 }
 
 /**
@@ -1679,4 +1686,7 @@ export { toolEnv } from './childEnv.js';
  * leaf on this one by design — so the helper lives here, where both already reach, rather than
  * giving either a new edge to an adapter package that builds the other kind of surface.
  */
-export { callModelSurface, sha256Hex } from './surface.js';
+export {
+  callModelSurface, sha256Hex, withModelSurface, attachedModelSurface,
+} from './surface.js';
+export type { ModelSurfaceCarrier } from './surface.js';

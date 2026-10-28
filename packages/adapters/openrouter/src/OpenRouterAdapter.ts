@@ -1,5 +1,5 @@
 import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord } from '@maf/types';
-import { TransportError } from '@maf/types';
+import { TransportError, callModelSurface, withModelSurface } from '@maf/types';
 import { BaseAdapter, failureTail } from '@maf/adapter-base';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
@@ -110,6 +110,12 @@ export class OpenRouterAdapter extends BaseAdapter {
     const controller = new AbortController();
     const deadline: Deadline = { signal: controller.signal, ms: options.timeoutMs };
     const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+    // R3-S1: this backend sends the system prompt and the prompt as the request's messages and no
+    // argv at all, so the surface the call site can rebuild from `options` *is* what was about to
+    // be sent. Composed before the request goes out, and attached to whatever the request throws,
+    // so a timeout or a 5xx still records the call — and records it as the adapter's own account,
+    // not as a fallback the recorder had to reconstruct.
+    const surface = callModelSurface(options.systemPrompt, options.prompt);
     try {
       const res = await answered(url, fetch(url, {
         method:  'POST',
@@ -135,6 +141,8 @@ export class OpenRouterAdapter extends BaseAdapter {
         exitCode:    0,
         duration:    Date.now() - start,
       };
+    } catch (err: unknown) {
+      throw err instanceof Error ? withModelSurface(err, surface) : err;
     } finally {
       clearTimeout(timer);
     }

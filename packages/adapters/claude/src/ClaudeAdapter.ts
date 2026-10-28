@@ -4,6 +4,7 @@ import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord,
   TurnAdapter, TurnMessage, AssistantTurn, ModelSurface, ToolPlugin,
 } from '@maf/types';
+import { withModelSurface } from '@maf/types';
 import { BaseAdapter } from '@maf/adapter-base';
 import {
   spawnAndCollect, spawnStreaming, turnStdout,
@@ -113,17 +114,26 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       prompt: serializeHistory(history),
       systemPrompt,
     }, CLAUDE_TURN_ISOLATION_ARGS);
-    const result = await this.spawn('claude', args, {
-      cwd: opts.workingDir,
-      timeoutMs: opts.timeoutMs,
-      env: { ...process.env },
-      ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
-    });
-    const turn = parseTurn(turnStdout(this.name, result));
-    // The surface is recorded where it is assembled (F4): the sha is of the exact bytes the system
-    // block held, and the argv is the one this turn spawned with — so a reader can settle what the
-    // model was shown without re-deriving either.
-    return { ...turn, modelSurface: modelSurfaceOf(systemPrompt, opts.tools, args) };
+    // The surface is assembled where the call is (F4): the sha is of the exact bytes the system
+    // block held and the argv is the one this turn spawns with — so a reader can settle what the
+    // model was shown without re-deriving either. Built before the spawn, and attached to the
+    // error if the turn fails (R3-S1): the loop holds only the role prompt, and a record built
+    // from *that* would name bytes claude was never sent — no protocol, no catalogue, no argv.
+    const surface = modelSurfaceOf(systemPrompt, opts.tools, args);
+    try {
+      const result = await this.spawn('claude', args, {
+        cwd: opts.workingDir,
+        timeoutMs: opts.timeoutMs,
+        env: { ...process.env },
+        ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
+      });
+      // The turn fails in two places — the spawn rejects when the binary cannot run, and `turnStdout`
+      // throws when it ran and did not finish cleanly — so both are inside the `try`: a record of a
+      // failed turn is the one a reader most wants, and it must not depend on which way it failed.
+      return { ...parseTurn(turnStdout(this.name, result)), modelSurface: surface };
+    } catch (err: unknown) {
+      throw attach(err, surface);
+    }
   }
 
 
@@ -137,13 +147,19 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const start = Date.now();
     const args = this.buildArgs(options, cliTierIsolation(options));
+    // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c): the same
+    // evidence a governed turn reports, built from the argv this call spawned with — with the two
+    // payload positionals elided, exactly as the governed turn's surface elides them, so the
+    // record carries a digest of the prompt rather than the prompt. Built here, before the spawn,
+    // so a binary that cannot start still carries what it was asked to run (R3-S1).
+    const surface = cliModelSurface(options.systemPrompt, options.prompt, elidePayloads(args));
 
     const result = await this.spawn('claude', args, {
       cwd: options.workingDir,
       timeoutMs: options.timeoutMs,
       env: { ...process.env },
       ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
-    });
+    }).catch((err: unknown): never => { throw attach(err, surface); });
 
     return {
       success:     result.exitCode === 0,
@@ -154,11 +170,7 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       // Forwarded so the dispatcher can tell a timeout or a silent exit — retryable (D-06) —
       // from an answer that happens to be a failure.
       ...(result.transportError !== undefined ? { transportError: result.transportError } : {}),
-      // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c): the same
-      // evidence a governed turn reports, built from the argv this call spawned with — with the two
-      // payload positionals elided, exactly as the governed turn's surface elides them, so the
-      // record carries a digest of the prompt rather than the prompt.
-      modelSurface: cliModelSurface(options.systemPrompt, options.prompt, elidePayloads(args), result.stdout),
+      modelSurface: { ...surface, outputSha256: sha256Hex(result.stdout) },
     };
   }
 
@@ -196,6 +208,15 @@ function cliTierIsolation(options: AdapterInvokeOptions): readonly string[] {
   if (options.nativeTools === false) return CLAUDE_TURN_ISOLATION_ARGS;
   if (options.nativeTools === 'read-only') return CLAUDE_READ_ONLY_ISOLATION_ARGS;
   return CLAUDE_MCP_ISOLATION_ARGS;
+}
+
+/**
+ * R3-S1: the surface of the call rides on whatever the call throws, so the loop records what claude
+ * was actually sent. An error that is not an `Error` cannot carry a field; it is rethrown untouched
+ * and the caller records its own fallback, marked as one.
+ */
+function attach(err: unknown, surface: ModelSurface): unknown {
+  return err instanceof Error ? withModelSurface(err, surface) : err;
 }
 
 /** The governed turn's model-facing surface: the system block's digest, the catalogue, the argv. */

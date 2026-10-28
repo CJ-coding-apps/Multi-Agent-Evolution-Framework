@@ -189,6 +189,9 @@ test('L1: reviewDiff() records one security-gate surface, naming the reviewed no
     promptSha256: sha256Hex(`Audit this diff for security issues. Respond with the strict JSON schema in your system prompt.\n\`\`\`diff\n${diff}\n\`\`\``),
     toolCatalog: '', outputSha256: sha256Hex(CLEAN_RESULT), argv: [],
     tier: 'cli', nativeTools: 'none', kind: 'security-gate',
+    // R3-S1: this adapter reports no surface, so the gate's own digests are recorded and marked as
+    // the fallback — the security role prompt is not the block a composing backend was sent.
+    surfaceSource: 'fallback',
   });
 });
 

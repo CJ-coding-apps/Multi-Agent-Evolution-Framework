@@ -2,9 +2,9 @@ import crypto from 'node:crypto';
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
   AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle, TaskId,
-  PolicyDecision, ModelSurfaceRecord, AttributedChange, WriterLockLedger, NodeId,
+  PolicyDecision, ModelSurface, ModelSurfaceRecord, AttributedChange, WriterLockLedger, NodeId,
 } from '@maf/types';
-import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY, callModelSurface } from '@maf/types';
+import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY, callModelSurface, attachedModelSurface } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -766,8 +766,12 @@ export class RoleDispatcher {
         if (loop.outcome === 'completed') answer = { tier: 'in-process', finalText: loop.finalText, turns: loop.steps };
       } else {
         let cliResult: AdapterInvokeResult | undefined;
+        let cliFailure: unknown;
         try {
           cliResult = await adapter.invoke(invokeOpts);
+        } catch (err: unknown) {
+          cliFailure = err;
+          throw err;
         } finally {
           // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
           // the same evidence shape as F4's governed turn, `tier: 'cli'`. What the dispatcher asked
@@ -775,7 +779,7 @@ export class RoleDispatcher {
           // shows it. The record is written whether the call returned or threw (R2-S1): a backend
           // that times out or never starts still took a turn this run asked for, and omitting it
           // would leave that governed writer's failed turn out of the evidence entirely.
-          await this.recordCliSurface(role, taskId, cliResult, invokeOpts);
+          await this.recordCliSurface(role, taskId, cliResult, invokeOpts, attachedModelSurface(cliFailure));
         }
         // The `finally` above records on both paths; a returned result is the only way here.
         if (cliResult === undefined) throw new Error('unreachable: adapter.invoke returned no result');
@@ -984,13 +988,18 @@ export class RoleDispatcher {
     taskId: TaskId,
     result: AdapterInvokeResult | undefined,
     invokeOpts: AdapterInvokeOptions,
+    thrownSurface: ModelSurface | undefined,
   ): Promise<void> {
     const askedNativeTools = invokeOpts.nativeTools;
+    // L1: an adapter that reports a surface keeps it (its argv is evidence this layer cannot
+    // reconstruct); one that reports none gets the digests of what was sent and answered.
+    // R3-S1: a call that threw reports through the surface attached to its error, if it attached
+    // one; the fallback is marked, because `invokeOpts` is what the dispatcher asked for, not
+    // necessarily the system block or argv the adapter actually composed.
+    const reported = result?.modelSurface ?? thrownSurface;
     const record: ModelSurfaceRecord = {
       role: role.role, taskId, turn: 1,
-      // L1: an adapter that reports a surface keeps it (its argv is evidence this layer cannot
-      // reconstruct); one that reports none gets the digests of what was sent and answered.
-      ...(result?.modelSurface ?? callModelSurface(invokeOpts.systemPrompt, invokeOpts.prompt, result?.output)),
+      ...(reported ?? callModelSurface(invokeOpts.systemPrompt, invokeOpts.prompt, result?.output)),
       tier: 'cli',
       // F3: what the dispatcher asked of the backend's own tools. `undefined` is the default —
       // nothing was asked, and the backend keeps its native tools — and it is recorded as 'full'
@@ -1005,6 +1014,7 @@ export class RoleDispatcher {
       nativeTools: askedNativeTools === false ? 'none' : askedNativeTools === 'read-only' ? 'read-only' : 'full',
       kind: 'role-call',
       ...(result === undefined ? { error: 'thrown' as const } : {}),
+      ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
       ...(invokeOpts.model !== undefined ? { model: invokeOpts.model } : {}),
     };
     try {
@@ -1014,7 +1024,8 @@ export class RoleDispatcher {
         `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; ` +
         `prompt sha256 ${record.promptSha256 ?? '(none)'}; output sha256 ${record.outputSha256 ?? '(none)'}; ` +
         `native tools ${record.nativeTools ?? '(unrecorded)'}; argv ${JSON.stringify(record.argv)}` +
-        (record.error !== undefined ? `; error ${record.error}` : ''),
+        (record.error !== undefined ? `; error ${record.error}` : '') +
+        (record.surfaceSource !== undefined ? `; surface source ${record.surfaceSource}` : ''),
         { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
           systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
           // F7: both digests, so the transcript alone ties the argv's elided markers to what was sent
@@ -1023,6 +1034,7 @@ export class RoleDispatcher {
           ...(record.outputSha256 !== undefined ? { outputSha256: record.outputSha256 } : {}),
           ...(record.stdinSha256 !== undefined ? { stdinSha256: record.stdinSha256 } : {}),
           ...(record.error !== undefined ? { error: record.error } : {}),
+          ...(record.surfaceSource !== undefined ? { surfaceSource: record.surfaceSource } : {}),
           nativeTools: record.nativeTools },
       );
     } catch (err: unknown) {

@@ -1,8 +1,8 @@
-import { makeAgentId, estimateTokens, sha256Hex } from '@maf/types';
+import { makeAgentId, estimateTokens, sha256Hex, attachedModelSurface } from '@maf/types';
 import type {
   RunId, TaskId, TurnAdapter, TurnMessage, ToolPlugin, ToolContext,
   PolicyEngineHandle, AttestorHandle, AssistantTurn, ToolCallRequest, ToolResult, ApprovalGateHandle,
-  ModelSurfaceRecord,
+  ModelSurface, ModelSurfaceRecord,
 } from '@maf/types';
 import { ProcessorInterrupt, ContractViolation } from '@maf/processors';
 import type { ProcessorPipeline, HarnessEvent, HookPoint } from '@maf/processors';
@@ -262,10 +262,17 @@ export class InProcessAgentLoop {
     // shown is known exactly. Recording only on return would drop the failed turn from the
     // evidence — the one turn a reader most wants to see.
     let turn: AssistantTurn | undefined;
+    let failure: unknown;
     try {
       turn = await this.callModel(promptHistory, systemPrompt);
+    } catch (err: unknown) {
+      failure = err;
+      throw err;
     } finally {
-      await this.recordSurface(base, stepIndex, turn, systemPrompt);
+      // A failed turn records the surface the adapter attached to its error (R3-S1): an adapter
+      // composes the system block (role prompt + wire protocol + catalogue) and the argv, and this
+      // loop holds only the role prompt. Recording *that* would name bytes the backend never saw.
+      await this.recordSurface(base, stepIndex, turn, systemPrompt, attachedModelSurface(failure));
     }
     // The `finally` above records on both paths; a returned turn is the only way here.
     if (turn === undefined) throw new Error('unreachable: adapter.sendTurn returned no turn');
@@ -287,19 +294,27 @@ export class InProcessAgentLoop {
    * serialized history and its answer is a parsed `AssistantTurn`, neither a single byte string, and
    * "not recorded" must read differently from "recorded as empty".
    *
-   * `turn` is absent when the model call threw (R2-S1): the system block and the prompt history
-   * this loop handed the adapter are still known, so the record is written with the surface's
-   * fallback digest, no `outputSha256`, and `error: 'thrown'`. The write is best-effort (R2-L2):
-   * this runs in the call's `finally`, so a recorder that throws would replace the adapter's
-   * error; it is reported on stderr instead, and the call's own outcome stands.
+   * `turn` is absent when the model call threw (R2-S1): the record is still written, with no
+   * `outputSha256` and `error: 'thrown'`. What it carries is the surface the adapter attached to
+   * its error when it attached one (R3-S1) — a backend that composes its own system block and argv
+   * knows what it sent and this loop does not. Only when the adapter attached nothing does the loop
+   * fall back to the role prompt it holds, and that record is marked `surfaceSource: 'fallback'`,
+   * because the role prompt is not the system block the backend was sent. The write is best-effort
+   * (R2-L2): this runs in the call's `finally`, so a recorder that throws would replace the
+   * adapter's error; it is reported on stderr instead, and the call's own outcome stands.
    */
   private async recordSurface(
     base: { runId: RunId; taskId: TaskId; role: string },
     stepIndex: number,
     turn: AssistantTurn | undefined,
     systemPrompt: string,
+    thrownSurface: ModelSurface | undefined,
   ): Promise<void> {
-    const surface = turn?.modelSurface ?? {
+    // What the adapter described wins: its result's surface, or the one it attached to the error it
+    // threw (R3-S1). Only when it described neither does the loop build one — and that one is
+    // marked, because the role prompt and the system block the backend was sent are different text.
+    const reported = turn?.modelSurface ?? thrownSurface;
+    const surface = reported ?? {
       systemPromptSha256: sha256Hex(systemPrompt), toolCatalog: '', argv: [],
     };
     // `tier` names which half of the run produced this call (WP-3.0c): the loop's own governed turn
@@ -309,16 +324,19 @@ export class InProcessAgentLoop {
       role: base.role, taskId: base.taskId, turn: stepIndex + 1, ...surface, tier: 'in-process',
       kind: 'role-call',
       ...(turn === undefined ? { error: 'thrown' as const } : {}),
+      ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
     };
     try {
       this.deps.attestor.recordModelSurface?.(record);
       await this.deps.transcript?.append(
         'system',
         `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; argv ${JSON.stringify(record.argv)}` +
-        (record.error !== undefined ? `; error ${record.error}` : ''),
+        (record.error !== undefined ? `; error ${record.error}` : '') +
+        (record.surfaceSource !== undefined ? `; surface source ${record.surfaceSource}` : ''),
         { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
           systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
-          ...(record.error !== undefined ? { error: record.error } : {}) },
+          ...(record.error !== undefined ? { error: record.error } : {}),
+          ...(record.surfaceSource !== undefined ? { surfaceSource: record.surfaceSource } : {}) },
       );
     } catch (err: unknown) {
       (this.deps.stderr ?? process.stderr).write(

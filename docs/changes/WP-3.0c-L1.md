@@ -42,11 +42,20 @@ appended to the run's transcript as it is recorded (`[surface] planner turn 1: s
 prompt sha256 …; output sha256 …; …`), with the same fields in the metadata. An investigator reading
 the transcript sees the same calls, in the same order, as the signed bundle.
 
-**An adapter that reports no surface still records one.** `callModelSurface` builds the record from
-what the call site itself holds when `result.modelSurface` is absent: the system-prompt digest, the
-prompt digest, the answer's digest. `argv` is `[]` and `toolCatalog` is `''` rather than an invented
-command line — the call site did not build one. This is why `ollama` and `openrouter` role calls are
-in the record too, `argv: []` and all.
+**What the record says the model saw is the adapter's account, not the call site's.** An adapter
+composes its own system block and argv — `claude` prepends the wire protocol and the tool catalogue
+to the role prompt and passes them with flags the call site never sees — so a record rebuilt from
+the role prompt describes bytes the backend was never sent. Each adapter therefore builds the
+surface **before** it spawns, returns it on success, and attaches it to whatever error it throws
+(`withModelSurface`, a field on the same `Error`, so a `TransportError` stays one and is still
+retried under D-06). The loop, the dispatcher, the planner and the gate record the adapter's
+surface when it is on the result or on the error; only an adapter that attached none falls back to
+`callModelSurface` — the system-prompt digest, the prompt digest, the answer's digest, `argv: []`,
+`toolCatalog: ''` — and that record is marked **`surfaceSource: "fallback"`**, because the role
+prompt is not the block a composing backend was sent. `ollama` and `openrouter` attach the surface
+of their request (system message plus user message, `argv: []`), so they are in the record without
+the marker; `claude` attaches the composed block and its elided argv, `codex` the composed block and
+the `stdinSha256` of the blob it wrote, `gemini` its elided argv.
 
 ## Scope
 

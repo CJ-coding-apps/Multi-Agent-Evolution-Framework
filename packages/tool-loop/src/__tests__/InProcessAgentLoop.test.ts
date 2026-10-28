@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  makeRunId, makeTaskId, makeToolId, sha256Hex,
+  makeRunId, makeTaskId, makeToolId, sha256Hex, TransportError, withModelSurface,
 } from '@maf/types';
 import type {
   TurnAdapter, TurnMessage, AssistantTurn, AdapterInvokeOptions, AdapterInvokeResult,
@@ -231,6 +231,9 @@ test('R2-S1: a turn that throws is recorded once, with the system digest and no 
     role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
     systemPromptSha256: sha256Hex(baseOpts.systemPrompt),
     toolCatalog: '', argv: [], tier: 'in-process', kind: 'role-call', error: 'thrown',
+    // R3-S1: this adapter attached no surface to its error, so the loop's record is its own account
+    // of the role prompt — and says so. The role prompt is not the system block claude would compose.
+    surfaceSource: 'fallback',
   }], 'the failed turn is in the record exactly once, and it carries no output digest');
 });
 
@@ -279,5 +282,42 @@ test('L1-S1: a turn the adapter reports no surface for still records the system 
     role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
     systemPromptSha256: sha256Hex(baseOpts.systemPrompt),
     toolCatalog: '', argv: [], tier: 'in-process', kind: 'role-call',
+    surfaceSource: 'fallback',
   }], 'the prompt and output digests stay absent — a turn has neither as one byte string');
+});
+
+/**
+ * R3-S1: a backend that composes its own system block (role prompt + protocol + catalogue) and its
+ * own argv, and then fails. The loop holds only the role prompt; the adapter holds what it sent.
+ * The record must be the adapter's account, not the loop's reconstruction.
+ */
+class ComposingThrowAdapter extends ScriptedAdapter {
+  readonly sent = {
+    systemPromptSha256: sha256Hex('role prompt\n\nwire protocol\n\nAVAILABLE TOOLS: echo'),
+    toolCatalog:        'AVAILABLE TOOLS (use the id as "toolName"):\n- echo [read]: echo echo',
+    argv:               ['--print', '--tools', '', '-p', '--', '<prompt: 12 bytes, sha256 ' + 'c'.repeat(64) + '>'],
+  };
+  override async sendTurn(): Promise<AssistantTurn> {
+    throw withModelSurface(new TransportError('claude exited 1 mid-turn'), this.sent);
+  }
+}
+
+test('R3-S1: a thrown turn records the surface the adapter attached, not a digest of the role prompt', async () => {
+  const attestor = new SpyAttestor();
+  const adapter = new ComposingThrowAdapter([]);
+  const loop = new InProcessAgentLoop(
+    { ...baseOpts, tools: [], maxTurns: 2, timeoutMs: 10_000 },
+    { ...baseDeps(adapter, attestor), transcript: { append: async () => {} } },
+  );
+  await assert.rejects(loop.run(), /claude exited 1 mid-turn/);
+
+  assert.deepEqual(attestor.surfaces, [{
+    role: 'analyst', taskId: makeTaskId('t1'), turn: 1,
+    ...adapter.sent, tier: 'in-process', kind: 'role-call', error: 'thrown',
+  }], 'the record names what claude was sent — the composed block and the argv — and is not a fallback');
+  assert.notEqual(
+    attestor.surfaces[0]?.systemPromptSha256, sha256Hex(baseOpts.systemPrompt),
+    'the role prompt the loop holds is not what the backend was shown',
+  );
+  assert.equal('surfaceSource' in (attestor.surfaces[0] ?? {}), false, 'an adapter-described record is not marked');
 });

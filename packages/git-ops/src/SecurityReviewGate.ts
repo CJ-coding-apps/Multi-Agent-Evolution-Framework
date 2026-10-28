@@ -2,7 +2,7 @@ import type {
   CliAdapter, AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord,
   SecurityFinding, SecurityReviewResult, SecuritySeverity,
 } from '@maf/types';
-import { GateRefused, callModelSurface, makeTaskId, redactCredentials } from '@maf/types';
+import { GateRefused, attachedModelSurface, callModelSurface, makeTaskId, redactCredentials } from '@maf/types';
 
 /** L1: what a review is about, when the caller knows it: the node whose change the gate read. */
 export interface ReviewedNode {
@@ -98,19 +98,27 @@ export class SecurityReviewGate {
       ...(nativeTools ? {} : { nativeTools: false }),
     };
     let result: AdapterInvokeResult | undefined;
+    let failure: unknown;
     try {
       result = await this.config.adapter.invoke(opts);
+    } catch (err: unknown) {
+      failure = err;
+      throw err;
     } finally {
       // L1: this is a model call whether or not it judged anything, so its surface is recorded
       // before the transport check below can throw, and whether or not the adapter returned (S5).
       // `taskId` is the reviewed node's, exactly as the dispatcher mints it (`makeTaskId(node.id)`),
       // so a reader joins the gate's call to that node's role records; reviewing outside a node
       // names the gate itself. A throw leaves `outputSha256` absent and says `error: 'thrown'`.
+      // R3-S1: a throw reports through the surface the adapter attached to its error; an adapter
+      // that attached none falls back to this call site, and that record says so.
+      const reported = result?.modelSurface ?? attachedModelSurface(failure);
       await this.config.recordSurface?.({
         role: 'security', taskId: makeTaskId(reviewed?.nodeId ?? 'security-gate'), turn: 1,
-        ...(result?.modelSurface ?? callModelSurface(opts.systemPrompt, prompt, result?.output)),
+        ...(reported ?? callModelSurface(opts.systemPrompt, prompt, result?.output)),
         tier: 'cli', nativeTools: nativeTools ? 'full' : 'none', kind: 'security-gate',
         ...(result === undefined ? { error: 'thrown' as const } : {}),
+        ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
         ...(this.config.model !== undefined ? { model: this.config.model } : {}),
       });
     }

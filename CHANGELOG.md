@@ -17,10 +17,13 @@ is entitled to know which of their own code stops compiling.
   so a reader of an older bundle reads what it read before. One record is written per attempt — a
   planner or node retried on a transport failure reports each attempt — and the record is written even
   when the call **threw**, in which case `outputSha256` is absent and `error: "thrown"` says why,
-  because "not recorded" must not read as "recorded as empty". A role call on `ollama` or `openrouter`,
-  whose adapters report no surface, is recorded from what the dispatcher sent and received, with
-  `argv: []` rather than an invented command line. Each record is mirrored into the run's transcript
-  as it is made.
+  because "not recorded" must not read as "recorded as empty". What a record says the model saw is the
+  adapter's own account: each adapter composes its surface before it spawns and attaches it to any
+  error it throws, so a failed turn names the bytes the backend was actually sent — its composed
+  system block and its own argv — rather than the role prompt the call site happens to hold. Only an
+  adapter that attaches nothing falls back to the call site's digests, with `argv: []` and
+  `toolCatalog: ''` rather than an invented command line, and that record is marked
+  `surfaceSource: "fallback"`. Each record is mirrored into the run's transcript as it is made.
 - **A run that fails at planning writes and signs a bundle** ([D-45](docs/DECISIONS.md)). The bundle
   holds every planner surface, `outcome.failure.kind: "planning_failed"` and no subjects (no node
   existed to name); `maf run` prints its path and signature, and `maf attest verify` accepts it.

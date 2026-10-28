@@ -209,7 +209,11 @@ test('L1: a successful planner call records one surface with the call\'s digests
     systemPromptSha256: sha256Hex('system text'),
     promptSha256: sha256Hex('user text'),
     toolCatalog: '', outputSha256: sha256Hex(PLAN), argv: [],
-    tier: 'cli', nativeTools: 'none', kind: 'planner', model: 'opus',
+    tier: 'cli', nativeTools: 'none', kind: 'planner',
+    // R3-S1: this adapter reports no surface, so the call site's digests are recorded and marked
+    // as the fallback — the planner's role prompt is not the block a composing backend was sent.
+    surfaceSource: 'fallback',
+    model: 'opus',
   });
 });
 
@@ -273,6 +277,10 @@ test('L1-S5: a planner call whose adapter throws still records the attempt, with
     promptSha256: sha256Hex('user text'),
     toolCatalog: '', argv: [],
     tier: 'cli', nativeTools: 'none', kind: 'planner', error: 'thrown',
+    // R3-S1: this adapter attached no surface to its error, so the call site's own digests are
+    // recorded and marked as the fallback — they are the planner's role prompt, not a block a
+    // backend composed.
+    surfaceSource: 'fallback',
   });
 });
 

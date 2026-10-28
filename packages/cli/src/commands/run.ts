@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
-import { callModelSurface, makeRunId, makeTaskId, makeAgentId } from '@maf/types';
+import { attachedModelSurface, callModelSurface, makeRunId, makeTaskId, makeAgentId } from '@maf/types';
 import type { AdapterInvokeResult, AdapterName, CliAdapter, Dag, DagNode, ModelSurfaceRecord, PlanSource, RetryPolicy, RunOutcome, TaskId } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
@@ -326,19 +326,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // order. The transcript is written as the run goes, so a run that fails before its bundle is
     // written still says which calls it made. The planner's and the gate's call sites both record
     // through here, so neither can reach one store and miss the other.
-    const recordSurface = async (record: ModelSurfaceRecord): Promise<void> => {
-      try {
-        attestor.recordModelSurface(record);
-        await transcript.append('system', surfaceLine(record), surfaceMetadata(record));
-      } catch (err: unknown) {
-        // R2-L2: the planner and the gate call this from a `finally`, so a write failure that
-        // escaped would replace the call's own error — or turn a valid result into a throw — with
-        // a transcript error. The surface record is evidence about the call; it does not outrank
-        // the call. Report what could not be written and keep the outcome.
-        warn(`[maf] warning: could not record the ${record.kind ?? 'call'} surface ` +
-          `(turn ${record.turn}): ${err instanceof Error ? err.message : String(err)}`);
-      }
-    };
+    const recordSurface = makeSurfaceRecorder(attestor, transcript, warn);
 
     // L1-S2: the bundle a finished run writes, and the one a run whose planning call failed writes
     // before it rethrows. Same builder, same harness config source, so `maf attest verify` reads
@@ -546,6 +534,7 @@ export function planGenerator(
 ): (systemPrompt: string, userPrompt: string) => Promise<string> {
   return (systemPrompt, userPrompt) => withRetry(async () => {
     let result: AdapterInvokeResult | undefined;
+    let failure: unknown;
     try {
       result = await adapter.invoke({
         prompt: userPrompt, systemPrompt,
@@ -554,16 +543,25 @@ export function planGenerator(
         nativeTools: false,
         ...(call.model !== undefined ? { model: call.model } : {}),
       });
+    } catch (err: unknown) {
+      failure = err;
+      throw err;
     } finally {
       // L1: record the attempt before any judgement of it, and whether or not it returned (S5).
       // A backend that reports its own surface keeps it (its argv is evidence this call site cannot
       // reconstruct); one that reports none gets the digests of what was sent and received, with no
-      // argv claimed. A throw leaves `outputSha256` absent and says `error: 'thrown'`.
+      // argv claimed. R3-S1: a call that threw reports through the surface the adapter attached to
+      // its error; only an adapter that attached none falls back to this call site, and that record
+      // is marked `surfaceSource: 'fallback'` — the system prompt here is the planner's role prompt,
+      // not the block a backend that composes one was sent. A throw leaves `outputSha256` absent and
+      // says `error: 'thrown'`.
+      const reported = result?.modelSurface ?? attachedModelSurface(failure);
       await call.recordSurface?.({
         role: 'planner', taskId: call.taskId ?? makeTaskId('planner'), turn: 1,
-        ...(result?.modelSurface ?? callModelSurface(systemPrompt, userPrompt, result?.output)),
+        ...(reported ?? callModelSurface(systemPrompt, userPrompt, result?.output)),
         tier: 'cli', nativeTools: 'none', kind: 'planner',
         ...(result === undefined ? { error: 'thrown' as const } : {}),
+        ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
         ...(call.model !== undefined ? { model: call.model } : {}),
       });
     }
@@ -589,6 +587,32 @@ export function writerLock(roles: RoleRegistry, adapter: CliAdapter, baseTools: 
   return (node) => roles.hasRole(node.agentRole) ? isWriterForLock(roles.getRole(node.agentRole), adapter, baseTools) : true;
 }
 
+/**
+ * L1-S9: the one recorder the planner and the security gate write their surfaces through — the
+ * bundle's array first, then the transcript, in that order.
+ *
+ * R2-L2, R3-M1: both call sites invoke it from a `finally`, so a write failure that escaped would
+ * replace the call's own error, or turn a valid result into a throw, with a transcript error. The
+ * surface record is evidence about the call; it does not outrank the call. A failure is reported on
+ * the run's stderr and the call's outcome stands, whichever store refused. Exported so a test can
+ * drive it with a sink that fails and see the call's result unchanged.
+ */
+export function makeSurfaceRecorder(
+  attestor: { recordModelSurface(record: ModelSurfaceRecord): void },
+  transcript: { append(role: 'system', content: string, metadata?: Record<string, unknown>): Promise<void> },
+  warn: (line: string) => void,
+): (record: ModelSurfaceRecord) => Promise<void> {
+  return async (record: ModelSurfaceRecord): Promise<void> => {
+    try {
+      attestor.recordModelSurface(record);
+      await transcript.append('system', surfaceLine(record), surfaceMetadata(record));
+    } catch (err: unknown) {
+      warn(`[maf] warning: could not record the ${record.kind ?? 'call'} surface ` +
+        `(turn ${record.turn}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+}
+
 /** The transcript's line for where the plan came from (WP-3.6, F4). */
 function planSourceLine(source: PlanSource): string {
   return source.kind === 'spec'
@@ -605,7 +629,8 @@ function surfaceLine(record: ModelSurfaceRecord): string {
   return `[surface] ${record.kind ?? 'call'} turn ${record.turn}: system sha256 ${record.systemPromptSha256}; ` +
     `prompt sha256 ${record.promptSha256 ?? '(none)'}; output sha256 ${record.outputSha256 ?? '(none)'}; ` +
     `native tools ${record.nativeTools ?? '(unrecorded)'}; argv ${JSON.stringify(record.argv)}` +
-    (record.error !== undefined ? `; error ${record.error}` : '');
+    (record.error !== undefined ? `; error ${record.error}` : '') +
+    (record.surfaceSource !== undefined ? `; surface source ${record.surfaceSource}` : '');
 }
 
 /** What rides with that line, field for field: the digests, the tier, and the call's identity. */
@@ -618,6 +643,7 @@ function surfaceMetadata(record: ModelSurfaceRecord): Record<string, unknown> {
     ...(record.outputSha256 !== undefined ? { outputSha256: record.outputSha256 } : {}),
     ...(record.stdinSha256 !== undefined ? { stdinSha256: record.stdinSha256 } : {}),
     ...(record.error !== undefined ? { error: record.error } : {}),
+    ...(record.surfaceSource !== undefined ? { surfaceSource: record.surfaceSource } : {}),
     nativeTools: record.nativeTools,
   };
 }

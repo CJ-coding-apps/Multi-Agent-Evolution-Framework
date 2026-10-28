@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord } from '@maf/types';
-import { BaseAdapter, spawnAndCollect, spawnStreaming, elided, cliModelSurface } from '@maf/adapter-base';
+import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord, ModelSurface } from '@maf/types';
+import { withModelSurface } from '@maf/types';
+import { BaseAdapter, spawnAndCollect, spawnStreaming, elided, cliModelSurface, sha256Hex } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
 
@@ -59,11 +60,14 @@ export class GeminiAdapter extends BaseAdapter {
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const start = Date.now();
     const args = this.buildArgs(options);
+    // R3-S1: the call's surface is composed before the spawn, so a binary that cannot start still
+    // carries what it was asked to run.
+    const surface = cliModelSurface(options.systemPrompt, options.prompt, elideGeminiPayloads(args), undefined);
     const result = await this.spawn('gemini', args, {
       cwd: options.workingDir,
       timeoutMs: options.timeoutMs,
       env: { ...process.env },
-    });
+    }).catch((err: unknown): never => { throw attach(err, surface); });
     return {
       success:     result.exitCode === 0,
       output:      result.stdout,
@@ -74,7 +78,7 @@ export class GeminiAdapter extends BaseAdapter {
       // from an answer that happens to be a failure.
       ...(result.transportError !== undefined ? { transportError: result.transportError } : {}),
       // The cli-tier call's model-facing surface (WP-3.0c), built from this adapter's own argv.
-      modelSurface: cliModelSurface(options.systemPrompt, options.prompt, elideGeminiPayloads(args), result.stdout),
+      modelSurface: { ...surface, outputSha256: sha256Hex(result.stdout) },
     };
   }
 
@@ -114,4 +118,13 @@ function elideGeminiPayloads(argv: readonly string[]): string[] {
     if (arg.startsWith('--prompt=')) return `--prompt=${elided('prompt', arg.slice('--prompt='.length))}`;
     return arg;
   });
+}
+
+/**
+ * R3-S1: the surface of the call rides on whatever the call throws, so a failed call records what
+ * gemini was actually sent. A value that is not an `Error` cannot carry a field; it is rethrown
+ * untouched and the caller records its own fallback, marked as one.
+ */
+function attach(err: unknown, surface: ModelSurface): unknown {
+  return err instanceof Error ? withModelSurface(err, surface) : err;
 }

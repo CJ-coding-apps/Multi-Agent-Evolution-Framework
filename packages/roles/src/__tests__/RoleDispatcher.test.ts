@@ -728,6 +728,7 @@ test('cli tier: an adapter that reports no model surface gets one built from wha
       tier:               'cli',
       nativeTools:        'read-only',
       kind:               'role-call',
+      surfaceSource:      'fallback',
     }], 'the call site records the digests it holds; no argv is invented for an adapter that has none');
     assert.ok(
       f.transcript.entries.some((e) => e.content.startsWith('[surface]')),
