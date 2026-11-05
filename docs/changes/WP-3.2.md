@@ -261,11 +261,12 @@ silent.
   `nodeId`); `LcmContext.summaryCalls`, `compactionTokens`, `degraded`.
 - **`packages/lcm/src/LcmEngine.ts`** — every summary call, at every level, goes through
   `recordCall` and the caller-supplied `recordSummaryCall`. The engine reports what the backend
-  said (`tokensUsed`, `modelSurface`, model); it does not invent a surface. An attempt that threw
+  said (`tokensUsed`, `modelSurface`, model); it does not invent a surface. An attempt that failed
   after the adapter was handed the request goes through `recordFailedSummaryCall`: it carries the
-  surface the summarizer attached, `error: 'thrown' | 'not-sent'`, and `surfaceSource` when the
-  call site built the surface, with no summary id, content or charge — one record per invocation,
-  retries included, and a failure before any adapter call is not recorded as one.
+  surface the summarizer attached, `error: 'thrown' | 'not-sent'` — absent when the adapter
+  *returned* a failed result, which records its output digest instead (Z1) — and `surfaceSource`
+  when the call site built the surface, with no summary id, content or charge — one record per
+  invocation, retries included, and a failure before the adapter is called is not recorded as one.
 - **`packages/lcm/src/{operators/AgenticMap,AdapterSummarizer}.ts`** — the sub-agent seam returns
   `SummaryOutput`, not a bare string. Without that the Agentic-Map operator discarded the
   backend's tokens and surface, so nothing was recorded — the defect this round's wiring test
