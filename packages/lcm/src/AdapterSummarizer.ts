@@ -95,12 +95,12 @@ export function createAdapterSummarizer(
             result.transportError.message,
             { cause: result.transportError },
           ),
-          surface, true, attached === undefined,
+          surface, true, attached === undefined, true,
         );
       }
       throw withModelSurface(
         new Error(`LCM summarization failed: the ${options.adapter.name} adapter exited ${result.exitCode}.`),
-        surface, true, attached === undefined,
+        surface, true, attached === undefined, true,
       );
     }
     const content = redactCredentials(result.output.trim());
@@ -108,7 +108,7 @@ export function createAdapterSummarizer(
       const attached = result.modelSurface;
       throw withModelSurface(
         new Error(`LCM summarization failed: the ${options.adapter.name} adapter returned an empty summary.`),
-        attached ?? { ...sent, outputSha256: sha256(result.output) }, true, attached === undefined,
+        attached ?? { ...sent, outputSha256: sha256(result.output) }, true, attached === undefined, true,
       );
     }
     // R6: not every backend reports a surface (ollama and openrouter return none today). A summary
@@ -169,12 +169,12 @@ export function createAdapterSubAgent(
             result.transportError.message,
             { cause: result.transportError },
           ),
-          surface, true, attached === undefined,
+          surface, true, attached === undefined, true,
         );
       }
       throw withModelSurface(
         new Error(`LCM Agentic-Map failed: the ${options.adapter.name} adapter exited ${result.exitCode}.`),
-        surface, true, attached === undefined,
+        surface, true, attached === undefined, true,
       );
     }
     const content = redactCredentials(result.output.trim());
@@ -184,7 +184,7 @@ export function createAdapterSubAgent(
       const attached = result.modelSurface;
       throw withModelSurface(
         new Error(`LCM Agentic-Map failed: the ${options.adapter.name} adapter returned an empty summary.`),
-        attached ?? { ...sent, outputSha256: sha256(result.output) }, true, attached === undefined,
+        attached ?? { ...sent, outputSha256: sha256(result.output) }, true, attached === undefined, true,
       );
     }
     // The backend's count and surface travel with the text (F1): Agentic-Map's summary is recorded

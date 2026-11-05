@@ -1,10 +1,11 @@
 import type {
   LcmApi, LcmMessage, LcmSummary, LcmContext, LcmMode, LcmTrigger,
   LcmMessageId, LcmSummaryId, GhostCue, RunId, LcmDegradedRecord, LcmSummarySurface,
-  ModelSurface,
+  LcmSummaryFailureSurface, ModelSurface,
 } from '@maf/types';
 import {
-  attachedModelSurface, modelSurfaceIsFallback, modelSurfaceWasSent, redactCredentials,
+  attachedModelSurface, modelSurfaceIsFallback, modelSurfaceWasReturned, modelSurfaceWasSent,
+  redactCredentials,
 } from '@maf/types';
 import { LcmStore } from './LcmStore.js';
 import { GhostCueBuilder } from './GhostCueBuilder.js';
@@ -50,7 +51,8 @@ export interface LcmSummaryFailure {
   level:           number;
   messageIds:      LcmMessageId[];
   childIds:        LcmSummaryId[];
-  error:           'thrown' | 'not-sent';
+  /** Absent when the adapter returned a failed result: only a throw (or a never-sent call) is an error. */
+  error?:          'thrown' | 'not-sent';
   surfaceSource?:  'fallback';
   surface?:        ModelSurface;
   trigger?:        LcmTrigger;
@@ -276,6 +278,7 @@ export class LcmEngine implements LcmApi {
     if (mode === 'off' || tokenBudget <= 0) return emptyContext(mode);
 
     const summaryCalls: LcmSummarySurface[] = [];
+    const summaryFailures: LcmSummaryFailureSurface[] = [];
     const degradedRecords: LcmDegradedRecord[] = [];
     let compactionTokens = 0;
     let degraded = false;
@@ -323,6 +326,7 @@ export class LcmEngine implements LcmApi {
         );
         included = archive.summaries;
         summaryCalls.push(...archive.calls);
+        summaryFailures.push(...archive.failures);
         used = included.reduce((s, summary) => s + summary.tokens, 0);
         if (archive.mergeFailure !== undefined) {
           // V5 (D-52 F5): an upward merge is a summarization call like any other, so its failure
@@ -404,6 +408,7 @@ export class LcmEngine implements LcmApi {
       ...(compactionTokens > 0 ? { compactionTokens } : {}),
       ...(archive.offerSummaries ? { summaries: archive.summaries } : {}),
       ...(summaryCalls.length > 0 ? { summaryCalls } : {}),
+      ...(summaryFailures.length > 0 ? { summaryFailures } : {}),
       ...(degradedRecords.length > 0 ? { degraded: degradedRecords } : {}),
     });
 
@@ -423,6 +428,7 @@ export class LcmEngine implements LcmApi {
         this.compactLocked(sessionId, messageIds, operator, trigger, summaryTarget));
       compactionTokens += result.reportedTokens.reduce((s, n) => s + n, 0);
       summaryCalls.push(...result.calls);
+      summaryFailures.push(...result.failures);
     };
 
     let uncompacted = this.store.getUncompactedMessages(sessionId, 0);
@@ -532,7 +538,10 @@ export class LcmEngine implements LcmApi {
     operator: 'LLM-Map' | 'Agentic-Map',
     trigger?: LcmTrigger,
     targetTokens?: number,
-  ): Promise<{ summaryId: LcmSummaryId; reportedTokens: number[]; calls: LcmSummarySurface[] }> {
+  ): Promise<{
+    summaryId: LcmSummaryId; reportedTokens: number[]; calls: LcmSummarySurface[];
+    failures: LcmSummaryFailureSurface[];
+  }> {
     const fresh = this.store.getMessagesByIds(messageIds);
     if (fresh.length !== messageIds.length) throw this.missing(messageIds, fresh);
     const uncovered = fresh.filter((m) => m.summaryId === undefined);
@@ -542,10 +551,10 @@ export class LcmEngine implements LcmApi {
       const covering = new Set(fresh.map((m) => m.summaryId!));
       const first = [...covering][0];
       if (covering.size === 1 && first !== undefined) {
-        return { summaryId: first, reportedTokens: [], calls: [] };
+        return { summaryId: first, reportedTokens: [], calls: [], failures: [] };
       }
       const newest = this.rootSummaries(sessionId).at(-1);
-      if (newest) return { summaryId: newest.id, reportedTokens: [], calls: [] };
+      if (newest) return { summaryId: newest.id, reportedTokens: [], calls: [], failures: [] };
       throw new Error('LCM compaction was asked to summarize messages that are already covered, and no summary covers them.');
     }
 
@@ -553,10 +562,11 @@ export class LcmEngine implements LcmApi {
     const groups = packUnits(units);
     const reported: number[] = [];
     const calls: LcmSummarySurface[] = [];
+    const failures: LcmSummaryFailureSurface[] = [];
     const level0: ParentUnit[] = [];
 
     for (const group of groups) {
-      const output = await this.callBounded(group, 0, operator, targetTokens, sessionId, trigger);
+      const output = await this.callBounded(group, 0, operator, targetTokens, sessionId, trigger, failures);
       // F7: an injected summarizer may return a credential the model echoed, so the store keeps
       // the masked text, not whatever came back. The call's own surface still hashes the true
       // bytes; the archive is the model-facing side.
@@ -578,8 +588,8 @@ export class LcmEngine implements LcmApi {
     // F9: summarize the summaries upward until one root covers everything. Nothing is dropped
     // without a parent: each level records its children and links every descendant message, so
     // `lcm.expand` on the root recovers the whole segment.
-    const rootId = await this.raise(level0, 1, operator, sessionId, trigger, reported, calls, targetTokens);
-    return { summaryId: rootId, reportedTokens: reported, calls };
+    const rootId = await this.raise(level0, 1, operator, sessionId, trigger, reported, calls, failures, targetTokens);
+    return { summaryId: rootId, reportedTokens: reported, calls, failures };
   }
 
   /** Builds level+1 summaries over `children` until exactly one root remains. */
@@ -591,6 +601,7 @@ export class LcmEngine implements LcmApi {
     trigger: LcmTrigger | undefined,
     reported: number[],
     calls: LcmSummarySurface[],
+    failures: LcmSummaryFailureSurface[],
     targetTokens?: number,
   ): Promise<LcmSummaryId> {
     if (children.length === 1) return children[0]!.id;
@@ -610,7 +621,7 @@ export class LcmEngine implements LcmApi {
     const parents: ParentUnit[] = [];
     for (const chunk of packUnits(units)) {
       const childIds = [...new Set(chunk.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
-      const output = await this.callBounded(chunk, level, operator, targetTokens, sessionId, trigger);
+      const output = await this.callBounded(chunk, level, operator, targetTokens, sessionId, trigger, failures);
       // R10: the same masking as level 0. A model can echo a credential it read, and this text is
       // stored and shown by `lcm.expand` exactly like a level-0 summary's.
       const content = redactCredentials(summaryContent(output));
@@ -628,7 +639,7 @@ export class LcmEngine implements LcmApi {
       if (surface) calls.push(surface);
       parents.push({ id: summaryId, content });
     }
-    return this.raise(parents, level + 1, operator, sessionId, trigger, reported, calls, targetTokens);
+    return this.raise(parents, level + 1, operator, sessionId, trigger, reported, calls, failures, targetTokens);
   }
 
   /**
@@ -645,6 +656,8 @@ export class LcmEngine implements LcmApi {
     recordDegradedRoot: boolean,
   ): Promise<{
     summaries: LcmSummary[]; calls: LcmSummarySurface[]; roots: LcmSummary[];
+    /** Z3: every attempt that failed after the adapter was called, for the transcript line. */
+    failures: LcmSummaryFailureSurface[];
     /**
      * L3c: the root the archive gave up on, when it still exceeds `budget`. `reason` distinguishes
      * a root that was retried and did not shrink from one whose retry failed (V8). W1/W2: present
@@ -656,8 +669,9 @@ export class LcmEngine implements LcmApi {
     mergeFailure?: unknown;
   }> {
     const calls: LcmSummarySurface[] = [];
+    const failures: LcmSummaryFailureSurface[] = [];
     let roots = this.rootSummaries(sessionId);
-    if (roots.length === 0) return { summaries: [], calls, roots };
+    if (roots.length === 0) return { summaries: [], calls, roots, failures };
     let mergeFailure: unknown;
     // Bounded: each pass halves the root count or stops. A budget too small for even one root
     // stops the loop rather than summarizing forever.
@@ -694,7 +708,7 @@ export class LcmEngine implements LcmApi {
             .map((id) => this.store.getSummary(id))
             .filter((summary): summary is LcmSummary => summary !== undefined);
           const messageIds = [...new Set(children.flatMap((s) => s.messageIds))];
-          const output = await this.callBounded(group, level, operator, targetTokens, sessionId, trigger);
+          const output = await this.callBounded(group, level, operator, targetTokens, sessionId, trigger, failures);
           const content = redactCredentials(summaryContent(output));
           const summaryId = this.store.insertSummary(
             content, estimateTokens(content), level, operator, childIds, messageIds,
@@ -751,7 +765,7 @@ export class LcmEngine implements LcmApi {
               MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD,
             ).map((content) => ({ role: 'system', content, summaryId: root.id }));
             const output = await this.callBounded(
-              units, level, operator, Math.max(1, Math.floor(targetTokens / 2)), sessionId, trigger,
+              units, level, operator, Math.max(1, Math.floor(targetTokens / 2)), sessionId, trigger, failures,
             );
             const content = redactCredentials(summaryContent(output));
             summaryId = this.store.insertSummary(
@@ -817,7 +831,7 @@ export class LcmEngine implements LcmApi {
     const fit = overflowNewestFirst(roots, budget);
     const kept = roots.filter((s) => !fit.includes(s));
     return {
-      summaries: kept.slice().reverse(), calls, roots, // chronological for the prompt
+      summaries: kept.slice().reverse(), calls, roots, failures, // chronological for the prompt
       ...(degradedRoot !== undefined ? { degradedRoot } : {}),
       ...(mergeFailure !== undefined ? { mergeFailure } : {}),
     };
@@ -863,6 +877,7 @@ export class LcmEngine implements LcmApi {
     targetTokens: number | undefined,
     sessionId: string,
     trigger: LcmTrigger | undefined,
+    failures: LcmSummaryFailureSurface[],
   ): Promise<SummaryOutput> {
     const attempts = 1 + Math.max(0, this.config.summaryRetry ?? 1);
     let lastError: unknown;
@@ -874,7 +889,7 @@ export class LcmEngine implements LcmApi {
         // R2-S1 on this path: an attempt that threw is still a model call MAF made. Record it
         // before deciding whether another attempt follows, so a retried call contributes one record
         // per invocation and the bundle can be matched to the adapter's ledger exactly.
-        await this.recordFailedSummaryCall({ err, units, depth, sessionId, trigger });
+        await this.recordFailedSummaryCall({ err, units, depth, sessionId, trigger, failures });
         if (!isTransport(err)) break;
       }
     }
@@ -882,26 +897,50 @@ export class LcmEngine implements LcmApi {
   }
 
   /**
-   * Records a summarization attempt that threw (WP-3.0c R2-S1/R4-L2, applied to this lane). The
-   * summarizer attaches the surface of the call — the adapter's own when it reported one, otherwise
-   * what the summarizer sent, marked `fallback` — so the record carries the sent digests and no
-   * `outputSha256`. A failure before any adapter call (an oversized prompt, a missing Agentic-Map
-   * backend) carries no surface and is not recorded: there was no model call to account for.
+   * Records a summarization attempt that failed after the adapter was called (WP-3.0c R2-S1/R4-L2,
+   * applied to this lane). The summarizer attaches the surface of the call — the adapter's own when it
+   * reported one, otherwise what the summarizer sent, marked `fallback` — so the record carries the
+   * digests of what was sent and what came back. A failure before the adapter is called (an oversized
+   * prompt, a missing Agentic-Map backend) carries no surface and is not recorded: there was no model
+   * call to account for.
    *
-   * The write is best-effort, as it is for a role call (R2-L2): the attempt's own error decides
-   * whether it is retried, and a recorder that failed must not replace it.
+   * Z1: `error` is a fact about a call that never came back. An adapter that *returned* a failed
+   * result records its output digest and no `error`, exactly as the planner and the gate record the
+   * same result (D-52). Only a throw records `'thrown'`, and a throw before anything was sent records
+   * `'not-sent'` (R4-L2).
+   *
+   * Z3: the failure is also appended to the caller's `failures`, which the transcript writer renders
+   * as one `[surface]` line per failed attempt — the role-call pattern from #62's S9. The write is
+   * best-effort, as it is for a role call (R2-L2): the attempt's own error decides whether it is
+   * retried, and a recorder that failed must not replace it.
    */
   private async recordFailedSummaryCall(args: {
     err: unknown; units: Unit[]; depth: number; sessionId: string; trigger: LcmTrigger | undefined;
+    failures: LcmSummaryFailureSurface[];
   }): Promise<void> {
     const surface = attachedModelSurface(args.err);
     if (!surface) return;
+    const messageIds = [...new Set(args.units.flatMap((unit) => (unit.messageId ? [unit.messageId] : [])))];
+    const childIds = [...new Set(args.units.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
+    const returned = modelSurfaceWasReturned(args.err);
+    // Z3: the flattened record is what the transcript line is built from. It is appended before the
+    // recorder runs, so a recorder that throws still leaves the attempt visible to the transcript.
+    args.failures.push({
+      level:              args.depth,
+      messages:           args.depth === 0 ? messageIds.length : childIds.length,
+      ...(returned ? {} : { error: modelSurfaceWasSent(args.err) ? 'thrown' as const : 'not-sent' as const }),
+      ...(modelSurfaceIsFallback(args.err) ? { surfaceSource: 'fallback' as const } : {}),
+      ...(surface.model !== undefined ? { model: surface.model } : {}),
+      systemPromptSha256: surface.systemPromptSha256,
+      ...(surface.promptSha256 !== undefined ? { promptSha256: surface.promptSha256 } : {}),
+      ...(surface.outputSha256 !== undefined ? { outputSha256: surface.outputSha256 } : {}),
+    });
     const call: LcmSummaryFailure = {
       sessionId:  args.sessionId,
       level:      args.depth,
-      messageIds: [...new Set(args.units.flatMap((unit) => (unit.messageId ? [unit.messageId] : [])))],
-      childIds:   [...new Set(args.units.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))],
-      error:      modelSurfaceWasSent(args.err) ? 'thrown' : 'not-sent',
+      messageIds,
+      childIds,
+      ...(returned ? {} : { error: modelSurfaceWasSent(args.err) ? 'thrown' as const : 'not-sent' as const }),
       ...(modelSurfaceIsFallback(args.err) ? { surfaceSource: 'fallback' as const } : {}),
       surface,
       ...(args.trigger !== undefined ? { trigger: args.trigger } : {}),

@@ -152,10 +152,12 @@ export function createRunLcm(input: RunLcmInput): RunLcm {
       // that supplied its own summarizer and did not: recording nothing is honest, inventing a
       // digest for text this layer never saw is not.
       if (!call.surface) return;
-      // WP-3.0c, applied to this lane: an attempt that threw after the adapter was handed the
+      // WP-3.0c, applied to this lane: an attempt that failed after the adapter was handed the
       // request is a model call MAF made, recorded once per attempt with the surface attached to
-      // the error. There is no summary for it to describe, so `lcmSummary` is absent and `error`
+      // the failure. There is no summary for it to describe, so `lcmSummary` is absent and `error`
       // (with `surfaceSource` when the call site built the surface) says how the attempt ended.
+      // Z1: `error` is present only for a throw or a `not-sent` failure; an adapter that returned a
+      // failed result records its output digest and no `error`, as the planner and gate do.
       if (!('summaryId' in call)) {
         input.attestor.recordModelSurface({
           role: 'lcm',
@@ -165,7 +167,7 @@ export function createRunLcm(input: RunLcmInput): RunLcm {
           nativeTools: 'none',
           kind: 'lcm-summary',
           ...call.surface,
-          error: call.error,
+          ...(call.error !== undefined ? { error: call.error } : {}),
           ...(call.surfaceSource !== undefined ? { surfaceSource: call.surfaceSource } : {}),
         });
         return;

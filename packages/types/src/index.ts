@@ -796,6 +796,25 @@ export interface LcmSummarySurface {
 }
 
 /**
+ * A summary attempt that failed after the adapter was called, as the assembly reports it (WP-3.0c
+ * R2-S1 on the summarizer path). Flattened like {@link LcmSummarySurface} for the same reason: the
+ * caller that owns the transcript holds only this object. `error` is present only when the adapter
+ * threw (or, per R4-L2, never sent anything); a result the adapter returned is recorded with its
+ * output digest and no `error`.
+ */
+export interface LcmSummaryFailureSurface {
+  level:               number;
+  /** The messages (at level 0) or child summaries this attempt was asked to cover. */
+  messages:            number;
+  error?:              'thrown' | 'not-sent';
+  surfaceSource?:      'fallback';
+  model?:              string;
+  systemPromptSha256:  string;
+  promptSha256?:       string;
+  outputSha256?:       string;
+}
+
+/**
  * A compaction this run could not complete (WP-3.2 F5). The node continues uncompacted, and the
  * bundle says so: a failure that leaves no trace is indistinguishable from compaction that ran.
  */
@@ -898,6 +917,14 @@ export interface LcmContext {
    * the engine has no transcript and a background pass has no task to attribute one to.
    */
   summaryCalls?: LcmSummarySurface[];
+  /**
+   * Summary attempts this assembly made that failed after the adapter was called (WP-3.0c R2-S1 on
+   * the summarizer path; WP-3.2 F1). The engine records each with the run's attestor; the caller
+   * that owns the transcript writes their `[surface]` lines from here, for the same reason the
+   * successful calls are reported: a failed attempt is a model call MAF made, and a run that fails
+   * before its bundle exists should still say so. Absent when no attempt failed.
+   */
+  summaryFailures?: LcmSummaryFailureSurface[];
   /** Compactions this assembly could not complete (WP-3.2 F5). */
   degraded?:    LcmDegradedRecord[];
 }
@@ -1857,6 +1884,6 @@ export { toolEnv } from './childEnv.js';
  */
 export {
   callModelSurface, sha256Hex, withModelSurface, attachedModelSurface, modelSurfaceWasSent,
-  modelSurfaceIsFallback,
+  modelSurfaceIsFallback, modelSurfaceWasReturned,
 } from './surface.js';
 export type { ModelSurfaceCarrier } from './surface.js';
