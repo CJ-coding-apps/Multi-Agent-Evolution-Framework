@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
@@ -79,8 +79,8 @@ type ExchangeKind = 'role-turn' | 'summary' | 'planner' | 'security-gate' | 'oth
 
 /**
  * Which model call an exchange was, read from the prompt alone — the same way an operator reading
- * the transcript would. A summary call is `@maf/lcm`'s (WP-3.2); there is none on this branch, but
- * the matcher names it so the rebase onto that lane does not silently stop covering it.
+ * the transcript would. A summary call is `@maf/lcm`'s (WP-3.2), made through `invoke` with the
+ * summarization system prompt; the compacting run below is the one that makes it.
  */
 function exchangeKind(e: ScriptedExchange): ExchangeKind {
   if (e.via === 'turn') return 'role-turn';
@@ -94,12 +94,10 @@ function exchangeKind(e: ScriptedExchange): ExchangeKind {
 
 /** A surface record's kind as the exchange's word for it: absent is a role call (it predates the field). */
 function surfaceKind(s: ModelSurfaceRecord): ExchangeKind {
-  // Read through `string` so this file compiles both before and after the LCM-lane rebase, where
-  // `'lcm-summary'` joins the union.
-  const kind = s.kind as string | undefined;
+  const kind = s.kind;
   if (kind === undefined || kind === 'role-call') return 'role-turn';
   if (kind === 'lcm-summary') return 'summary';
-  return kind as ExchangeKind;
+  return kind;
 }
 
 /** The digest key a surface record is matched by. An in-process turn has no prompt/output digest. */
@@ -531,6 +529,94 @@ test('L1-S6: a gate call retried after a transport failure records both attempts
     // A repeated review is two calls for the same node; each is one record. A mutant that pushes
     // twice per review leaves four.
     assert.equal(gates[0]?.taskId, gates[1]?.taskId, 'both reviews name the node that was retried');
+    assertBijection(surfaces, exchanges);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ── WP-3.2 F1, with WP-3.0c's rules applied to the lane ───────────────────────────────────────────
+// `@maf/lcm` compacts by asking the run's own adapter for a summary, and that call used to reach the
+// adapter without a surface record: the bundle's account of what the model was shown was one call
+// short per compaction. A summary attempt that threw left no trace at all. The run below is
+// configured to compact on its first assembly (a threshold low enough that any history is over it,
+// and a fresh tail of one), and its model fails the first summary attempt with a transport error —
+// so the bijection has to pair the retried attempt, the one that replaced it, and every planner,
+// gate and turn call around them.
+
+/** The scripted model that answers summarization prompts, failing the first attempt with a timeout. */
+class SummaryScripted extends ScriptedAdapter {
+  private attempts = 0;
+
+  override async invoke(o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    if (!(o.systemPrompt ?? '').startsWith('You are a context summarization agent')) return super.invoke(o);
+    this.attempts += 1;
+    const exchange: ScriptedExchange = {
+      via: 'invoke', kind: 'task', systemPrompt: o.systemPrompt ?? '', prompt: o.prompt, tools: o.tools ?? [],
+    };
+    this.exchanges.push(exchange);
+    if (this.attempts === 1) {
+      exchange.output = '';
+      return transportFailure();
+    }
+    exchange.output = `Summary ${this.attempts}: the run read sum.js and fixed the subtraction.`;
+    return answered(exchange.output);
+  }
+
+  /** How many summary attempts the run made — the count the records must account for. */
+  get summaryAttempts(): number { return this.attempts; }
+}
+
+test('F1: a compacting run records one surface per summary attempt, including the one that threw', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-compact-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    const mafDir = path.join(repo, '.maf');
+    await mkdir(mafDir, { recursive: true });
+    await writeFile(path.join(mafDir, 'config.yaml'), [
+      'lcm:',
+      '  mode: Upward',
+      // Any history is over this fraction of the budget, and only the newest message is protected,
+      // so the run compacts as soon as there is something to compact.
+      '  contextThreshold: 0.001',
+      '  freshTailCount: 1',
+      '  summaryTimeoutMs: 4321',
+      '',
+    ].join('\n'), 'utf8');
+
+    const scripted = new SummaryScripted([onePlannedNode(TASK), CODER]);
+    const { surfaces, exchanges } = await runAndRead(repo, scripted, []);
+
+    const summaries = surfaces.filter((s) => s.kind === 'lcm-summary');
+    const attempts = scripted.summaryAttempts;
+    assert.ok(attempts >= 2, 'the run compacted, and the first summary attempt was retried');
+    assert.equal(summaries.length, attempts, 'one record per summary attempt: no attempt is dropped or doubled');
+
+    const failed = summaries.filter((s) => s.error !== undefined);
+    assert.equal(failed.length, 1, 'the timed-out attempt is recorded, once');
+    const timedOut = failed[0];
+    assert.ok(timedOut);
+    assert.equal(timedOut.role, 'lcm');
+    assert.equal(timedOut.tier, 'cli', 'the summary went through the adapter\'s `invoke`');
+    assert.equal(timedOut.nativeTools, 'none', 'a summary asks for text only');
+    assert.equal(timedOut.error, 'thrown', 'the adapter took the call and failed it');
+    assert.equal(timedOut.surfaceSource, 'fallback', 'the scripted adapter reported no surface, so the summarizer built one');
+    assert.equal(timedOut.outputSha256, sha256Hex(''), 'the timed-out attempt answered with no bytes');
+    assert.equal(timedOut.lcmSummary, undefined, 'no summary was written, so the record describes none');
+
+    const wrote = summaries.filter((s) => s.error === undefined);
+    assert.ok(wrote.length >= 1, 'the retry produced a summary');
+    for (const record of wrote) {
+      assert.ok(record.lcmSummary, 'a successful summary record says what it covered and cost');
+      assert.equal(record.lcmSummary.level, 0);
+    }
+
+    // Every record names the session's own call, and the retried attempt and its successor are two
+    // calls, not one written twice.
+    assert.equal(new Set(summaries).size, summaries.length);
+    const summaryCalls = exchanges.filter((e) => exchangeKind(e) === 'summary');
+    assert.equal(summaryCalls.length, attempts, 'the adapter ledger saw every attempt');
+
     assertBijection(surfaces, exchanges);
   } finally {
     await rm(root, { recursive: true, force: true });

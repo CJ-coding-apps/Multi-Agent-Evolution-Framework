@@ -3,7 +3,9 @@ import type {
   LcmMessageId, LcmSummaryId, GhostCue, RunId, LcmDegradedRecord, LcmSummarySurface,
   ModelSurface,
 } from '@maf/types';
-import { redactCredentials } from '@maf/types';
+import {
+  attachedModelSurface, modelSurfaceIsFallback, modelSurfaceWasSent, redactCredentials,
+} from '@maf/types';
 import { LcmStore } from './LcmStore.js';
 import { GhostCueBuilder } from './GhostCueBuilder.js';
 import { SessionMerger } from './SessionMerger.js';
@@ -32,6 +34,24 @@ export interface LcmSummaryCall {
    */
   tokenBudgetCharged: number;
   model?:          string;
+  surface?:        ModelSurface;
+  trigger?:        LcmTrigger;
+}
+
+/**
+ * One summary call that failed after the adapter was handed the request (WP-3.0c R2-S1/R4-L2, on
+ * the summarizer path). No summary exists, so there is no id, content or charge; what the call was
+ * shown and answered (or did not answer) is the evidence, and it rides on the record exactly as a
+ * role call's does. `surface` is present whenever the summarizer could describe the call; a
+ * summarizer that supplied no surface is not invented (the recorder skips it).
+ */
+export interface LcmSummaryFailure {
+  sessionId:       string;
+  level:           number;
+  messageIds:      LcmMessageId[];
+  childIds:        LcmSummaryId[];
+  error:           'thrown' | 'not-sent';
+  surfaceSource?:  'fallback';
   surface?:        ModelSurface;
   trigger?:        LcmTrigger;
 }
@@ -86,9 +106,11 @@ export interface LcmEngineConfig {
   summaryTimeoutMs?: number;
   /**
    * Where a summary call is recorded (WP-3.2 F1). It is a model call like any other: the caller
-   * attaches it to the attestor and writes the `[surface]` transcript line.
+   * attaches it to the attestor and writes the `[surface]` transcript line. A call that threw is
+   * reported too (WP-3.0c R2-S1): the union's failure arm carries no summary, only what was sent
+   * and how the attempt ended, so every adapter invocation has exactly one record.
    */
-  recordSummaryCall?(call: LcmSummaryCall): void | Promise<void>;
+  recordSummaryCall?(call: LcmSummaryCall | LcmSummaryFailure): void | Promise<void>;
   /**
    * A compaction that failed after its retries (WP-3.2 F5). The assembly continues uncompacted;
    * this is the only place the caller learns that the archive is behind.
@@ -534,7 +556,7 @@ export class LcmEngine implements LcmApi {
     const level0: ParentUnit[] = [];
 
     for (const group of groups) {
-      const output = await this.callBounded(group, 0, operator, targetTokens);
+      const output = await this.callBounded(group, 0, operator, targetTokens, sessionId, trigger);
       // F7: an injected summarizer may return a credential the model echoed, so the store keeps
       // the masked text, not whatever came back. The call's own surface still hashes the true
       // bytes; the archive is the model-facing side.
@@ -588,7 +610,7 @@ export class LcmEngine implements LcmApi {
     const parents: ParentUnit[] = [];
     for (const chunk of packUnits(units)) {
       const childIds = [...new Set(chunk.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
-      const output = await this.callBounded(chunk, level, operator, targetTokens);
+      const output = await this.callBounded(chunk, level, operator, targetTokens, sessionId, trigger);
       // R10: the same masking as level 0. A model can echo a credential it read, and this text is
       // stored and shown by `lcm.expand` exactly like a level-0 summary's.
       const content = redactCredentials(summaryContent(output));
@@ -672,7 +694,7 @@ export class LcmEngine implements LcmApi {
             .map((id) => this.store.getSummary(id))
             .filter((summary): summary is LcmSummary => summary !== undefined);
           const messageIds = [...new Set(children.flatMap((s) => s.messageIds))];
-          const output = await this.callBounded(group, level, operator, targetTokens);
+          const output = await this.callBounded(group, level, operator, targetTokens, sessionId, trigger);
           const content = redactCredentials(summaryContent(output));
           const summaryId = this.store.insertSummary(
             content, estimateTokens(content), level, operator, childIds, messageIds,
@@ -729,7 +751,7 @@ export class LcmEngine implements LcmApi {
               MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD,
             ).map((content) => ({ role: 'system', content, summaryId: root.id }));
             const output = await this.callBounded(
-              units, level, operator, Math.max(1, Math.floor(targetTokens / 2)),
+              units, level, operator, Math.max(1, Math.floor(targetTokens / 2)), sessionId, trigger,
             );
             const content = redactCredentials(summaryContent(output));
             summaryId = this.store.insertSummary(
@@ -838,7 +860,9 @@ export class LcmEngine implements LcmApi {
     units: Unit[],
     depth: number,
     operator: 'LLM-Map' | 'Agentic-Map',
-    targetTokens?: number,
+    targetTokens: number | undefined,
+    sessionId: string,
+    trigger: LcmTrigger | undefined,
   ): Promise<SummaryOutput> {
     const attempts = 1 + Math.max(0, this.config.summaryRetry ?? 1);
     let lastError: unknown;
@@ -847,10 +871,46 @@ export class LcmEngine implements LcmApi {
         return await this.callOperator(units, depth, operator, targetTokens);
       } catch (err: unknown) {
         lastError = err;
+        // R2-S1 on this path: an attempt that threw is still a model call MAF made. Record it
+        // before deciding whether another attempt follows, so a retried call contributes one record
+        // per invocation and the bundle can be matched to the adapter's ledger exactly.
+        await this.recordFailedSummaryCall({ err, units, depth, sessionId, trigger });
         if (!isTransport(err)) break;
       }
     }
     throw lastError;
+  }
+
+  /**
+   * Records a summarization attempt that threw (WP-3.0c R2-S1/R4-L2, applied to this lane). The
+   * summarizer attaches the surface of the call — the adapter's own when it reported one, otherwise
+   * what the summarizer sent, marked `fallback` — so the record carries the sent digests and no
+   * `outputSha256`. A failure before any adapter call (an oversized prompt, a missing Agentic-Map
+   * backend) carries no surface and is not recorded: there was no model call to account for.
+   *
+   * The write is best-effort, as it is for a role call (R2-L2): the attempt's own error decides
+   * whether it is retried, and a recorder that failed must not replace it.
+   */
+  private async recordFailedSummaryCall(args: {
+    err: unknown; units: Unit[]; depth: number; sessionId: string; trigger: LcmTrigger | undefined;
+  }): Promise<void> {
+    const surface = attachedModelSurface(args.err);
+    if (!surface) return;
+    const call: LcmSummaryFailure = {
+      sessionId:  args.sessionId,
+      level:      args.depth,
+      messageIds: [...new Set(args.units.flatMap((unit) => (unit.messageId ? [unit.messageId] : [])))],
+      childIds:   [...new Set(args.units.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))],
+      error:      modelSurfaceWasSent(args.err) ? 'thrown' : 'not-sent',
+      ...(modelSurfaceIsFallback(args.err) ? { surfaceSource: 'fallback' as const } : {}),
+      surface,
+      ...(args.trigger !== undefined ? { trigger: args.trigger } : {}),
+    };
+    try {
+      await this.config.recordSummaryCall?.(call);
+    } catch {
+      // R2-L2: the call's own outcome decides what happens next; the evidence write does not.
+    }
   }
 
   private async callOperator(

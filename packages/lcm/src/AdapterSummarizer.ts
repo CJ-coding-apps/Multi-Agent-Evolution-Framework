@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
-import type { CliAdapter, LcmMessage, ModelSurface } from '@maf/types';
-import { redactCredentials, TransportError } from '@maf/types';
+import type { AdapterInvokeResult, CliAdapter, LcmMessage, ModelSurface } from '@maf/types';
+import {
+  attachedModelSurface, modelSurfaceWasSent, redactCredentials, TransportError, withModelSurface,
+} from '@maf/types';
 import type { SummaryOutput } from './summarizer.js';
 import {
   byteLength, MAX_SUMMARY_ARGV_BYTES, MAX_SUMMARY_PROMPT_BYTES, SUMMARY_ARGV_ALLOWANCE_BYTES,
@@ -58,44 +60,62 @@ export function createAdapterSummarizer(
       'LCM summarization',
     );
 
-    const result = await options.adapter.invoke({
-      prompt,
-      systemPrompt,
-      workingDir: options.workingDir,
-      timeoutMs: options.timeoutMs ?? 120_000,
-      nativeTools: false,
-      ...(options.model !== undefined ? { model: options.model } : {}),
-    });
-    if (!result.success) {
+    const sent = sentSurfaceOf(systemPrompt, prompt, options.model);
+    let result: AdapterInvokeResult;
+    try {
+      result = await options.adapter.invoke({
+        prompt,
+        systemPrompt,
+        workingDir: options.workingDir,
+        timeoutMs: options.timeoutMs ?? 120_000,
+        nativeTools: false,
+        ...(options.model !== undefined ? { model: options.model } : {}),
+      });
+    } catch (err: unknown) {
+      // R2-S1/R3-S1: the adapter threw after MAF handed it the request. The surface it attached, or
+      // the one this layer sent when it attached none, rides on the error the engine records.
       // Preserve the class: the scheduler retries a `TransportError` and only a `TransportError`
       // (D-06). Wrapping it in a plain Error turned a retryable timeout into a terminal failure.
+      const attached = attachedModelSurface(err);
+      const base = err instanceof TransportError
+        ? new TransportError(
+          `LCM summarization failed: the ${options.adapter.name} adapter reported a transport failure: ` + err.message,
+          { cause: err },
+        )
+        : new Error(`LCM summarization failed: the ${options.adapter.name} adapter failed: ` + messageOf(err));
+      throw withModelSurface(base, attached ?? sent, modelSurfaceWasSent(err), attached === undefined);
+    }
+    if (!result.success) {
+      const attached = result.modelSurface;
+      const surface = attached ?? { ...sent, outputSha256: sha256(result.output) };
       if (result.transportError) {
-        throw new TransportError(
-          `LCM summarization failed: the ${options.adapter.name} adapter reported a transport failure: ` +
-          result.transportError.message,
-          { cause: result.transportError },
+        throw withModelSurface(
+          new TransportError(
+            `LCM summarization failed: the ${options.adapter.name} adapter reported a transport failure: ` +
+            result.transportError.message,
+            { cause: result.transportError },
+          ),
+          surface, true, attached === undefined,
         );
       }
-      throw new Error(
-        `LCM summarization failed: the ${options.adapter.name} adapter exited ${result.exitCode}.`,
+      throw withModelSurface(
+        new Error(`LCM summarization failed: the ${options.adapter.name} adapter exited ${result.exitCode}.`),
+        surface, true, attached === undefined,
       );
     }
     const content = redactCredentials(result.output.trim());
     if (content === '') {
-      throw new Error(`LCM summarization failed: the ${options.adapter.name} adapter returned an empty summary.`);
+      const attached = result.modelSurface;
+      throw withModelSurface(
+        new Error(`LCM summarization failed: the ${options.adapter.name} adapter returned an empty summary.`),
+        attached ?? { ...sent, outputSha256: sha256(result.output) }, true, attached === undefined,
+      );
     }
     // R6: not every backend reports a surface (ollama and openrouter return none today). A summary
     // is a model call like any other, so one is recorded from what this layer knows: the two prompts
     // and the output it was handed, and the model it asked for. MAF composed no tool catalogue for
     // a text-only call, which is what `''` means here.
-    const surface: ModelSurface = result.modelSurface ?? {
-      systemPromptSha256: sha256(systemPrompt),
-      toolCatalog: '',
-      promptSha256: sha256(prompt),
-      outputSha256: sha256(result.output),
-      argv: [],
-      ...(options.model !== undefined ? { model: options.model } : {}),
-    };
+    const surface: ModelSurface = result.modelSurface ?? { ...sent, outputSha256: sha256(result.output) };
     return {
       content,
       ...(result.tokensUsed !== undefined ? { tokensUsed: result.tokensUsed } : {}),
@@ -118,43 +138,59 @@ export function createAdapterSubAgent(
       systemPrompt,
       'LCM Agentic-Map',
     );
-    const result = await options.adapter.invoke({
-      prompt,
-      systemPrompt,
-      workingDir: options.workingDir,
-      timeoutMs: options.timeoutMs ?? 120_000,
-      nativeTools: false,
-      ...(options.model !== undefined ? { model: options.model } : {}),
-    });
+    const sent = sentSurfaceOf(systemPrompt, prompt, options.model);
+    let result: AdapterInvokeResult;
+    try {
+      result = await options.adapter.invoke({
+        prompt,
+        systemPrompt,
+        workingDir: options.workingDir,
+        timeoutMs: options.timeoutMs ?? 120_000,
+        nativeTools: false,
+        ...(options.model !== undefined ? { model: options.model } : {}),
+      });
+    } catch (err: unknown) {
+      const attached = attachedModelSurface(err);
+      const base = err instanceof TransportError
+        ? new TransportError(
+          `LCM Agentic-Map failed: the ${options.adapter.name} adapter reported a transport failure: ` + err.message,
+          { cause: err },
+        )
+        : new Error(`LCM Agentic-Map failed: the ${options.adapter.name} adapter failed: ` + messageOf(err));
+      throw withModelSurface(base, attached ?? sent, modelSurfaceWasSent(err), attached === undefined);
+    }
     if (!result.success) {
+      const attached = result.modelSurface;
+      const surface = attached ?? { ...sent, outputSha256: sha256(result.output) };
       if (result.transportError) {
-        throw new TransportError(
-          `LCM Agentic-Map failed: the ${options.adapter.name} adapter reported a transport failure: ` +
-          result.transportError.message,
-          { cause: result.transportError },
+        throw withModelSurface(
+          new TransportError(
+            `LCM Agentic-Map failed: the ${options.adapter.name} adapter reported a transport failure: ` +
+            result.transportError.message,
+            { cause: result.transportError },
+          ),
+          surface, true, attached === undefined,
         );
       }
-      throw new Error(
-        `LCM Agentic-Map failed: the ${options.adapter.name} adapter exited ${result.exitCode}.`,
+      throw withModelSurface(
+        new Error(`LCM Agentic-Map failed: the ${options.adapter.name} adapter exited ${result.exitCode}.`),
+        surface, true, attached === undefined,
       );
     }
     const content = redactCredentials(result.output.trim());
     if (content === '') {
       // The same rule as the LLM summarizer: a compaction that produced nothing must fail, not
       // write an empty summary over the messages it was asked to preserve.
-      throw new Error(`LCM Agentic-Map failed: the ${options.adapter.name} adapter returned an empty summary.`);
+      const attached = result.modelSurface;
+      throw withModelSurface(
+        new Error(`LCM Agentic-Map failed: the ${options.adapter.name} adapter returned an empty summary.`),
+        attached ?? { ...sent, outputSha256: sha256(result.output) }, true, attached === undefined,
+      );
     }
     // The backend's count and surface travel with the text (F1): Agentic-Map's summary is recorded
     // in the same array as every role call, and its tokens are charged to the budget that paid.
     // R6: a backend that reports no surface still gets one recorded, as on the LLM-Map path.
-    const surface: ModelSurface = result.modelSurface ?? {
-      systemPromptSha256: sha256(systemPrompt),
-      toolCatalog: '',
-      promptSha256: sha256(prompt),
-      outputSha256: sha256(result.output),
-      argv: [],
-      ...(options.model !== undefined ? { model: options.model } : {}),
-    };
+    const surface: ModelSurface = result.modelSurface ?? { ...sent, outputSha256: sha256(result.output) };
     return {
       content,
       ...(result.tokensUsed !== undefined ? { tokensUsed: result.tokensUsed } : {}),
@@ -199,4 +235,23 @@ function boundedPrompt(prompt: string, systemPrompt: string, what: string): stri
 /** The hex digest a surface records; the same construction the adapters use. */
 function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/**
+ * R6/L1: what this layer sent, when the adapter reports no surface of its own. The two prompts and
+ * the model it asked for are known exactly here; MAF composed no tool catalogue for a text-only
+ * call, which is what `toolCatalog: ''` says.
+ */
+function sentSurfaceOf(systemPrompt: string, prompt: string, model: string | undefined): ModelSurface {
+  return {
+    systemPromptSha256: sha256(systemPrompt),
+    toolCatalog: '',
+    promptSha256: sha256(prompt),
+    argv: [],
+    ...(model !== undefined ? { model } : {}),
+  };
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

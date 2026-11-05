@@ -52,6 +52,12 @@ export interface ModelSurfaceCarrier {
    * timeout and a non-zero exit: those attempts were made, and the model may have seen the prompt.
    */
   readonly modelSurfaceSent?: boolean;
+  /**
+   * R3-S1: `true` when the attached surface is the call site's own reconstruction (the adapter
+   * reported none), so the record says `surfaceSource: 'fallback'`. Absent when the adapter
+   * described the call itself.
+   */
+  readonly modelSurfaceFallback?: boolean;
 }
 
 /**
@@ -66,8 +72,23 @@ export function withModelSurface<T extends Error>(
   err: T,
   surface: ModelSurface,
   sent = true,
+  fallback = false,
 ): T & ModelSurfaceCarrier {
-  return Object.assign(err, sent ? { modelSurface: surface } : { modelSurface: surface, modelSurfaceSent: false });
+  return Object.assign(err, {
+    modelSurface: surface,
+    ...(sent ? {} : { modelSurfaceSent: false }),
+    ...(fallback ? { modelSurfaceFallback: true } : {}),
+  });
+}
+
+/**
+ * R3-S1: whether the surface an error carries was built by the call site (`true`, a fallback)
+ * rather than reported by the adapter. Anything that carries no surface is not a fallback — there
+ * is nothing to mark.
+ */
+export function modelSurfaceIsFallback(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  return (err as { modelSurfaceFallback?: unknown }).modelSurfaceFallback === true;
 }
 
 /**

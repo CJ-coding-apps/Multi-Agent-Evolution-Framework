@@ -308,7 +308,8 @@ test('a summary call is recorded with its surface and trigger, and charged to th
         outputSha256: 'c'.repeat(64),
       },
     }),
-    recordSummaryCall: (call) => { calls.push(call); },
+    // This scenario never fails a call; a failure record has no `summaryId` and is not one of these.
+    recordSummaryCall: (call) => { if ('summaryId' in call) calls.push(call); },
   });
   t.after(() => engine.close());
   const ids = await addMessages(engine, ['m1', 'm2', 'm3', 'm4', 'm5']);
@@ -802,7 +803,8 @@ test('a call that reports no count is charged input plus output (R5)', async (t)
   const { engine } = engineWith({
     mode: 'Upward',
     summarize: async () => 'summary-1',
-    recordSummaryCall: (call) => { calls.push(call); },
+    // This scenario never fails a call; a failure record has no `summaryId` and is not one of these.
+    recordSummaryCall: (call) => { if ('summaryId' in call) calls.push(call); },
   });
   t.after(() => engine.close());
   await addMessages(engine, ['m1', 'm2', 'm3', 'm4', 'm5']);
@@ -1442,7 +1444,7 @@ test('a root is retried once for the whole run, and degraded once (V1)', async (
       // delimited, so the redactor masks it rather than swallowing the whole summary.
       return `key: ${SECRET}\n${'y'.repeat(20_000)}`;   // ignores its target, every time
     },
-    recordSummaryCall: (call) => { recorded.push(call); },
+    recordSummaryCall: (call) => { if ('summaryId' in call) recorded.push(call); },
   });
   const [id] = await addMessages(engine, ['m1'], 1);
   const firstRoot = await engine.summarizeChunk([id!], 'LLM-Map');

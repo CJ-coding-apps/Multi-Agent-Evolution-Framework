@@ -1664,16 +1664,12 @@ export interface ModelSurface {
    * answer is a parsed `AssistantTurn`, not one stdout string.
    */
   outputSha256?:      string;
-  // L1: the model the call named, when it named one. The planner and the security gate are calls
-  // MAF makes directly rather than through a role's dispatcher, so neither carries a node's
-  // `modelOverride`; without this a reader of the surface could not tell which model was asked for.
-  // Absent when the call asked for the adapter's own default.
-  model?:             string;
   /**
-   * The model the call named, when it named one (WP-3.2 F1). A summary call can use a model
-   * different from the role call that triggered it — `lcm.model` exists for exactly that — so the
-   * surface says which model was asked for rather than leaving a reader to infer it from the run.
-   * Absent when the adapter chose its own.
+   * The model the call named, when it named one (WP-3.0c L1; WP-3.2 F1). The planner and the security
+   * gate are calls MAF makes directly rather than through a role's dispatcher, so neither carries a
+   * node's `modelOverride`; and a summary call can use a model different from the role call that
+   * triggered it — `lcm.model` exists for exactly that — so the surface says which model was asked
+   * for rather than leaving a reader to infer it from the run. Absent when the adapter chose its own.
    */
   model?:             string;
   /**
@@ -1861,5 +1857,6 @@ export { toolEnv } from './childEnv.js';
  */
 export {
   callModelSurface, sha256Hex, withModelSurface, attachedModelSurface, modelSurfaceWasSent,
+  modelSurfaceIsFallback,
 } from './surface.js';
 export type { ModelSurfaceCarrier } from './surface.js';
