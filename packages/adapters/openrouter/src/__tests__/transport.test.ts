@@ -103,13 +103,21 @@ test('invoke: HTTP 500 is a TransportError naming the status and the body tail',
 });
 
 test('invoke: HTTP 401 is a failed result, not a thrown error', async () => {
-  const reply = async (): Promise<Response> => new Response('{"error":"invalid key"}', { status: 401 });
-  await withFetch(reply, async () => {
-    const result = await adapter().invoke(CALL);
+  const body = '{"error":"invalid key"}';
+  const reply = async (): Promise<Response> => new Response(body, { status: 401 });
+  await withRecordedFetch(reply, async (sent) => {
+    const result = await adapter().invoke({ ...CALL, systemPrompt: 'be brief' });
     assert.equal(result.success, false);
     assert.equal(result.exitCode, 401);
-    assert.equal(result.output, '{"error":"invalid key"}');
+    assert.equal(result.output, body);
     assert.equal('transportError' in result, false);
+    // R5-M1: a judged failure answered, so it is a call that was sent, and the result states the
+    // surface of the request the stub received — the same digests, not one rebuilt by the caller.
+    const init = sent[0];
+    assert.ok(init, 'the request reached fetch');
+    const texts = messageTexts(init);
+    assert.deepEqual(result.modelSurface, callModelSurface(texts.systemPrompt, texts.prompt, body));
+    assert.deepEqual(result.modelSurface, callModelSurface('be brief', 'say hi', body));
   });
 });
 
