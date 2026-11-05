@@ -574,13 +574,14 @@ class SummaryScripted extends ScriptedAdapter {
  * A repo whose every assembly compacts: the LCM threshold is low enough that any history is over it,
  * and only the newest message is protected.
  */
-async function compactingRepo(root: string): Promise<string> {
+async function compactingRepo(root: string, operator: 'llm-map' | 'agentic-map' = 'llm-map'): Promise<string> {
   const repo = await dirtyUserRepo(root);
   const mafDir = path.join(repo, '.maf');
   await mkdir(mafDir, { recursive: true });
   await writeFile(path.join(mafDir, 'config.yaml'), [
     'lcm:',
     '  mode: Upward',
+    `  operator: ${operator}`,
     '  contextThreshold: 0.001',
     '  freshTailCount: 1',
     '  summaryTimeoutMs: 4321',
@@ -632,6 +633,7 @@ test('F1: a compacting run records one surface per summary attempt, including th
     assert.equal(summaryCalls.length, attempts, 'the adapter ledger saw every attempt');
 
     assertBijection(surfaces, exchanges);
+
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -792,6 +794,101 @@ test('Z2: an empty summary is a recorded failure, not a summary of nothing', nee
     assert.equal(failed[0]!.outputSha256, sha256Hex(''), 'the bytes it answered are the evidence');
     assert.equal(surfaces.filter((s) => s.lcmSummary !== undefined).length, 0,
       'no empty summary was written over the messages it was asked to preserve');
+    assert.equal(run.error, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Z2: a transport error the adapter throws is retried, and the retry writes the summary', needsLcm, async () => {
+  // B8: the other transport-failure shape. A backend can *throw* its timeout instead of returning
+  // a `transportError` result. D-06 retries it once, so a compacting run makes two summary calls
+  // and the second produces the summary; the run does not degrade. A catch that wraps the thrown
+  // `TransportError` as a plain `Error` loses the retry — one call, no summary, a degraded run.
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-z2-thrown-'));
+  try {
+    const repo = await compactingRepo(root);
+    const scripted = new SummaryAnswers([onePlannedNode(TASK), CODER]);
+    scripted.answer(new TransportError('the backend timed out'));
+    const { surfaces, bundleText, run } = await runAndRead(repo, scripted, []);
+
+    assert.equal(scripted.summaryAttempts, 2, 'the thrown transport failure was retried once (D-06)');
+    const failed = surfaces.filter((s) => s.kind === 'lcm-summary' && s.lcmSummary === undefined);
+    assert.equal(failed.length, 1, 'the thrown attempt is recorded, once');
+    assert.equal(failed[0]!.error, 'thrown', 'the adapter threw: no result came back');
+    assert.equal(failed[0]!.surfaceSource, 'fallback',
+      'nothing was attached to the throw; the summarizer built the surface it meant to send');
+    const wrote = surfaces.filter((s) => s.lcmSummary !== undefined);
+    assert.equal(wrote.length, 1, 'the second attempt wrote the summary the compaction needed');
+    const predicate = (JSON.parse(bundleText) as InTotoStatement<AttestationBundle>).predicate;
+    assert.equal(predicate.lcmDegraded?.length ?? 0, 0, 'the retry succeeded, so nothing degraded');
+    assert.equal(run.error, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Z2: a returned summary failure keeps the surface the adapter reported, not the fallback', needsLcm, async () => {
+  // B7: the returned-failure path. The adapter answered and reported the surface it actually sent
+  // (its argv); the record must keep it and must not mark the surface as rebuilt. The throw-path
+  // test above covers the other shape. Replacing `attached ?? sent` with `sent` on this path swaps
+  // the adapter's argv for an empty one the summarizer guessed, and marks it `fallback`.
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-z2-returned-attached-'));
+  try {
+    const repo = await compactingRepo(root);
+    const attached = {
+      systemPromptSha256: 'f'.repeat(64),
+      toolCatalog: 'the backend\'s catalogue',
+      promptSha256: '1'.repeat(64),
+      outputSha256: '2'.repeat(64),
+      argv: ['claude', '-p', '--', 'the backend\'s own argv'],
+    };
+    const scripted = new SummaryAnswers([onePlannedNode(TASK), CODER]);
+    scripted.answer({ ...answered('the backend refused the request', false), modelSurface: attached });
+    const { surfaces, run } = await runAndRead(repo, scripted, []);
+
+    const failed = surfaces.filter((s) => s.kind === 'lcm-summary' && s.lcmSummary === undefined);
+    assert.equal(failed.length, 1, 'the returned failure is recorded, once');
+    const record = failed[0]!;
+    assert.equal(record.systemPromptSha256, attached.systemPromptSha256,
+      'the system block the adapter actually sent');
+    assert.equal(record.promptSha256, attached.promptSha256);
+    assert.equal(record.outputSha256, attached.outputSha256);
+    assert.equal(record.toolCatalog, attached.toolCatalog);
+    assert.deepEqual(record.argv, attached.argv, 'the adapter\'s own argv, not the fallback\'s empty one');
+    assert.equal(record.surfaceSource, undefined, 'the adapter reported this surface; nothing was rebuilt');
+    assert.equal(record.error, undefined, 'the adapter returned a failed result (Z1)');
+    assert.equal(run.error, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Z2: an Agentic-Map sub-agent that throws is recorded once, with its attached surface', needsLcm, async () => {
+  // B15: Agentic-Map's summary call is made by a sub-agent, not by the engine directly. When that
+  // sub-agent throws, the failure must still reach `recordSummaryCall` — once, with the surface
+  // the throw carried. If the sub-agent's catch drops the surface, the engine has nothing to
+  // record and the attempt disappears from the bundle.
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-z2-agentic-'));
+  try {
+    const repo = await compactingRepo(root, 'agentic-map');
+    const attached = {
+      systemPromptSha256: '3'.repeat(64),
+      toolCatalog: 'the sub-agent\'s catalogue',
+      promptSha256: '4'.repeat(64),
+      argv: ['claude', '-p', '--', 'agentic-map argv'],
+    };
+    const scripted = new SummaryAnswers([onePlannedNode(TASK), CODER]);
+    scripted.answer(withModelSurface(new TransportError('the sub-agent timed out'), attached));
+    const { surfaces, run } = await runAndRead(repo, scripted, []);
+
+    assert.equal(scripted.summaryAttempts, 2, 'the sub-agent\'s transport failure was retried (D-06)');
+    const failed = surfaces.filter((s) => s.kind === 'lcm-summary' && s.lcmSummary === undefined);
+    assert.equal(failed.length, 1, 'the Agentic-Map failure is recorded exactly once');
+    assert.equal(failed[0]!.error, 'thrown');
+    assert.deepEqual(failed[0]!.argv, attached.argv, 'the surface the sub-agent reported');
+    assert.equal(surfaces.filter((s) => s.lcmSummary !== undefined).length, 1,
+      'the retry produced the summary');
     assert.equal(run.error, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
