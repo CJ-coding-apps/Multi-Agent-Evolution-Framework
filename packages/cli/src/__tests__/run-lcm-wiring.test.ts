@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { makeRunId, TransportError } from '@maf/types';
 import type {
-  AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, CliAdapter,
+  AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, CliAdapter, LcmSummaryId,
 } from '@maf/types';
+import { LcmStore } from '@maf/lcm';
 import { mintHarnessConfig } from '@maf/harness-config';
 import type { Attestor } from '@maf/attestation';
 import { buildRunStack, createRunLcm } from '../wiring.js';
@@ -411,6 +412,73 @@ test('the run log names what degraded, in the same words the transcript uses (L3
     assert.doesNotMatch(logged[0]!, /after a tighter retry|tighter retry/,
       'it did not report a retry that never produced anything');
     assert.equal(degraded.length, 1);
+  } finally {
+    console.error = original;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Y1: the run setting reaches the engine. The claim lifetime is derived from the summarizer
+// timeout the *run* configured, and `createRunLcm` is the only construction that passes it. The
+// claim here is older than the configured lifetime but far younger than the engine's 120 s
+// fallback: with the setting the assembly spends the claim and reports the root, without it the
+// same claim reads as a live retry and nothing is recorded. Deleting the wiring line turns this
+// test red, which is the mutant it exists to kill.
+test('the configured summarizer timeout reaches the engine\'s claim lifetime (Y1)', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-lcm-claim-'));
+  const degraded: Array<{ reason: string }> = [];
+  const attestor = {
+    recordLcmSettings: () => {},
+    recordModelSurface: () => {},
+    recordLcmDegraded: (record: { reason: string }) => { degraded.push(record); },
+  } as unknown as Attestor;
+  const original = console.error;
+  console.error = () => {};
+  const huge = new RecordingAdapter(undefined, 'word '.repeat(12_000));
+  const runId = makeRunId(crypto.randomUUID());
+  const mafDir = path.join(root, 'claim');
+  try {
+    await mkdir(mafDir, { recursive: true });
+    // 10 ms per attempt, one extra attempt, 10 % slack: a 22 ms lifetime. The engine's fallback
+    // when the setting does not arrive is 120 s, so its lifetime is 264 s — four orders of
+    // magnitude apart, which 250 ms tells apart without a timing race.
+    const lcm = { ...settings(), summaryTimeoutMs: 10 };
+    const seeded = createRunLcm({
+      mafDir, cwd: root, adapter: huge, lcm, sessionId: 'sess-y1', attestor,
+    });
+    let rootId: LcmSummaryId;
+    try {
+      const ids = [];
+      for (const content of ['one', 'two']) {
+        ids.push(await seeded.engine.addMessage({ sessionId: 'sess-y1', runId, role: 'user', content, tokens: 1 }));
+      }
+      rootId = await seeded.engine.summarizeChunk(ids, 'LLM-Map');
+    } finally {
+      seeded.close();
+    }
+
+    // Another process claims the root's one retry and leaves it `attempted`.
+    const other = new LcmStore(path.join(mafDir, 'lcm.db'));
+    try {
+      assert.equal(other.claimRootRetry(rootId), true, 'the claim is this test\'s to write');
+    } finally {
+      other.close();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const assembling = createRunLcm({
+      mafDir, cwd: root, adapter: huge, lcm, sessionId: 'sess-y1', attestor,
+    });
+    try {
+      const ctx = await assembling.engine.assembleContext('sess-y1', 10, 'Upward');
+      const reported = (ctx.degraded ?? []).filter((record) => record.summaryId === rootId);
+      assert.equal(reported.length, 1,
+        'a claim older than the configured budget is spent, so the root is reported');
+      assert.equal(reported[0]!.reason, 'root-over-budget');
+    } finally {
+      assembling.close();
+    }
+    assert.equal(degraded.length, 1, 'and the run record carries the same fact');
   } finally {
     console.error = original;
     await rm(root, { recursive: true, force: true });
