@@ -152,6 +152,7 @@ async function runAndRead(
   surfaces: ModelSurfaceRecord[];
   exchanges: ScriptedExchange[];
   bundleText: string;
+  runId: string;
   run: Awaited<ReturnType<typeof driveRun>>;
 }> {
   const run = await driveRun([task, '--dir', repo, '--adapter', 'scripted', ...extra], {
@@ -166,7 +167,7 @@ async function runAndRead(
   const statement = JSON.parse(bundleText) as InTotoStatement<AttestationBundle>;
   assert.equal(statement.predicateType, MAF_RUN_PREDICATE_TYPE);
   assert.equal(Attestor.report(parseBundle(bundleText), { secret: KEY }).valid, true);
-  return { surfaces: statement.predicate.modelSurfaces ?? [], exchanges: scripted.exchanges, bundleText, run };
+  return { surfaces: statement.predicate.modelSurfaces ?? [], exchanges: scripted.exchanges, bundleText, runId, run };
 }
 
 const PLAN_TEXT = 'One node of the default role does the whole task.';
@@ -595,7 +596,7 @@ test('F1: a compacting run records one surface per summary attempt, including th
   try {
     const repo = await compactingRepo(root);
     const scripted = new SummaryScripted([onePlannedNode(TASK), CODER]);
-    const { surfaces, exchanges } = await runAndRead(repo, scripted, []);
+    const { surfaces, exchanges, runId } = await runAndRead(repo, scripted, []);
 
     const summaries = surfaces.filter((s) => s.kind === 'lcm-summary');
     const attempts = scripted.summaryAttempts;
@@ -634,6 +635,19 @@ test('F1: a compacting run records one surface per summary attempt, including th
 
     assertBijection(surfaces, exchanges);
 
+    // Z6: the failed attempt is not only in the bundle. The engine's own failures reach the
+    // dispatcher and are written into the run's transcript — through the real engine and the real
+    // injector, not a stand-in. A stub can show the dispatcher formats a list it was handed; only
+    // the real wiring shows the list is filled.
+    const transcript = await readFile(path.join(repo, '.maf', 'transcripts', `${runId}.jsonl`), 'utf8');
+    const failedLines = transcript.split('\n').filter((line) => line.includes('[surface] lcm summary (failed)'));
+    assert.equal(failedLines.length, 1, 'the one failed summary attempt has one transcript line');
+    const entry = JSON.parse(failedLines[0]!) as { role: string; metadata: Record<string, unknown> };
+    assert.equal(entry.role, 'system');
+    assert.equal(entry.metadata.kind, 'lcm-summary');
+    assert.equal(entry.metadata.failed, true);
+    assert.match(failedLines[0]!, /adapter returned a failure/,
+      'the adapter returned this result; the line says so rather than calling it a throw');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
