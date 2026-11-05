@@ -104,6 +104,9 @@ export interface LcmStoreOptions {
    * take the lock. The V6 concurrency test parks every opener here, so all six have read the old
    * version before any of them can commit — the race it exercises is certain, not probable.
    * Production callers never pass it.
+   *
+   * @internal This seam exists so the migration race can be made deterministic; it is not part of
+   * the store's supported surface. Do not set it outside a test.
    */
   beforeMigrate?: () => void;
 }
