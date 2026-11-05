@@ -8,7 +8,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
-import { TransportError, makeLcmMessageId, makeNodeId, makeRunId, makeTaskId } from '@maf/types';
+import {
+  TransportError, makeLcmMessageId, makeNodeId, makeRunId, makeTaskId, withModelSurface,
+} from '@maf/types';
 import type {
   LcmContext, LcmDegradedRecord, LcmMessage, LcmMessageId, LcmSummary, LcmSummaryId,
 } from '@maf/types';
@@ -1808,4 +1810,74 @@ test('a cli-tier reader that gets no archive is told so, once per root (V10)', a
       `${mode}: recorded once per root, not once per assembly`,
     );
   }
+});
+
+test('Z2: a failure before the adapter is called records no summary call', async (t) => {
+  // The summarizer attaches a surface only once a model call was made (R2-S1). A refusal that never
+  // reached one — here the stand-in summarizer throws a plain error, as an oversized prompt or a
+  // missing Agentic-Map backend would — has no call to account for, so nothing is recorded.
+  const recorded: unknown[] = [];
+  const { engine } = engineWith({
+    mode: 'Upward',
+    summarize: async () => { throw new Error('refused before any backend ran'); },
+    recordSummaryCall: (call) => { recorded.push(call); },
+  });
+  t.after(() => engine.close());
+  const [id] = await addMessages(engine, ['m1']);
+
+  await assert.rejects(() => engine.summarizeChunk([makeLcmMessageId(id!)], 'LLM-Map'), /refused/);
+  assert.deepEqual(recorded, [], 'there was no model call, so there is no record');
+});
+
+test('Z2: a recorder that throws does not replace the failed attempt\'s error, and the retry still happens', async (t) => {
+  const surface = { systemPromptSha256: 'a'.repeat(64), toolCatalog: '', argv: [] };
+  let attempts = 0;
+  let failureRecords = 0;
+  const { engine } = engineWith({
+    mode: 'Upward',
+    summarize: async () => {
+      attempts += 1;
+      if (attempts === 1) throw withModelSurface(new TransportError('backend timed out'), surface);
+      return 'recovered';
+    },
+    recordSummaryCall: (call) => {
+      if ('summaryId' in call) return;
+      failureRecords += 1;
+      throw new Error('the bundle refused the record');
+    },
+  });
+  t.after(() => engine.close());
+  const [id] = await addMessages(engine, ['m1']);
+
+  const summaryId = await engine.summarizeChunk([makeLcmMessageId(id!)], 'LLM-Map');
+  assert.equal(failureRecords, 1, 'the failed attempt was offered to the recorder');
+  assert.equal(attempts, 2, 'the recorder\'s throw did not replace the attempt\'s own error');
+  assert.equal((await engine.expandSummary(summaryId))!.summary.content, 'recovered');
+});
+
+test('Z2: a returned failure is passed to the recorder without `error` and with its output digest', async (t) => {
+  // The engine only sees a thrown value, so the summarizer marks a *returned* result as returned on
+  // the error it raises (Z1). The record must then carry the same shape the planner writes for the
+  // same adapter result: the output digest, no `error`.
+  const surface = {
+    systemPromptSha256: 'b'.repeat(64), toolCatalog: '', promptSha256: 'c'.repeat(64),
+    outputSha256: 'd'.repeat(64), argv: [],
+  };
+  const failures: unknown[] = [];
+  const { engine } = engineWith({
+    mode: 'Upward',
+    summarize: async () => {
+      throw withModelSurface(new Error('the adapter exited 1'), surface, true, false, true);
+    },
+    summaryRetry: 0,
+    recordSummaryCall: (call) => { if (!('summaryId' in call)) failures.push(call); },
+  });
+  t.after(() => engine.close());
+  const [id] = await addMessages(engine, ['m1']);
+
+  await assert.rejects(() => engine.summarizeChunk([makeLcmMessageId(id!)], 'LLM-Map'));
+  assert.equal(failures.length, 1);
+  const record = failures[0] as { error?: string; surface: { outputSha256?: string } };
+  assert.equal(record.error, undefined, 'a returned result is not a throw (Z1)');
+  assert.equal(record.surface.outputSha256, 'd'.repeat(64), 'the digest of what it returned');
 });

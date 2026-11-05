@@ -9,7 +9,7 @@ import type {
   AdapterInvokeOptions, AdapterInvokeResult, AssistantTurn, AttestationBundle, ModelSurfaceRecord,
   TurnMessage,
 } from '@maf/types';
-import { TransportError, sha256Hex } from '@maf/types';
+import { TransportError, sha256Hex, withModelSurface } from '@maf/types';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import type { ScriptedExchange, ScriptedTask } from '@maf/eval-harness';
 import { Attestor, MAF_RUN_PREDICATE_TYPE, parseBundle } from '@maf/attestation';
@@ -567,23 +567,29 @@ class SummaryScripted extends ScriptedAdapter {
   get summaryAttempts(): number { return this.attempts; }
 }
 
+/**
+ * A repo whose every assembly compacts: the LCM threshold is low enough that any history is over it,
+ * and only the newest message is protected.
+ */
+async function compactingRepo(root: string): Promise<string> {
+  const repo = await dirtyUserRepo(root);
+  const mafDir = path.join(repo, '.maf');
+  await mkdir(mafDir, { recursive: true });
+  await writeFile(path.join(mafDir, 'config.yaml'), [
+    'lcm:',
+    '  mode: Upward',
+    '  contextThreshold: 0.001',
+    '  freshTailCount: 1',
+    '  summaryTimeoutMs: 4321',
+    '',
+  ].join('\n'), 'utf8');
+  return repo;
+}
+
 test('F1: a compacting run records one surface per summary attempt, including the one that threw', needsLcm, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-compact-'));
   try {
-    const repo = await dirtyUserRepo(root);
-    const mafDir = path.join(repo, '.maf');
-    await mkdir(mafDir, { recursive: true });
-    await writeFile(path.join(mafDir, 'config.yaml'), [
-      'lcm:',
-      '  mode: Upward',
-      // Any history is over this fraction of the budget, and only the newest message is protected,
-      // so the run compacts as soon as there is something to compact.
-      '  contextThreshold: 0.001',
-      '  freshTailCount: 1',
-      '  summaryTimeoutMs: 4321',
-      '',
-    ].join('\n'), 'utf8');
-
+    const repo = await compactingRepo(root);
     const scripted = new SummaryScripted([onePlannedNode(TASK), CODER]);
     const { surfaces, exchanges } = await runAndRead(repo, scripted, []);
 
@@ -592,19 +598,24 @@ test('F1: a compacting run records one surface per summary attempt, including th
     assert.ok(attempts >= 2, 'the run compacted, and the first summary attempt was retried');
     assert.equal(summaries.length, attempts, 'one record per summary attempt: no attempt is dropped or doubled');
 
-    const failed = summaries.filter((s) => s.error !== undefined);
+    const failed = summaries.filter((s) => s.lcmSummary === undefined);
     assert.equal(failed.length, 1, 'the timed-out attempt is recorded, once');
     const timedOut = failed[0];
     assert.ok(timedOut);
     assert.equal(timedOut.role, 'lcm');
     assert.equal(timedOut.tier, 'cli', 'the summary went through the adapter\'s `invoke`');
     assert.equal(timedOut.nativeTools, 'none', 'a summary asks for text only');
-    assert.equal(timedOut.error, 'thrown', 'the adapter took the call and failed it');
+    // Z1: the adapter *returned* this failure (a `transportError` result); it did not throw. A call
+    // that came back records its output digest and no `error`, exactly as the planner and the gate
+    // record the same result. `error: 'thrown'` here is the mutant this assertion kills.
+    assert.equal(timedOut.error, undefined, 'the adapter returned a failed result, so the call did come back');
     assert.equal(timedOut.surfaceSource, 'fallback', 'the scripted adapter reported no surface, so the summarizer built one');
     assert.equal(timedOut.outputSha256, sha256Hex(''), 'the timed-out attempt answered with no bytes');
     assert.equal(timedOut.lcmSummary, undefined, 'no summary was written, so the record describes none');
 
-    const wrote = summaries.filter((s) => s.error === undefined);
+    // Z1: a returned failure also has no `error`, so "wrote" is read from the record's own summary,
+    // not from the absence of an error.
+    const wrote = summaries.filter((s) => s.lcmSummary !== undefined);
     assert.ok(wrote.length >= 1, 'the retry produced a summary');
     for (const record of wrote) {
       assert.ok(record.lcmSummary, 'a successful summary record says what it covered and cost');
@@ -618,6 +629,167 @@ test('F1: a compacting run records one surface per summary attempt, including th
     assert.equal(summaryCalls.length, attempts, 'the adapter ledger saw every attempt');
 
     assertBijection(surfaces, exchanges);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A summarization backend whose attempts are scripted one by one: an `AdapterInvokeResult` it
+ * returns, or an `Error` it throws. Every attempt is pushed to the exchange ledger exactly as the
+ * adapter took it — a throw answered nothing, a returned failure answered the bytes it returned.
+ */
+class SummaryAnswers extends ScriptedAdapter {
+  private attempts = 0;
+  private readonly answers: Array<AdapterInvokeResult | Error> = [];
+
+  answer(...answers: Array<AdapterInvokeResult | Error>): this {
+    this.answers.push(...answers);
+    return this;
+  }
+
+  override async invoke(o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
+    if (!(o.systemPrompt ?? '').startsWith('You are a context summarization agent')) return super.invoke(o);
+    this.attempts += 1;
+    const exchange: ScriptedExchange = {
+      via: 'invoke', kind: 'task', systemPrompt: o.systemPrompt ?? '', prompt: o.prompt, tools: o.tools ?? [],
+    };
+    this.exchanges.push(exchange);
+    const next = this.answers.shift();
+    if (next instanceof Error) throw next;
+    if (next !== undefined) {
+      exchange.output = next.output;
+      return next;
+    }
+    exchange.output = `Summary ${this.attempts}: the run read sum.js and fixed the subtraction.`;
+    return answered(exchange.output);
+  }
+
+  get summaryAttempts(): number { return this.attempts; }
+}
+
+test('Z1: the same adapter result records the same error/outputSha256 shape at the planner and the summarizer', needsLcm, async () => {
+  // The adapter *returns* a transport failure in both runs: `success: false` with `output: ''`. The
+  // planner's call site records its output digest and no `error` (run.ts); the summarizer must too.
+  const plannerRoot = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-z1-plan-'));
+  const summarizerRoot = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-z1-sum-'));
+  try {
+    const plannerRepo = await dirtyUserRepo(plannerRoot);
+    const plannerScripted = new ScriptedCalls([onePlannedNode(TASK), CODER]);
+    plannerScripted.planner(transportFailure(), answered(PLAN_TEXT));
+    const plannerRun = await runAndRead(plannerRepo, plannerScripted, []);
+    const plannerFailed = plannerRun.surfaces.filter(
+      (s) => s.kind === 'planner' && s.outputSha256 === sha256Hex(''),
+    );
+    assert.ok(plannerFailed.length >= 1, 'the returned planning failure is recorded');
+
+    const summarizerRepo = await compactingRepo(summarizerRoot);
+    const summarizerScripted = new SummaryAnswers([onePlannedNode(TASK), CODER]);
+    summarizerScripted.answer(transportFailure());
+    const summarizerRun = await runAndRead(summarizerRepo, summarizerScripted, []);
+    const summarizerFailed = summarizerRun.surfaces.filter(
+      (s) => s.kind === 'lcm-summary' && s.outputSha256 === sha256Hex(''),
+    );
+    assert.equal(summarizerFailed.length, 1, 'the returned summary failure is recorded once');
+
+    const shape = (s: ModelSurfaceRecord) => ({
+      error: s.error, outputSha256: s.outputSha256, surfaceSource: s.surfaceSource,
+    });
+    assert.deepEqual(
+      shape(summarizerFailed[0]!), shape(plannerFailed[0]!),
+      'a returned failure is one shape whichever call site recorded it (Z1)',
+    );
+    assert.equal(summarizerFailed[0]!.error, undefined);
+  } finally {
+    await rm(plannerRoot, { recursive: true, force: true });
+    await rm(summarizerRoot, { recursive: true, force: true });
+  }
+});
+
+test('Z2: a summary failure keeps the surface the adapter attached, not the summarizer\'s fallback', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-z2-attached-'));
+  try {
+    const repo = await compactingRepo(root);
+    const attached = {
+      systemPromptSha256: 'a'.repeat(64),
+      toolCatalog: 'the backend\'s catalogue',
+      promptSha256: 'b'.repeat(64),
+      outputSha256: 'c'.repeat(64),
+      argv: ['claude', '-p', '--', '<elided 4096 bytes>'],
+    };
+    const scripted = new SummaryAnswers([onePlannedNode(TASK), CODER]);
+    scripted.answer(withModelSurface(new TransportError('the backend timed out'), attached));
+    const { surfaces, run } = await runAndRead(repo, scripted, []);
+
+    const failed = surfaces.filter((s) => s.kind === 'lcm-summary' && s.lcmSummary === undefined);
+    assert.equal(failed.length, 1, 'the failed attempt is recorded');
+    const record = failed[0]!;
+    assert.equal(record.systemPromptSha256, attached.systemPromptSha256,
+      'the system block the adapter actually sent, not the summarizer\'s role prompt');
+    assert.equal(record.promptSha256, attached.promptSha256);
+    assert.equal(record.outputSha256, attached.outputSha256);
+    assert.equal(record.toolCatalog, attached.toolCatalog);
+    assert.deepEqual(record.argv, attached.argv);
+    assert.equal(record.surfaceSource, undefined, 'the adapter reported this surface; nothing was rebuilt');
+    assert.equal(run.error, undefined, 'the retried attempt produced the summary');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Z2: a failure before the adapter sent anything records `not-sent`, not `thrown`', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-z2-notsent-'));
+  try {
+    const repo = await compactingRepo(root);
+    const sent = {
+      systemPromptSha256: 'd'.repeat(64), toolCatalog: '', promptSha256: 'e'.repeat(64), argv: [],
+    };
+    const scripted = new SummaryAnswers([onePlannedNode(TASK), CODER]);
+    scripted.answer(withModelSurface(new Error('the backend binary could not be started'), sent, false));
+    const { surfaces } = await runAndRead(repo, scripted, []);
+
+    const failed = surfaces.filter((s) => s.kind === 'lcm-summary' && s.lcmSummary === undefined);
+    assert.equal(failed.length, 1, 'the attempt is recorded, once');
+    assert.equal(failed[0]!.error, 'not-sent', 'no request left the adapter (R4-L2)');
+    assert.equal(failed[0]!.outputSha256, undefined, 'nothing came back');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Z2: a summary the adapter answered with a failure result records its output digest and no `error`', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-z2-exit-'));
+  try {
+    const repo = await compactingRepo(root);
+    const scripted = new SummaryAnswers([onePlannedNode(TASK), CODER]);
+    scripted.answer(answered('the backend refused the request', false));
+    const { surfaces, run } = await runAndRead(repo, scripted, []);
+
+    const failed = surfaces.filter((s) => s.kind === 'lcm-summary' && s.lcmSummary === undefined);
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0]!.error, undefined, 'a returned result, even a failed one, is not `thrown` (Z1)');
+    assert.equal(failed[0]!.outputSha256, sha256Hex('the backend refused the request'));
+    assert.equal(run.error, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Z2: an empty summary is a recorded failure, not a summary of nothing', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-z2-empty-'));
+  try {
+    const repo = await compactingRepo(root);
+    const scripted = new SummaryAnswers([onePlannedNode(TASK), CODER]);
+    scripted.answer(answered('', true));
+    const { surfaces, run } = await runAndRead(repo, scripted, []);
+
+    const failed = surfaces.filter((s) => s.kind === 'lcm-summary' && s.lcmSummary === undefined);
+    assert.equal(failed.length, 1, 'an empty answer is one recorded attempt');
+    assert.equal(failed[0]!.error, undefined, 'the adapter returned; the emptiness is the failure, not a throw');
+    assert.equal(failed[0]!.outputSha256, sha256Hex(''), 'the bytes it answered are the evidence');
+    assert.equal(surfaces.filter((s) => s.lcmSummary !== undefined).length, 0,
+      'no empty summary was written over the messages it was asked to preserve');
+    assert.equal(run.error, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
