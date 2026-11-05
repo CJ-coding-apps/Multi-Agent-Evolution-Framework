@@ -100,8 +100,12 @@ type SumRow = {
 export class LcmStore {
   private db: Database.Database;
 
-  constructor(dbPath: string) {
-    this.db = new Database(dbPath);
+  constructor(dbPath: string, options: { busyTimeoutMs?: number } = {}) {
+    // W3: `BEGIN IMMEDIATE` makes a second opener WAIT for the migrating one rather than fail, so
+    // the migration's correctness depends on the busy timeout as much as on the lock. It is named
+    // here (and can be raised by a caller that knows its openers are slow) instead of being left
+    // implicit in better-sqlite3's default.
+    this.db = new Database(dbPath, { timeout: options.busyTimeoutMs ?? 5_000 });
     // V7: read the version before writing anything. `exec(SCHEMA)` used to run first, so refusing
     // a newer archive still created this build's five tables in it and switched its journal to
     // WAL — a refusal that modified the file it refused. A file this build cannot read is left
@@ -347,10 +351,33 @@ export class LcmStore {
       .get(rootId) !== undefined;
   }
 
+  /**
+   * W1: what the claim recorded, and when. An assembly that finds a claim written by another
+   * engine or process can tell a retry that is still running from one that has ended, and must not
+   * report a root that a running retry may yet supersede.
+   */
+  rootRetry(rootId: LcmSummaryId): { outcome: 'attempted' | 'succeeded' | 'failed'; claimedAt: Date } | undefined {
+    const row = this.db.prepare(`SELECT outcome, created_at FROM lcm_root_retries WHERE root_id=?`)
+      .get(rootId) as { outcome: string; created_at: string } | undefined;
+    if (row === undefined) return undefined;
+    const outcome = row.outcome === 'succeeded' || row.outcome === 'failed' ? row.outcome : 'attempted';
+    return { outcome, claimedAt: new Date(row.created_at) };
+  }
+
   /** Whether `id` is the summary a retry produced — never retried again (L3/V1). */
   isRootRetryOutput(id: LcmSummaryId): boolean {
     return this.db.prepare(`SELECT 1 AS found FROM lcm_root_retries WHERE retry_id=? AND retry_id<>''`)
       .get(id) !== undefined;
+  }
+
+  /**
+   * W2: whether this root has any degradation recorded at all. `markRootDegraded` keys on
+   * (root, reason), so a later assembly that names the same root with a different sentence would
+   * add a second fact about one root — the failed-retry case is read through this first.
+   */
+  hasRootDegradation(summaryId: LcmSummaryId): boolean {
+    return this.db.prepare(`SELECT 1 AS found FROM lcm_root_degradations WHERE summary_id=?`)
+      .get(summaryId) !== undefined;
   }
 
   /**

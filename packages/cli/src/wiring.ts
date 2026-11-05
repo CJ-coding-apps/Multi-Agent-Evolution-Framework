@@ -183,10 +183,10 @@ export function createRunLcm(input: RunLcmInput): RunLcm {
       const tokens = record.tokens ?? '?';
       console.error(record.reason === 'root-over-budget'
         ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) ` +
-          `after the one retry it is allowed; the archive omits it`
+          `after the one retry it is allowed; it is offered as a cue`
         : record.reason.startsWith('root-retry-failed')
         ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) and its ` +
-          `one retry failed (${record.reason.replace(/^root-retry-failed:\s*/, '')}); the archive omits it`
+          `one retry failed (${record.reason.replace(/^root-retry-failed:\s*/, '')}); it is offered as a cue`
         : record.reason === 'cli-tier-cues'
         ? `[lcm] the cli tier cannot act on a cue; archive root ${root} (${tokens} tokens) is ` +
           `omitted rather than offered as one it could not expand`

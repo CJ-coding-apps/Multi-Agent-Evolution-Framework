@@ -754,17 +754,17 @@ export class RoleDispatcher {
     }
     for (const record of assembled.lcmDegraded ?? []) {
       // L3c/V8/V10: say which thing happened. A root too large is not a failed compaction (its
-      // summaries are intact, and it is omitted or offered as a cue); a retry that itself failed
-      // says so rather than claiming the archive tried a tighter one; and a cli-tier reader gets
-      // the limit named, because a cue it cannot expand is not an offer.
+      // summaries are intact, and it is offered as a cue); a retry that itself failed says so
+      // rather than claiming the archive tried a tighter one; and a cli-tier reader gets the limit
+      // named, because a cue it cannot expand is not an offer.
       const root = record.summaryId ?? '(unknown)';
       const tokens = record.tokens ?? '?';
       const line = record.reason === 'root-over-budget'
         ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) ` +
-          `after the one retry it is allowed; the archive omits it`
+          `after the one retry it is allowed; it is offered as a cue`
         : record.reason.startsWith('root-retry-failed')
         ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) and its ` +
-          `one retry failed (${record.reason.replace(/^root-retry-failed:\s*/, '')}); the archive omits it`
+          `one retry failed (${record.reason.replace(/^root-retry-failed:\s*/, '')}); it is offered as a cue`
         : record.reason === 'cli-tier-cues'
         ? `[lcm] the cli tier cannot act on a cue; archive root ${root} (${tokens} tokens) is ` +
           `omitted rather than offered as one it could not expand`

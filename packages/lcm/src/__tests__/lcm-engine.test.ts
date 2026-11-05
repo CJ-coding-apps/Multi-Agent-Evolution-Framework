@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { TransportError, makeLcmMessageId, makeNodeId, makeRunId, makeTaskId } from '@maf/types';
 import type {
-  LcmDegradedRecord, LcmMessage, LcmMessageId, LcmSummary, LcmSummaryId,
+  LcmContext, LcmDegradedRecord, LcmMessage, LcmMessageId, LcmSummary, LcmSummaryId,
 } from '@maf/types';
 import { LcmEngine } from '../LcmEngine.js';
 import type { LcmEngineConfig, LcmSummaryCall } from '../LcmEngine.js';
@@ -1316,13 +1316,23 @@ test('two processes opening an old archive migrate it exactly once (V6)', async 
   const moduleUrl = pathToFileURL(path.join(__dirname, '..', 'LcmStore.js')).href;
   const script = `
     const { LcmStore } = await import(process.env.LCM_MODULE);
-    new LcmStore(process.env.LCM_DB).close();
+    new LcmStore(process.env.LCM_DB, { busyTimeoutMs: 10_000 }).close();
   `;
-  await Promise.all(Array.from({ length: 6 }, () => execFileAsync(
+  // W3: every open must SUCCEED. The swap happening once is not enough — a dropped `IMMEDIATE`
+  // leaves one opener raising `database is locked` while the surviving opener still migrates
+  // cleanly, so a test that only inspects the final rows calls that a pass.
+  const opens = await Promise.allSettled(Array.from({ length: 6 }, () => execFileAsync(
     process.execPath,
     ['--input-type=module', '-e', script],
     { env: { ...process.env, LCM_MODULE: moduleUrl, LCM_DB: legacy.dbPath } },
   )));
+  for (const [index, open] of opens.entries()) {
+    assert.equal(
+      open.status, 'fulfilled',
+      `concurrent open ${index + 1} succeeded${
+        open.status === 'rejected' ? ` (it failed with: ${String(open.reason)})` : ''}`,
+    );
+  }
 
   const raw = new Database(legacy.dbPath, { readonly: true });
   try {
@@ -1431,6 +1441,71 @@ test('concurrent assemblies cannot retry one root twice (V2: L4b, L4g)', async (
       `summary ${summary.id} has ${summary.parentIds.length} parents; the upward lineage is a tree`,
     );
   }
+});
+
+test('an assembly that meets a retry in flight waits for it, and never degrades a superseded root (W1)', async (t) => {
+  // W1: an assembly that found a retry claimed but unfinished used to skip the lock, read the
+  // pre-retry root, record a false `root-over-budget` and render cues. Here the retry is made slow
+  // and the seven later assemblies are started while its call is in flight — the state the live
+  // probe hit in 4 of 4 runs at N=8. They must queue behind the retry, re-read the roots under the
+  // lock, and render the retried summary that fits.
+  let entered: () => void = () => {};
+  const retryEntered = new Promise<void>((resolve) => { entered = resolve; });
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const { engine, store } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      entered();
+      await new Promise<void>((resolve) => setTimeout(resolve, 60));
+      inFlight -= 1;
+      return 'small';        // the retry fits: big -> small
+    },
+  });
+  const [root] = await seedRoots(engine, store, ['m1'], 20_000);
+
+  const raced: Array<Promise<LcmContext>> = [engine.assembleContext('s', 4_096, 'Upward')];
+  await retryEntered;      // the retry is claimed, its call is running, nothing is stored yet
+  for (let i = 0; i < 7; i++) raced.push(engine.assembleContext('s', 4_096, 'Upward'));
+  const contexts = await Promise.all(raced);
+
+  assert.equal(maxInFlight, 1, 'the retry is never overlapped by another summary call');
+  for (const [assembly, ctx] of contexts.entries()) {
+    assert.equal(ctx.summaries?.length, 1, `assembly ${assembly} renders the retried summary`);
+    assert.equal(
+      (ctx.degraded ?? []).some((record) => record.reason === 'root-over-budget'), false,
+      `assembly ${assembly} records nothing against a root the retry superseded`,
+    );
+  }
+  assert.equal(store.hasRootDegradation(root!), false, 'no degradation row for the old root');
+  assert.equal(
+    store.getSummariesForSession('s').filter((summary) => summary.parentIds.length === 0).length, 1,
+    'the archive has exactly one root',
+  );
+});
+
+test('a failed retry writes one record for its root, with the reason that names the failure (W2)', async (t) => {
+  // W2: the retry is spent by its claim, so every later assembly sees a root still over budget and
+  // used to write its own `root-over-budget` row beside the retrier's `root-retry-failed` — two
+  // facts about one root. The record must be the one that names what happened, written once.
+  let calls = 0;
+  const { engine, store } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async () => { calls += 1; throw new Error('backend refused'); },
+  });
+  const [root] = await seedRoots(engine, store, ['m1'], 20_000);
+
+  const contexts = await Promise.all(Array.from({ length: 8 }, () =>
+    engine.assembleContext('s', 4_096, 'Upward')));
+
+  assert.equal(calls, 1, 'one retry, for the whole run');
+  const reported = contexts.flatMap((ctx) => ctx.degraded ?? [])
+    .filter((record) => record.summaryId === root);
+  assert.equal(reported.length, 1, 'one degraded record for the root, not one per assembly');
+  assert.equal(reported[0]!.reason, 'root-retry-failed: backend refused',
+    'and it names the failure rather than claiming the retry produced a tighter summary');
 });
 
 test('the retry decides under the lock, against a re-read archive (V2: L4b, L4g)', async (t) => {

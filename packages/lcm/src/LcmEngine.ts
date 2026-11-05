@@ -127,6 +127,14 @@ const RECENT_MESSAGE_OVERHEAD_TOKENS = 12;
  */
 const SUMMARY_TARGET_SHARE = 0.5;
 
+/**
+ * W1: how long a claim with no outcome is still believed to be a retry in flight. A claim is
+ * written before the call, so a process that died mid-retry leaves it `attempted` for good; past
+ * this window the assembly treats the claim as spent and reports the root's size. The default
+ * summarizer timeout in `createRunLcm` is 120 s, so a live retry ends inside it.
+ */
+const ROOT_RETRY_STALE_MS = 120_000;
+
 function summaryTargetTokens(budget: number): number {
   return Math.max(1, Math.floor(budget * SUMMARY_TARGET_SHARE));
 }
@@ -272,7 +280,9 @@ export class LcmEngine implements LcmApi {
       let offerSummaries = mode === 'Upward';
 
       if (mode === 'Upward') {
-        const archive = await this.fitUpward(sessionId, tokenBudget, summaryTarget, trigger);
+        const archive = await this.fitUpward(
+          sessionId, tokenBudget, summaryTarget, trigger, render !== 'summaries',
+        );
         included = archive.summaries;
         summaryCalls.push(...archive.calls);
         used = included.reduce((s, summary) => s + summary.tokens, 0);
@@ -288,10 +298,15 @@ export class LcmEngine implements LcmApi {
         }
         // A cue fallback is only the story when cues are what this caller renders; a cli-tier
         // reader gets `cli-tier-cues` below, which is the limit that actually applied (V10).
-        if (archive.degradedRoot !== undefined && render !== 'summaries') {
-          await degradeRoot(
-            archive.degradedRoot.summaryId, archive.degradedRoot.tokens, archive.degradedRoot.reason,
-          );
+        // W1/W2: `fitUpward` inserts the degradation under the session lock and returns it only to
+        // the assembly that inserted it, so this reports the record rather than making one.
+        if (archive.degradedRoot !== undefined) {
+          const { summaryId, tokens, reason } = archive.degradedRoot;
+          await pushDegraded({
+            sessionId, reason, summaryId, tokens,
+            ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
+            ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
+          });
         }
         if (included.length === 0 && archive.roots.length > 0) {
           if (render === 'summaries') {
@@ -589,11 +604,14 @@ export class LcmEngine implements LcmApi {
     budget: number,
     targetTokens: number,
     trigger: LcmTrigger | undefined,
+    recordDegradedRoot: boolean,
   ): Promise<{
     summaries: LcmSummary[]; calls: LcmSummarySurface[]; roots: LcmSummary[];
     /**
      * L3c: the root the archive gave up on, when it still exceeds `budget`. `reason` distinguishes
-     * a root that was retried and did not shrink from one whose retry failed (V8).
+     * a root that was retried and did not shrink from one whose retry failed (V8). W1/W2: present
+     * only on the assembly that recorded it, under the session lock — one record per root, not one
+     * per assembly that found it.
      */
     degradedRoot?: { summaryId: LcmSummaryId; tokens: number; reason: string };
     /** V5: the upward merge that failed, if one did. The assembly degrades; the node runs. */
@@ -669,67 +687,89 @@ export class LcmEngine implements LcmApi {
     // the same root — not after a failure, and not when the root is the output of a retry.
     let degradedRoot: { summaryId: LcmSummaryId; tokens: number; reason: string } | undefined;
     if (mergeFailure === undefined && roots.length === 1 && roots[0]!.tokens > budget) {
-      let retryFailure: unknown;
-      const rootId = roots[0]!.id;
-      if (!this.store.hasRootRetry(rootId) && !this.store.isRootRetryOutput(rootId)) {
-        try {
-          await this.serialize(sessionId, async () => {
-            const current = this.rootSummaries(sessionId);
-            if (current.length !== 1) return;
-            const root = current[0]!;
-            if (root.tokens <= budget) return;
-            if (this.store.hasRootRetry(root.id) || this.store.isRootRetryOutput(root.id)) return;
-            // Claim before the call: a retry that fails is still the root's one retry.
-            if (!this.store.claimRootRetry(root.id)) return;
-            let summaryId: LcmSummaryId | undefined;
-            try {
-              const operator = this.config.operator ?? 'LLM-Map';
-              const level = root.level + 1;
-              const units: Unit[] = splitByBytes(
-                `[Level-${root.level} summary ${root.id}]\n${root.content}`,
-                MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD,
-              ).map((content) => ({ role: 'system', content, summaryId: root.id }));
-              const output = await this.callBounded(
-                units, level, operator, Math.max(1, Math.floor(targetTokens / 2)),
-              );
-              const content = redactCredentials(summaryContent(output));
-              summaryId = this.store.insertSummary(
-                content, estimateTokens(content), level, operator, [root.id], root.messageIds,
-              );
-              const surface = await this.recordCall({
-                sessionId, summaryId, level, messageIds: root.messageIds, childIds: [root.id],
-                content, contentTokens: estimateTokens(content), output, trigger,
-                inputTokens: promptTokensOf(units),
-              });
-              if (surface) calls.push(surface);
-            } finally {
-              this.store.finishRootRetry(root.id, summaryId);
-            }
-          });
-        } catch (err: unknown) {
-          // The retry is a second chance, not a guarantee. V8: what remains is reported as what
-          // happened — a failed retry (`root-retry-failed`) is not "after a tighter retry".
-          retryFailure = err;
+      // W1: the decision is taken under the session lock even when this assembly did not claim the
+      // retry. An assembly that found the retry already claimed used to skip the lock, read the
+      // pre-retry root and record a `root-over-budget` degradation for a root the retry was about
+      // to supersede — 4 of 4 runs at N=8. Queuing on the same lock waits for that retry, and the
+      // roots are re-read under it: the caller renders the retried summary when it fits, and one
+      // degradation is recorded only when it does not.
+      degradedRoot = await this.serialize(sessionId, async () => {
+        let current = this.rootSummaries(sessionId);
+        if (current.length !== 1) return undefined;
+        let root = current[0]!;
+        if (root.tokens <= budget) return undefined;
+        let retryFailure: unknown;
+        if (!this.store.hasRootRetry(root.id) && !this.store.isRootRetryOutput(root.id)) {
+          // Claim before the call: a retry that fails is still the root's one retry. A claim lost
+          // to another process means that process owns the decision; this assembly says nothing
+          // about a root whose retry may yet supersede what it can see.
+          if (!this.store.claimRootRetry(root.id)) return undefined;
+          let summaryId: LcmSummaryId | undefined;
+          try {
+            const operator = this.config.operator ?? 'LLM-Map';
+            const level = root.level + 1;
+            const units: Unit[] = splitByBytes(
+              `[Level-${root.level} summary ${root.id}]\n${root.content}`,
+              MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD,
+            ).map((content) => ({ role: 'system', content, summaryId: root.id }));
+            const output = await this.callBounded(
+              units, level, operator, Math.max(1, Math.floor(targetTokens / 2)),
+            );
+            const content = redactCredentials(summaryContent(output));
+            summaryId = this.store.insertSummary(
+              content, estimateTokens(content), level, operator, [root.id], root.messageIds,
+            );
+            const surface = await this.recordCall({
+              sessionId, summaryId, level, messageIds: root.messageIds, childIds: [root.id],
+              content, contentTokens: estimateTokens(content), output, trigger,
+              inputTokens: promptTokensOf(units),
+            });
+            if (surface) calls.push(surface);
+          } catch (err: unknown) {
+            // The retry is a second chance, not a guarantee. V8: what remains is reported as what
+            // happened — a failed retry (`root-retry-failed`) is not "after a tighter retry".
+            retryFailure = err;
+          } finally {
+            this.store.finishRootRetry(root.id, summaryId);
+          }
+          // V2: decide on the roots as they are now, not as this assembly read them before
+          // queuing. Another pass may have changed the archive while this one waited.
+          current = this.rootSummaries(sessionId);
+          if (current.length !== 1) return undefined;
+          root = current[0]!;
+          if (root.tokens <= budget) return undefined;
         }
-      }
-      // V2: the roots are re-read whatever the retry block decided. Another pass may have changed
-      // the archive while this assembly queued for the lock (a second root, or a root already
-      // retried); reporting degradation from the pre-lock view would name a root the archive no
-      // longer has as its single one.
-      roots = this.rootSummaries(sessionId);
-      const root = roots.length === 1 ? roots[0]! : undefined;
-      if (root !== undefined && root.tokens > budget) {
+        if (!recordDegradedRoot) return undefined;
         // A summary written by the retry (even if the record callback then threw) means the retry
         // happened and produced text; the archive's size is what failed, not the call.
         const produced = this.store.isRootRetryOutput(root.id);
-        degradedRoot = {
-          summaryId: root.id,
-          tokens: root.tokens,
-          reason: retryFailure === undefined || produced
-            ? 'root-over-budget'
-            : `root-retry-failed: ${messageOf(retryFailure)}`,
-        };
-      }
+        if (!produced && retryFailure === undefined) {
+          // W1: a claim another engine or process wrote may belong to a retry that is still
+          // running; reporting this root now would name one that retry may supersede.
+          const claim = this.store.rootRetry(root.id);
+          if (claim?.outcome === 'attempted'
+            && Date.now() - claim.claimedAt.getTime() < ROOT_RETRY_STALE_MS) {
+            return undefined;
+          }
+          // W2: one record per root. The assembly that ran the retry writes the reason that names
+          // its failure; an assembly that waited on that retry must not add `root-over-budget` for
+          // the same root, which the (root, reason) key would store as a second fact.
+          if (this.store.hasRootDegradation(root.id)) return undefined;
+        }
+        const reason = retryFailure === undefined || produced
+          ? 'root-over-budget'
+          : `root-retry-failed: ${messageOf(retryFailure)}`;
+        const summaryId = root.id;
+        const tokens = root.tokens;
+        // The record is inserted under the lock, so the assembly that returns it is the only one
+        // that reports it; `markRootDegraded` still guards the cross-process case.
+        return this.store.markRootDegraded(summaryId, reason, tokens)
+          ? { summaryId, tokens, reason }
+          : undefined;
+      });
+      // V2: the roots are re-read whatever the retry block decided, so the caller fits and renders
+      // the archive as it stands now.
+      roots = this.rootSummaries(sessionId);
     }
 
     const fit = overflowNewestFirst(roots, budget);

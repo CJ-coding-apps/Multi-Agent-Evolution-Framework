@@ -1804,8 +1804,8 @@ test('each degraded archive is reported for what happened, not as one generic li
       .filter((e) => e.metadata['kind'] === 'lcm-degraded')
       .map((e) => e.content);
     assert.deepEqual(lines, [
-      '[lcm] archive root root-a still exceeds the injector budget (900 tokens) after the one retry it is allowed; the archive omits it',
-      '[lcm] archive root root-b still exceeds the injector budget (901 tokens) and its one retry failed (backend refused); the archive omits it',
+      '[lcm] archive root root-a still exceeds the injector budget (900 tokens) after the one retry it is allowed; it is offered as a cue',
+      '[lcm] archive root root-b still exceeds the injector budget (901 tokens) and its one retry failed (backend refused); it is offered as a cue',
       '[lcm] the cli tier cannot act on a cue; archive root root-c (902 tokens) is omitted rather than offered as one it could not expand',
     ]);
     assert.ok(

@@ -370,7 +370,7 @@ test('the run log names what degraded, in the same words the transcript uses (L3
       seeded.close();
     }
     assert.equal(logged.length, 1);
-    const overBudget = /^\[lcm\] archive root (\S+) still exceeds the injector budget \((\d+) tokens\) after the one retry it is allowed; the archive omits it$/.exec(logged[0]!);
+    const overBudget = /^\[lcm\] archive root (\S+) still exceeds the injector budget \((\d+) tokens\) after the one retry it is allowed; it is offered as a cue$/.exec(logged[0]!);
     assert.ok(overBudget, `the line names an oversized root: ${logged[0]!}`);
     assert.notEqual(overBudget[1], rootId,
       'the retry did produce a new root; it is the one that still does not fit');
