@@ -67,7 +67,7 @@ still describes what the call *would* have sent — it was composed before the f
 says `error: "not-sent"`, with no `outputSha256`: "the model was shown this and failed" and "the model
 was never reached" are different facts about the spend. A timeout or a non-zero exit stays `"thrown"`:
 the attempt was made and the model may have seen the prompt. A **refused connection** stays `"thrown"`
-too: the request had been written to the socket's owner, and MAF cannot tell whether any byte left
+too: the request had been handed to `fetch`, and MAF cannot tell whether any byte left
 before the connection failed, so "it may have been seen" is the safe direction to err in. An adapter
 marks the distinction with `withModelSurface(err, surface, false)`; the call sites read it with
 `modelSurfaceWasSent`.
