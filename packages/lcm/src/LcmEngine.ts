@@ -79,6 +79,12 @@ export interface LcmEngineConfig {
    */
   summaryRetry?: number;
   /**
+   * X2: the deadline one summarizer call is given. Together with `summaryRetry` it is the budget a
+   * live retry can take, and it is what the claim lifetime is derived from — a fixed window was
+   * shorter than the retry it was supposed to cover. Default 120 s, matching `createRunLcm`.
+   */
+  summaryTimeoutMs?: number;
+  /**
    * Where a summary call is recorded (WP-3.2 F1). It is a model call like any other: the caller
    * attaches it to the attestor and writes the `[surface]` transcript line.
    */
@@ -128,12 +134,22 @@ const RECENT_MESSAGE_OVERHEAD_TOKENS = 12;
 const SUMMARY_TARGET_SHARE = 0.5;
 
 /**
- * W1: how long a claim with no outcome is still believed to be a retry in flight. A claim is
+ * W1/X2: how long a claim with no outcome is still believed to be a retry in flight. A claim is
  * written before the call, so a process that died mid-retry leaves it `attempted` for good; past
- * this window the assembly treats the claim as spent and reports the root's size. The default
- * summarizer timeout in `createRunLcm` is 120 s, so a live retry ends inside it.
+ * this window the assembly treats the claim as spent and reports the root's size. The window is
+ * derived from the call budget rather than fixed: a retry can spend the summarizer's deadline on
+ * each of its attempts (about 240 s at the defaults), so the old fixed 120 s declared a live retry
+ * dead half way through it.
  */
-const ROOT_RETRY_STALE_MS = 120_000;
+const DEFAULT_SUMMARY_TIMEOUT_MS = 120_000;
+/** Slack over the call budget for the scheduling between attempts. */
+const ROOT_RETRY_CLAIM_SLACK = 0.1;
+
+/** X2: the time a retry may legitimately take, with slack — the smallest honest claim lifetime. */
+export function rootRetryClaimLifetimeMs(summaryTimeoutMs: number, summaryRetry: number): number {
+  const attempts = 1 + Math.max(0, summaryRetry);
+  return Math.ceil(summaryTimeoutMs * attempts * (1 + ROOT_RETRY_CLAIM_SLACK));
+}
 
 function summaryTargetTokens(budget: number): number {
   return Math.max(1, Math.floor(budget * SUMMARY_TARGET_SHARE));
@@ -747,8 +763,12 @@ export class LcmEngine implements LcmApi {
           // W1: a claim another engine or process wrote may belong to a retry that is still
           // running; reporting this root now would name one that retry may supersede.
           const claim = this.store.rootRetry(root.id);
+          const claimLifetime = rootRetryClaimLifetimeMs(
+            this.config.summaryTimeoutMs ?? DEFAULT_SUMMARY_TIMEOUT_MS,
+            this.config.summaryRetry ?? 1,
+          );
           if (claim?.outcome === 'attempted'
-            && Date.now() - claim.claimedAt.getTime() < ROOT_RETRY_STALE_MS) {
+            && Date.now() - claim.claimedAt.getTime() < claimLifetime) {
             return undefined;
           }
           // W2: one record per root. The assembly that ran the retry writes the reason that names

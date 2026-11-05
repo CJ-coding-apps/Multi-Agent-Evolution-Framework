@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -12,7 +12,7 @@ import { TransportError, makeLcmMessageId, makeNodeId, makeRunId, makeTaskId } f
 import type {
   LcmContext, LcmDegradedRecord, LcmMessage, LcmMessageId, LcmSummary, LcmSummaryId,
 } from '@maf/types';
-import { LcmEngine } from '../LcmEngine.js';
+import { LcmEngine, rootRetryClaimLifetimeMs } from '../LcmEngine.js';
 import type { LcmEngineConfig, LcmSummaryCall } from '../LcmEngine.js';
 import { LcmStore } from '../LcmStore.js';
 import { SessionMerger } from '../SessionMerger.js';
@@ -76,7 +76,7 @@ async function addMessages(engine: LcmEngine, contents: string[], tokens = 10): 
 async function fileEngineWith(
   t: TestContext,
   overrides: Partial<LcmEngineConfig> = {},
-): Promise<{ engine: LcmEngine; summarized: LcmMessage[][]; store: LcmStore }> {
+): Promise<{ engine: LcmEngine; summarized: LcmMessage[][]; store: LcmStore; dbPath: string }> {
   const dir = await mkdtemp(path.join(tmpdir(), 'lcm-engine-'));
   const dbPath = path.join(dir, 'lcm.db');
   const { engine, summarized } = engineWith({ dbPath, ...overrides });
@@ -86,7 +86,7 @@ async function fileEngineWith(
     store.close();
     await rm(dir, { recursive: true, force: true });
   });
-  return { engine, summarized, store };
+  return { engine, summarized, store, dbPath };
 }
 
 /**
@@ -1151,10 +1151,27 @@ CREATE TABLE lcm_summary_messages (
 );
 `;
 
+/** X1: waits until `count` children have reported that they are about to open the archive. */
+async function waitForFiles(dir: string, count: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const entries = await readdir(dir);
+    if (entries.length >= count) return;
+    if (Date.now() > deadline) {
+      throw new Error(`only ${entries.length} of ${count} openers reached the barrier in ${timeoutMs} ms`);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 async function legacyDatabase(t: TestContext): Promise<{ dbPath: string; close: () => Promise<void> }> {
   const dir = await mkdtemp(path.join(tmpdir(), 'lcm-legacy-'));
   const dbPath = path.join(dir, 'lcm.db');
   const db = new Database(dbPath);
+  // X1: an engine-written archive is already WAL, so opening it does not switch the journal under
+  // a lock; keeping that true here leaves the six V6 openers contending at the swap itself rather
+  // than at `PRAGMA journal_mode`.
+  db.pragma('journal_mode = WAL');
   db.exec(V1_SCHEMA);
   // The old layout stored (parent, child) under the names (summary_id, parent_id).
   db.prepare(`INSERT INTO lcm_summaries VALUES (?,?,?,?,?,?)`).run('P', 'parent text', 3, 1, 'LLM-Map', new Date().toISOString());
@@ -1314,24 +1331,73 @@ test('two processes opening an old archive migrate it exactly once (V6)', async 
   t.after(legacy.close);
   // This package compiles to CommonJS; the child imports the built module by file URL.
   const moduleUrl = pathToFileURL(path.join(__dirname, '..', 'LcmStore.js')).href;
+  // X1: the race has to be certain, not probable. The archive was small enough that six opens
+  // rarely overlapped, so the drop-`IMMEDIATE` mutant was red once in ten runs on Linux and the
+  // dropped-re-read mutant never. Every child reads the old version and parks at the migration
+  // (`beforeMigrate`) BEFORE it takes any lock; once all six are parked the parent takes the write
+  // lock and only then releases them, so all six contend for the same swap. The lock cannot be
+  // taken any earlier: creating this build's missing tables inside `exec(SCHEMA)` needs it, and a
+  // held lock would stop the children before they reached the barrier. Seeding more rows would
+  // only make the collision likelier, not certain.
+  const barrier = await mkdtemp(path.join(tmpdir(), 'lcm-v6-barrier-'));
+  t.after(async () => { await rm(barrier, { recursive: true, force: true }); });
   const script = `
+    const fs = await import('node:fs');
     const { LcmStore } = await import(process.env.LCM_MODULE);
-    new LcmStore(process.env.LCM_DB, { busyTimeoutMs: 10_000 }).close();
+    new LcmStore(process.env.LCM_DB, {
+      busyTimeoutMs: 10_000,
+      beforeMigrate: () => {
+        fs.writeFileSync(process.env.LCM_READY, 'ready');
+        const deadline = Date.now() + 10_000;
+        while (!fs.existsSync(process.env.LCM_RELEASE)) {
+          if (Date.now() > deadline) throw new Error('the V6 barrier was not released');
+        }
+      },
+    }).close();
   `;
-  // W3: every open must SUCCEED. The swap happening once is not enough — a dropped `IMMEDIATE`
-  // leaves one opener raising `database is locked` while the surviving opener still migrates
-  // cleanly, so a test that only inspects the final rows calls that a pass.
-  const opens = await Promise.allSettled(Array.from({ length: 6 }, () => execFileAsync(
-    process.execPath,
-    ['--input-type=module', '-e', script],
-    { env: { ...process.env, LCM_MODULE: moduleUrl, LCM_DB: legacy.dbPath } },
-  )));
-  for (const [index, open] of opens.entries()) {
-    assert.equal(
-      open.status, 'fulfilled',
-      `concurrent open ${index + 1} succeeded${
-        open.status === 'rejected' ? ` (it failed with: ${String(open.reason)})` : ''}`,
-    );
+  const holder = new Database(legacy.dbPath);
+  let committed = false;
+  try {
+    let finished = 0;
+    const opening = Array.from({ length: 6 }, (_, index) => execFileAsync(
+      process.execPath,
+      ['--input-type=module', '-e', script],
+      {
+        env: {
+          ...process.env,
+          LCM_MODULE: moduleUrl,
+          LCM_DB: legacy.dbPath,
+          LCM_READY: path.join(barrier, `ready-${index}`),
+          LCM_RELEASE: path.join(barrier, 'release'),
+        },
+      },
+    ).finally(() => { finished += 1; }));
+    await waitForFiles(barrier, 6);
+    assert.equal(finished, 0, 'all six openers read the old version and are parked at the migration');
+    holder.exec('BEGIN IMMEDIATE');
+    await writeFile(path.join(barrier, 'release'), 'release');
+    // Let every parked opener leave the barrier and take its read inside the migration while the
+    // lock is still ours: the dropped-`IMMEDIATE` mutant then starts six transactions that all
+    // read version 0, and five of them must lose the race — the deterministic failure.
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    holder.exec('COMMIT');
+    committed = true;
+    // W3: every open must SUCCEED. The swap happening once is not enough — a dropped `IMMEDIATE`
+    // leaves one opener raising `database is locked` while the surviving opener still migrates
+    // cleanly, so a test that only inspects the final rows calls that a pass.
+    const opens = await Promise.allSettled(opening);
+    for (const [index, open] of opens.entries()) {
+      assert.equal(
+        open.status, 'fulfilled',
+        `concurrent open ${index + 1} succeeded${
+          open.status === 'rejected' ? ` (it failed with: ${String(open.reason)})` : ''}`,
+      );
+    }
+  } finally {
+    if (!committed) {
+      try { holder.exec('ROLLBACK'); } catch { /* the transaction was never taken */ }
+    }
+    holder.close();
   }
 
   const raw = new Database(legacy.dbPath, { readonly: true });
@@ -1506,6 +1572,105 @@ test('a failed retry writes one record for its root, with the reason that names 
   assert.equal(reported.length, 1, 'one degraded record for the root, not one per assembly');
   assert.equal(reported[0]!.reason, 'root-retry-failed: backend refused',
     'and it names the failure rather than claiming the retry produced a tighter summary');
+});
+
+test('the claim lifetime covers the retry it stands for, not a fixed 120 s (X2)', () => {
+  // A retry can spend the summarizer's deadline on each attempt: 120 s x 2 = 240 s at the
+  // defaults. The old fixed 120 s window called a live retry spent half way through it.
+  assert.equal(rootRetryClaimLifetimeMs(120_000, 1), 264_000,
+    'the default budget (120 s, one retry attempt) plus slack');
+  assert.equal(rootRetryClaimLifetimeMs(10_000, 2), 33_000,
+    'every configured attempt is covered, not just the first');
+  assert.ok(rootRetryClaimLifetimeMs(10_000, 0) > 10_000,
+    'even one attempt gets more than its own deadline');
+});
+
+test('another engine\'s live claim suppresses this assembly\'s record (W1/X3)', async (t) => {
+  // X3: the check is between engines, not between assemblies of one. Engine A claims the retry
+  // and is still inside its call; engine B must not report the root A may yet supersede. The
+  // claim is aged past the old fixed 120 s window and inside this configuration's real budget.
+  let calls = 0;
+  const { engine, store, dbPath } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async () => { calls += 1; return 'small'; },
+  });
+  const [root] = await seedRoots(engine, store, ['m1'], 20_000);
+  const other = new LcmStore(dbPath);
+  try {
+    assert.equal(other.claimRootRetry(root!), true, 'the other engine owns the retry');
+  } finally {
+    other.close();
+  }
+  const raw = new Database(dbPath);
+  try {
+    raw.prepare(`UPDATE lcm_root_retries SET created_at=? WHERE root_id=?`)
+      .run(new Date(Date.now() - 121_000).toISOString(), root);
+  } finally {
+    raw.close();
+  }
+
+  const ctx = await engine.assembleContext('s', 4_096, 'Upward');
+  assert.equal(calls, 0, 'the retry is not this engine\'s to make');
+  assert.deepEqual(ctx.degraded ?? [], [], 'no record against a root a live retry may supersede');
+  assert.equal(store.hasRootDegradation(root!), false, 'and nothing was written for it');
+});
+
+test('the claim window is the configured budget: a claim past it is reported (X2/X3)', async (t) => {
+  // The complement of the test above: with a short configured budget the same claim is spent, so
+  // the assembly reports the root. A lifetime that ignored the configuration would fail one of
+  // these two tests whichever value it was fixed at.
+  const { engine, store, dbPath } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summaryTimeoutMs: 10, summaryRetry: 0,
+    summarize: async () => 'small',
+  });
+  const [root] = await seedRoots(engine, store, ['m1'], 20_000);
+  const other = new LcmStore(dbPath);
+  try {
+    assert.equal(other.claimRootRetry(root!), true);
+  } finally {
+    other.close();
+  }
+  const raw = new Database(dbPath);
+  try {
+    raw.prepare(`UPDATE lcm_root_retries SET created_at=? WHERE root_id=?`)
+      .run(new Date(Date.now() - 1_000).toISOString(), root);
+  } finally {
+    raw.close();
+  }
+
+  const ctx = await engine.assembleContext('s', 4_096, 'Upward');
+  const reported = (ctx.degraded ?? []).filter((record) => record.summaryId === root);
+  assert.equal(reported.length, 1, 'a claim older than the configured budget is spent');
+  assert.equal(reported[0]!.reason, 'root-over-budget');
+});
+
+test('a degradation another engine recorded is not written a second time (W2/X3)', async (t) => {
+  // X3: one root, one record, across engines. The other engine's retry failed and said so; this
+  // assembly found the claim spent and must not add its own sentence about the same root.
+  const { engine, store, dbPath } = await fileEngineWith(t, {
+    contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async () => 'small',
+  });
+  const [root] = await seedRoots(engine, store, ['m1'], 20_000);
+  const other = new LcmStore(dbPath);
+  try {
+    other.claimRootRetry(root!);
+    other.finishRootRetry(root!);          // the retry ended without producing a summary
+    other.markRootDegraded(root!, 'root-retry-failed: the other engine', 20_000);
+  } finally {
+    other.close();
+  }
+
+  const ctx = await engine.assembleContext('s', 4_096, 'Upward');
+  assert.deepEqual(ctx.degraded ?? [], [], 'this assembly adds no second sentence about one root');
+  const raw = new Database(dbPath, { readonly: true });
+  try {
+    const rows = raw.prepare(`SELECT reason FROM lcm_root_degradations WHERE summary_id=?`).all(root);
+    assert.deepEqual(rows, [{ reason: 'root-retry-failed: the other engine' }], 'one root, one record');
+  } finally {
+    raw.close();
+  }
 });
 
 test('the retry decides under the lock, against a re-read archive (V2: L4b, L4g)', async (t) => {

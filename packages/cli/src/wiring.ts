@@ -139,6 +139,9 @@ export function createRunLcm(input: RunLcmInput): RunLcm {
     freshTailCount:   input.lcm.freshTailCount,
     mode:             input.lcm.mode,
     operator:         input.lcm.operator === 'agentic-map' ? 'Agentic-Map' : 'LLM-Map',
+    // X2: the same deadline the summarizer was built with. The engine uses it to decide how long
+    // a claim written by another engine may still belong to a retry in flight.
+    summaryTimeoutMs: input.lcm.summaryTimeoutMs,
     summarize:   createAdapterSummarizer(summarizerOptions),
     runSubAgent: createAdapterSubAgent(summarizerOptions),
     // F1/R5: a summary is a model call like any other. It goes into the same array, under the node

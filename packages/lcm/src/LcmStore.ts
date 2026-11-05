@@ -97,10 +97,23 @@ type SumRow = {
   level: number; operator: string; created_at: string;
 };
 
+export interface LcmStoreOptions {
+  busyTimeoutMs?: number;
+  /**
+   * X1 (tests only): called once the archive's version has been read and the migration is about to
+   * take the lock. The V6 concurrency test parks every opener here, so all six have read the old
+   * version before any of them can commit — the race it exercises is certain, not probable.
+   * Production callers never pass it.
+   */
+  beforeMigrate?: () => void;
+}
+
 export class LcmStore {
   private db: Database.Database;
+  private readonly options: LcmStoreOptions;
 
-  constructor(dbPath: string, options: { busyTimeoutMs?: number } = {}) {
+  constructor(dbPath: string, options: LcmStoreOptions = {}) {
+    this.options = options;
     // W3: `BEGIN IMMEDIATE` makes a second opener WAIT for the migrating one rather than fail, so
     // the migration's correctness depends on the busy timeout as much as on the lock. It is named
     // here (and can be raised by a caller that knows its openers are slow) instead of being left
@@ -137,6 +150,8 @@ export class LcmStore {
    * the first wrote, and does nothing.
    */
   private migrate(): void {
+    // X1: the caller's version read has happened; tests park here to make the race certain.
+    this.options.beforeMigrate?.();
     const txn = this.db.transaction(() => {
       const from = this.db.pragma('user_version', { simple: true }) as number;
       if (from >= LCM_SCHEMA_VERSION) return;
