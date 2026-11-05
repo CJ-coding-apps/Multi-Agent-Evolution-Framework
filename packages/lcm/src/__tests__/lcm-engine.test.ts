@@ -1587,20 +1587,29 @@ test('the claim lifetime covers the retry it stands for, not a fixed 120 s (X2)'
 
 test('another engine\'s live claim suppresses this assembly\'s record (W1/X3)', async (t) => {
   // X3: the check is between engines, not between assemblies of one. Engine A claims the retry
-  // and is still inside its call; engine B must not report the root A may yet supersede. The
-  // claim is aged past the old fixed 120 s window and inside this configuration's real budget.
+  // and is still inside its call; engine B must not report the root A may yet supersede. A's real
+  // claim is aged past the old fixed 120 s window and inside this configuration's derived budget —
+  // the case the fixed window got wrong, without waiting four minutes to observe it.
   let calls = 0;
-  const { engine, store, dbPath } = await fileEngineWith(t, {
+  const { engine: b, store, dbPath } = await fileEngineWith(t, {
     contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
     summarize: async () => { calls += 1; return 'small'; },
   });
-  const [root] = await seedRoots(engine, store, ['m1'], 20_000);
-  const other = new LcmStore(dbPath);
-  try {
-    assert.equal(other.claimRootRetry(root!), true, 'the other engine owns the retry');
-  } finally {
-    other.close();
-  }
+  const [root] = await seedRoots(b, store, ['m1'], 20_000);
+
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let entered: () => void = () => {};
+  const retryEntered = new Promise<void>((resolve) => { entered = resolve; });
+  let retries = 0;
+  const a = new LcmEngine({
+    dbPath, contextThreshold: 1, freshTailCount: 0, mode: 'Upward',
+    summarize: async () => { retries += 1; entered(); await held; return 'small'; },
+  });
+  t.after(() => a.close());
+
+  const owning = a.assembleContext('s', 4_096, 'Upward');
+  await retryEntered;                    // A's claim is written and its call is in flight
   const raw = new Database(dbPath);
   try {
     raw.prepare(`UPDATE lcm_root_retries SET created_at=? WHERE root_id=?`)
@@ -1609,10 +1618,15 @@ test('another engine\'s live claim suppresses this assembly\'s record (W1/X3)', 
     raw.close();
   }
 
-  const ctx = await engine.assembleContext('s', 4_096, 'Upward');
-  assert.equal(calls, 0, 'the retry is not this engine\'s to make');
+  const ctx = await b.assembleContext('s', 4_096, 'Upward');
+  assert.equal(calls, 0, 'the retry is not B\'s to make');
   assert.deepEqual(ctx.degraded ?? [], [], 'no record against a root a live retry may supersede');
   assert.equal(store.hasRootDegradation(root!), false, 'and nothing was written for it');
+
+  release();
+  await owning;
+  assert.equal(retries, 1, 'A made the one retry the archive allows');
+  assert.equal(store.hasRootDegradation(root!), false, 'A\'s retry fitted, so there is nothing to report');
 });
 
 test('the claim window is the configured budget: a claim past it is reported (X2/X3)', async (t) => {
