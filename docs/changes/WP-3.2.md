@@ -154,11 +154,23 @@ budget (half the normal target). "Once" is per root and for the whole run: the c
 spent too, a later assembly cannot retry the same root, and a retry's own output is never retried.
 If the root still does not fit, the assembly records `lcmDegraded` with `reason: root-over-budget`,
 the root's id and its token count — once per root, from `lcm_root_degradations`, not once per
-assembly. A retry that itself failed records `reason: root-retry-failed: <message>` instead, so
-the line never claims a tighter retry that produced nothing (V8). A caller that can expand a cue
-(`render: 'cues'`) is offered one; the cli tier cannot call `lcm.expand`, so when its archive
-renders nothing it records `reason: cli-tier-cues` once per root, and the transcript names the
-limit rather than offering an instruction it cannot follow (V10). *Rejected:* letting the model
+assembly. **The decision is taken under the same session lock the retry runs under (W1).** An
+assembly that finds the claim written but no outcome waits on that lock like any other, re-reads
+the roots under it, and then decides: a summary if the retried root now fits, otherwise the record.
+It never records against a root a running retry may supersede — the live row hit that in 4 of 4
+runs at N=8, when the path that found the claim already taken skipped the lock, read the pre-retry
+root and wrote a false `root-over-budget`. A claim still `attempted` after 120 s (the default
+summarizer timeout) is treated as abandoned, so a crashed retrier does not suppress the record
+forever; a claim lost to another process is that process's decision, and this assembly says
+nothing. A retry that itself failed records `reason: root-retry-failed: <message>` instead, so the
+line never claims a tighter retry that produced nothing (V8), and that is the root's **only**
+record (W2): a later assembly that waited on the failed retry sees a degradation already recorded
+for the root and adds nothing, rather than writing `root-over-budget` beside it as a second fact.
+A caller that can expand a cue (`render: 'cues'`) is offered one, and the transcript sentence now
+says so — it said "the archive omits it", which describes the cli tier and not the caller that
+receives this record. The cli tier cannot call `lcm.expand`, so when its archive renders nothing it
+records `reason: cli-tier-cues` once per root, and the transcript names the limit rather than
+offering an instruction it cannot follow (V10). *Rejected:* letting the model
 choose the size, measured in the live row where higher levels never shrank and the `<summaries>`
 sentence was false; retrying per assembly, which wrote eight lines for one fact and stacked a
 retry on a retry; and dropping an oversized root, which loses context silently.
@@ -432,6 +444,20 @@ The third pass found that round 2's own ruling was wrong, and that three mutants
 | V5 | The headroom arithmetic said "~22 KiB" | 150,000 − 131,072 = 18.5 KiB, and the 64 KiB prompt cap is the limit that matters because the prompt is one argument. |
 | — | V2's real-wiring test found a live defect: a reader that wrote nothing failed with `unexpected_change` on `.maf/memory.kuzu.wal` | A Kùzu database is the file **and** its sibling write-ahead log (D2), so `memory.kuzu.wal` joins `MAF_RUNTIME_STATE` and the root `.gitignore`. MAF's own graph appends to it while open; keeping it in a snapshot reports MAF's state as the node's change. |
 
+### Round 4 — W1–W4, against D-52
+
+These are the verifier's ids; they are distinct from the `W1–W4` labels the round-3 wiring tests
+use for their own checks. The fourth pass re-read the live row's N=8 race: a retry was claimed,
+and the assemblies that found the claim already taken skipped the lock, read the pre-retry root
+and decided against it.
+
+| | Finding | Disposition |
+|---|---|---|
+| W1 | An assembly that found a retry claimed but unfinished skipped the lock, read the superseded root, recorded a false `root-over-budget` and rendered cues — 4 of 4 runs at N=8 | Every assembly with one oversized root now enters the same session lock as the retrier and re-reads the roots under it; it renders the retried summary when it fits and records the degradation only when it does not. A claim by another engine or process that is still `attempted` suppresses the record, and a claim older than the default 120 s summarizer timeout is treated as abandoned so a crashed retrier cannot suppress it forever. Test: a big → small retry races eight assemblies with a delayed summarizer; all eight render the summary and no `root-over-budget` row exists for the old root. Restoring the skip path turns it red: the second assembly renders 0 summaries where the test asserts 1, and the assertion names it. |
+| W2 | A failed retry wrote its `root-retry-failed` record and every later assembly added `root-over-budget` for the same root; the `root-over-budget` sentence also said the archive omits the root, which is the cli tier's story, not the caller that receives the record | One record per root: the assembly that ran the retry writes the reason that names the failure, and `LcmStore.hasRootDegradation` stops a later assembly adding a second fact. The transcript lines in `RoleDispatcher` and `wiring` now say the root "is offered as a cue". Test: eight assemblies against a failing retry find exactly one record, `root-retry-failed: backend refused`. Dropping the guard turns it red (2 records, asserted 1). |
+| W3 | The V6 test proved the relation was swapped once, not that both opens succeeded; dropping `IMMEDIATE` leaves one opener raising `database is locked` while the surviving opener migrates cleanly, so the final rows still look right | The six opens are collected with `Promise.allSettled` and each must be `fulfilled`, with the child's error in the assertion message. The wait the lock relies on is now explicit: `LcmStore` takes an optional `busyTimeoutMs` (default 5 s) and the test raises it to 10 s for its six racing processes. Mutant: `txn.immediate()` → `txn()` turns it red, 3 of 3 runs, with `SqliteError: database is locked` named in the assertion. |
+| W4 | The `RoleDispatcher.ts` row in the file table omitted the T1 hunks and claimed the edits sat in one region | The row now carries the five T1 ranges and says the edits are two regions. |
+
 ## Files outside the spec's list, and why
 
 Every file this branch changes that the WP-3.2 spec did not list, with the reason and the line
@@ -439,7 +465,7 @@ range (R7). "Line range" means the hunks this branch writes, not the whole file.
 
 | File | Reason | Where |
 |---|---|---|
-| `packages/roles/src/RoleDispatcher.ts` | The archive is assembled before the node's prompt and its summary calls become records: the summary transcript line, the spend against the triggering node's budget, and the one flag that tells the injector whether the role can call `lcm.expand` (R14). Not this WP's file — it is line-scoped for WP-3.4/3.5 — so the edits sit in one region. | `mafToolsAvailable` :732; the `lcmSummaryCalls` transcript loop :738–754 and the `lcmDegraded` loop :755–781; the summary spend :795–803 |
+| `packages/roles/src/RoleDispatcher.ts` | The archive is assembled before the node's prompt and its summary calls become records: the summary transcript line, the spend against the triggering node's budget, and the one flag that tells the injector whether the role can call `lcm.expand` (R14). The T1 fix (round 2) also lives here because the dispatch loop is what knows whether the in-process pipeline already recorded the turn: it threads the loop's `transcriptRecorded` back to the one append that used to write the final answer twice. Not this WP's file — it is line-scoped for WP-3.4/3.5 — and the edits are two regions, not one. | `mafToolsAvailable` :732; the `lcmSummaryCalls` transcript loop :738–754 and the `lcmDegraded` loop :755–781; the summary spend :795–803. T1 (round 2): the `recordedInPipeline` flag and its reason :823–825; the fields taken from the loop result :829–834; the guarded final-answer append :868–870; `runInProcess`'s return type :946; the pipeline check that produces the flag :1028–1031 |
 | `packages/attestation/src/Attestor.ts` | The run's LCM settings are recorded once and emitted in the bundle (R4a), so `lcm.mode: off` is readable in the record rather than inferred. | field :260; `recordLcmSettings` :385–387; `lcmSettings` in the predicate :428 |
 | `packages/tools/src/index.ts` | `LcmExpandTool` is exported and registered in `createDefaultRegistry`, which is what makes the Dolt cue's `lcm.expand("<id>")` callable by every built-in role (F8). | export :7–8; import :11; option :31; construction :45 |
 | `packages/tools/src/plugins/lcm.ts` | New: the read-only, pathless `lcm.expand` tool. Masks the summary text and every source message (F7, R8), and refuses an id that is not in this run's session (R9). | whole file |
@@ -491,16 +517,17 @@ On `wp/3.2-lcm`, after the final edit:
 
 | Gate | Result |
 |---|---|
-| `pnpm -r build` | exit 0 |
-| `pnpm run check:build-output` | exit 0 |
-| `pnpm run check:test-scripts` | exit 0 |
-| `pnpm run check:workspace-deps` | exit 0 |
-| `pnpm run check:doc-refs` | exit 0 |
-| `pnpm -r typecheck` | exit 0, `error TS` = 0 |
-| `pnpm -r test` | exit 0 — **1460 tests, 1458 pass, 0 fail, 2 skipped** |
+| `pnpm -r build` | exit 0, on macOS (Node 25.6.0) and on Linux (`node:22-bookworm`, Node 22.23.4) |
+| `pnpm run check:build-output` | exit 0 on both |
+| `pnpm run check:test-scripts` | exit 0 on both |
+| `pnpm run check:workspace-deps` | exit 0 on both |
+| `pnpm run check:doc-refs` | exit 0 on both |
+| `pnpm -r typecheck` | exit 0, `error TS` = 0 (macOS; the Linux build runs the same `tsc`) |
+| `pnpm -r test` | exit 0 on both — **1462 tests, 1460 pass, 0 fail, 2 skipped** (lcm 58/58, roles 235/235, cli 219 = 218 + 1 skip) |
 
-The two skips are `lcm-live` (needs `MAF_LIVE_SUMMARIZATION=1` and a real adapter; it is not run
-as part of the suite) and one pre-existing skip in `@maf/tools`.
+On Linux the tree was an isolated copy, installed with `--frozen-lockfile` in the container. The
+two skips are `lcm-live` (needs `MAF_LIVE_SUMMARIZATION=1` and a real adapter; it is not run as
+part of the suite) and one pre-existing skip in `@maf/tools`.
 
 New/expanded tests: `lcm/src/__tests__/adapter-summarizer.test.ts`,
 `lcm/src/__tests__/lcm-engine.test.ts`,
@@ -522,6 +549,9 @@ newer archive is refused before any table is created; V10: a cli-tier caller off
 `roles/src/__tests__/RoleDispatcher.test.ts` (T1 across the cli, default and
 `policy-audit`-only bundles; L3l: the sentence matches what happened), and
 `cli/src/__tests__/run-lcm-wiring.test.ts` (L3m: the run log uses the transcript's words).
+Round 4 added two engine tests — W1 (eight assemblies meet a slow retry; all render the summary,
+no false degradation) and W2 (a failed retry leaves exactly one record) — and tightened V6 to assert
+that every concurrent open succeeds, not only that the relation was swapped once.
 
 ## Live rows
 
