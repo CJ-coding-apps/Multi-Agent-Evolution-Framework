@@ -1,5 +1,5 @@
 import type { AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord } from '@maf/types';
-import { TransportError } from '@maf/types';
+import { TransportError, callModelSurface, withModelSurface } from '@maf/types';
 import { BaseAdapter, failureTail } from '@maf/adapter-base';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
@@ -98,19 +98,31 @@ export class OpenRouterAdapter extends BaseAdapter {
 
   async invoke(options: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const start = Date.now();
-    const body: OAIRequest = {
-      model:       this.resolveModel(options),
-      messages:    this.buildMessages(options),
-      stream:      false,
-      max_tokens:  options.tokenBudget,
-      temperature: options.temperature,   // honored (golden determinism when pinned to 0)
-    };
-
+    const messages = this.buildMessages(options);
+    // R3-S1: this backend sends the system prompt and the prompt as the request's messages and no
+    // argv at all, so the surface the call site can rebuild from `options` *is* what was about to
+    // be sent. Composed before the request goes out, and attached to whatever the request throws,
+    // so a timeout or a 5xx still records the call — and records it as the adapter's own account,
+    // not as a fallback the recorder had to reconstruct. R4-M2: the same surface comes back on
+    // success (with the answer's digest), so the fallback marker is reserved for an adapter that
+    // describes nothing.
+    const surface = callModelSurface(options.systemPrompt, options.prompt);
     const url = `${this.baseUrl}/chat/completions`;
     const controller = new AbortController();
     const deadline: Deadline = { signal: controller.signal, ms: options.timeoutMs };
     const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+    // R4-L2: `resolveModel` throws before the request exists (no model configured). That is a call
+    // that never left this adapter, and the record says `not-sent` rather than `thrown`.
+    let sent = false;
     try {
+      const body: OAIRequest = {
+        model:       this.resolveModel(options),
+        messages,
+        stream:      false,
+        max_tokens:  options.tokenBudget,
+        temperature: options.temperature,   // honored (golden determinism when pinned to 0)
+      };
+      sent = true;
       const res = await answered(url, fetch(url, {
         method:  'POST',
         headers: this.headers,
@@ -122,7 +134,10 @@ export class OpenRouterAdapter extends BaseAdapter {
       if (!res.ok) {
         // A 4xx is the provider judging the request. Which of those are auth or quota is D-05's
         // classification (0.6.0); until then it is a failed result, not a retry.
-        return { success: false, output: text, toolCallLog: [], exitCode: res.status, duration: Date.now() - start };
+        return {
+          success: false, output: text, toolCallLog: [], exitCode: res.status, duration: Date.now() - start,
+          modelSurface: callModelSurface(options.systemPrompt, options.prompt, text),
+        };
       }
       const data = JSON.parse(text) as OAIResponse;
       const content    = data.choices[0]?.message.content ?? '';
@@ -134,7 +149,10 @@ export class OpenRouterAdapter extends BaseAdapter {
         toolCallLog: [] as ToolCallRecord[],
         exitCode:    0,
         duration:    Date.now() - start,
+        modelSurface: callModelSurface(options.systemPrompt, options.prompt, content),
       };
+    } catch (err: unknown) {
+      throw err instanceof Error ? withModelSurface(err, surface, sent) : err;
     } finally {
       clearTimeout(timer);
     }

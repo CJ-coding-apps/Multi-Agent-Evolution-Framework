@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TransportError } from '@maf/types';
+import { TransportError, attachedModelSurface, callModelSurface, modelSurfaceWasSent } from '@maf/types';
 import type { AdapterInvokeOptions } from '@maf/types';
 import { OllamaAdapter } from '../index.js';
 
@@ -105,13 +105,21 @@ test('invoke: HTTP 500 is a TransportError naming the status and the body tail',
 });
 
 test('invoke: HTTP 401 is a failed result, not a thrown error', async () => {
-  const reply = async (): Promise<Response> => new Response('{"error":"unauthorized"}', { status: 401 });
-  await withFetch(reply, async () => {
-    const result = await adapter().invoke(CALL);
+  const body = '{"error":"unauthorized"}';
+  const reply = async (): Promise<Response> => new Response(body, { status: 401 });
+  await withRecordedFetch(reply, async (sent) => {
+    const result = await adapter().invoke({ ...CALL, systemPrompt: 'be brief' });
     assert.equal(result.success, false);
     assert.equal(result.exitCode, 401);
-    assert.equal(result.output, '{"error":"unauthorized"}');
+    assert.equal(result.output, body);
     assert.equal('transportError' in result, false);
+    // R5-M1: a judged failure answered, so it is a call that was sent, and the result states the
+    // surface of the request the stub received — the same digests, not one rebuilt by the caller.
+    const init = sent[0];
+    assert.ok(init, 'the request reached fetch');
+    const texts = messageTexts(init);
+    assert.deepEqual(result.modelSurface, callModelSurface(texts.systemPrompt, texts.prompt, body));
+    assert.deepEqual(result.modelSurface, callModelSurface('be brief', 'say hi', body));
   });
 });
 
@@ -129,5 +137,73 @@ test('stream: HTTP 503 is a TransportError, HTTP 401 a plain Error', async () =>
   await withFetch(async () => new Response('unauthorized', { status: 401 }), async () => {
     await assert.rejects(adapter().stream(CALL).next(), (err: unknown) =>
       err instanceof Error && !(err instanceof TransportError) && /401/.test(err.message));
+  });
+});
+
+// R4-M1: the attach path, exercised through the failures this file already covers. What the error
+// carries must be what the stub received: the adapter made the request, so the call is a sent
+// attempt (`modelSurfaceWasSent`), and no answer came back, so there is no output digest.
+
+/** Replaces global `fetch` with `reply`, recording each request's init, and restores it. */
+async function withRecordedFetch(
+  reply: (init: FetchInit) => Promise<Response>,
+  body: (sent: FetchInit[]) => Promise<void>,
+): Promise<void> {
+  const original = globalThis.fetch;
+  const sent: FetchInit[] = [];
+  globalThis.fetch = async (_input: FetchInput, init?: FetchInit): Promise<Response> => {
+    if (init !== undefined) sent.push(init);
+    return reply(init as FetchInit);
+  };
+  try {
+    await body(sent);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+/** The system and user text this backend put in the request body. */
+function messageTexts(init: FetchInit): { systemPrompt: string | undefined; prompt: string } {
+  const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+  const system = body.messages.find((m) => m.role === 'system');
+  const user = body.messages.find((m) => m.role === 'user');
+  assert.ok(user, 'the request carries the prompt as a user message');
+  return { systemPrompt: system?.content, prompt: user.content };
+}
+
+test('R4-M1: a 5xx attaches the surface of the request it sent, and the call is a sent attempt', async () => {
+  const reply = async (): Promise<Response> => new Response('upstream exploded', { status: 500 });
+  await withRecordedFetch(reply, async (sent) => {
+    await assert.rejects(adapter().invoke({ ...CALL, systemPrompt: 'be brief' }), (err: unknown) => {
+      const surface = attachedModelSurface(err);
+      assert.deepEqual(surface, callModelSurface('be brief', 'say hi'));
+      const init = sent[0];
+      assert.ok(init, 'the request reached fetch');
+      const texts = messageTexts(init);
+      assert.equal(surface?.systemPromptSha256, callModelSurface(texts.systemPrompt, texts.prompt).systemPromptSha256);
+      assert.equal(surface?.promptSha256, callModelSurface(texts.systemPrompt, texts.prompt).promptSha256);
+      assert.equal('outputSha256' in (surface ?? {}), false, 'no answer came back, so none is claimed');
+      assert.equal(modelSurfaceWasSent(err), true);
+      return true;
+    });
+  });
+});
+
+test('R4-M1: a timeout attaches the surface of the request it sent, and the call is a sent attempt', async () => {
+  const hang = (init: FetchInit): Promise<Response> => new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) {
+      reject(new Error('expected invoke to pass an AbortSignal to fetch, found none'));
+      return;
+    }
+    signal.addEventListener('abort', () => reject(abortError()), { once: true });
+  });
+  await withRecordedFetch(hang, async (sent) => {
+    await assert.rejects(adapter().invoke({ ...CALL, systemPrompt: 'be brief', timeoutMs: 20 }), (err: unknown) => {
+      assert.deepEqual(attachedModelSurface(err), callModelSurface('be brief', 'say hi'));
+      assert.equal(sent.length, 1, 'the request was made, so the attempt was sent');
+      assert.equal(modelSurfaceWasSent(err), true);
+      return true;
+    });
   });
 });

@@ -1,8 +1,8 @@
-import { makeAgentId, estimateTokens } from '@maf/types';
+import { makeAgentId, estimateTokens, sha256Hex, attachedModelSurface, modelSurfaceWasSent } from '@maf/types';
 import type {
   RunId, TaskId, TurnAdapter, TurnMessage, ToolPlugin, ToolContext,
   PolicyEngineHandle, AttestorHandle, AssistantTurn, ToolCallRequest, ToolResult, ApprovalGateHandle,
-  ModelSurfaceRecord,
+  ModelSurface, ModelSurfaceRecord,
 } from '@maf/types';
 import { ProcessorInterrupt, ContractViolation } from '@maf/processors';
 import type { ProcessorPipeline, HarnessEvent, HookPoint } from '@maf/processors';
@@ -50,6 +50,8 @@ export interface InProcessLoopDeps {
   transcript?: TranscriptSink;
   /** Asked when the policy escalates a call (D-02); reaches executeToolGated with these deps. */
   approvalGate?: ApprovalGateHandle | undefined;
+  /** Where a failure to write the surface record is reported; `process.stderr` when unset. */
+  stderr?: { write(text: string): unknown };
 }
 
 export interface InProcessLoopResult {
@@ -255,8 +257,25 @@ export class InProcessAgentLoop {
     promptHistory: TurnMessage[],
     systemPrompt: string,
   ): Promise<{ turn: AssistantTurn; intercepted: boolean }> {
-    const turn = await this.callModel(promptHistory, systemPrompt);
-    await this.recordSurface(base, stepIndex, turn);
+    // The turn and its record are one call, whether it returns or throws (R2-S1): an adapter that
+    // times out or exits non-zero still took a turn this run asked for, and the surface it was
+    // shown is known exactly. Recording only on return would drop the failed turn from the
+    // evidence — the one turn a reader most wants to see.
+    let turn: AssistantTurn | undefined;
+    let failure: unknown;
+    try {
+      turn = await this.callModel(promptHistory, systemPrompt);
+    } catch (err: unknown) {
+      failure = err;
+      throw err;
+    } finally {
+      // A failed turn records the surface the adapter attached to its error (R3-S1): an adapter
+      // composes the system block (role prompt + wire protocol + catalogue) and the argv, and this
+      // loop holds only the role prompt. Recording *that* would name bytes the backend never saw.
+      await this.recordSurface(base, stepIndex, turn, systemPrompt, failure);
+    }
+    // The `finally` above records on both paths; a returned turn is the only way here.
+    if (turn === undefined) throw new Error('unreachable: adapter.sendTurn returned no turn');
     if (!this.deps.pipeline) return { turn, intercepted: false };
     const ev = await this.deps.pipeline.run({ ...base, hook: 'after_model', stepIndex, turn });
     const first = this.firstEvent<{ turn: AssistantTurn }>(ev, 'after_model');
@@ -268,27 +287,68 @@ export class InProcessAgentLoop {
    * Records what this turn showed the model (F4), to the bundle and the transcript. It runs before
    * the `after_model` hook, because the evidence is about what the model *was shown*, which no
    * processor that edits the turn can change after the fact.
+   *
+   * An adapter that reports no surface still gets a record (L1): the system block this loop handed
+   * it is known exactly, so its digest is the same evidence a reporting adapter carries. The prompt
+   * and output are left absent, not hashed as empty strings — a governed turn's prompt is the
+   * serialized history and its answer is a parsed `AssistantTurn`, neither a single byte string, and
+   * "not recorded" must read differently from "recorded as empty".
+   *
+   * `turn` is absent when the model call threw (R2-S1): the record is still written, with no
+   * `outputSha256` and `error: 'thrown'`. What it carries is the surface the adapter attached to
+   * its error when it attached one (R3-S1) — a backend that composes its own system block and argv
+   * knows what it sent and this loop does not. Only when the adapter attached nothing does the loop
+   * fall back to the role prompt it holds, and that record is marked `surfaceSource: 'fallback'`,
+   * because the role prompt is not the system block the backend was sent. The write is best-effort
+   * (R2-L2): this runs in the call's `finally`, so a recorder that throws would replace the
+   * adapter's error; it is reported on stderr instead, and the call's own outcome stands.
    */
   private async recordSurface(
     base: { runId: RunId; taskId: TaskId; role: string },
     stepIndex: number,
-    turn: AssistantTurn,
+    turn: AssistantTurn | undefined,
+    systemPrompt: string,
+    failure: unknown,
   ): Promise<void> {
-    const surface = turn.modelSurface;
-    if (!surface) return;
+    const warn = (message: string): void => {
+      (this.deps.stderr ?? process.stderr).write(`[maf] warning: ${message}\n`);
+    };
+    // What the adapter described wins: its result's surface, or the one it attached to the error it
+    // threw (R3-S1). Only when it described neither does the loop build one — and that one is
+    // marked, because the role prompt and the system block the backend was sent are different text.
+    const reported = turn?.modelSurface ?? attachedModelSurface(failure, warn);
+    const surface = reported ?? {
+      systemPromptSha256: sha256Hex(systemPrompt), toolCatalog: '', argv: [],
+    };
     // `tier` names which half of the run produced this call (WP-3.0c): the loop's own governed turn
     // is 'in-process', and a cli-tier `invoke` the dispatcher records is 'cli'. Same record shape
-    // both places, so "every role call is in the record" is one array, not two.
+    // both places, so "every model call is in the record" is one array, not two.
     const record: ModelSurfaceRecord = {
       role: base.role, taskId: base.taskId, turn: stepIndex + 1, ...surface, tier: 'in-process',
+      kind: 'role-call',
+      // R4-L2: a call the adapter never sent (no model configured, a binary that could not start)
+      // is still recorded, but it is not a turn the model saw: `not-sent`, not `thrown`.
+      ...(turn === undefined ? { error: (modelSurfaceWasSent(failure) ? 'thrown' : 'not-sent') as 'thrown' | 'not-sent' } : {}),
+      ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
     };
-    this.deps.attestor.recordModelSurface?.(record);
-    await this.deps.transcript?.append(
-      'system',
-      `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; argv ${JSON.stringify(record.argv)}`,
-      { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
-        systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv },
-    );
+    try {
+      this.deps.attestor.recordModelSurface?.(record);
+      await this.deps.transcript?.append(
+        'system',
+        `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; argv ${JSON.stringify(record.argv)}` +
+        (record.error !== undefined ? `; error ${record.error}` : '') +
+        (record.surfaceSource !== undefined ? `; surface source ${record.surfaceSource}` : ''),
+        { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
+          systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
+          ...(record.error !== undefined ? { error: record.error } : {}),
+          ...(record.surfaceSource !== undefined ? { surfaceSource: record.surfaceSource } : {}) },
+      );
+    } catch (err: unknown) {
+      (this.deps.stderr ?? process.stderr).write(
+        `[maf] warning: could not record the model surface for role "${base.role}" ` +
+        `(turn ${record.turn}): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   }
 
   private async callModel(history: TurnMessage[], systemPrompt: string): Promise<AssistantTurn> {

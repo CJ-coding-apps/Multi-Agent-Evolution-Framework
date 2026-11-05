@@ -29,6 +29,11 @@ export interface ScriptedExchange {
   systemPrompt: string;
   /** The task prompt (on a turn, the first user message), or the invoke prompt. */
   prompt: string;
+  /**
+   * The text this call answered with. The adapter builds no `modelSurface` of its own, so a caller
+   * matching surfaces to calls (L1) reads the output here and hashes it itself.
+   */
+  output?: string;
   tools:  readonly ToolPlugin[];
   /** Turn only: the newest tool result in the history — what the model has just seen. */
   lastToolResult?: string;
@@ -88,18 +93,32 @@ export class ScriptedAdapter implements TurnAdapter {
 
   async invoke(o: AdapterInvokeOptions): Promise<AdapterInvokeResult> {
     const kind = classify(o);
-    this.exchanges.push({ via: 'invoke', kind, systemPrompt: o.systemPrompt ?? '', prompt: o.prompt, tools: o.tools ?? [] });
     const answer = (output: string, success = true): AdapterInvokeResult =>
       ({ success, output, toolCallLog: [], exitCode: success ? 0 : 1, duration: 0 });
-    if (kind === 'judge') return answer(formatJudgeVerdict({ passed: false, rationale: SCRIPTED_JUDGE_RATIONALE }));
-    if (kind === 'security-review') return answer(SCRIPTED_REVIEW);
-
-    const script = this.scripts.get(o.prompt);
-    if (!script) return answer(noScript(o.prompt), false);
-    for (const step of script.steps) {
-      if (CLI_EFFECTS.has(step.tool)) await applyEffect(o.workingDir, step);
+    // L1: the exchange is on the record before any effect is applied. The call happened when the
+    // model answered; a write it asked for failing (or an escape out of the working dir) is a fact
+    // about the tree, not a reason for the call that caused it to vanish from the ledger. `output`
+    // is filled in below, so an effect that throws leaves it absent rather than guessed.
+    const exchange: ScriptedExchange = {
+      via: 'invoke', kind, systemPrompt: o.systemPrompt ?? '', prompt: o.prompt,
+      tools: o.tools ?? [],
+    };
+    this.exchanges.push(exchange);
+    let result: AdapterInvokeResult;
+    if (kind === 'judge') result = answer(formatJudgeVerdict({ passed: false, rationale: SCRIPTED_JUDGE_RATIONALE }));
+    else if (kind === 'security-review') result = answer(SCRIPTED_REVIEW);
+    else {
+      const script = this.scripts.get(o.prompt);
+      if (!script) result = answer(noScript(o.prompt), false);
+      else {
+        for (const step of script.steps) {
+          if (CLI_EFFECTS.has(step.tool)) await applyEffect(o.workingDir, step);
+        }
+        result = answer(script.final);
+      }
     }
-    return answer(script.final);
+    exchange.output = result.output;
+    return result;
   }
 
   async *stream(o: AdapterInvokeOptions): AsyncGenerator<string> {
@@ -110,20 +129,24 @@ export class ScriptedAdapter implements TurnAdapter {
     const first = history.find((m) => m.kind === 'user');
     const prompt = first && first.kind === 'user' ? first.text : '';
     const lastTool = [...history].reverse().find((m) => m.kind === 'tool');
-    this.exchanges.push({
+    const exchange: ScriptedExchange = {
       via: 'turn', kind: 'task', systemPrompt: o.systemPrompt ?? '', prompt, tools: o.tools ?? [],
       ...(lastTool && lastTool.kind === 'tool' ? { lastToolResult: lastTool.content } : {}),
-    });
+    };
 
     const script = this.scripts.get(prompt);
-    if (!script) throw new Error(noScript(prompt));
+    if (!script) {
+      this.exchanges.push(exchange);
+      throw new Error(noScript(prompt));
+    }
     const taken = history.filter((m) => m.kind === 'assistant').length;
     const step = script.steps[taken];
-    if (!step) return { text: script.final, toolCalls: [] };
-    return {
-      text: `step ${taken + 1}`,
-      toolCalls: [{ toolUseId: `scripted-${taken + 1}`, toolName: step.tool, input: step.input }],
-    };
+    const turn: AssistantTurn = step
+      ? { text: `step ${taken + 1}`,
+          toolCalls: [{ toolUseId: `scripted-${taken + 1}`, toolName: step.tool, input: step.input }] }
+      : { text: script.final, toolCalls: [] };
+    this.exchanges.push({ ...exchange, output: turn.text });
+    return turn;
   }
 }
 

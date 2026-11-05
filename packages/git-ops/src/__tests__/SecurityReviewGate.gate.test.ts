@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { CliAdapter, AdapterInvokeOptions, AdapterInvokeResult } from '@maf/types';
-import { GateRefused } from '@maf/types';
+import type { CliAdapter, AdapterInvokeOptions, AdapterInvokeResult, ModelSurfaceRecord } from '@maf/types';
+import { GateRefused, TransportError, sha256Hex, withModelSurface } from '@maf/types';
 import { SecurityReviewGate } from '../SecurityReviewGate.js';
 
 const CLEAN_RESULT = JSON.stringify({ findings: [], summary: 'clean', passed: true });
@@ -170,4 +170,167 @@ test('unparseable adapter output fails closed', async () => {
   const res = await g.reviewDiff('diff');
   assert.equal(res.passed, false);
   assert.match(res.summary, /Could not parse/);
+});
+
+// L1: the gate's reviewer call is a model call, and the live rows found it outside the record. One
+// record per attempt, written before the verdict is parsed — a review that blocked is as much a
+// model call as one that passed, and a timed-out one spent tokens too.
+test('L1: reviewDiff() records one security-gate surface, naming the reviewed node', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const g = gate(fakeAdapter(CLEAN_RESULT), { recordSurface: (record) => records.push(record) });
+  const diff = 'diff --git a/db.ts b/db.ts\n+exec(userInput)\n';
+  await g.reviewDiff(diff, { nodeId: 'n7' });
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.ok(record);
+  assert.deepEqual(record, {
+    role: 'security', taskId: 'n7', turn: 1,
+    systemPromptSha256: sha256Hex('You are a security auditor. Respond in strict JSON.'),
+    promptSha256: sha256Hex(`Audit this diff for security issues. Respond with the strict JSON schema in your system prompt.\n\`\`\`diff\n${diff}\n\`\`\``),
+    toolCatalog: '', outputSha256: sha256Hex(CLEAN_RESULT), argv: [],
+    tier: 'cli', nativeTools: 'none', kind: 'security-gate',
+    // R3-S1: this adapter reports no surface, so the gate's own digests are recorded and marked as
+    // the fallback — the security role prompt is not the block a composing backend was sent.
+    surfaceSource: 'fallback',
+  });
+});
+
+test('L1: a blocking verdict is recorded too', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const blocking = JSON.stringify({ findings: [{ severity: 'critical', category: 'x', file: 'a.ts', line: 1, rationale: 'r', remediation: 'm' }], summary: 'bad', passed: false });
+  const g = gate(fakeAdapter(blocking), { recordSurface: (record) => records.push(record) });
+  const res = await g.reviewDiff('diff', { nodeId: 'n1' });
+  assert.equal(res.passed, false);
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.outputSha256, sha256Hex(blocking));
+});
+
+test('L1: a transport failure records its attempt before the throw', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const failing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => ({
+      success: false, output: '', toolCallLog: [], exitCode: 124, duration: 1,
+      transportError: new TransportError('timed out'),
+    }),
+  };
+  const g = gate(failing, { recordSurface: (record) => records.push(record) });
+  await assert.rejects(() => g.reviewDiff('diff', { nodeId: 'n2' }), TransportError);
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.outputSha256, sha256Hex(''));
+});
+
+// L1-S5: an adapter that throws is still a model call MAF made, and the tokens (if any) were
+// spent. The record says so: the digests of what was sent, `outputSha256` absent rather than the
+// digest of an empty string (Constitution §4: "not recorded" must differ from "recorded as empty"),
+// and `error: 'thrown'`.
+test('L1-S5: a throwing adapter still records the attempt, with no output digest', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const throwing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => { throw new Error('spawn ENOENT'); },
+  };
+  const g = gate(throwing, { recordSurface: (record) => records.push(record) });
+  const diff = 'diff --git a/b.ts b/b.ts\n+x\n';
+  await assert.rejects(() => g.reviewDiff(diff, { nodeId: 'n9' }), /spawn ENOENT/);
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.ok(record);
+  assert.equal(record.error, 'thrown');
+  assert.equal('outputSha256' in record, false, 'no output came back, so no digest is written');
+  assert.equal(record.systemPromptSha256, sha256Hex('You are a security auditor. Respond in strict JSON.'));
+  assert.equal(record.promptSha256, sha256Hex(
+    `Audit this diff for security issues. Respond with the strict JSON schema in your system prompt.\n\`\`\`diff\n${diff}\n\`\`\``,
+  ));
+  assert.equal(record.taskId, 'n9');
+  assert.equal(record.kind, 'security-gate');
+});
+
+test('L1: reviewPaths() records nativeTools full; no model call records nothing', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const g = gate(fakeAdapter(CLEAN_RESULT), { recordSurface: (record) => records.push(record) });
+  await g.reviewDiff('   ');
+  await g.reviewPaths([], '/repo');
+  assert.equal(records.length, 0, 'a short-circuit made no model call');
+  await g.reviewPaths(['src/a.ts'], '/repo', { nodeId: 'n3' });
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.nativeTools, 'full');
+  assert.equal(records[0]?.taskId, 'n3');
+});
+
+test('L1: a review outside a node names the gate, not a node', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const g = gate(fakeAdapter(CLEAN_RESULT), { recordSurface: (record) => records.push(record) });
+  await g.reviewDiff('diff');
+  assert.equal(records[0]?.taskId, 'security-gate');
+});
+
+test('L1: the model the gate was configured with is on the record', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const g = gate(fakeAdapter(CLEAN_RESULT), { model: 'claude-sonnet', recordSurface: (record) => records.push(record) });
+  await g.reviewDiff('diff', { nodeId: 'n4' });
+  assert.equal(records[0]?.model, 'claude-sonnet');
+});
+
+// R4-M1: the gate's thrown path prefers the surface the adapter attached — the reviewer's own
+// account of the call — and only falls back to what the gate asked for. R4-L1: a foreign surface
+// that does not validate is ignored, the fallback is recorded and marked, and the defect is warned
+// about rather than silently dropped.
+
+test('R4-M1: a throwing adapter\'s attached surface is what the gate records, not its fallback', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const surface = {
+    systemPromptSha256: 'reviewer-sys', promptSha256: 'reviewer-prompt', toolCatalog: '',
+    argv: ['claude', '--print', '--system-prompt', '<--system-prompt: 9 bytes, sha256 abc>'],
+  };
+  const throwing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => {
+      throw withModelSurface(new Error('the reviewer failed'), surface);
+    },
+  };
+  const g = gate(throwing, { recordSurface: (record) => records.push(record) });
+  await assert.rejects(() => g.reviewDiff('diff --git a/b.ts b/b.ts\n+x\n', { nodeId: 'n9' }), /the reviewer failed/);
+  assert.deepEqual(records[0], {
+    role: 'security', taskId: 'n9', turn: 1, ...surface,
+    tier: 'cli', nativeTools: 'none', kind: 'security-gate', error: 'thrown',
+  });
+  assert.equal('surfaceSource' in (records[0] ?? {}), false, 'the adapter described the call');
+});
+
+test('R4-L1: a malformed attached surface is ignored, the fallback is recorded, and a warning is emitted', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const warnings: string[] = [];
+  const malformed = Object.assign(new Error('the reviewer failed'), {
+    modelSurface: { systemPromptSha256: 'sys', toolCatalog: '', argv: 'not-an-array' },
+  });
+  const throwing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => { throw malformed; },
+  };
+  const g = gate(throwing, {
+    recordSurface: (record) => records.push(record),
+    warn: (line) => warnings.push(line),
+  });
+  await assert.rejects(() => g.reviewDiff('diff --git a/b.ts b/b.ts\n+x\n'), /the reviewer failed/);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? '', /not a valid model surface/);
+  assert.equal(records[0]?.surfaceSource, 'fallback');
+  assert.equal(records[0]?.error, 'thrown');
+  assert.equal(records[0]?.systemPromptSha256, sha256Hex('You are a security auditor. Respond in strict JSON.'));
+});
+
+test('R4-L2: a gate call that never left the adapter is recorded as not-sent', async () => {
+  const records: ModelSurfaceRecord[] = [];
+  const unsent = new Error('no model configured; no request was sent');
+  const throwing: CliAdapter = {
+    ...fakeAdapter(CLEAN_RESULT),
+    invoke: async (): Promise<AdapterInvokeResult> => { throw withModelSurface(unsent, {
+      systemPromptSha256: 'sys', promptSha256: 'prompt', toolCatalog: '', argv: [],
+    }, false); },
+  };
+  const g = gate(throwing, { recordSurface: (record) => records.push(record) });
+  await assert.rejects(() => g.reviewDiff('diff --git a/b.ts b/b.ts\n+x\n'), /no model configured/);
+  assert.equal(records[0]?.error, 'not-sent');
+  assert.equal('outputSha256' in (records[0] ?? {}), false);
 });

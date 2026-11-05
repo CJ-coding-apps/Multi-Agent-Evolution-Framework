@@ -2,11 +2,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord,
-  TurnAdapter, TurnMessage, AssistantTurn,
+  TurnAdapter, TurnMessage, AssistantTurn, ModelSurface,
 } from '@maf/types';
+import { withModelSurface } from '@maf/types';
 import {
   BaseAdapter, spawnAndCollect, spawnStreaming, turnStdout,
-  buildTurnSystemPrompt, serializeHistory, parseTurn, cliModelSurface,
+  buildTurnSystemPrompt, serializeHistory, parseTurn, cliModelSurface, sha256Hex,
 } from '@maf/adapter-base';
 
 const execFileAsync = promisify(execFile);
@@ -71,17 +72,33 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
    */
   async sendTurn(history: TurnMessage[], opts: AdapterInvokeOptions): Promise<AssistantTurn> {
     const systemBlock = buildTurnSystemPrompt(opts.systemPrompt, opts.tools);
-    const input = `${systemBlock}\n\n${serializeHistory(history)}`;
+    const historyText = serializeHistory(history);
+    const input = `${systemBlock}\n\n${historyText}`;
     const args: string[] = [];
     if (opts.model) args.push('--model', opts.model);
-    const result = await this.spawn('codex', args, {
-      cwd:       opts.workingDir,
-      timeoutMs: opts.timeoutMs,
-      input,
-      env:       { ...process.env },
-      ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
-    });
-    return parseTurn(turnStdout(this.name, result));
+    // R3-S1: composed before the spawn and attached to a throw, so a failed governed turn records
+    // the system block this adapter built and the blob codex was written — the loop holds only the
+    // role prompt and would otherwise name bytes codex was never sent.
+    const surface = cliModelSurface(systemBlock, historyText, args, undefined, input);
+    // R4-L2: a spawn that rejects never ran the binary, so nothing was sent; a turn that ran and
+    // failed is a sent attempt. The flag rides the attached record so the loop can tell them apart.
+    let sent = false;
+    try {
+      const result = await this.spawn('codex', args, {
+        cwd:       opts.workingDir,
+        timeoutMs: opts.timeoutMs,
+        input,
+        env:       { ...process.env },
+        ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
+      });
+      sent = true;
+      // Both ways a turn fails — the spawn rejects, or `turnStdout` throws on a run that did not
+      // finish cleanly — are inside the `try`, so the error a failed turn throws always carries its
+      // surface (R3-S1).
+      return { ...parseTurn(turnStdout(this.name, result)), modelSurface: surface };
+    } catch (err: unknown) {
+      throw attach(err, surface, sent);
+    }
   }
 
   async isAvailable(): Promise<boolean> {
@@ -104,12 +121,15 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
     const args: string[] = ['--full-auto'];
     if (options.model) args.push('--model', options.model);
 
+    // R3-S1: the call's surface is composed before the spawn, so a binary that cannot start still
+    // carries what it was asked to run.
+    const surface = cliModelSurface(options.systemPrompt, options.prompt, args, undefined, fullPrompt);
     const result = await this.spawn('codex', args, {
       cwd:       options.workingDir,
       timeoutMs: options.timeoutMs,
       input:     fullPrompt,
       env:       { ...process.env },
-    });
+    }).catch((err: unknown): never => { throw attach(err, surface, false); });
     return {
       success:     result.exitCode === 0,
       output:      result.stdout,
@@ -123,7 +143,7 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       // binary takes the prompt on stdin — so it is carried verbatim; the prompt digest is of what
       // was composed and `stdinSha256` of the blob codex was actually written, which joins the
       // system block and the prompt (F7): the two parts do not by themselves say what was sent.
-      modelSurface: cliModelSurface(options.systemPrompt, options.prompt, args, result.stdout, fullPrompt),
+      modelSurface: { ...surface, outputSha256: sha256Hex(result.stdout) },
     };
   }
 
@@ -137,4 +157,13 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
     // Write stdin by injecting via process pipe — handled in spawnStreaming
     for await (const chunk of proc) yield chunk;
   }
+}
+
+/**
+ * R3-S1: the surface of the call rides on whatever the call throws, so a failed turn records what
+ * codex was actually sent. A value that is not an `Error` cannot carry a field; it is rethrown
+ * untouched and the caller records its own fallback, marked as one.
+ */
+function attach(err: unknown, surface: ModelSurface, sent = true): unknown {
+  return err instanceof Error ? withModelSurface(err, surface, sent) : err;
 }
