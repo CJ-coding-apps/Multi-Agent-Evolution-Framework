@@ -1673,6 +1673,55 @@ test('an LCM summary call is written to the transcript with the surface it was m
   }
 });
 
+test('a failed LCM summary attempt is written to the transcript, once per attempt (Z3)', async () => {
+  // Z3: a summary attempt that failed after the adapter was called is a model call the operator must
+  // be able to see, in the same form as a role call (#62's S9). One line per attempt; a returned
+  // failure says so rather than leaving `error` blank, and a `not-sent` failure says that.
+  const adapter = new CliOnlyAdapter();
+  const injector = {
+    assemble: async () => ({
+      systemPromptPrefix: '',
+      lcmSummaryFailures: [{
+        level: 0, messages: 2, model: 'summary-model',
+        systemPromptSha256: 'a'.repeat(64), promptSha256: 'b'.repeat(64), outputSha256: 'c'.repeat(64),
+      }, {
+        level: 1, messages: 1, error: 'not-sent' as const, surfaceSource: 'fallback' as const,
+        systemPromptSha256: 'd'.repeat(64),
+      }],
+    }),
+  } as unknown as GraphAwareInjector;
+  const f = await makeFixture({
+    roleExecution: 'cli', adapter, policyHandler: ALLOW, injector,
+  });
+  try {
+    await f.dispatcher.runNode(makeNode(ANALYST));
+    const lines = f.transcript.entries.filter((e) => e.content.startsWith('[surface] lcm summary (failed)'));
+    assert.equal(lines.length, 2, 'one line per failed attempt, and no line for a call that never failed');
+
+    assert.match(
+      lines[0]!.content,
+      /^\[surface\] lcm summary \(failed\) \(level 0, 2 message\(s\)\): model summary-model; /,
+    );
+    assert.match(lines[0]!.content, new RegExp(`system sha256 a{64}; prompt sha256 b{64}; output sha256 c{64}`));
+    assert.match(lines[0]!.content, /adapter returned a failure$/,
+      'a returned failure has no `error`; the line says which fact that is');
+    assert.equal(lines[0]!.metadata.failed, true);
+    assert.equal(lines[0]!.metadata.kind, 'lcm-summary');
+    assert.equal(lines[0]!.metadata.level, 0);
+    assert.equal(lines[0]!.metadata.messages, 2);
+    assert.equal(lines[0]!.metadata.outputSha256, 'c'.repeat(64));
+    assert.equal(lines[0]!.metadata.error, undefined);
+
+    assert.match(lines[1]!.content, /\(level 1, 1 message\(s\)\)/);
+    assert.match(lines[1]!.content, /error not-sent; surface source fallback$/);
+    assert.equal(lines[1]!.metadata.error, 'not-sent');
+    assert.equal(lines[1]!.metadata.surfaceSource, 'fallback');
+    assert.equal(typeof lines[1]!.metadata.taskId, 'string', 'the attempt is attributed to the node\'s task');
+  } finally {
+    await f.cleanup();
+  }
+});
+
 // R14, at the dispatcher: the tier a node will actually run on decides what the archive renders.
 // A Dolt cue says `call lcm.expand(id)`, and only an in-process turn is handed MAF's tool registry
 // to call it with, so a cli-tier role must be assembled with `mafToolsAvailable: false` — the

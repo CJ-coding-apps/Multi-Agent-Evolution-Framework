@@ -752,6 +752,28 @@ export class RoleDispatcher {
           ...(call.outputSha256 !== undefined ? { outputSha256: call.outputSha256 } : {}) },
       );
     }
+    // Z3: a summary attempt that failed after the adapter was called gets its own line, in the same
+    // form as a role call's (#62's S9). A retried attempt that then succeeded appears twice: once
+    // here and once as the summary. `error` is absent when the adapter returned a failed result
+    // (Z1); the line says so rather than writing `(none)`, which would read as "not recorded".
+    for (const failure of assembled.lcmSummaryFailures ?? []) {
+      await this.config.transcript.append(
+        'system',
+        `[surface] lcm summary (failed) (level ${failure.level}, ${failure.messages} message(s)): ` +
+        `model ${failure.model ?? '(unrecorded)'}; system sha256 ${failure.systemPromptSha256}; ` +
+        `prompt sha256 ${failure.promptSha256 ?? '(none)'}; output sha256 ${failure.outputSha256 ?? '(none)'}; ` +
+        (failure.error !== undefined ? `error ${failure.error}` : 'adapter returned a failure') +
+        (failure.surfaceSource !== undefined ? `; surface source ${failure.surfaceSource}` : ''),
+        { agentRole: role.role, taskId, nodeId: node.id, tier: 'cli', kind: 'lcm-summary',
+          failed: true, level: failure.level, messages: failure.messages,
+          systemPromptSha256: failure.systemPromptSha256,
+          ...(failure.promptSha256 !== undefined ? { promptSha256: failure.promptSha256 } : {}),
+          ...(failure.outputSha256 !== undefined ? { outputSha256: failure.outputSha256 } : {}),
+          ...(failure.model !== undefined ? { model: failure.model } : {}),
+          ...(failure.error !== undefined ? { error: failure.error } : {}),
+          ...(failure.surfaceSource !== undefined ? { surfaceSource: failure.surfaceSource } : {}) },
+      );
+    }
     for (const record of assembled.lcmDegraded ?? []) {
       // L3c/V8/V10: say which thing happened. A root too large is not a failed compaction (its
       // summaries are intact, and it is offered as a cue); a retry that itself failed says so

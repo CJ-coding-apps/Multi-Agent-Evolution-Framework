@@ -171,3 +171,17 @@ test('an empty LCM context adds nothing, and no session means no LCM call', asyn
   await injector(lcm).assemble('a task');
   assert.equal(called, false, 'no session id: nothing to assemble');
 });
+
+test('failed summary attempts are passed through to the dispatcher (Z3)', async () => {
+  // The injector is the only layer that sees the assembly's failure list, and the dispatcher is the
+  // only layer that owns the transcript. Dropping the list here would silently lose the Z3 lines.
+  const failures = [{
+    level: 0, messages: 3, error: 'thrown' as const, model: 'summary-model',
+    systemPromptSha256: 'a'.repeat(64), outputSha256: 'b'.repeat(64),
+  }];
+  const lcm = lcmReturning({ summaryFailures: failures });
+  const assembled = await injector(lcm).assemble('a task', 'session-1', 'coder');
+
+  assert.deepEqual(assembled.lcmSummaryFailures, failures, 'the attempt reaches the layer that writes it');
+  assert.equal(assembled.lcmSummaryCalls, undefined, 'a failure is not also reported as a call');
+});

@@ -1,6 +1,6 @@
 import type {
   MemorySubgraph, MemoryNode, MemoryEdge, GhostCue, LcmSummary, LcmMessage, LcmTrigger,
-  LcmSummarySurface, LcmDegradedRecord,
+  LcmSummarySurface, LcmSummaryFailureSurface, LcmDegradedRecord,
 } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import type { LcmEngine } from '@maf/lcm';
@@ -21,6 +21,11 @@ export interface AssembledContext {
    * when MAF, not the model, decided to make it.
    */
   lcmSummaryCalls?: LcmSummarySurface[];
+  /**
+   * Summary attempts this assembly made that failed after the adapter was called (Z3). The
+   * dispatcher writes one `[surface]` line per attempt, in the same form as a role call's.
+   */
+  lcmSummaryFailures?: LcmSummaryFailureSurface[];
   /** Compactions that could not complete during this assembly (WP-3.2 F5). */
   lcmDegraded?:    LcmDegradedRecord[];
 }
@@ -47,6 +52,7 @@ export class GraphAwareInjector {
     const parts: string[] = [];
     let tokens = 0;
     let lcmSummaryCalls: LcmSummarySurface[] | undefined;
+    let lcmSummaryFailures: LcmSummaryFailureSurface[] | undefined;
     let lcmDegraded: LcmDegradedRecord[] | undefined;
 
     if (agentRole) {
@@ -75,6 +81,7 @@ export class GraphAwareInjector {
       // Passed straight through rather than re-derived here: the assembly is the only place that
       // knows which calls it made and which compactions it could not finish.
       if (ctx.summaryCalls && ctx.summaryCalls.length > 0) lcmSummaryCalls = ctx.summaryCalls;
+      if (ctx.summaryFailures && ctx.summaryFailures.length > 0) lcmSummaryFailures = ctx.summaryFailures;
       if (ctx.degraded && ctx.degraded.length > 0) lcmDegraded = ctx.degraded;
       if (ctx.summaries && ctx.summaries.length > 0) {
         const summaryXml = formatSummaries(ctx.summaries);
@@ -116,6 +123,7 @@ export class GraphAwareInjector {
       systemPromptPrefix,
       estimatedTokens: tokens,
       ...(lcmSummaryCalls !== undefined ? { lcmSummaryCalls } : {}),
+      ...(lcmSummaryFailures !== undefined ? { lcmSummaryFailures } : {}),
       ...(lcmDegraded !== undefined ? { lcmDegraded } : {}),
     };
   }
