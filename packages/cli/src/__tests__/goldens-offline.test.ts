@@ -137,6 +137,50 @@ test('a poisoned project graph and an earlier attempt\'s memory never reach the 
   }
 });
 
+// L1-S7: a goldens task is dispatched through `buildRunStack`, whose per-task `SecurityReviewGate`
+// records its surface into the suite's attestor. Dropping that `recordSurface` would leave a goldens
+// bundle missing every review it ran — a writer's change attested as gated with no record of the
+// gate's model call. (The goldens `securityScore` gate is a separate call and belongs to WP-3.7; this
+// covers the dispatch path.)
+test('L1-S7: a goldens task\'s security-gate call reaches the suite bundle', needsLcm, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-goldens-gate-surface-'));
+  const prompt = 'Fix sum.js so test.js passes.';
+  try {
+    await mkdir(path.join(root, '.maf'), { recursive: true });
+    await cp(path.join(REPO, '.maf/policy.yaml'), path.join(root, '.maf/policy.yaml'));
+    const corpus = path.join(root, 'corpus');
+    await cp(path.join(SEED, 'fixtures/coder-sum'), path.join(corpus, 'fixtures/coder-sum'), { recursive: true });
+    await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([{
+      id: 'coder-sum', repoFixture: 'fixtures/coder-sum', prompt, role: 'coder',
+      verifiers: [{ kind: 'test-script', command: 'node', args: ['test.js'], expectExit: 0 }],
+      mustNotModify: ['test.js'], provenance: { source: 'human-decision', ref: 'gate surface' },
+    }]), 'utf8');
+
+    const harness = await loadHarnessFile(await defaultHarnessFile());
+    const scripted = new ScriptedAdapter([{
+      prompt,
+      steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: 'function sum(a,b){ return a + b; }\nmodule.exports = { sum };\n' } }],
+      final: 'fixed',
+    }]);
+    const { result: run, bundlePath } = await runGoldenSuite({
+      cwd: root, corpusRoot: corpus, harness, harnessSource: 'test', agent: scripted, judge: { adapter: scripted },
+      attempts: 1, policy: { value: path.join(root, '.maf/policy.yaml'), typed: true }, runId: makeRunId('gate-surface-run'),
+    });
+    assert.deepEqual(run.solvedTaskIds, ['coder-sum'], 'the writer was dispatched and passed, so a gate ran');
+
+    const statement = JSON.parse(await readFile(bundlePath, 'utf8')) as {
+      predicate?: { modelSurfaces?: Array<Record<string, unknown>> };
+    };
+    const gates = (statement.predicate?.modelSurfaces ?? []).filter((s) => s['kind'] === 'security-gate');
+    assert.equal(gates.length, 1, 'the review of the writer\'s diff is in the suite bundle');
+    assert.equal(gates[0]?.['role'], 'security');
+    assert.equal(gates[0]?.['tier'], 'cli');
+    assert.equal(gates[0]?.['nativeTools'], 'none', 'a diff review asks for no native tools');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function result(over: Partial<GoldenSuiteResult>): GoldenSuiteResult {
   return { harnessSha: 'a'.repeat(64), harnessId: 'h', adapter: 'scripted', attempts: 2, tasks: [], solvedTaskIds: [], ranAt: 't', ...over };
 }

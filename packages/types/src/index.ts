@@ -303,6 +303,12 @@ export interface RunOutcome {
   unscheduled: NodeId[];
   /** Nodes held back because another writer held the working tree at the time. */
   deferredWriters?: NodeId[];
+  /**
+   * Why the run failed before any node existed (L1-S2): the planner's call failed, so there is no
+   * DAG, no node verdict, and nothing unscheduled. Absent on every run that reached its DAG — a
+   * failed node carries its own `failure`, and a run with a DAG but no node failure is not this.
+   */
+  failure?:    RunFailureDetail;
 }
 
 /**
@@ -500,6 +506,20 @@ export type OutcomeFailureKind =
   | 'gate_refused'
   | 'review_refused'
   | 'policy_violation';
+
+/**
+ * Every kind a failed *run* can carry (L1-S2): the node verdicts above, plus `planning_failed` for
+ * a run whose one model call — the planner's — failed, leaving no node to blame. Kept apart from
+ * `OutcomeFailureKind` so a node's failure field cannot claim a kind no node can have.
+ */
+export type RunFailureKind = OutcomeFailureKind | 'planning_failed';
+
+/** The machine-checkable half of a run failure: the kind, and a refusal's rule and tool when named. */
+export interface RunFailureDetail {
+  kind:    RunFailureKind;
+  ruleId?: string;
+  toolId?: string;
+}
 
 /**
  * The machine-checkable half of a node failure (L3): the `kind`, and — when a policy refusal caused
@@ -1485,6 +1505,11 @@ export interface ModelSurface {
    * answer is a parsed `AssistantTurn`, not one stdout string.
    */
   outputSha256?:      string;
+  // L1: the model the call named, when it named one. The planner and the security gate are calls
+  // MAF makes directly rather than through a role's dispatcher, so neither carries a node's
+  // `modelOverride`; without this a reader of the surface could not tell which model was asked for.
+  // Absent when the call asked for the adapter's own default.
+  model?:             string;
   /**
    * The backend argv. Payload positionals — the system-prompt value and the trailing prompt — are
    * replaced by `<name: N bytes, sha256 H>` markers, so the *flags* (including the empty string that
@@ -1517,6 +1542,25 @@ export interface ModelSurfaceRecord extends ModelSurface {
    * keep everything whatever was asked. It is what was *asked for*, not what the backend did with it.
    */
   nativeTools?: 'full' | 'read-only' | 'none';
+  // L1: which of MAF's model calls this record is. A role call says so explicitly; a record from
+  // before this field means the same and still parses. The planner is the run's call (no node), and
+  // the security gate's call names the node whose diff it reviewed in `taskId`, so all three land in
+  // the one array rather than in separate records.
+  kind?: 'role-call' | 'planner' | 'security-gate';
+  // L1-S5: how an attempt ended when the adapter threw and returned no result. The record still
+  // carries the digests of what was sent; `outputSha256` is absent, because no output came back —
+  // "not recorded" must read differently from "recorded as empty" (Constitution §4). Absent on a
+  // call that returned, however it judged the work. R4-L2: `'not-sent'` is a call that failed
+  // before any request left the adapter — no model configured, a binary that could not start — so
+  // the surface describes what it *would* have sent; `'thrown'` is a call that was sent and failed.
+  error?: 'thrown' | 'not-sent';
+  // R3-S1: where this surface came from. `'fallback'` means the call site built it from the bytes it
+  // held (`callModelSurface`) because the adapter reported none and attached none — a call site can
+  // describe the role prompt it passed, but it cannot describe a system block or an argv an adapter
+  // composed. Absent means the adapter described the call, either on its result or on the error it
+  // threw, so the record names what the backend was actually sent. A reader who needs to know
+  // whether a failed turn's digests cover the composed block must check this field.
+  surfaceSource?: 'fallback';
 }
 
 /**
@@ -1637,3 +1681,14 @@ export {
  * `MAF_*` variable in maf's own environment out of a process a patch an agent wrote controls.
  */
 export { toolEnv } from './childEnv.js';
+
+/**
+ * L1: the surface of a model call an adapter did not describe. The planner (`@maf/cli`) and the
+ * security gate (`@maf/git-ops`) both call `adapter.invoke` directly, and the gate's package is a
+ * leaf on this one by design — so the helper lives here, where both already reach, rather than
+ * giving either a new edge to an adapter package that builds the other kind of surface.
+ */
+export {
+  callModelSurface, sha256Hex, withModelSurface, attachedModelSurface, modelSurfaceWasSent,
+} from './surface.js';
+export type { ModelSurfaceCarrier } from './surface.js';
