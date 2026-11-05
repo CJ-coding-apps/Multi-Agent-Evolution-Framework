@@ -538,13 +538,16 @@ test('L1-S6: a gate call retried after a transport failure records both attempts
 // ── WP-3.2 F1, with WP-3.0c's rules applied to the lane ───────────────────────────────────────────
 // `@maf/lcm` compacts by asking the run's own adapter for a summary, and that call used to reach the
 // adapter without a surface record: the bundle's account of what the model was shown was one call
-// short per compaction. A summary attempt that threw left no trace at all. The run below is
+// short per compaction. A summary attempt that failed left no trace at all. The run below is
 // configured to compact on its first assembly (a threshold low enough that any history is over it,
-// and a fresh tail of one), and its model fails the first summary attempt with a transport error —
-// so the bijection has to pair the retried attempt, the one that replaced it, and every planner,
-// gate and turn call around them.
+// and a fresh tail of one), and its model *returns* a transport failure on the first summary
+// attempt — so the bijection has to pair the retried attempt, the one that replaced it, and every
+// planner, gate and turn call around them.
 
-/** The scripted model that answers summarization prompts, failing the first attempt with a timeout. */
+/**
+ * The scripted model that answers summarization prompts, failing the first attempt with a *returned*
+ * transport failure (a timeout result, not a throw) — the Z1 shape.
+ */
 class SummaryScripted extends ScriptedAdapter {
   private attempts = 0;
 
@@ -586,7 +589,7 @@ async function compactingRepo(root: string): Promise<string> {
   return repo;
 }
 
-test('F1: a compacting run records one surface per summary attempt, including the one that threw', needsLcm, async () => {
+test('F1: a compacting run records one surface per summary attempt, including the one that failed', needsLcm, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-surfaces-compact-'));
   try {
     const repo = await compactingRepo(root);
