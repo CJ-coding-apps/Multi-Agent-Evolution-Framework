@@ -284,11 +284,15 @@ test('a timeout kills the runner\'s own children, not only the runner', async (t
   // Signalling only the runner leaves the grandchild alive — which is what the old code did.
   await writeFile(path.join(root, 'hang.test.js'), HANGING_RUNNER);
 
-  // The timeout has to outlive the fixture's own startup, or the run times out before a grandchild
-  // exists and the test proves nothing (measured: the chain took 17 s to start on a contended host,
-  // and a 2 s guard killed it first). 60 s is a guard on a hang, not a wait the test depends on.
-  const result = await new TestRunnerTool().execute({ runner: 'node', timeout: 60_000 }, ctxIn(root));
+  // The timeout is short because the tool's own timer is what this test is about (J3): the fixture
+  // starts its grandchild within the budget (measured: pid written and exit 124 at ~758 ms), and a
+  // long budget would make the test wait it out for no extra proof. The elapsed guard below keeps a
+  // regression to a long timeout red without depending on this host's speed.
+  const started = Date.now();
+  const result = await new TestRunnerTool().execute({ runner: 'node', timeout: 750 }, ctxIn(root));
+  const elapsed = Date.now() - started;
   assert.equal(result.exitCode, 124, result.stdout + result.stderr);
+  assert.ok(elapsed < 5_000, `the call ends on the injected timeout, not a waited-out one (${elapsed} ms)`);
 
   await waitForDeath(await waitForPid(path.join(root, 'grandchild.pid')), 'the timeout');
 });
