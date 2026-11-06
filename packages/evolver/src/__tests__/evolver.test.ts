@@ -385,15 +385,19 @@ test('loop: sensitive-role edit archived unevaluated without approval', async ()
   assert.ok(goldensRan <= 1, 'no evaluation spend on unapproved sensitive edits');
 });
 
-// WP-3.9 H1. `--approve-sensitive` had stopped meaning anything: the loop's pre-evaluation guard
-// was keyed on the flag, but gate b3 fired unconditionally right after it, so an approved edit was
-// stopped before the critic anyway. The flag now decides only b3, and with it set the candidate
-// goes through the whole evaluation and gets the verdict the ordinary stages give it.
-test('loop: an approved sensitive-role edit is evaluated in full and ships on its merits (WP-3.9 H1)', async () => {
+// WP-3.9 K1, correcting H1's own ruling. `--approve-sensitive` means "spend to evaluate it", not
+// "let it ship": with the flag the sensitive edit gets the full evaluation — critic, smoke test,
+// goldens — and its verdict is still needs-approval, with the evaluation stored on the candidate.
+// Nothing is applied; a human applies it. Without the flag nothing is evaluated (the test above).
+test('loop: a flag-on sensitive edit is evaluated in full and its verdict is still needs-approval (WP-3.9 K1)', async () => {
   let goldensRan = 0;
   let criticCalls = 0;
   let smoked = 0;
+  let candidateSha: string | undefined;
+  const shipped: string[] = [];
+  const store = makeGraph();
   const opts = loopOpts({
+    graph: store.graph,
     approveSensitive: true,
     maxRounds: 1,
     metaGenerate: async (system: string): Promise<string> => {
@@ -405,20 +409,37 @@ test('loop: an approved sensitive-role edit is evaluated in full and ships on it
     // model: the harness solves t2 IFF the SECURITY prompt is the revised one
     runGoldens: async (h) => {
       goldensRan++;
+      if (h.sha !== CURRENT.sha) candidateSha = h.sha;
       const thorough = h.roleSet.roles.find((r) => r.role === 'security')?.systemPrompt?.includes('thorough');
       const solved = thorough ? ['t1', 't2'] : ['t1'];
       return suite(solved, h.sha);
     },
     runSmoke: async () => { smoked++; },
-    onShip: async () => {},
+    onShip: async (c) => { shipped.push(c.id); },
     patience: 1,
   });
   const report = await evolve(opts);
-  assert.equal(criticCalls, 1, 'the critic ran for an approved sensitive edit');
-  assert.equal(smoked, 1, 'the smoke test ran for an approved sensitive edit');
+  assert.equal(criticCalls, 1, 'the critic ran for a flag-on sensitive edit');
+  assert.equal(smoked, 1, 'the smoke test ran for a flag-on sensitive edit');
   assert.equal(goldensRan, 2, 'the baseline and the candidate were both evaluated');
-  assert.equal(report.rounds[0]?.outcome, 'ship', 'the normal verdict, not needs-approval');
-  assert.equal(report.ships, 1);
+  assert.equal(report.rounds[0]?.outcome, 'needs-approval', 'the flag buys the evaluation, never the ship');
+  assert.equal(report.ships, 0, 'nothing was applied');
+  assert.deepEqual(shipped, [], 'onShip never ran for a sensitive candidate');
+  assert.match(report.rounds[0]?.note ?? '', /evaluated in full/);
+  assert.match(report.rounds[0]?.note ?? '', /needs-approval/);
+
+  const evaluation = report.rounds[0]?.evaluation;
+  assert.ok(evaluation, 'the evaluated candidate is stored with its evaluation');
+  assert.equal(evaluation.candidateSha, candidateSha);
+  assert.notEqual(evaluation.candidateSha, CURRENT.sha);
+  assert.deepEqual(evaluation.currentScores.solvedTaskIds, ['t1']);
+  assert.deepEqual(evaluation.candidateScores.solvedTaskIds, ['t1', 't2'],
+    'the evaluation the human decides on is the one that was paid for');
+
+  const round = store.nodes.find(
+    (n) => (n as { kind?: string }).kind === 'EvolutionRound',
+  ) as { properties?: Record<string, unknown> } | undefined;
+  assert.ok(round?.properties?.['evaluation'], 'the graph record — what `maf evolve approve` reads — carries it too');
 });
 
 test('loop: --approve-sensitive does not approve a tool widening (b4 unchanged, WP-3.9 H1)', async () => {

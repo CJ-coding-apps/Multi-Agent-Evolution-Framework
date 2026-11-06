@@ -47,8 +47,9 @@ export function registerEvolveCommand(program: Command): void {
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
     .option(
       '--approve-sensitive',
-      'Evaluate edits to safety-adjacent roles (security/reviewer) in full and decide them normally, '
-      + 'instead of archiving them unevaluated as needs-approval; does not approve a tool widening',
+      'Spend to evaluate edits to safety-adjacent roles (security/reviewer) in full (critic, smoke, '
+      + 'goldens) instead of archiving them unevaluated; the verdict is still needs-approval and the '
+      + 'candidate is applied only by a human (maf evolve approve <id>); does not approve a tool widening',
       false,
     )
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")

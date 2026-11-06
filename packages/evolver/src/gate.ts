@@ -41,12 +41,13 @@ export interface GateContext {
   /** Roles whose prompts never change without human approval. */
   safetyAdjacentRoles?: ReadonlySet<string>;
   /**
-   * The operator has approved edits to safety-adjacent roles for this run (WP-3.9 H1).
-   *
-   * It changes stage b3 and nothing else: with it set, such an edit is evaluated like any other
-   * and its verdict comes from the normal stages; without it, b3 asks the operator before any
-   * evaluation spend. Stage b4 never consults it — a tool widening needs approval whatever the
-   * operator approved for role prompts.
+   * The operator has authorized the evaluation spend on an edit to a safety-adjacent role
+   * (WP-3.9 K1). It changes stage b3 and nothing else: with it set, such an edit is evaluated in
+   * full — critic, smoke test, golden suite — and its verdict is still `needs-approval` (stage e's
+   * ship is downgraded); without it, b3 asks the operator before any evaluation spend. The flag
+   * never approves a ship: only a human applies a sensitive candidate, and only by hand. Stage b4
+   * never consults it either — a tool widening needs approval whatever the operator paid to
+   * evaluate.
    */
   approveSensitive?: boolean;
   /** Golden task ids whose verifiers are all llm-judge (rule e needs this). */
@@ -77,6 +78,9 @@ export type GateVeto = Extract<GateDecision, { verdict: 'reject' }> | NeedsAppro
 
 /** The levels that make an added tool a widening rather than another way to read. */
 const WRITE_LEVELS: ReadonlySet<PermissionLevel> = new Set<PermissionLevel>(['write', 'execute', 'dangerous']);
+
+/** The roles whose prompts never change without human approval, unless the caller names its own. */
+const DEFAULT_SAFETY_ADJACENT_ROLES: ReadonlySet<string> = new Set(['security', 'reviewer']);
 
 /**
  * Stage b4, exported (WP-3.9 F7): the widening rule, as a pure function of the manifest and the
@@ -161,14 +165,14 @@ export function gateStatic(ctx: GateStaticContext): GateVeto | undefined {
       return { verdict: 'reject', stage: 'b2-instruction-screening', reason: screening.findings.join(', ') };
   }
 
-  // ── stage b3: human approval for sensitive mutations (plan §6.3 amended) ──
-  // The approval is `approveSensitive`, not the mere existence of this stage: it says the operator
-  // has already decided that edits to these roles may be evaluated, and with it set the candidate
-  // goes through the critic, the smoke test and the golden suite like any other. Without it the
-  // answer is `needs-approval` and nothing is evaluated. Before WP-3.9 H1 this stage fired
-  // unconditionally, so the flag had no effect on the verdict — a caller passed the approval and
-  // was still stopped here, before the critic.
-  const safetyAdjacent = ctx.safetyAdjacentRoles ?? new Set(['security', 'reviewer']);
+  // ── stage b3: human approval for sensitive mutations (plan §6.3 as amended by WP-3.9 K1) ──
+  // `approveSensitive` is permission to SPEND on the evaluation, not to ship: with it set the
+  // candidate goes through the critic, the smoke test and the golden suite, and `gateEvaluate`
+  // still answers `needs-approval` (its stage-e ship is downgraded). Without it the answer is
+  // `needs-approval` here and nothing is evaluated. Before WP-3.9 H1 this stage fired
+  // unconditionally, so the flag had no effect on the verdict; H1 then let a flag-on edit ship on
+  // its merits, which K1 corrects — a sensitive edit never ships without a human.
+  const safetyAdjacent = ctx.safetyAdjacentRoles ?? DEFAULT_SAFETY_ADJACENT_ROLES;
   if (!ctx.approveSensitive && 'role' in manifest.edit && safetyAdjacent.has(manifest.edit.role)) {
     return {
       verdict: 'needs-approval',
@@ -206,6 +210,20 @@ export function gateEvaluate(ctx: GateContext): GateDecision {
       verdict: 'needs-approval',
       reason: 'improvement rests on llm-judge verdicts only — requires human sign-off (plan §6.1 gate rule e)',
     };
+
+  // ── WP-3.9 K1: a sensitive candidate is evaluated, never shipped ──
+  // Reaching here with the flag set means the evaluation would have shipped. The flag bought the
+  // evaluation, not the ship: the verdict is still `needs-approval`, with the evidence stored by
+  // the caller, and only a human applies the candidate. A reject above stays a reject.
+  const safetyAdjacent = ctx.safetyAdjacentRoles ?? DEFAULT_SAFETY_ADJACENT_ROLES;
+  if ('role' in ctx.manifest.edit && safetyAdjacent.has(ctx.manifest.edit.role)) {
+    return {
+      verdict: 'needs-approval',
+      reason: `targets safety-adjacent role "${ctx.manifest.edit.role}": evaluated in full ` +
+        '(critic, smoke test, golden suite) and its verdict is still needs-approval — a sensitive ' +
+        'edit never ships without a human; apply it with `maf evolve approve <id>`',
+    };
+  }
 
   return { verdict: 'ship', improvements: seesaw.improvements };
 }
