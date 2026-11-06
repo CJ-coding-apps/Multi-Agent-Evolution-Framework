@@ -14,6 +14,7 @@ import { createDefaultProcessorRegistry } from '@maf/processors';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
+import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import { resolveGoldensHarness } from './goldens.js';
 
 /**
@@ -63,6 +64,9 @@ export function registerEvolveCommand(program: Command): void {
         policy: { value: opts.policy, typed: cmd.getOptionValueSource('policy') === 'cli' },
         harnessSha: base.sha, headless: true, ...(opts.model ? { model: opts.model } : {}),
         ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
+        // WP-3.2 F12: the stack takes resolved settings. `evolve` reads no `maf.config`, so the
+        // shipped defaults are its resolution — one object, not a second set of constants here.
+        lcm: DEFAULT_MAF_CONFIG.lcm,
       });
 
       const corpus: GoldenTask[] = JSON.parse(await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'));

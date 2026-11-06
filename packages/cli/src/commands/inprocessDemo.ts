@@ -13,6 +13,7 @@ import { componentId } from '@maf/attestation';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { runIsolatedGit } from '@maf/git-ops';
 import { buildRunStack } from '../wiring.js';
+import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 
 /**
@@ -182,7 +183,7 @@ export function registerInProcessDemoCommand(program: Command): void {
       // demo rather than quietly run it with no rules (D-49, F4).
       const stack = await buildRunStack({
         cwd: fixture, mafDir, policy: { value: policyPath, typed: true }, adapter, runId,
-        harnessSha: harness.sha, headless: true,
+        harnessSha: harness.sha, headless: true, lcm: DEFAULT_MAF_CONFIG.lcm,
       });
 
       let output = '';

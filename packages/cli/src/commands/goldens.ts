@@ -21,6 +21,7 @@ import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { harnessesAssetRoot } from '../assets.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { RESOLVER_REFS, buildRunStack, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
+import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import type { PolicyChoice } from '../wiring.js';
 import { committedDefaults, loadHarnessFile, locateStoredHarness } from './harness.js';
 
@@ -180,6 +181,8 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
       cwd: o.cwd, mafDir: evalDir, policy: o.policy, adapter: o.agent, runId: o.runId,
       harnessSha: o.harness.sha, headless: true, ...model,
       ...(o.allowUngoverned === true ? { allowUngoverned: true } : {}),
+      // WP-3.2 F12: resolved settings, not another set of literals. `goldens` reads no config file.
+      lcm: DEFAULT_MAF_CONFIG.lcm,
     });
     let result: GoldenSuiteResult;
     try {

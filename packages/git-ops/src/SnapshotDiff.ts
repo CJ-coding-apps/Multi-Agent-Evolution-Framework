@@ -70,9 +70,14 @@ export function runIsolatedGit(
  * The entries under `.maf/` that a run produces, mirrored from the "MAF runtime state" block of
  * this repository's `.gitignore`. Anything not listed — the policy, roles, config and prompts —
  * is reviewed like any other file.
+ *
+ * A Kùzu database is the file *and* its sibling write-ahead log (D2): every write since the last
+ * `CHECKPOINT` is in `<path>.wal`, and maf's own `MemoryGraph` appends to it while the graph is
+ * open. A snapshot that kept it would report MAF's state as the node's change, so a reader that
+ * correctly wrote nothing fails its diff with `unexpected_change`.
  */
 export const MAF_RUNTIME_STATE = [
-  'runs', 'cache', 'memory.kuzu', 'lcm.db', 'lcm.db-wal', 'lcm.db-shm',
+  'runs', 'cache', 'memory.kuzu', 'memory.kuzu.wal', 'lcm.db', 'lcm.db-wal', 'lcm.db-shm',
   'transcripts', 'attestations', 'harnesses', 'goldens/results', 'evolve',
   // The headless approval gate's pending records: written by MAF when nobody can answer, never by
   // the agent, and in a `--no-worktree` run they would otherwise land in the next writer's diff.

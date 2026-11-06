@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { makeToolId } from '@maf/types';
 import { createDefaultRegistry } from '@maf/tools';
 import { DEFAULT_ROLE_SET, DEFAULT_ROLE_CATALOG } from '../defaults.js';
 import { DEFAULT_MAX_TOOL_ITERATIONS } from '../RoleConfig.js';
@@ -35,6 +36,52 @@ test('read-only roles cannot write through their allowedTools', () => {
         `role ${roleName} unexpectedly grants ${id}`,
       );
     }
+  }
+});
+
+test('every default role can expand the summary a Dolt cue names (F8)', () => {
+  // Dolt mode's cue says `call lcm.expand("<id>")`. A role without the tool would be handed a
+  // pointer it cannot follow, so the cue would be a dead reference rather than a capability.
+  const tools = createDefaultRegistry();
+  assert.ok(tools.get(makeToolId('lcm.expand')), 'the tool is in the registry every role is cut from');
+  for (const role of DEFAULT_ROLE_SET.roles) {
+    assert.ok(
+      role.allowedTools.includes(makeToolId('lcm.expand')),
+      `role "${role.role}" cannot expand the summary its Dolt cue names`,
+    );
+  }
+});
+
+test('the shipped .maf/roles.yaml grants lcm.expand to every role too (F8)', async () => {
+  const mafDir = path.resolve(__dirname, '../../../../.maf');
+  const roles = await RoleRegistry.fromYamlOrDefault(
+    path.join(mafDir, 'roles.yaml'), mafDir, createDefaultRegistry(),
+  );
+  for (const role of roles.list()) {
+    assert.ok(
+      role.allowedTools.includes(makeToolId('lcm.expand')),
+      `shipped role "${role.role}" cannot expand the summary its Dolt cue names`,
+    );
+  }
+});
+
+test('a prompt\'s "Tools available" line names exactly what its role may call (R13)', () => {
+  // The prompt is what the model reads; `allowedTools` is what it may actually call. A prompt that
+  // omits a tool teaches the model it cannot do what it can — the reviewer's line omitted
+  // `lcm.expand` while its catalogue carried it — and one that names a tool it lacks teaches a call
+  // that is refused. Compare the two, for every role whose prompt carries the line.
+  const withLine = DEFAULT_ROLE_SET.roles.filter((r) => /Tools available:/.test(r.systemPrompt ?? ''));
+  assert.ok(withLine.length >= 3, 'the read-only prompts are here to check');
+  for (const role of withLine) {
+    // The list ends at the first dot followed by whitespace — not at the dot in `fs.read`.
+    const line = /Tools available: ([^\n]+?)\.\s/.exec(role.systemPrompt ?? '')?.[1];
+    assert.ok(line, `role "${role.role}" has a malformed Tools-available line`);
+    const named = line.split(',').map((s) => s.trim()).sort();
+    const allowed = role.allowedTools.map((id) => String(id)).sort();
+    assert.deepEqual(
+      named, allowed,
+      `role "${role.role}" advertises ${named.join(', ')} but may call ${allowed.join(', ')}`,
+    );
   }
 });
 

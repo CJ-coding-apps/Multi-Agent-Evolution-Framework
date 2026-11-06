@@ -55,7 +55,7 @@ Output STRICT JSON only, wrapped in a \`\`\`json fenced block:
 
 "passed" is false if any critical or high finding exists.
 
-Tools available: fs.read, fs.list, fs.stat, grep, git.diff, git.log. No writes — you hold no write tool, and a change you make to the tree fails this node, its diff recorded in the run's attestation.`;
+Tools available: fs.read, fs.list, fs.stat, grep, lcm.expand, git.diff, git.log. No writes — you hold no write tool, and a change you make to the tree fails this node, its diff recorded in the run's attestation.`;
 
 const REVIEWER_PROMPT = `You are the Reviewer agent. Read-only. You review diffs for correctness, maintainability, and clarity.
 
@@ -64,26 +64,26 @@ Respond with:
 2. A brief reasoning paragraph.
 3. A bulleted list of specific suggestions (if any).
 
-Tools available: fs.read, grep, git.diff, git.log. No writes — you hold no write tool, and a change you make to the tree fails this node, its diff recorded in the run's attestation.`;
+Tools available: fs.read, grep, lcm.expand, git.diff, git.log. No writes — you hold no write tool, and a change you make to the tree fails this node, its diff recorded in the run's attestation.`;
 
 const CODER_TOOLS: ToolId[] = [
   t('fs.read'), t('fs.write'), t('fs.delete'), t('fs.stat'), t('fs.list'),
-  t('grep'),
+  t('grep'), t('lcm.expand'),
   t('git.status'), t('git.diff'), t('git.add'), t('git.commit'), t('git.log'), t('git.reset'),
   t('patch.apply'),
   t('test.run'),
 ];
 
 const TESTER_TOOLS: ToolId[] = [
-  t('fs.read'), t('fs.list'), t('fs.stat'), t('grep'), t('test.run'), t('patch.apply'),
+  t('fs.read'), t('fs.list'), t('fs.stat'), t('grep'), t('lcm.expand'), t('test.run'), t('patch.apply'),
 ];
 
 const SECURITY_TOOLS: ToolId[] = [
-  t('fs.read'), t('fs.list'), t('fs.stat'), t('grep'), t('git.diff'), t('git.log'),
+  t('fs.read'), t('fs.list'), t('fs.stat'), t('grep'), t('lcm.expand'), t('git.diff'), t('git.log'),
 ];
 
 const REVIEWER_TOOLS: ToolId[] = [
-  t('fs.read'), t('grep'), t('git.diff'), t('git.log'),
+  t('fs.read'), t('grep'), t('lcm.expand'), t('git.diff'), t('git.log'),
 ];
 
 const ANALYST_PROMPT = `You are the Analyst agent. Read-only. You answer a question about the code, investigate, and report. You make no change.
@@ -95,10 +95,10 @@ What you do:
 
 Output: the answer to the question, and the evidence you read to reach it. If the task actually requires a change to the tree, say so — a role that writes must make that change, and this one does not.
 
-Tools available: fs.read, fs.list, fs.stat, grep, git.status, git.diff, git.log. No writes — you hold no write tool, and a change you make to the tree fails this node, its diff recorded in the run's attestation.`;
+Tools available: fs.read, fs.list, fs.stat, grep, lcm.expand, git.status, git.diff, git.log. No writes — you hold no write tool, and a change you make to the tree fails this node, its diff recorded in the run's attestation.`;
 
 const ANALYST_TOOLS: ToolId[] = [
-  t('fs.read'), t('fs.list'), t('fs.stat'), t('grep'), t('git.status'), t('git.diff'), t('git.log'),
+  t('fs.read'), t('fs.list'), t('fs.stat'), t('grep'), t('lcm.expand'), t('git.status'), t('git.diff'), t('git.log'),
 ];
 
 export const DEFAULT_ROLE_SET: RoleSet = {
