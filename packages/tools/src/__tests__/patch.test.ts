@@ -1183,30 +1183,37 @@ test('a restore that does not put the tree back reports restoreFailed; a complet
   const diff = R4_DEL_X + R4_NEW_XY + R4_FAIL_C;
   let snapshotDirs: string[] = [];
   let snapshotMode = 0;
+  let removedBlobs = 0;
   const hooked = new PatchApplyTool({
     beforeRestore: () => {
       // The snapshot is live here, before the call's `finally` removes it, so its directory can be
-      // inspected (K5). Then make the project root unwritable, which is the injected failure K4
-      // names: the restore cannot remove or write anything under it.
+      // inspected (K5). The injected failure is the loss of the blob that would restore `x`, so the
+      // restore cannot put that name back. It is not made by making the project root unwritable:
+      // measured in the Linux container, which runs as root, a 0500 directory is still writable to
+      // root, so a mode-based injection silently turns the restore into a success there and this
+      // test would measure nothing. A missing snapshot source cannot be bypassed by privilege.
       snapshotDirs = readdirSync(tmpdir()).filter((name) => name.startsWith('maf-restore-'));
-      snapshotMode = lstatSync(path.join(tmpdir(), snapshotDirs[0]!)).mode & 0o777;
-      chmodSync(dir, 0o500);
+      const snapshot = path.join(tmpdir(), snapshotDirs[0]!);
+      snapshotMode = lstatSync(snapshot).mode & 0o777;
+      for (const blob of readdirSync(snapshot).filter((name) => name.startsWith('blob-'))) {
+        if (readFileSync(path.join(snapshot, blob), 'utf8') === 'old x\n') {
+          rmSync(path.join(snapshot, blob));
+          removedBlobs += 1;
+        }
+      }
     },
   });
-  try {
-    const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
-    const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
-    assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
-    assert.equal(result.metadata['restoreFailed'], true, 'verification found the tree different from the snapshot');
-    assert.deepEqual(
-      [...(result.metadata['restoreFailedPaths'] as string[])].sort(), ['x'],
-      'the path that differs, not the exception that could not be avoided',
-    );
-    assert.match(result.stderr, /did not put the tree back/);
-    assert.doesNotMatch(result.stderr, /every declared path was restored/);
-  } finally {
-    chmodSync(dir, 0o700);
-  }
+  const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+  const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+  assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+  assert.equal(removedBlobs, 1, 'the injection removed exactly the snapshot source for x');
+  assert.equal(result.metadata['restoreFailed'], true, 'verification found the tree different from the snapshot');
+  assert.deepEqual(
+    [...(result.metadata['restoreFailedPaths'] as string[])].sort(), ['x'],
+    'the path that differs, not the exception that could not be avoided',
+  );
+  assert.match(result.stderr, /did not put the tree back/);
+  assert.doesNotMatch(result.stderr, /every declared path was restored/);
   assert.equal(snapshotDirs.length, 1, 'a live snapshot directory existed while the restore ran');
   assert.equal(snapshotMode, 0o700, 'the snapshot directory is private (K5)');
   assert.equal(
