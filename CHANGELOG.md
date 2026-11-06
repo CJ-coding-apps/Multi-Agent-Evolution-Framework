@@ -32,6 +32,32 @@ is entitled to know which of their own code stops compiling.
   holds every planner surface, `outcome.failure.kind: "planning_failed"` and no subjects (no node
   existed to name); `maf run` prints its path and signature, and `maf attest verify` accepts it.
 
+### Changed
+
+- **`--approve-sensitive` pays for an evaluation; it does not approve a ship** (WP-3.9 K1). The flag
+  used to let an edit to a safety-adjacent role (the evolver's `security` or `reviewer` prompt) ship
+  on its merits — approval granted in advance to something nobody had read. It now means *spend to
+  evaluate it*: with the flag the edit gets the critic, the smoke test and the golden suite, the
+  candidate is stored with that evaluation, and its verdict is still `needs-approval`, applied only by
+  a human with `maf evolve approve <id>`. The gate downgrades its own `ship` for a sensitive target,
+  so no caller can ship one. Without the flag the round stops before the critic, as before. The flag's
+  help text says this, and so do `docs/SECURITY.md` and `docs/DECISIONS.md` (D-15).
+
+### Fixed
+
+- **A failed `patch.apply` puts the tree back and proves it** (WP-3.9 K2–K5). The restore now
+  records the mode of every directory the apply might remove or create, because `git apply` removes a
+  directory it empties — a `0700` or `0750` directory emptied by a failed diff comes back as itself,
+  not as the umask's `0755`. The restored tree is verified against the snapshot (name, kind, mode and
+  bytes, with no extra path left behind) and only a verification failure is reported: `restored` means
+  verified, and a failure is structured — `restoreFailed: true` with the differing paths in the tool
+  result metadata, which the attestation carries, beside the message on stderr. The snapshot is a
+  fresh `0700` directory under the system temp directory with file contents copied into it one at a
+  time rather than held in memory, removed in a `finally`; the restore is no-follow, so a symbolic
+  link left by the apply is refused rather than written through. Limits: there is no crash recovery —
+  a `SIGKILL` mid-apply leaves the tree part-applied, the snapshot directory behind, and nothing that
+  consults it — and a successful edit takes git's file mode, as in 0.5.1.
+
 ## [0.5.1] - 2026-10-22
 
 A patch closing two holes in `patch.apply`'s path declaration, and replacing the design that produced

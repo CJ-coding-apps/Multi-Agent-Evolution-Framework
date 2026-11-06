@@ -415,11 +415,13 @@ each section against the current tree without simulating the sections before it,
 creates `x` and `x/y` (either order), or `x/y` and `x/y/z`, or a file where a non-empty directory
 is, can have written earlier sections when a later one fails — every one of them declared and
 allowed. Before the apply, each declared path and every ancestor is recorded: content and mode for
-a file, the target for a symlink, the kind for a directory, absence for a name that does not
+a file, the target for a symlink, the mode for a directory (K2), absence for a name that does not
 exist. On a non-zero apply the recorded names are removed deepest-first and recreated
 shallowest-first, a name of unchanged kind being rewritten because its content may have changed,
-and directories the apply created are removed. If a declared path cannot be recorded, the call is
-refused before anything is written: a write the tool cannot undo is not one it makes. Rejected:
+and directories the apply created are removed. What was restored is then verified against the
+snapshot (K4): the report says `restored` only when every name, kind, mode and byte matches. If a
+declared path cannot be recorded, the call is refused before anything is written: a write the tool
+cannot undo is not one it makes. Rejected:
 extracting the paths *inside* `execute` and assigning `input.paths` there — the policy engine
 evaluates before `execute`, so it saw `paths: []` and the shipped `protect-secrets` rule was skipped
 for the one tool it had been extended to cover. Rejected: moving the extraction earlier for
@@ -432,7 +434,8 @@ exactly reversible; the snapshot is bounded by the declared set, which is the se
 Rejected: no restore — a part-applied tree is neither the old one nor the new, and 0.5.1's
 `CHANGELOG.md` promises the restore. Limit, recorded: the restore covers the declared paths and
 their ancestors and nothing else, because a sealed `git apply` writes nothing else; a restore that
-itself fails is reported by name on stderr, beside the apply's own error rather than replacing it.
+does not put the tree back is reported by name on stderr and as structured `restoreFailed: true` with
+the paths, beside the apply's own error rather than replacing it (K4).
 
 **(5) A candidate that widens a role with a write tool is the operator's decision, not the
 evolver's refusal.** Stage `b4-write-tool-widening` answered `reject`: a candidate that added a
@@ -443,11 +446,55 @@ registry `permissionLevel`, still taken as the candidate's surface minus the cur
 candidate still cannot ship itself — `maf evolve` records `needs-approval` with the tools and the
 role, and moves on without a smoke test or a golden run. No flag grants this particular approval:
 `--approve-sensitive` decides stage b3 and nothing else — with it set, an edit targeting a
-safety-adjacent role is evaluated and decided normally — and the widening rule runs whether or not
-it is set. What changed is who answers the question. WP-3.7's live row holds on this verdict —
+safety-adjacent role is evaluated in full, and its verdict is still `needs-approval`, applied only
+by a human — and the widening rule runs whether or not it is set. What changed is who answers the
+question. WP-3.7's live row holds on this verdict —
 the row is the end-to-end check on what an operator is offered, and it is why this ruling is
 recorded rather than left as an internal detail. The order the gate asks in — invariants first,
 then b4, both the moment the manifest exists — is its own entry below.
+
+**A sensitive edit is evaluated by permission and applied by a human (round 4, K1).** H1 read
+`--approve-sensitive` as approval granted in advance, so a flag-on edit to a safety-adjacent role
+could ship on its merits. Approving in advance something nobody has read is not a review, and the
+reading let `maf evolve` ship an evolved `security` or `reviewer` prompt that no human had seen.
+The flag now means *spend to evaluate it*: with it the edit gets the critic, the smoke test and the
+golden suite, the candidate is stored with that evaluation, and its verdict is still
+`needs-approval` — the gate downgrades its own `ship` for a sensitive target, so no path ships
+one. Without the flag the round stops before the critic, as before. The evaluation is attached so
+the human who runs `maf evolve approve <id>` decides with the evidence in hand; a `reject` stays a
+`reject`.
+
+**A failed apply's restore is measured, not assumed (round 4, K2–K5).** The restore added in round 3
+put back what it recorded, and three review findings said the record and the claim were both
+narrower than the tree. *K2:* `git apply` removes a directory it empties (measured), so a failed
+apply can destroy a directory the call never declared; the snapshot now records the mode of every
+directory the apply might remove or create, and the restore recreates it with that mode — a `0700`
+and a `0750` directory emptied by a failed diff come back as themselves, not as the umask's
+`0755`. *K3:* what "restored" means is now checked rather than performed: content, mode and
+existence for files **and** directories, and no extra path left behind. The fixtures carry
+non-default modes (`0600` files, a `0755` executable, `0700`/`0750` directories) because a restore
+that only rewrites bytes passes every default-mode fixture. Three mutants were measured dead:
+restore content without mode (3 tests red), leave created directories behind (1 red — the shape
+where the created directory's parents all existed, which no earlier fixture had), and snapshot the
+declared paths without their parents (4 red). The third mutant is why the created-directory test
+exists: in the original `x` file → `x/y` shape the restore removes the new directory as a side
+effect of restoring `x`, so only a directory whose ancestors survived the apply can show it. *K4:*
+only the verification decides. The tool attempts the restore and compares the tree against the
+snapshot; only a verification failure is a restore failure, so an attempt that throws and leaves
+the tree right is reported as restored, and an attempt that reports nothing and leaves a mode wrong
+is not. The failure is structured — `restoreFailed: true` and the differing paths in the tool
+result metadata, which the attestation carries as the call's recorded result, beside the message on
+stderr. *K5:* the snapshot is a fresh `0700` directory under the system temp directory, file
+contents are copied into it one at a time rather than read into memory, and the directory is removed
+in a `finally` whatever the call did; the restore is no-follow — every parent component is
+`lstat`ed, a symbolic link is refused rather than written through, and the refusal surfaces as a
+verification failure, not as a replacement for the apply's own error.
+
+Limits, stated in the present tense: there is no crash recovery — a `SIGKILL` between the apply's
+first write and the restore's last leaves the tree part-applied, and the snapshot directory the
+`finally` would have removed is left behind and is never consulted, so nothing repairs the tree on
+the next call; and a successful edit takes git's file mode as in 0.5.1, so a restore is what
+preserves a mode, not an apply.
 
 **A round that is only in the report was not archived (round 2, G8).** D-59 says the loop *records*
 `needs-approval`; the graph write that makes the record durable was correct but untested, so a loop
@@ -645,11 +692,14 @@ The earlier 1213/1212 count was measured at `4ead112` and predates rounds 2 and 
   already states this; the declaration above is what lets a path rule see the files at all.
 - `--approve-sensitive` changes only whether an edit targeting a safety-adjacent role is evaluated:
   without it the round is archived unevaluated as `needs-approval`; with it the candidate is
-  evaluated in full and can ship on the ordinary gate's verdict. `maf evolve` has no interactive
-  approval, so without the flag there is no way to answer the question inside the run. The flag
-  decides stage b3 only — a tool widening still needs the operator. `docs/SECURITY.md` states this
-  rather than implying either that the flag approves a ship or that an approved candidate cannot
-  reach one.
+  evaluated in full — critic, smoke test, goldens — and its verdict is still `needs-approval`,
+  stored with that evaluation and applied only by `maf evolve approve <id>`. The flag is permission
+  to spend, not to ship: a sensitive edit never reaches `onShip`, whatever the evaluation says, and
+  the gate downgrades its own `ship` to `needs-approval`. `maf evolve` has no interactive approval,
+  so without the flag there is no way to answer the question inside the run — and with it the
+  answer is still the operator's, made with the evaluation in hand. The flag decides stage b3 only
+  — a tool widening still needs the operator. `docs/SECURITY.md` states this rather than implying
+  that the flag approves a ship.
 - A `needs-approval` from the widening rule has no flag that grants it: `maf evolve` records the
   tools and the role and stops. The operator grants a widening by authoring it; there is no
   `--approve-widening`, and this branch does not add one.

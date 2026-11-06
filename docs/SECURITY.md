@@ -686,7 +686,20 @@ one path declaration can answer. Binary patches are refused from their `-` line 
 lines after it from the grammar. What the guarantee is: every path a patch writes is a path the policy saw,
 not atomicity. A patch git rejects outright writes nothing; in a few structural conflicts (`x` and `x/y`
 both created, or a file where a directory exists) git can write some declared, allowed files before failing,
-and maf 0.6.0 restores the declared paths on failure. Absolute names and
+and maf restores the declared paths and their ancestors on failure. Each declared path and every ancestor is
+recorded before the apply: file bytes are copied into a fresh `0700` directory under the system temp
+directory, and the kind, mode and symlink target of each name are recorded — a directory's mode too, because
+`git apply` removes a directory it empties and the restore has to recreate it as it was. On a non-zero apply
+the names are removed deepest-first and recreated shallowest-first, directories the apply created included.
+The result is verified against the snapshot, not assumed: the call reports `restored` only when every name,
+kind, mode and byte matches, and otherwise reports `restoreFailed: true` with the differing paths, both in
+the tool result metadata (which the attestation carries as the call's recorded result) and on stderr, beside
+the apply's own error rather than replacing it. The restore is no-follow: every parent component is
+`lstat`ed, a symbolic link is refused rather than written through, and the refusal is a verification
+failure. Two limits, stated plainly: there is no crash recovery — a `SIGKILL` between the apply's first
+write and the restore's last leaves the tree part-applied, the snapshot directory is not removed, and
+nothing consults it — and a successful edit takes git's file mode, as in 0.5.1, so a mode is preserved by a
+restore, not chosen by an apply. Absolute names and
 names containing `..` are refused by name, `--check` runs before the apply, so a diff git rejects there
 changes nothing, and `--reject` is never passed, so no `.orig` or `.rej` file is left behind. Nothing is
 loosened relative to `git apply` — there is no `--recount` — so a wrong hunk count fails with git's own
@@ -797,14 +810,17 @@ the proposal and no evaluation spend. The gate's permission map is a required ar
 map used to skip the rule silently, and a tool the map does not name is treated as `dangerous`,
 never as `read`.
 
-The only route to a write tool is the operator. An edit whose target role is safety-adjacent
-(`security`, `reviewer`) is routed to the operator at stage `b3` unless the run was started with
-`--approve-sensitive`: without the flag the loop records `needs-approval` after the planner call and
-evaluates nothing; with it the edit is evaluated in full — critic, smoke test, golden suite — and
-receives the verdict those stages give any other candidate, which can be `ship`. The flag approves
-the evaluation, not the shipping: nothing about a sensitive role's result is exempt from the normal
-gate, and `maf evolve` has no interactive prompt, so without the flag there is no way to answer the
-question inside the run. The flag does not touch the widening rule below. An unknown tool id never
+The only route to a write tool is the operator, and the same holds for a sensitive role's prompt.
+An edit whose target role is safety-adjacent (`security`, `reviewer`) never ships without a human.
+Without `--approve-sensitive` the loop records `needs-approval` after the planner call and evaluates
+nothing. With the flag the edit is evaluated in full — critic, smoke test, golden suite — and its
+verdict is **still `needs-approval`**: the candidate is stored with the evaluation attached, and it
+is applied only by `maf evolve approve <id>`, which a human runs. The flag buys the evaluation, not
+the ship; the gate downgrades its own `ship` to `needs-approval` for a sensitive edit, so nothing
+about a sensitive role's result is exempt from that rule. `maf evolve` has no interactive prompt, so
+without the flag there is no way to answer the question inside the run — and with it the answer is
+still the operator's, made with the evaluation in hand. The flag does not touch the widening rule
+below. An unknown tool id never
 reaches the
 widening rule: the invariant stage runs first and refuses the candidate (`reject`, stage
 `b-invariants`), naming the tools the registry does know. An unknown id is a malformed candidate, not
