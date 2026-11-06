@@ -1,4 +1,4 @@
-import type { RunId } from '@maf/types';
+import type { PermissionLevel, RunId } from '@maf/types';
 import type { HarnessConfig } from '@maf/harness-config';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
@@ -10,8 +10,8 @@ import {
   PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, parsePlannerResponse,
 } from './planner.js';
 import type { MetaGenerate, RoleCatalogEntry } from './planner.js';
-import { gateEvaluate } from './gate.js';
-import type { GateDecision } from './gate.js';
+import { gateEvaluate, gateStatic } from './gate.js';
+import type { GateDecision, GateVeto } from './gate.js';
 
 export interface EvolveRoundRecord {
   round: number;
@@ -19,6 +19,20 @@ export interface EvolveRoundRecord {
   gate?: GateDecision;
   outcome: 'ship' | 'reject' | 'no-op' | 'needs-approval' | 'planner-error' | 'smoke-failed' | 'critic-reject';
   note: string;
+  /**
+   * The evaluation a flag-on sensitive edit paid for and did not act on (WP-3.9 K1). The ruling
+   * makes `--approve-sensitive` permission to SPEND on the evaluation, not to ship: the candidate
+   * reaches the critic, the smoke test and the golden suite, its verdict is still `needs-approval`,
+   * and this is the evidence the operator applies by hand (`maf evolve approve <id>`).
+   */
+  evaluation?: SensitiveEvaluation;
+}
+
+/** What the evaluation of a sensitive candidate measured, kept with the stored candidate. */
+export interface SensitiveEvaluation {
+  candidateSha: string;
+  currentScores: GoldenSuiteResult;
+  candidateScores: GoldenSuiteResult;
 }
 
 export interface EvolveOptions {
@@ -38,11 +52,25 @@ export interface EvolveOptions {
   onShip: (candidate: HarnessConfig, improvements: string[]) => Promise<void>;
   roleCatalog: RoleCatalogEntry[];
   knownToolIds: ReadonlySet<string>;
+  /**
+   * Permission level per known tool (WP-3.9 F7: required). The gate's widening rule is the
+   * evolver's one defence against turning a reader into a writer, and while this was optional a
+   * caller that omitted it skipped the rule silently. A tool the map does not name is treated as
+   * `dangerous`, never as harmless.
+   */
+  toolPermissions: ReadonlyMap<string, PermissionLevel>;
   knownProcessorNames: ReadonlySet<string>;
   knownModels?: ReadonlySet<string>;
   safetyAdjacentRoles?: ReadonlySet<string>;
   judgeOnlyTaskIds?: ReadonlySet<string>;
-  /** When false (default), sensitive edits are archived without evaluation. */
+  /**
+   * Permission to spend to evaluate a sensitive edit, not to ship it (WP-3.9 K1). When true, an
+   * edit targeting a safety-adjacent role runs the full evaluation — critic, smoke test, golden
+   * suite — and its verdict is still `needs-approval`: the candidate is stored with its evaluation
+   * and applied only by a human (`maf evolve approve <id>`). When false (default) it is archived
+   * unevaluated as `needs-approval`. It does not approve a tool widening either: stage b4 asks the
+   * operator whatever this says.
+   */
   approveSensitive?: boolean;
 }
 
@@ -81,6 +109,9 @@ async function recordRound(
       round: round.round, outcome: round.outcome, note: round.note,
       harness_sha: harnessSha,
       manifest: round.manifest ?? null, gate: round.gate ?? null,
+      // A sensitive candidate's evaluation is part of the stored candidate (K1): the operator
+      // applies it by hand, and the evidence must outlive this process.
+      ...(round.evaluation ? { evaluation: round.evaluation } : {}),
     },
     runId,
   });
@@ -96,6 +127,15 @@ function baselineFromHistory(history: Digest['goldenHistory'], harness: HarnessC
 }
 
 const CRASH_OK = (e: unknown): e is Error => e instanceof Error;
+
+/** The safety-adjacent role an edit targets, or undefined when it targets none (or no role). */
+function sensitiveRoleOf(
+  manifest: ChangeManifest, safetyAdjacent: ReadonlySet<string>,
+): string | undefined {
+  return 'role' in manifest.edit && safetyAdjacent.has(manifest.edit.role)
+    ? manifest.edit.role
+    : undefined;
+}
 
 /**
  * The AEGIS-lite evolution loop (plan §6.2). Selective invocation: no_digest
@@ -125,6 +165,32 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       } catch (err) {
         r.note = `${r.note} [graph-record-failed: ${err instanceof Error ? err.message : String(err)}]`;
       }
+    };
+
+    // Every gate stage that is free (WP-3.9 G3/G4): the candidate is built and the invariants and
+    // widening rule are asked, with no model call and no evaluation. Called as soon as a manifest
+    // exists and again on the final one, because a critic revision can introduce either defect.
+    const freeCheck = (m: ChangeManifest): { candidate: HarnessConfig } | { veto: GateVeto } => {
+      let candidate: HarnessConfig;
+      try {
+        candidate = applyEdit(base, m.edit, `${base.id}-r${round + 1}`);
+      } catch (err) {
+        // An edit the harness cannot express is a malformed candidate, not a reason to abort the
+        // loop; the invariant stage is where a refusal belongs, and it names what it refused.
+        if (err instanceof ManifestError)
+          return { veto: { verdict: 'reject', stage: 'b-invariants', reason: err.message } };
+        throw err;
+      }
+      const veto = gateStatic({
+        manifest: m, candidate, current: base,
+        knownToolIds: opts.knownToolIds,
+        toolPermissions: opts.toolPermissions,
+        knownProcessorNames: opts.knownProcessorNames,
+        safetyAdjacentRoles: safetyAdjacent,
+        approveSensitive: opts.approveSensitive === true,
+        ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
+      });
+      return veto ? { veto } : { candidate };
     };
 
     // ── 1. Digester ──
@@ -157,12 +223,34 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     }
 
     // ── 3. Pre-evaluation approval routing (§6.3: approve BEFORE evaluation spend) ──
-    const targetsSensitive = 'role' in manifest.edit && safetyAdjacent.has(manifest.edit.role);
-    if (targetsSensitive && !opts.approveSensitive) {
+    // Without the flag a sensitive edit is archived before anything is spent. With it the operator
+    // has paid for the evaluation — not for the ship — so the round continues and step 6 downgrades
+    // the verdict (K1).
+    const sensitiveRole = sensitiveRoleOf(manifest, safetyAdjacent);
+    if (sensitiveRole !== undefined && !opts.approveSensitive) {
       idle++;
       await record(rec({
         manifest, outcome: 'needs-approval',
-        note: `targets safety-adjacent role "${'role' in manifest.edit ? manifest.edit.role : ''}"; archived unevaluated`,
+        note: `targets safety-adjacent role "${sensitiveRole}"; archived unevaluated`,
+      }));
+      if (idle >= patience) { stopReason = 'patience'; break; }
+      continue;
+    }
+
+    // ── 3b. The free gate stages, the moment the candidate manifest exists (WP-3.9 G3/G4) ──
+    // The proposal itself is a model call and cannot be avoided; the critic, the smoke test and
+    // the golden suite are three more, and none of them can change this answer. Running the
+    // invariants (an unknown tool id is refused here, naming the tools that exist) and the
+    // widening rule now means a manifest that widens a reader into a writer — or names a tool
+    // that does not exist — costs one model call and nothing else.
+    const proposed = freeCheck(manifest);
+    if ('veto' in proposed) {
+      const veto = proposed.veto;
+      idle++;
+      await record(rec({
+        manifest, gate: veto,
+        outcome: veto.verdict === 'needs-approval' ? 'needs-approval' : 'reject',
+        note: veto.verdict === 'reject' ? `${veto.stage}: ${veto.reason}` : veto.reason,
       }));
       if (idle >= patience) { stopReason = 'patience'; break; }
       continue;
@@ -203,10 +291,27 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       continue;
     }
 
-    // ── 5. Evolver: apply the FINAL manifest → candidate → smoke test (fail fast) ──
-    const finalCandidate = applyEdit(base, manifest.edit, `${base.id}-r${round + 1}`);
+    // ── 5. Evolver: apply the FINAL manifest → candidate → free stages again → smoke ──
+    // The critic may have replaced the manifest, so the invariants and the widening rule are asked
+    // again about what will actually be smoked: a revision can introduce an unknown tool or a
+    // widening the first check never saw. Still no model call and no golden run after the
+    // proposal — the critic's own calls are the only ones between the two checks.
+    const finalManifest = manifest;
+    const finalCheck = freeCheck(finalManifest);
+    if ('veto' in finalCheck) {
+      const veto = finalCheck.veto;
+      idle++;
+      await record(rec({
+        manifest: finalManifest, gate: veto,
+        outcome: veto.verdict === 'needs-approval' ? 'needs-approval' : 'reject',
+        note: veto.verdict === 'reject' ? `${veto.stage}: ${veto.reason}` : veto.reason,
+      }));
+      if (idle >= patience) { stopReason = 'patience'; break; }
+      continue;
+    }
+    const finalCandidate = finalCheck.candidate;
     try {
-      const smokeTarget = manifest.targetTasks[0];
+      const smokeTarget = finalManifest.targetTasks[0];
       if (smokeTarget) await opts.runSmoke(finalCandidate, smokeTarget);
     } catch (err) {
       idle++;
@@ -221,29 +326,42 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     // ── 6. Gate (mandatory, deterministic) ──
     const candidateScores = await opts.runGoldens(finalCandidate);
     const gate = gateEvaluate({
-      manifest, candidate: finalCandidate, current: base,
+      manifest: finalManifest, candidate: finalCandidate, current: base,
       currentScores: baseline, candidateScores,
       knownToolIds: opts.knownToolIds,
+      toolPermissions: opts.toolPermissions,
       knownProcessorNames: opts.knownProcessorNames,
       safetyAdjacentRoles: safetyAdjacent,
+      approveSensitive: opts.approveSensitive === true,
       ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
       ...(opts.judgeOnlyTaskIds ? { judgeOnlyTaskIds: opts.judgeOnlyTaskIds } : {}),
     });
+
+    // K1: a sensitive edit reaches this point only with the flag, and the gate returns
+    // `needs-approval` even when the evaluation would ship. What the evaluation measured is stored
+    // with the candidate so the human who applies it (`maf evolve approve <id>`) sees the evidence.
+    // The role is read from the FINAL manifest: the critic may have revised the target role.
+    const finalSensitiveRole = sensitiveRoleOf(finalManifest, safetyAdjacent);
+    const evaluation: SensitiveEvaluation | undefined =
+      finalSensitiveRole !== undefined && gate.verdict === 'needs-approval'
+        ? { candidateSha: finalCandidate.sha, currentScores: baseline, candidateScores }
+        : undefined;
 
     if (gate.verdict === 'ship') {
       idle = 0;
       ships++;
       await opts.onShip(finalCandidate, gate.improvements);
-      await record(rec({ manifest, gate, outcome: 'ship', note: `improves ${gate.improvements.join(', ')}` }));
+      await record(rec({ manifest: finalManifest, gate, outcome: 'ship', note: `improves ${gate.improvements.join(', ')}` }));
       base = finalCandidate;
       baseline = candidateScores;
       continue;
     }
     idle++;
     await record(rec({
-      manifest, gate,
+      manifest: finalManifest, gate,
       outcome: gate.verdict === 'needs-approval' ? 'needs-approval' : 'reject',
       note: gate.verdict === 'reject' ? `${gate.stage}: ${gate.reason}` : gate.reason,
+      ...(evaluation ? { evaluation } : {}),
     }));
     if (idle >= patience) { stopReason = 'patience'; break; }
   }

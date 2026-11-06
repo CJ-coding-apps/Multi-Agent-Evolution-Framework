@@ -1,5 +1,6 @@
 import type { MemoryGraph } from '@maf/memory-graph';
 import { intLiteral } from '@maf/memory-graph';
+import { refusePrototypeKey } from '@maf/types';
 
 /**
  * Digester (plan §6.2 step 1) — deterministic evidence assembly. No LLM in v1:
@@ -30,7 +31,10 @@ export interface Digest {
 
 function parseProps(row: Record<string, unknown>): Record<string, unknown> {
   try {
-    return JSON.parse(String(row['n.properties'] ?? '{}')) as Record<string, unknown>;
+    // WP-3.9 G5: a graph row's properties column comes out of `.maf/`, so it is read through the
+    // shared reviver. A refused blob is treated exactly like an unparseable one — empty — so a
+    // poisoned row cannot contribute evidence to the planner.
+    return JSON.parse(String(row['n.properties'] ?? '{}'), refusePrototypeKey) as Record<string, unknown>;
   } catch {
     return {};
   }

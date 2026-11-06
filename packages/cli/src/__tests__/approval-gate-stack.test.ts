@@ -25,6 +25,10 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
   const root = await mkdtemp(path.join(tmpdir(), 'maf-approval-stack-'));
   try {
     const repo = await createDemoFixture(root);
+    // Every production caller ensures its mafDir first (`run.ts`, `goldens.ts`, the demo), and
+    // `buildRunStack` opens `lcm.db` under it eagerly. Created here rather than relied on: this
+    // test passed on Linux only because kuzu creates the parent synchronously there, and on macOS
+    // the SQLite store was the first thing to notice it did not exist.
     const mafDir = path.join(root, 'state');
     // `buildRunStack`'s contract is that the caller has created `mafDir` (run and goldens call
     // `ensureMafDir`); the stores inside it open files and do not create it. This test passed only

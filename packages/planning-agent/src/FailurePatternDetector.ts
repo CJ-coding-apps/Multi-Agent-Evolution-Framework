@@ -1,4 +1,5 @@
 import type { GraphQueryRunner } from '@maf/types';
+import { redactText } from '@maf/types';
 import { recallFailures } from '@maf/memory-graph';
 import type { RecalledFailure } from '@maf/memory-graph';
 
@@ -33,8 +34,10 @@ export class FailurePatternDetector {
 
   formatAsContext(patterns: FailurePattern[]): string {
     if (patterns.length === 0) return '';
-    const items = patterns.map(
-      (p) => `- Task "${p.taskLabel}" → ${p.failureType}${p.filePaths.length > 0 ? ` (on ${p.filePaths[0]})` : ''}`
+    // Redacted on the way into the prompt, not only where the memory graph is written (WP-3.9 F4):
+    // records written before that boundary existed still hold what a past failure put there.
+    const items = patterns.map((p) =>
+      redactText(`- Task "${p.taskLabel}" → ${p.failureType}${p.filePaths.length > 0 ? ` (on ${p.filePaths[0]})` : ''}`)
     ).join('\n');
     return `<past-failures>\nThese similar tasks failed previously — avoid repeating these patterns:\n${items}\n</past-failures>`;
   }

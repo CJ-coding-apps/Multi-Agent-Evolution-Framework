@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { lstat, readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import { toolEnv } from '@maf/types';
 import type { VerifierRef } from './GoldenTask.js';
 
 const execFileAsync = promisify(execFile);
@@ -41,7 +42,9 @@ export async function runVerifier(v: VerifierRef, ctx: VerifierContext): Promise
   switch (v.kind) {
     case 'test-script': {
       try {
-        await execFileAsync(v.command, v.args, { cwd: ctx.workDir, maxBuffer: 4 * 1024 * 1024 });
+        // The script here is agent-written — it runs in the work dir the coder just edited — so it
+        // gets the tool allowlist, not maf's environment: no `MAF_SIGNING_KEY`, no provider token.
+        await execFileAsync(v.command, v.args, { cwd: ctx.workDir, maxBuffer: 4 * 1024 * 1024, env: toolEnv() });
         return { kind: v.kind, passed: true, detail: `${v.command} exited 0` };
       } catch (err) {
         const code = (err as { code?: number }).code;

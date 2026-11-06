@@ -126,6 +126,41 @@ test('a spec file that is not a workflow spec is refused by name', async () => {
   await assert.rejects(() => new DagSynthesizer(ROLES).fromFile(noNodes, RUN_ID), /must contain a JSON object with a "nodes" array/);
 });
 
+test('a spec naming a prototype key is refused as a refusal, naming the file (G5)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'maf-spec-proto-'));
+  // `metadata` is spread into node metadata downstream. A document with an own `__proto__`
+  // anywhere is refused whole at parse time, so nothing downstream ever holds the poisoned object.
+  const proto = path.join(dir, 'proto.json');
+  await writeFile(
+    proto,
+    '{"nodes":[{"id":"a","label":"a","metadata":{"__proto__":{"polluted":true}}}]}',
+    'utf8',
+  );
+  await assert.rejects(
+    () => new DagSynthesizer(ROLES).fromFile(proto, RUN_ID),
+    /proto\.json is refused: the JSON key "__proto__" names a prototype/,
+  );
+  // The refusal is not "not valid JSON": the file parses; naming a prototype is the objection.
+  await assert.rejects(
+    () => new DagSynthesizer(ROLES).fromFile(proto, RUN_ID),
+    (err: unknown) => {
+      assert.doesNotMatch(String(err), /could not read/);
+      return true;
+    },
+  );
+  // Depth does not matter: an edge-level key is refused by the same reviver.
+  const deep = path.join(dir, 'deep.json');
+  await writeFile(
+    deep,
+    '{"nodes":[{"id":"a","label":"a"}],"edges":[{"from":"a","to":"a","kind":{"constructor":{}}}]}',
+    'utf8',
+  );
+  await assert.rejects(
+    () => new DagSynthesizer(ROLES).fromFile(deep, RUN_ID),
+    /deep\.json is refused: the JSON key "constructor" names a prototype/,
+  );
+});
+
 // ── F5: a closed schema, refused at parse time ────────────────────────────────────────────────
 
 function refuses(build: () => unknown, pattern: RegExp): void {
