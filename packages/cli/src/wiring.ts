@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { makeAgentId, makeNodeId, makeTaskId } from '@maf/types';
 import type { DagNode, CliAdapter, GraphQueryRunner, RunId } from '@maf/types';
 import { BlackboardStore } from '@maf/blackboard';
-import { LcmEngine } from '@maf/lcm';
+import { LcmEngine, createAdapterSummarizer, createAdapterSubAgent } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor } from '@maf/attestation';
@@ -22,6 +22,7 @@ import type { HarnessConfig, HarnessStore, ResolvedHarness } from '@maf/harness-
 import type { TaskDispatcher } from '@maf/eval-harness';
 import { importHarness, locateStoredHarness } from './commands/harness.js';
 import { goldensAssetRoot, readAsset } from './assets.js';
+import type { ResolvedMafConfig } from './config/ConfigLoader.js';
 
 /**
  * Shared CLI wiring for run/goldens/evolve commands: one component stack per
@@ -69,6 +70,161 @@ export async function loadCommandPolicy(
   );
 }
 
+/**
+ * The model summarization calls use (D-17): `lcm.model` when the config names one, else the model
+ * the run was given, else the adapter's own. Summarization has its own setting so an operator can
+ * buy a cheaper model for compaction without changing the model that does the work. Defined beside
+ * the one construction that reads it (R1), not in a command file.
+ */
+export function summarizerModelFor(cfg: Pick<ResolvedMafConfig, 'lcm' | 'model'>): string | undefined {
+  return cfg.lcm.model ?? cfg.model;
+}
+
+export interface RunLcmInput {
+  mafDir:    string;
+  /** Where the summarizer's backend runs: the run's working directory. */
+  cwd:       string;
+  adapter:   CliAdapter;
+  /** The model the run was given; `lcm.model` wins for summarization alone. */
+  model?:    string;
+  /** The resolved `lcm` settings the command read. */
+  lcm:       ResolvedMafConfig['lcm'];
+  /** The session this run's archive belongs to (R9): `maf run` uses the run id. */
+  sessionId: string;
+  attestor:  Attestor;
+}
+
+export interface RunLcm {
+  engine: LcmEngine;
+  /** `lcm.expand` for this run's archive (F8). */
+  expand(summaryId: string): ReturnType<LcmEngine['expandSummary']>;
+  close(): void;
+}
+
+/**
+ * The run's LCM wiring — one construction, used by `maf run` and by goldens/evolve (R1).
+ *
+ * The two commands used to each build the engine, the summarizer and the recorder. Two copies is
+ * how `maf run`'s copy survived seven mutants no test touched, so this is the only place they are
+ * built now: the settings that are in force are recorded once on the attestor (R4a), every summary
+ * call is recorded against the node that triggered it with its charge (F1, R5), and a degraded
+ * compaction is recorded and logged (F5).
+ */
+export function createRunLcm(input: RunLcmInput): RunLcm {
+  const summarizerModel = summarizerModelFor({
+    lcm: input.lcm,
+    ...(input.model !== undefined ? { model: input.model } : {}),
+  });
+  const summarizerOptions = {
+    adapter:    input.adapter,
+    workingDir: input.cwd,
+    timeoutMs:  input.lcm.summaryTimeoutMs,
+    ...(summarizerModel !== undefined ? { model: summarizerModel } : {}),
+  };
+  // R4a: what this run actually ran with, recorded once, so a reader of the bundle does not have
+  // to infer the mode, operator or thresholds from the source or from the config it might have had.
+  input.attestor.recordLcmSettings({
+    mode:             input.lcm.mode,
+    operator:         input.lcm.operator === 'agentic-map' ? 'Agentic-Map' : 'LLM-Map',
+    contextThreshold: input.lcm.contextThreshold,
+    freshTailCount:   input.lcm.freshTailCount,
+    summaryTimeoutMs: input.lcm.summaryTimeoutMs,
+    ...(summarizerModel !== undefined ? { model: summarizerModel } : {}),
+  });
+  const engine = new LcmEngine({
+    dbPath:  path.join(input.mafDir, 'lcm.db'),
+    // R9: `.maf/lcm.db` outlives the run, so the engine may only expand its own session's archive.
+    sessionId:       input.sessionId,
+    contextThreshold: input.lcm.contextThreshold,
+    freshTailCount:   input.lcm.freshTailCount,
+    mode:             input.lcm.mode,
+    operator:         input.lcm.operator === 'agentic-map' ? 'Agentic-Map' : 'LLM-Map',
+    // X2: the same deadline the summarizer was built with. The engine uses it to decide how long
+    // a claim written by another engine may still belong to a retry in flight.
+    summaryTimeoutMs: input.lcm.summaryTimeoutMs,
+    summarize:   createAdapterSummarizer(summarizerOptions),
+    runSubAgent: createAdapterSubAgent(summarizerOptions),
+    // F1/R5: a summary is a model call like any other. It goes into the same array, under the node
+    // whose assembly triggered it — with no trigger (a background pass) it is attributed to the
+    // session rather than made to look like a node's call. The charge is the engine's own record.
+    recordSummaryCall: (call) => {
+      // R6 makes the summarizer supply a surface on every backend, so this guard is for a caller
+      // that supplied its own summarizer and did not: recording nothing is honest, inventing a
+      // digest for text this layer never saw is not.
+      if (!call.surface) return;
+      // WP-3.0c, applied to this lane: an attempt that failed after the adapter was handed the
+      // request is a model call MAF made, recorded once per attempt with the surface attached to
+      // the failure. There is no summary for it to describe, so `lcmSummary` is absent and `error`
+      // (with `surfaceSource` when the call site built the surface) says how the attempt ended.
+      // Z1: `error` is present only for a throw or a `not-sent` failure; an adapter that returned a
+      // failed result records its output digest and no `error`, as the planner and gate do.
+      if (!('summaryId' in call)) {
+        input.attestor.recordModelSurface({
+          role: 'lcm',
+          taskId: call.trigger?.taskId ?? makeTaskId(`lcm-${call.sessionId}`),
+          turn: 1,
+          tier: 'cli',
+          nativeTools: 'none',
+          kind: 'lcm-summary',
+          ...call.surface,
+          ...(call.error !== undefined ? { error: call.error } : {}),
+          ...(call.surfaceSource !== undefined ? { surfaceSource: call.surfaceSource } : {}),
+        });
+        return;
+      }
+      input.attestor.recordModelSurface({
+        role: 'lcm',
+        taskId: call.trigger?.taskId ?? makeTaskId(`lcm-${call.sessionId}`),
+        turn: 1,
+        tier: 'cli',
+        nativeTools: 'none',
+        kind: 'lcm-summary',
+        ...call.surface,
+        ...(call.model !== undefined ? { model: call.model } : {}),
+        lcmSummary: {
+          summaryId: call.summaryId,
+          level: call.level,
+          messages: call.messageIds.length,
+          chars: call.content.length,
+          contentTokens: call.contentTokens,
+          tokenBudgetCharged: call.tokenBudgetCharged,
+          ...(call.trigger?.taskId !== undefined ? { taskId: call.trigger.taskId } : {}),
+          ...(call.trigger?.nodeId !== undefined ? { nodeId: call.trigger.nodeId } : {}),
+          ...(call.reportedTokens !== undefined ? { reportedTokens: call.reportedTokens } : {}),
+        },
+      });
+    },
+    // F5: continue uncompacted, and say so where an operator will see it. The transcript line is
+    // written by the dispatcher from `ctx.degraded`, which is per-node; this one is the run's log,
+    // for a background pass that has no node.
+    onDegraded: (record) => {
+      // L3c/V8/V10: an oversized root is not a failed compaction; say which one and what the
+      // injector does. A failed retry says so, and the cli tier's limit is named rather than
+      // reported as a cue it was handed. The dispatcher writes the same sentences to the
+      // transcript for a node's assembly; this one is the run's log.
+      const root = record.summaryId ?? '(unknown)';
+      const tokens = record.tokens ?? '?';
+      console.error(record.reason === 'root-over-budget'
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) ` +
+          `after the one retry it is allowed; it is offered as a cue`
+        : record.reason.startsWith('root-retry-failed')
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) and its ` +
+          `one retry failed (${record.reason.replace(/^root-retry-failed:\s*/, '')}); it is offered as a cue`
+        : record.reason === 'cli-tier-cues'
+        ? `[lcm] the cli tier cannot act on a cue; archive root ${root} (${tokens} tokens) is ` +
+          `omitted rather than offered as one it could not expand`
+        : `[lcm] compaction failed: ${record.reason.replace(/^compaction-failed:\s*/, '')}; ` +
+          `continuing uncompacted`);
+      input.attestor.recordLcmDegraded(record);
+    },
+  });
+  return {
+    engine,
+    expand: (summaryId) => engine.expandSummary(summaryId),
+    close: () => engine.close(),
+  };
+}
+
 export interface RunStack {
   adapter: CliAdapter;
   graph: MemoryGraph;
@@ -83,7 +239,8 @@ export interface RunStack {
    */
   recordPolicyInForce(): void;
   dispatchTask(harness: HarnessConfig, role: string, prompt: string, workDir: string, timeoutMs: number, temperature?: number): Promise<string>;
-  close(): void;
+  /** Resolves once the graph's files are released; a caller may remove `mafDir` after awaiting it. */
+  close(): Promise<void>;
 }
 
 export async function buildRunStack(cfg: {
@@ -99,12 +256,20 @@ export async function buildRunStack(cfg: {
   allowUngoverned?: boolean;
   /** No one is asked anything: an escalated tool call is refused (D-02). goldens and evolve run so. */
   headless?: boolean;
+  /**
+   * The resolved `lcm` settings the command read (WP-3.2 F12). Passed in rather than hard-coded
+   * here: the mode, threshold, tail, model and operator are operator choices, and a second copy
+   * of their defaults in this file is how `maf run`'s config section became inert before.
+   */
+  lcm: ResolvedMafConfig['lcm'];
 }): Promise<RunStack> {
   const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
   // M1: a setup that fails after this point must not leak the handle. Kùzu keeps files open under
   // `mafDir`, and a caller that removes that directory on the way out — goldens' evaluation
   // directory — then fails with ENOTEMPTY, which would replace the error that caused the removal
-  // (a mistyped `--policy`, in the reported case). Nothing here can use a half-built stack.
+  // (a mistyped `--policy`, in the reported case). The close below is awaited: `close()` now
+  // resolves only after the database is released, so the removal that follows it cannot race the
+  // native writes (WP-3.8 follow-up). Nothing here can use a half-built stack.
   let lcm: LcmEngine | undefined;
   try {
     const attestor = new Attestor(cfg.runId, graph, path.join(cfg.mafDir, 'attestations'), Attestor.resolveSigningSecret(process.env), cfg.harnessSha);
@@ -114,14 +279,25 @@ export async function buildRunStack(cfg: {
       recorder: attestor, mafDir: cfg.mafDir,
       env: cfg.headless === true ? { ...process.env, MAF_HEADLESS: '1' } : process.env,
     });
-    const baseTools = createDefaultRegistry();
     const board = new BlackboardStore();
-    const engine = new LcmEngine({
-      dbPath: path.join(cfg.mafDir, 'lcm.db'),
-      contextThreshold: 0.75, freshTailCount: 64, mode: 'Upward',
-      summarize: async (msgs) => msgs.map((m) => m.content.slice(0, 200)).join('\n'),
+    // R1: the one LCM construction, shared with `maf run`. Building it here from the same pieces
+    // is what produced two copies and left `run`'s untested; the settings recorded on the attestor
+    // and the attribution of each summary call are therefore the same in goldens and evolve.
+    const runLcm = createRunLcm({
+      mafDir: cfg.mafDir,
+      cwd:    cfg.cwd,
+      adapter: cfg.adapter,
+      ...(cfg.model !== undefined ? { model: cfg.model } : {}),
+      lcm:       cfg.lcm,
+      sessionId: cfg.runId,
+      attestor,
     });
+    const engine = runLcm.engine;
     lcm = engine;
+    // F8: the Dolt cue names `lcm.expand`; the tool exists in every role registry and resolves
+    // against this run's archive. One expander, shared by the allowlist registry and each task's.
+    const lcmExpand = (summaryId: string) => runLcm.expand(summaryId);
+    const baseTools = createDefaultRegistry({ lcmExpand });
     const injector = new GraphAwareInjector({ graph, lcm: engine, maxNodes: 40, tokenBudget: 4096 });
     const lcmBridge = new BlackboardToLcmAdapter(board, engine, cfg.runId, cfg.runId);
 
@@ -155,11 +331,13 @@ export async function buildRunStack(cfg: {
         await transcript.init();
         const gate = new SecurityReviewGate({
           adapter: cfg.adapter, projectRoot: workDir, securityPrompt: stack.securityPrompt,
+          // L1: a task's gate call is a model call; `runNode` names the node it reviewed.
+          recordSurface: (record) => attestor.recordModelSurface(record),
           ...(cfg.model ? { model: cfg.model } : {}),
         });
         // Bound to this task's directory so the git tools learn its repository root before the agent
         // acts (WP-2.17); the shared `baseTools` above only validates role allowlists.
-        const taskTools = createDefaultRegistry({ projectRoot: workDir });
+        const taskTools = createDefaultRegistry({ projectRoot: workDir, lcmExpand });
         const dispatcher = new RoleDispatcher({
           adapter: cfg.adapter, baseTools: taskTools, roles, injector, policy,
           attestor, approvalGate, graph, transcript, lcmBridge, securityGate: gate,
@@ -177,15 +355,15 @@ export async function buildRunStack(cfg: {
         const value = out['output'];
         return value && value.kind === 'string' ? value.value : '';
       },
-      close() {
-        graph.close();
+      async close() {
+        await graph.close();
         engine.close();
       },
     };
     return stack;
   } catch (err) {
     lcm?.close();
-    graph.close();
+    await graph.close();
     throw err;
   }
 }

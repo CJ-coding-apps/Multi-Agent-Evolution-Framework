@@ -2,9 +2,9 @@ import crypto from 'node:crypto';
 import type {
   DagNode, RunId, RetryPolicy, BlackboardValue, CliAdapter, AdapterInvokeOptions,
   AdapterInvokeResult, PartialNodeOutcome, SecurityReviewResult, ApprovalGateHandle, TaskId,
-  PolicyDecision, ModelSurfaceRecord, AttributedChange, WriterLockLedger, NodeId,
+  PolicyDecision, ModelSurface, ModelSurfaceRecord, AttributedChange, WriterLockLedger, NodeId,
 } from '@maf/types';
-import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY } from '@maf/types';
+import { isTurnAdapter, makeTaskId, NodeFailure, GateRefused, ReviewRefused, TransportError, DEFAULT_RETRY_POLICY, callModelSurface, attachedModelSurface, modelSurfaceWasSent } from '@maf/types';
 import type { ToolRegistry } from '@maf/tools';
 import type { PolicyEngine } from '@maf/policy-engine';
 import type { GraphAwareInjector } from '@maf/prompt-injector';
@@ -721,10 +721,86 @@ export class RoleDispatcher {
     const roleTools = new RoleToolRegistry(this.config.baseTools, role.allowedTools);
     const rolePrompt = await this.config.roles.loadPrompt(role);
 
-    const { systemPromptPrefix } = await this.config.injector.assemble(
-      node.label, this.config.sessionId, role.role,
+    // The node whose assembly this is: a summary call made while preparing its prompt is a model
+    // call MAF made on this node's behalf, and it is attributed and charged here (WP-3.2 F1). A
+    // background compaction with no node passes no trigger and is attributed to the session.
+    const assembled = await this.config.injector.assemble(
+      node.label, this.config.sessionId, role.role, { taskId, nodeId: node.id },
+      // R14: a Dolt cue says "call lcm.expand", and only an in-process turn has MAF's tool registry
+      // to call it with. A cli-tier role gets the archive as summaries instead of an instruction it
+      // cannot follow.
+      { mafToolsAvailable: resolved.tier === 'in-process' },
     );
-    const systemPrompt = [systemPromptPrefix, rolePrompt].filter(Boolean).join('\n');
+    const systemPrompt = [assembled.systemPromptPrefix, rolePrompt].filter(Boolean).join('\n');
+    // The archive's own transcript lines: the calls it made, and any compaction that could not
+    // finish (F1, F5). Written before the node's turn so the call is recorded whether or not the
+    // turn that follows it fails.
+    for (const call of assembled.lcmSummaryCalls ?? []) {
+      await this.config.transcript.append(
+        'system',
+        `[surface] lcm summary ${call.summaryId} (level ${call.level}, ${call.messages} message(s)): ` +
+        `model ${call.model ?? '(unrecorded)'}; system sha256 ${call.systemPromptSha256 ?? '(none)'}; ` +
+        `prompt sha256 ${call.promptSha256 ?? '(none)'}; output sha256 ${call.outputSha256 ?? '(none)'}; ` +
+        `content tokens ${call.contentTokens}; reported tokens ${call.reportedTokens ?? '(none)'}`,
+        { agentRole: role.role, taskId, nodeId: node.id, tier: 'cli', kind: 'lcm-summary',
+          summaryId: call.summaryId, level: call.level, messages: call.messages,
+          contentTokens: call.contentTokens,
+          ...(call.reportedTokens !== undefined ? { reportedTokens: call.reportedTokens } : {}),
+          ...(call.model !== undefined ? { model: call.model } : {}),
+          ...(call.systemPromptSha256 !== undefined ? { systemPromptSha256: call.systemPromptSha256 } : {}),
+          ...(call.promptSha256 !== undefined ? { promptSha256: call.promptSha256 } : {}),
+          ...(call.outputSha256 !== undefined ? { outputSha256: call.outputSha256 } : {}) },
+      );
+    }
+    // Z3: a summary attempt that failed after the adapter was called gets its own line, in the same
+    // form as a role call's (#62's S9). A retried attempt that then succeeded appears twice: once
+    // here and once as the summary. `error` is absent when the adapter returned a failed result
+    // (Z1); the line says so rather than writing `(none)`, which would read as "not recorded".
+    for (const failure of assembled.lcmSummaryFailures ?? []) {
+      await this.config.transcript.append(
+        'system',
+        `[surface] lcm summary (failed) (level ${failure.level}, ${failure.messages} message(s)): ` +
+        `model ${failure.model ?? '(unrecorded)'}; system sha256 ${failure.systemPromptSha256}; ` +
+        `prompt sha256 ${failure.promptSha256 ?? '(none)'}; output sha256 ${failure.outputSha256 ?? '(none)'}; ` +
+        (failure.error !== undefined ? `error ${failure.error}` : 'adapter returned a failure') +
+        (failure.surfaceSource !== undefined ? `; surface source ${failure.surfaceSource}` : ''),
+        { agentRole: role.role, taskId, nodeId: node.id, tier: 'cli', kind: 'lcm-summary',
+          failed: true, level: failure.level, messages: failure.messages,
+          systemPromptSha256: failure.systemPromptSha256,
+          ...(failure.promptSha256 !== undefined ? { promptSha256: failure.promptSha256 } : {}),
+          ...(failure.outputSha256 !== undefined ? { outputSha256: failure.outputSha256 } : {}),
+          ...(failure.model !== undefined ? { model: failure.model } : {}),
+          ...(failure.error !== undefined ? { error: failure.error } : {}),
+          ...(failure.surfaceSource !== undefined ? { surfaceSource: failure.surfaceSource } : {}) },
+      );
+    }
+    for (const record of assembled.lcmDegraded ?? []) {
+      // L3c/V8/V10: say which thing happened. A root too large is not a failed compaction (its
+      // summaries are intact, and it is offered as a cue); a retry that itself failed says so
+      // rather than claiming the archive tried a tighter one; and a cli-tier reader gets the limit
+      // named, because a cue it cannot expand is not an offer.
+      const root = record.summaryId ?? '(unknown)';
+      const tokens = record.tokens ?? '?';
+      const line = record.reason === 'root-over-budget'
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) ` +
+          `after the one retry it is allowed; it is offered as a cue`
+        : record.reason.startsWith('root-retry-failed')
+        ? `[lcm] archive root ${root} still exceeds the injector budget (${tokens} tokens) and its ` +
+          `one retry failed (${record.reason.replace(/^root-retry-failed:\s*/, '')}); it is offered as a cue`
+        : record.reason === 'cli-tier-cues'
+        ? `[lcm] the cli tier cannot act on a cue; archive root ${root} (${tokens} tokens) is ` +
+          `omitted rather than offered as one it could not expand`
+        : `[lcm] compaction failed: ${record.reason.replace(/^compaction-failed:\s*/, '')}; ` +
+          `continuing uncompacted`;
+      await this.config.transcript.append(
+        'system',
+        line,
+        { agentRole: role.role, taskId, nodeId: node.id, kind: 'lcm-degraded',
+          reason: record.reason,
+          ...(record.summaryId !== undefined ? { summaryId: record.summaryId } : {}),
+          ...(record.tokens !== undefined ? { tokens: record.tokens } : {}) },
+      );
+    }
 
     const nodeTask = (node.metadata as Record<string, unknown>)['taskDescription'];
     const userPrompt = typeof nodeTask === 'string' && nodeTask ? nodeTask : node.label;
@@ -739,7 +815,15 @@ export class RoleDispatcher {
     };
     const modelChoice = role.model ?? this.config.modelOverride;
     if (modelChoice) invokeOpts.model = modelChoice;
-    if (role.tokenBudget) invokeOpts.tokenBudget = role.tokenBudget;
+    if (role.tokenBudget) {
+      // F1/R5: the summary call was made for this node, so it spends this node's budget. The engine
+      // records `tokenBudgetCharged` on every call — the backend's reported count when it gave one,
+      // else input plus output — and that is what is subtracted. Recorded always, enforced here,
+      // where a budget exists; no built-in role sets one, and D-52 says so.
+      const summarySpend = (assembled.lcmSummaryCalls ?? [])
+        .reduce((sum, call) => sum + (call.tokenBudgetCharged ?? call.reportedTokens ?? call.contentTokens), 0);
+      invokeOpts.tokenBudget = Math.max(0, role.tokenBudget - summarySpend);
+    }
     if (this.config.temperature !== undefined) invokeOpts.temperature = this.config.temperature;
     // A reader on the cli tier does not get the backend's write tools (F7). The in-process tier
     // needs nothing here — MAF runs every tool through the registry, and a reader's registry holds
@@ -758,18 +842,37 @@ export class RoleDispatcher {
     // completed. A loop that stopped any other way has its own failure, and keeps it.
     let answer: Answer | undefined;
     const ranInProcess = resolved.tier === 'in-process';
+    // T1: whether the in-process pipeline's transcript processor already wrote this turn's
+    // assistant text at `step_end`.
+    let recordedInPipeline = false;
     try {
       if (ranInProcess) {
         const loop = await this.runInProcess(role, invokeOpts, taskId, review);
-        outputForMemory = loop.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
-        shortfall = loopShortfall(role, loop);
-        if (loop.outcome === 'completed') answer = { tier: 'in-process', finalText: loop.finalText, turns: loop.steps };
+        outputForMemory = loop.result.finalText.slice(0, MAX_STORED_OUTPUT_CHARS);
+        shortfall = loopShortfall(role, loop.result);
+        if (loop.result.outcome === 'completed') {
+          answer = { tier: 'in-process', finalText: loop.result.finalText, turns: loop.result.steps };
+        }
+        recordedInPipeline = loop.transcriptRecorded;
       } else {
-        const cliResult = await adapter.invoke(invokeOpts);
-        // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
-        // the same evidence shape as F4's governed turn, `tier: 'cli'`. What the dispatcher asked of
-        // the backend's own tools goes in with it (F3), because for codex and gemini no argv shows it.
-        await this.recordCliSurface(role, taskId, cliResult, invokeOpts.nativeTools);
+        let cliResult: AdapterInvokeResult | undefined;
+        let cliFailure: unknown;
+        try {
+          cliResult = await adapter.invoke(invokeOpts);
+        } catch (err: unknown) {
+          cliFailure = err;
+          throw err;
+        } finally {
+          // The cli-tier call is a model call MAF made, so it belongs in the record (WP-3.0c, D-45):
+          // the same evidence shape as F4's governed turn, `tier: 'cli'`. What the dispatcher asked
+          // of the backend's own tools goes in with it (F3), because for codex and gemini no argv
+          // shows it. The record is written whether the call returned or threw (R2-S1): a backend
+          // that times out or never starts still took a turn this run asked for, and omitting it
+          // would leave that governed writer's failed turn out of the evidence entirely.
+          await this.recordCliSurface(role, taskId, cliResult, invokeOpts, cliFailure);
+        }
+        // The `finally` above records on both paths; a returned result is the only way here.
+        if (cliResult === undefined) throw new Error('unreachable: adapter.invoke returned no result');
         outputForMemory = cliResult.output.slice(0, MAX_STORED_OUTPUT_CHARS);
         shortfall = cliShortfall(role, adapter.name, cliResult);
         answer = { tier: 'cli', result: cliResult };
@@ -793,7 +896,13 @@ export class RoleDispatcher {
       throw err;
     }
 
-    await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
+    // T1: the in-process transcript processor records every step's assistant text, the final one
+    // included, at `step_end`. Appending the final answer again here stored it twice in the
+    // transcript and in `lcm_messages`, so it was summarized and charged twice. The cli tier has no
+    // pipeline, and a custom bundle may leave the transcript processor out; those still append here.
+    if (!recordedInPipeline) {
+      await this.config.transcript.append('assistant', outputForMemory, { agentRole: role.role, nodeId: node.id });
+    }
     await this.config.lcmBridge.flush();
 
     // Every writer's diff is reviewed, once per attempt. In-process that normally happened at
@@ -869,7 +978,7 @@ export class RoleDispatcher {
     invokeOpts: AdapterInvokeOptions,
     taskId: ReturnType<typeof makeTaskId>,
     review: AttemptReview | undefined,
-  ): Promise<InProcessLoopResult> {
+  ): Promise<{ result: InProcessLoopResult; transcriptRecorded: boolean }> {
     const adapter = this.config.adapter;
     if (!isTurnAdapter(adapter)) throw new Error('unreachable: gated by caller');
 
@@ -921,6 +1030,9 @@ export class RoleDispatcher {
         runId:     this.config.runId,
         taskId,
         pipeline,
+        // R2-L2: where the loop reports a surface record it could not write. Same channel as the
+        // dispatcher's own warning and the ungoverned banner.
+        stderr: this.config.stderr ?? process.stderr,
       },
     );
 
@@ -951,54 +1063,95 @@ export class RoleDispatcher {
     }
     // budget_exhausted is returned, not thrown: whether it fails the node depends on the node's
     // allowPartial, which the caller decides after the transcript has the output.
-    return result;
+    //
+    // T1: whether the bundle records step output itself. The dispatcher appends the final answer for
+    // the cli tier, and must not do it again for a pipeline that already wrote every step.
+    return { result, transcriptRecorded: pipeline.names().includes('transcript') };
   }
 
   /**
    * Records a cli-tier role call's model-facing surface (WP-3.0c, D-45), the cli-tier twin of F4's
-   * in-process record: the same shape, `tier: 'cli'`, so "every role call is in the record" is one
-   * array rather than two. The adapter assembles it, each from its own argv; an adapter that
-   * assembles none — an HTTP backend, which has no argv of its own to report — records nothing
-   * rather than an invented surface, exactly as a governed turn with no surface records nothing. A
-   * node's cli-tier call is one turn.
+   * in-process record: the same shape, `tier: 'cli'`, so "every model call is in the record" is one
+   * array rather than two. The adapter assembles it from its own argv when it can; an adapter that
+   * assembles none — `ollama`, `openrouter`, which spawn no process — still gets a record built here
+   * from what this call site sent and received (`callModelSurface`), so the call is not dropped for
+   * lack of an argv. A node's cli-tier call is one turn.
+   *
+   * `result` is absent when the call threw (R2-S1): the surface sent is still known exactly, so the
+   * record carries the digests of what was sent, no `outputSha256` (there was no answer to hash),
+   * and `error: 'thrown'` — or `'not-sent'` (R4-L2) when the adapter marks that no request left it,
+   * as with no model configured or a binary that could not start. The write itself never changes
+   * the call's outcome (R2-L2): a recorder that fails is reported on stderr, and the call's own
+   * result or error still decides the node.
    */
   private async recordCliSurface(
     role: RoleConfig,
     taskId: TaskId,
-    result: AdapterInvokeResult,
-    askedNativeTools: AdapterInvokeOptions['nativeTools'],
+    result: AdapterInvokeResult | undefined,
+    invokeOpts: AdapterInvokeOptions,
+    failure: unknown,
   ): Promise<void> {
-    const surface = result.modelSurface;
-    if (!surface) return;
+    const askedNativeTools = invokeOpts.nativeTools;
+    // L1: an adapter that reports a surface keeps it (its argv is evidence this layer cannot
+    // reconstruct); one that reports none gets the digests of what was sent and answered.
+    // R3-S1: a call that threw reports through the surface attached to its error, if it attached
+    // one; the fallback is marked, because `invokeOpts` is what the dispatcher asked for, not
+    // necessarily the system block or argv the adapter actually composed.
+    const warn = (message: string): void => {
+      (this.config.stderr ?? process.stderr).write(`[maf] warning: ${message}\n`);
+    };
+    const reported = result?.modelSurface ?? attachedModelSurface(failure, warn);
     const record: ModelSurfaceRecord = {
-      role: role.role, taskId, turn: 1, ...surface, tier: 'cli',
+      role: role.role, taskId, turn: 1,
+      ...(reported ?? callModelSurface(invokeOpts.systemPrompt, invokeOpts.prompt, result?.output)),
+      tier: 'cli',
       // F3: what the dispatcher asked of the backend's own tools. `undefined` is the default —
       // nothing was asked, and the backend keeps its native tools — and it is recorded as 'full'
       // rather than left out, because codex and gemini pass no flag either way and their argv
       // cannot tell the two apart. It is what was *asked for*: codex ignores `false` and keeps
       // everything, which the reader can see from the adapter it names.
       //
-      // N3 (3.0c review): the `'none'` arm is unreachable from a role call. A role call asks
-      // `'read-only'` (line above) or nothing at all; `false` is asked only by the planner's and the
-      // security reviewer's calls, and neither records a surface. The arm stays for the type's
-      // completeness, not because any entry this line writes is ever `'none'`.
+      // L1: a role call still asks `'read-only'` or nothing at all, so this line writes `'full'` or
+      // `'read-only'`. The `'none'` arm remains for the type's completeness; the calls that ask for
+      // no tools — the planner's and the security gate's — record their own `'none'` surfaces in
+      // `planGenerator` and `SecurityReviewGate`, in this same array.
       nativeTools: askedNativeTools === false ? 'none' : askedNativeTools === 'read-only' ? 'read-only' : 'full',
+      kind: 'role-call',
+      ...(result === undefined ? { error: (modelSurfaceWasSent(failure) ? 'thrown' : 'not-sent') as 'thrown' | 'not-sent' } : {}),
+      ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
+      ...(invokeOpts.model !== undefined ? { model: invokeOpts.model } : {}),
     };
-    this.config.attestor.recordModelSurface?.(record);
-    await this.config.transcript.append(
-      'system',
-      `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; ` +
-      `prompt sha256 ${record.promptSha256 ?? '(none)'}; output sha256 ${record.outputSha256 ?? '(none)'}; ` +
-      `native tools ${record.nativeTools ?? '(unrecorded)'}; argv ${JSON.stringify(record.argv)}`,
-      { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
-        systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
-        // F7: both digests, so the transcript alone ties the argv's elided markers to what was sent
-        // and ties the output to what came back, without the prompt or the output themselves.
-        ...(record.promptSha256 !== undefined ? { promptSha256: record.promptSha256 } : {}),
-        ...(record.outputSha256 !== undefined ? { outputSha256: record.outputSha256 } : {}),
-        ...(record.stdinSha256 !== undefined ? { stdinSha256: record.stdinSha256 } : {}),
-        nativeTools: record.nativeTools },
-    );
+    try {
+      this.config.attestor.recordModelSurface?.(record);
+      await this.config.transcript.append(
+        'system',
+        `[surface] turn ${record.turn}: system sha256 ${record.systemPromptSha256}; ` +
+        `prompt sha256 ${record.promptSha256 ?? '(none)'}; output sha256 ${record.outputSha256 ?? '(none)'}; ` +
+        `native tools ${record.nativeTools ?? '(unrecorded)'}; argv ${JSON.stringify(record.argv)}` +
+        (record.error !== undefined ? `; error ${record.error}` : '') +
+        (record.surfaceSource !== undefined ? `; surface source ${record.surfaceSource}` : ''),
+        { agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
+          systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
+          // F7: both digests, so the transcript alone ties the argv's elided markers to what was sent
+          // and ties the output to what came back, without the prompt or the output themselves.
+          ...(record.promptSha256 !== undefined ? { promptSha256: record.promptSha256 } : {}),
+          ...(record.outputSha256 !== undefined ? { outputSha256: record.outputSha256 } : {}),
+          ...(record.stdinSha256 !== undefined ? { stdinSha256: record.stdinSha256 } : {}),
+          ...(record.error !== undefined ? { error: record.error } : {}),
+          ...(record.surfaceSource !== undefined ? { surfaceSource: record.surfaceSource } : {}),
+          nativeTools: record.nativeTools },
+      );
+    } catch (err: unknown) {
+      // R2-L2: this runs in the call's `finally`, so letting the recorder's failure out would
+      // replace the transport error with "the transcript could not append" — the node's real
+      // failure lost behind the evidence trail's. The record is best-effort; the call's outcome
+      // is not. Say on stderr what could not be written, and let the call's own result or error
+      // through.
+      (this.config.stderr ?? process.stderr).write(
+        `[maf] warning: could not record the model surface for role "${role.role}" ` +
+        `(turn ${record.turn}): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   }
 
   /**
@@ -1325,7 +1478,8 @@ export class RoleDispatcher {
     let secRes: SecurityReviewResult;
     let refusal: GateRefused | undefined;
     try {
-      secRes = await securityGate.reviewDiff(diff);
+      // L1: the node is named so the gate's surface record joins this node's role records.
+      secRes = await securityGate.reviewDiff(diff, { nodeId: node.id });
     } catch (err: unknown) {
       if (!(err instanceof GateRefused)) throw err;
       refusal = err;

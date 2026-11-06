@@ -101,6 +101,90 @@ graph exits non-zero with `no graph at <path>` and creates nothing — not the e
 database, not its parent directory. Opening the path instead would create an empty database and
 write a file that reads like a successful rescue of nothing.
 
+## Follow-up — `close()` resolves only after the release
+
+The finding, measured at `6beab28` on Linux with Node 22: **10 processes × 60 cycles failed in 3 of
+the 10 processes**, each with `ENOTEMPTY … memory.kuzu`; the same 600 cycles run one process at a
+time failed in none. `KuzuDriver.close()` was synchronous and returned at once. When anything was in
+flight — the `conn.init()` every constructor starts, a query, a schema statement — the release was
+deferred, so the caller's `rm` ran against a directory whose native handles were still open.
+
+Ruling: fix the cause, not the caller. **`close(): Promise<void>`** now resolves only after `ready`
+(that `init()`) has settled, no work is in flight, and both `await conn.close()` and `await
+db.close()` have completed — connection first, then database, as the buffer-manager rule requires.
+A second `close()` returns the same promise, and a query issued after it is refused at once rather
+than queued behind the release. The wait is a counter plus an idle-waiter list (`track()` /
+`whenSettled()`), not a poll: there is no deadline, so nothing here is timing-dependent. `run()`
+still refuses immediately on the `closed` flag.
+
+**`MemoryGraph.close()` is a promise too**, and awaits `schemaReady` before it releases the driver.
+That is not belt-and-braces: the schema sequence has idle gaps between its statements, so the
+driver's in-flight count passes through zero between two of them, and a driver-only close would
+release the database under the statement that follows.
+
+**Every caller awaits it — nothing enforces that.** `MemoryGraphApi.close()` in `@maf/types`
+carries the promise under a `// WP-3.8 follow-up` header. Every caller awaits it today: the
+`graph`, `goldens`, `run`, `evolve` and `inprocess-demo` commands, the `merge` command in
+`main.ts` (line 79), `RunStack.close()` in `wiring.ts` (including the setup-failure path), and
+every test that closes a graph. But the type does not make a caller await it: an unawaited
+`close()` type-checks (the verifier's mutant dropped one at `graph.ts:51` and `tsc` exited 0), and
+the promise is then simply discarded. This repo has no eslint config, so there is no
+floating-promise lint rule to run. Proposed to CJ under WP-3.12 —
+`@typescript-eslint/no-floating-promises` — which would make the unawaited form an error; it is
+**not** added here.
+
+`wiring.ts` keeps its `try`/`catch` close — the release is in the `catch`, not a `finally`. The
+reason is the leak, not `ENOTEMPTY`: a setup that fails after the graph is constructed must still
+release the handle, or the address-space reservation and the native work keep running under the
+`mafDir` that the caller removes next. The success path closes through the `RunStack` the caller
+holds. The comment there says both.
+
+**Before and after, same protocol.** 10 processes × 60 cycles: **3 of 10 failed before, 0 of 10
+after.** The regression tests are retry-free and observe ordering, not duration:
+
+| Pin | Test |
+|---|---|
+| the promise resolves after the connection and then the database have closed, and a `close()` that resolves first is red | `native-lifetime.test.ts` — patches both native `close` methods to record `conn:begin/end`, `db:begin/end` and asserts that exact sequence before `close:resolved`; the early-resolve mutant was run against it and fails it |
+| `close()` during `init()` | the same file — `init()` is held open, `close()` must not have resolved, then it must |
+| `close()` during a query | the same file — the query is held open, completes, and its row is on disk in a re-opened graph |
+| `close()` between two schema statements | the same file — the sequence is held mid-flight, and no statement meets a released database |
+| four processes closing and removing at once, 30 cycles each | the same file — the M1 shape as a **smoke test**, not a regression pin: the child opens, closes and removes with no query, so `init()` is in flight at `close()`. Measured on base `60e93e5` with Kùzu 0.11.3 on macOS **and** Linux: it **passes**. CI at `6beab28` (kuzu 0.11.3, run 39832249760) failed once with `ENOTEMPTY`; neither 0.11.3 nor the reshaped test reproduced it on demand on macOS or Linux, and `close()` now resolves only after both native closes, which removes the window by construction. It targets 0.11.3, whose single-file database removes the case the race needed — a directory entry re-created after `rm`. In the verifier's ten runs, with `close()` mutated to resolve early this 4 × 30 test failed 2 of 10 and unmutated it failed 0 of 10; this session's ten runs of each, on macOS and Linux, failed 0 of 10 in both — it is a race, not a guaranteed red, but it can go red, so "cannot go red" is not a property of the test. The base code at 10 × 60 on 0.7.1 never failed. The regression itself is pinned by the three rows above |
+
+### Round 2 — the graph waits for its own operations, and a failed release fails the close
+
+Two holes the first round left.
+
+**`MemoryGraph` counts its own public operations (C2).** Waiting on the driver's in-flight count was
+not enough: a query issued before `close()` but still awaiting schema setup is invisible to the
+driver, so the graph released underneath it and the query was refused instead of finishing; a
+`querySubgraph` between its node query and its edge query was cut off the same way, silently
+returning edges 0. Every public method now enters through `track()` — the count is incremented
+synchronously, before the method touches `ensureSchema`, so an operation that has passed the
+`closed` check is always counted — and `close()` waits for the count to reach zero before awaiting
+the driver's close. `close()` itself is memoised (`closePromise ??=`), and a call made after it is
+refused at once by the `closed` flag.
+
+**`release()` swallows only what cannot be acted on (C4).** Both native closes are attempted on
+every path, connection first. An init failure has two shapes. When the **database failed to open**
+(the 0.7.x-directory refusal), `Connection.init()` throws before it builds a native connection, so
+`conn.close()` returns normally and `db.close()` is called — and throws on the database's own
+retained rejected init promise — with no live connection to free the database under. When **only the
+connection's `init()` failed**, `conn.close()` throws before it releases the native connection, so
+`db.close()` is skipped and the natively open database is deliberately leaked to the GC rather than
+freed under a connection that may still point into it. Either way the one real error was already
+delivered through `ready`, so the close resolves; reporting it again here would say nothing new.
+Otherwise a native close error **rejects** the close, naming which handle failed and carrying the
+first error as `cause`: a caller in a `finally` must not remove the directory of a database that did
+not close. `close()` also has no deadline, stated as a known property in its JSDoc: a native query
+that never settles keeps it pending (C9).
+
+Tests: a query issued just before `close()` resolves with its real rows and the next is refused; an
+in-flight `querySubgraph` returns real edges; a database close that throws rejects with the message
+above while the connection is still released first; a connection whose `init()` failed releases in
+order and resolves. Removing the graph's in-flight wait turns the first two red; resolving the
+driver's `close()` before the release turns six of the thirteen tests in the file red (3, 5, 6, 7,
+11, 12) — the exact list and the logs are in the PR body.
+
 ## Acceptance
 
 | WP-3.8 acceptance | Where it is discharged |

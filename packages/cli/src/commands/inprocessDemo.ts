@@ -13,6 +13,7 @@ import { componentId } from '@maf/attestation';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { runIsolatedGit } from '@maf/git-ops';
 import { buildRunStack } from '../wiring.js';
+import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 
 /**
@@ -136,14 +137,14 @@ export function demoFailures(o: DemoObservation): string[] {
  * its result block names the bundle as the proof — so the error is not swallowed. A dispatch that
  * already failed is still attested, and its error, the cause, is the one thrown.
  */
-export async function attestAndClose(stack: { close(): void }, attest: () => Promise<unknown>, dispatchError?: unknown): Promise<void> {
+export async function attestAndClose(stack: { close(): Promise<void> }, attest: () => Promise<unknown>, dispatchError?: unknown): Promise<void> {
   try {
     await attest();
   } catch (err) {
     if (dispatchError === undefined) throw err;
     console.error(`[demo] the attestation bundle could not be written either: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
-    stack.close();
+    await stack.close();
   }
   if (dispatchError !== undefined) throw dispatchError;
 }
@@ -198,7 +199,7 @@ export function registerInProcessDemoCommand(program: Command): void {
       // demo rather than quietly run it with no rules (D-49, F4).
       const stack = await buildRunStack({
         cwd: fixture, mafDir, policy: { value: policyPath, typed: true }, adapter, runId,
-        harnessSha: harness.sha, headless: true,
+        harnessSha: harness.sha, headless: true, lcm: DEFAULT_MAF_CONFIG.lcm,
       });
 
       let output = '';

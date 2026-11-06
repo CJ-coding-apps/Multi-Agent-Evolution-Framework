@@ -9,6 +9,7 @@ import type { AttestationBundle } from '@maf/types';
 import { mintHarnessConfig } from '@maf/harness-config';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import { buildRunStack } from '../wiring.js';
+import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { needsLcm } from './runFixture.js';
 
@@ -29,6 +30,11 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
     // test passed on Linux only because kuzu creates the parent synchronously there, and on macOS
     // the SQLite store was the first thing to notice it did not exist.
     const mafDir = path.join(root, 'state');
+    // `buildRunStack`'s contract is that the caller has created `mafDir` (run and goldens call
+    // `ensureMafDir`); the stores inside it open files and do not create it. This test passed only
+    // because Kùzu 0.7.1 creates the parent directory as a side effect of the schema query, and
+    // 0.11.3 does not — measured, `new Database(<missing parent>)` then a query: 0.7.1 creates it,
+    // 0.11.3 fails. Create it so the test proves the stack, not a library's side effect.
     await mkdir(mafDir, { recursive: true });
     const policyPath = path.join(root, 'policy.yaml');
     await writeFile(policyPath, JSON.stringify({ rules: [
@@ -48,7 +54,7 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
     const runId = makeRunId(crypto.randomUUID());
     const stack = await buildRunStack({
       cwd: repo, mafDir, policy: { value: policyPath, typed: true }, adapter, runId,
-      harnessSha: harness.sha, headless: true,
+      harnessSha: harness.sha, headless: true, lcm: DEFAULT_MAF_CONFIG.lcm,
     });
     try {
       await stack.dispatchTask(harness, 'coder', PROMPT, repo, 60_000, 0);
@@ -56,7 +62,7 @@ test('a headless stack refuses an escalated call, leaves a pending record, attes
         { configSource: { uri: 'test', digest: { sha256: harness.sha } }, parameters: {}, environment: {} },
         [], { status: 'Succeeded', unscheduled: [] });
     } finally {
-      stack.close();
+      await stack.close();
     }
 
     await assert.rejects(access(path.join(repo, 'yarn.lock')), 'the refused call never ran');

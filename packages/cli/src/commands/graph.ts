@@ -2,7 +2,7 @@ import path from 'node:path';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import type { Command } from 'commander';
 import {
-  MemoryGraph, exportGraph, importGraph, parseGraphExport, kuzuVersion,
+  MemoryGraph, parseGraphExport, kuzuVersion,
   GRAPH_EXPORT_FORMAT_VERSION,
 } from '@maf/memory-graph';
 
@@ -34,7 +34,9 @@ export async function runGraphExport(dbPath: string, outFile: string): Promise<G
   const graph = new MemoryGraph(dbPath);
   try {
     const version = kuzuVersion();
-    const exported = await exportGraph(graph, version);
+    // `graph.exportGraph`, not the free `exportGraph`: the whole export is one admitted operation,
+    // so a concurrent close cannot refuse it halfway (R2-1).
+    const exported = await graph.exportGraph(version);
     // The file can hold task titles, file paths and failure messages; it is the user's to keep,
     // and nobody else's to read by default.
     await writeFile(outFile, `${JSON.stringify(exported, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -48,7 +50,7 @@ export async function runGraphExport(dbPath: string, outFile: string): Promise<G
       edges: exported.edges.length,
     };
   } finally {
-    graph.close();
+    await graph.close();
   }
 }
 
@@ -64,7 +66,7 @@ export async function runGraphImport(file: string, dbPath: string): Promise<Grap
 
   const graph = new MemoryGraph(dbPath);
   try {
-    const report = await importGraph(graph, exported);
+    const report = await graph.importGraph(exported);
     return {
       lines: [
         `Imported ${report.nodesCreated} nodes and ${report.edgesCreated} edges from ${file} into ${dbPath}` +
@@ -74,7 +76,7 @@ export async function runGraphImport(file: string, dbPath: string): Promise<Grap
       edges: report.edgesCreated,
     };
   } finally {
-    graph.close();
+    await graph.close();
   }
 }
 

@@ -30,7 +30,7 @@ before(async () => {
 });
 
 after(async () => {
-  graph.close();
+  await graph.close();
   await rm(dir, { recursive: true, force: true });
 });
 

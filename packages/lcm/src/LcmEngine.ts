@@ -1,73 +1,491 @@
 import type {
-  LcmApi, LcmMessage, LcmSummary, LcmContext, LcmMode,
-  LcmMessageId, LcmSummaryId, GhostCue, RunId,
+  LcmApi, LcmMessage, LcmSummary, LcmContext, LcmMode, LcmTrigger,
+  LcmMessageId, LcmSummaryId, GhostCue, RunId, LcmDegradedRecord, LcmSummarySurface,
+  LcmSummaryFailureSurface, ModelSurface,
 } from '@maf/types';
-import { makeLcmSummaryId } from '@maf/types';
+import {
+  attachedModelSurface, modelSurfaceIsFallback, modelSurfaceWasReturned, modelSurfaceWasSent,
+  redactCredentials,
+} from '@maf/types';
 import { LcmStore } from './LcmStore.js';
+import { GhostCueBuilder } from './GhostCueBuilder.js';
+import { SessionMerger } from './SessionMerger.js';
+import { LlmMap } from './operators/LlmMap.js';
+import { AgenticMap } from './operators/AgenticMap.js';
+import {
+  estimateTokens, summaryContent, byteLength, MAX_SUMMARY_PROMPT_BYTES, type SummaryOutput,
+} from './summarizer.js';
 
-// Rough token count — 4 chars ≈ 1 token
-function estimateTokens(text: string): number { return Math.ceil(text.length / 4); }
+/** One summary call, as the engine reports it to its recorder (WP-3.2 F1). */
+export interface LcmSummaryCall {
+  sessionId:       string;
+  summaryId:       LcmSummaryId;
+  level:           number;
+  messageIds:      LcmMessageId[];
+  /** L2: the summaries whose text this call ingested — the new summary's children. */
+  childIds:        LcmSummaryId[];
+  content:         string;
+  /** The content's own estimate — the size the summary occupies in a prompt (F10). */
+  contentTokens:   number;
+  /** What the backend reported for the call, when it reports anything (F10). */
+  reportedTokens?: number;
+  /**
+   * What this call spent against the triggering node's budget (R5): the backend's reported count
+   * when it reports one, else the estimate of the prompt plus the summary.
+   */
+  tokenBudgetCharged: number;
+  model?:          string;
+  surface?:        ModelSurface;
+  trigger?:        LcmTrigger;
+}
+
+/**
+ * One summary call that failed after the adapter was handed the request (WP-3.0c R2-S1/R4-L2, on
+ * the summarizer path). No summary exists, so there is no id, content or charge; what the call was
+ * shown and answered (or did not answer) is the evidence, and it rides on the record exactly as a
+ * role call's does. `surface` is present whenever the summarizer could describe the call; a
+ * summarizer that supplied no surface is not invented (the recorder skips it).
+ */
+export interface LcmSummaryFailure {
+  sessionId:       string;
+  level:           number;
+  messageIds:      LcmMessageId[];
+  childIds:        LcmSummaryId[];
+  /** Absent when the adapter returned a failed result: only a throw (or a never-sent call) is an error. */
+  error?:          'thrown' | 'not-sent';
+  surfaceSource?:  'fallback';
+  surface?:        ModelSurface;
+  trigger?:        LcmTrigger;
+}
 
 export interface LcmEngineConfig {
   dbPath:            string;
+  /**
+   * The session this engine serves (R9). `.maf/lcm.db` outlives a run, so a lookup by summary id
+   * alone could read an earlier run's archive; with this set, `expandSummary` refuses a summary
+   * that covers no message of this session. Absent, the engine is unscoped — the shape a test
+   * that owns the whole database uses.
+   */
+  sessionId?:        string;
   contextThreshold:  number;   // 0.0–1.0, default 0.75 — triggers compaction
-  freshTailCount:    number;   // recent messages protected from compaction, default 64
+  /**
+   * The most messages `<recent>` offers raw when compaction is active (V1). It is not a fixed
+   * count protected from compaction: the protected tail is what the budget actually rendered, so a
+   * message inside this count that did not fit is summarized at the same assembly, not 64 messages
+   * later. With room to spare the prompt may show every message, whatever this count says.
+   */
+  freshTailCount:    number;   // raw recent messages offered when compacting; default 64
   mode:              LcmMode;
-  // Injected summarizer: takes messages, returns summary text
-  summarize(messages: LcmMessage[], depth: number): Promise<string>;
+  /**
+   * The run's summarizer (WP-3.2). In the CLI this is the run's adapter, with the model the run
+   * was given; the engine never invents a summary.
+   *
+   * L3: `targetTokens` is the size the summary is asked to fit, derived from the injector's
+   * budget (half of it for a normal pass, a quarter for the one retry of an oversized root). A
+   * summarizer that cannot honour a target may ignore it; the engine then retries once and
+   * records the fallback rather than pretending the archive fits.
+   */
+  summarize(messages: LcmMessage[], depth: number, targetTokens?: number): Promise<SummaryOutput>;
+  /**
+   * A full sub-agent call for Agentic-Map. When it is absent, asking for Agentic-Map is an
+   * error rather than a silent fall back to LLM-Map: the two have different costs, and a caller
+   * that asked for the expensive one must learn it did not get it.
+   */
+  runSubAgent?(systemPrompt: string, userMessages: string[]): Promise<SummaryOutput>;
+  /** Operator automatic compaction uses. Default `LLM-Map`. */
+  operator?: 'LLM-Map' | 'Agentic-Map';
+  /**
+   * Extra attempts for a summarization call that failed with a `TransportError` (WP-3.2 F5).
+   * D-06 retries transport failures and never retries a verdict; a summary call is a backend call,
+   * so the same rule applies. Default 1 (two attempts in total).
+   */
+  summaryRetry?: number;
+  /**
+   * X2: the deadline one summarizer call is given. Together with `summaryRetry` it is the budget a
+   * live retry can take, and it is what the claim lifetime is derived from — a fixed window was
+   * shorter than the retry it was supposed to cover. Default 120 s, matching `createRunLcm`.
+   */
+  summaryTimeoutMs?: number;
+  /**
+   * Where a summary call is recorded (WP-3.2 F1). It is a model call like any other: the caller
+   * attaches it to the attestor and writes the `[surface]` transcript line. A call that threw is
+   * reported too (WP-3.0c R2-S1): the union's failure arm carries no summary, only what was sent
+   * and how the attempt ended, so every adapter invocation has exactly one record.
+   */
+  recordSummaryCall?(call: LcmSummaryCall | LcmSummaryFailure): void | Promise<void>;
+  /**
+   * A compaction that failed after its retries (WP-3.2 F5). The assembly continues uncompacted;
+   * this is the only place the caller learns that the archive is behind.
+   */
+  onDegraded?(record: LcmDegradedRecord): void | Promise<void>;
 }
 
+/** One piece of text a summary prompt is built from: a message or a fragment of one. */
+interface Unit {
+  role:       LcmMessage['role'];
+  content:    string;
+  messageId?: LcmMessageId;
+  /**
+   * Set on a unit that renders a stored summary at a higher level (R11). A child too large for one
+   * prompt is split into several units, each carrying its child's id, so every parent names exactly
+   * the children whose text it saw.
+   */
+  summaryId?: LcmSummaryId;
+}
+
+/** A summary a higher level summarizes: its id and what it says. */
+interface ParentUnit {
+  id:      LcmSummaryId;
+  content: string;
+}
+
+const SUMMARY_UNIT_OVERHEAD = 32; // `[ASSISTANT] ` + the joining newline, generously rounded.
+
+/**
+ * What the injector's `<recent>` block adds around the messages it renders (R4c): the wrapper plus
+ * one `<message role="…"></message>` line per message. Fitting uses the same numbers the renderer
+ * pays, so the archive's share is a real ceiling rather than an approximation of one.
+ */
+const RECENT_WRAPPER_TOKENS = 8;
+const RECENT_MESSAGE_OVERHEAD_TOKENS = 12;
+
+/**
+ * The size one summary is asked to fit (L3): half the injector's budget. A summarizer left to its
+ * own judgment returns roughly what it was given, so higher levels never shrank and the archive
+ * overflowed a root at a time. Stating a target derived from the budget is what makes each level
+ * able to give the level below room.
+ */
+const SUMMARY_TARGET_SHARE = 0.5;
+
+/**
+ * W1/X2: how long a claim with no outcome is still believed to be a retry in flight. A claim is
+ * written before the call, so a process that died mid-retry leaves it `attempted` for good; past
+ * this window the assembly treats the claim as spent and reports the root's size. The window is
+ * derived from the call budget rather than fixed: a retry can spend the summarizer's deadline on
+ * each of its attempts (about 240 s at the defaults), so the old fixed 120 s declared a live retry
+ * dead half way through it.
+ */
+const DEFAULT_SUMMARY_TIMEOUT_MS = 120_000;
+/** Slack over the call budget for the scheduling between attempts. */
+const ROOT_RETRY_CLAIM_SLACK = 0.1;
+
+/** X2: the time a retry may legitimately take, with slack — the smallest honest claim lifetime. */
+export function rootRetryClaimLifetimeMs(summaryTimeoutMs: number, summaryRetry: number): number {
+  const attempts = 1 + Math.max(0, summaryRetry);
+  return Math.ceil(summaryTimeoutMs * attempts * (1 + ROOT_RETRY_CLAIM_SLACK));
+}
+
+function summaryTargetTokens(budget: number): number {
+  return Math.max(1, Math.floor(budget * SUMMARY_TARGET_SHARE));
+}
+
+/**
+ * How many fit/compact/re-fit rounds an assembly may take before it compacts everything that is
+ * still uncovered (V1). Each round summarizes at least one message, so the loop converges; this is
+ * a backstop against a summarizer that produces summaries larger than the messages they replace.
+ */
+const MAX_ASSEMBLY_PASSES = 8;
+
 export class LcmEngine implements LcmApi {
-  private store: LcmStore;
-  private config: LcmEngineConfig;
+  private readonly store: LcmStore;
+  private readonly config: LcmEngineConfig;
+  private readonly llmMap: LlmMap;
+  private readonly agenticMap?: AgenticMap;
+  private readonly ghostCues = new GhostCueBuilder();
+  private readonly merger: SessionMerger;
+  /** One compaction at a time per session (WP-3.2 F6). A settled `void` chain, never a rejection. */
+  private readonly sessionLocks = new Map<string, Promise<void>>();
 
   constructor(config: LcmEngineConfig) {
     this.config = config;
     this.store  = new LcmStore(config.dbPath);
+    this.llmMap = new LlmMap({
+      store: this.store,
+      summarize: (messages, depth, targetTokens) => config.summarize(messages, depth, targetTokens),
+    });
+    if (config.runSubAgent) {
+      this.agenticMap = new AgenticMap({ store: this.store, runSubAgent: config.runSubAgent });
+    }
+    this.merger = new SessionMerger(this.store);
   }
 
+  /**
+   * A message entering the archive is masked on the way in (WP-3.2 F7): the transcript, the
+   * summary prompt and the summary output are all model-text paths, and a credential that reached
+   * any of them would be repeated by every later prompt.
+   */
   async addMessage(msg: Omit<LcmMessage, 'id' | 'createdAt'>): Promise<LcmMessageId> {
-    return this.store.insertMessage(msg);
+    return this.store.insertMessage({ ...msg, content: redactCredentials(msg.content) });
   }
 
+  /**
+   * Summarizes exactly `messageIds` — no more and no fewer. An id that is not in the store is an
+   * error: the version this replaces was handed transcript-entry ids it had never stored (the
+   * `as never[]` cast), summarized nothing, and then dropped those entries from the in-memory
+   * transcript, so a run lost context with no error anywhere (D-17).
+   *
+   * WP-3.2 F6: the work is serialized per session, and ids another pass already summarized are
+   * skipped rather than summarized twice. Two nodes assembling at once therefore make one call,
+   * and each message belongs to exactly one summary.
+   */
   async summarizeChunk(
     messageIds: LcmMessageId[],
     operator: 'LLM-Map' | 'Agentic-Map',
+    trigger?: LcmTrigger,
   ): Promise<LcmSummaryId> {
-    const messages  = this.store.getMessagesByIds(messageIds);
-    const depth     = 0; // leaf-level summary
-    const content   = await this.config.summarize(messages, depth);
-    const tokens    = estimateTokens(content);
-    const summaryId = this.store.insertSummary(content, tokens, depth, operator, [], messageIds);
-    this.store.markSummarized(messageIds, summaryId);
-    return summaryId;
+    if (messageIds.length === 0) {
+      throw new Error('LCM compaction was asked to summarize an empty chunk; there is nothing to drop.');
+    }
+    const initial = this.store.getMessagesByIds(messageIds);
+    if (initial.length !== messageIds.length) throw this.missing(messageIds, initial);
+    const sessionId = initial[0]!.sessionId;
+    const compacted = await this.serialize(sessionId, () =>
+      this.compactLocked(sessionId, messageIds, operator, trigger));
+    return compacted.summaryId;
   }
 
+  /**
+   * The context a node is given (WP-3.2, D-17; budget semantics D-52, R2/R4c; coverage V1).
+   *
+   * `messages` are the newest messages of the session, newest first. They are rendered as
+   * `<recent>` after the archive and inside the same budget.
+   *
+   * **The invariant (V1):** at every assembly, every message of the session is either rendered in
+   * `<recent>`, covered by a summary (directly or through an ancestor), or newer than the assembly.
+   * The tail that stays raw is *what was rendered*, not a fixed count, so a message that did not fit
+   * is eligible for compaction at this very assembly, whatever its age. Compaction shrinks the room
+   * left for `<recent>`, so the rendered set only shrinks and the loop converges; anything still
+   * uncovered at the bound is compacted before returning.
+   *
+   * If compaction fails, every uncompacted message is a recent candidate again and the failure is
+   * recorded (F5): nothing is dropped unsummarized, and the operator is told the archive is behind.
+   *
+   * `totalTokens` is the size of what the injector renders — summaries/cues plus the recent
+   * messages. A summary call's cost is `compactionTokens`, a budget record and never a reservation
+   * out of the rendered room (R2): the room is about rendered size, the call is about the call.
+   *
+   * `render` asks for summaries where the mode would otherwise offer ghost cues (R14). A cli-tier
+   * role has no `lcm.expand` tool, so a cue telling it to call one is not an instruction it can
+   * follow; the dispatcher asks for summaries there instead.
+   */
   async assembleContext(
     sessionId: string,
     tokenBudget: number,
     mode: LcmMode = this.config.mode,
+    trigger?: LcmTrigger,
+    render?: 'cues' | 'summaries',
   ): Promise<LcmContext> {
-    const allMessages = this.store.getMessagesBySession(sessionId);
-    const totalRaw    = allMessages.reduce((s, m) => s + m.tokens, 0);
+    if (mode === 'off' || tokenBudget <= 0) return emptyContext(mode);
 
-    // If under threshold: return raw messages, no compaction needed
-    if (totalRaw <= tokenBudget * this.config.contextThreshold) {
-      return { messages: allMessages, ghosts: [], totalTokens: totalRaw };
+    const summaryCalls: LcmSummarySurface[] = [];
+    const summaryFailures: LcmSummaryFailureSurface[] = [];
+    const degradedRecords: LcmDegradedRecord[] = [];
+    let compactionTokens = 0;
+    let degraded = false;
+    const operator = this.config.operator ?? 'LLM-Map';
+    // L3: the size a summary is asked to fit, derived from what the injector can render. Half the
+    // budget leaves the rest for `<recent>` and for a summary that overshoots its target a little.
+    const summaryTarget = summaryTargetTokens(tokenBudget);
+
+    /** Records a degradation the caller hears about, and returns it. */
+    const pushDegraded = async (record: LcmDegradedRecord): Promise<void> => {
+      degradedRecords.push(record);
+      await this.config.onDegraded?.(record);
+    };
+
+    /**
+     * L3/V1: one record per root and reason, across every assembly of the run. The store is the
+     * record, not a set local to this call: eight assemblies of one oversized root used to write
+     * eight transcript lines for the same fact.
+     */
+    const degradeRoot = async (
+      summaryId: LcmSummaryId, tokens: number, reason: string,
+    ): Promise<void> => {
+      if (!this.store.markRootDegraded(summaryId, reason, tokens)) return;
+      await pushDegraded({
+        sessionId, reason, summaryId, tokens,
+        ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
+        ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
+      });
+    };
+
+    /** The archive half of one assembly: what the mode offers and what it costs. */
+    const fitArchive = async (): Promise<{
+      summaries: LcmSummary[]; ghosts: GhostCue[]; used: number; offerSummaries: boolean;
+    }> => {
+      // R2: room is measured on rendered size. The call's reported tokens were subtracted here and
+      // on a backend that reports them (openrouter) that emptied the archive's own room.
+      const ghosts: GhostCue[] = [];
+      let included: LcmSummary[] = [];
+      let used = 0;
+      let offerSummaries = mode === 'Upward';
+
+      if (mode === 'Upward') {
+        const archive = await this.fitUpward(
+          sessionId, tokenBudget, summaryTarget, trigger, render !== 'summaries',
+        );
+        included = archive.summaries;
+        summaryCalls.push(...archive.calls);
+        summaryFailures.push(...archive.failures);
+        used = included.reduce((s, summary) => s + summary.tokens, 0);
+        if (archive.mergeFailure !== undefined) {
+          // V5 (D-52 F5): an upward merge is a summarization call like any other, so its failure
+          // degrades the assembly rather than failing the node. The roots already stored are
+          // intact; the archive renders the ones that fit and the node runs.
+          await pushDegraded({
+            sessionId, reason: `compaction-failed: ${messageOf(archive.mergeFailure)}`,
+            ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
+            ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
+          });
+        }
+        // A cue fallback is only the story when cues are what this caller renders; a cli-tier
+        // reader gets `cli-tier-cues` below, which is the limit that actually applied (V10).
+        // W1/W2: `fitUpward` inserts the degradation under the session lock and returns it only to
+        // the assembly that inserted it, so this reports the record rather than making one.
+        if (archive.degradedRoot !== undefined) {
+          const { summaryId, tokens, reason } = archive.degradedRoot;
+          await pushDegraded({
+            sessionId, reason, summaryId, tokens,
+            ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
+            ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
+          });
+        }
+        if (included.length === 0 && archive.roots.length > 0) {
+          if (render === 'summaries') {
+            // V10: the caller cannot expand a cue, so rendering one would be an instruction it
+            // cannot follow. Say what was omitted instead of offering it uselessly, once per root.
+            const newest = archive.roots[archive.roots.length - 1]!;
+            await degradeRoot(newest.id, newest.tokens, 'cli-tier-cues');
+          } else {
+            // R12: one root larger than the whole archive used to render nothing and say nothing.
+            // A cue is a sentence, so it fits where the summary did not; the model can expand it.
+            used = this.fitCues(archive.roots, Math.max(0, tokenBudget - used), ghosts);
+          }
+        }
+      } else if (render === 'summaries') {
+        // R14: no cues the backend cannot act on. The roots are fitted newest-first, exactly as the
+        // cues would be, without the extra compaction Upward's fit performs.
+        const roots = this.rootSummaries(sessionId);
+        const fitted = fitRootsNewestFirst(roots, tokenBudget);
+        included = fitted.summaries;
+        used = fitted.used;
+        offerSummaries = true;
+        if (included.length === 0 && roots.length > 0) {
+          // V10: under Dolt with `render: 'summaries'` an over-budget root used to vanish silently
+          // for the caller least able to cope with it.
+          const newest = roots[roots.length - 1]!;
+          await degradeRoot(newest.id, newest.tokens, 'cli-tier-cues');
+        }
+      } else {
+        // Cues are sentences, newest first: the most recent archive is the most relevant, and a cue
+        // the budget cannot hold is skipped rather than crowding out the rest.
+        used = this.fitCues(this.rootSummaries(sessionId), tokenBudget, ghosts);
+      }
+      return { summaries: included, ghosts, used, offerSummaries };
+    };
+
+    /**
+     * One assembly of what is currently stored. `cap` bounds the raw tail only when compaction is
+     * warranted; a roomy prompt shows every message that fits. A message outside what `fitRecent`
+     * renders is left uncovered, and the caller compacts it before returning (V1).
+     */
+    const assembleNow = async (uncompacted: LcmMessage[], cap: number | undefined) => {
+      const archive = await fitArchive();
+      const candidates = cap === undefined
+        ? uncompacted
+        : uncompacted.slice(Math.max(0, uncompacted.length - cap));
+      const recent = fitRecent(candidates, Math.max(0, tokenBudget - archive.used));
+      return { archive, recent };
+    };
+
+    const build = (
+      archive: Awaited<ReturnType<typeof fitArchive>>,
+      recent: ReturnType<typeof fitRecent>,
+    ): LcmContext => ({
+      messages: recent.messages,
+      ghosts: archive.ghosts,
+      totalTokens: archive.used + recent.tokens,
+      ...(compactionTokens > 0 ? { compactionTokens } : {}),
+      ...(archive.offerSummaries ? { summaries: archive.summaries } : {}),
+      ...(summaryCalls.length > 0 ? { summaryCalls } : {}),
+      ...(summaryFailures.length > 0 ? { summaryFailures } : {}),
+      ...(degradedRecords.length > 0 ? { degraded: degradedRecords } : {}),
+    });
+
+    const recordDegradation = async (err: unknown): Promise<void> => {
+      // F5: a failed compaction degrades. The node continues and the failure is recorded; throwing
+      // here would turn a background optimization into a node failure.
+      degraded = true;
+      await pushDegraded({
+        sessionId, reason: messageOf(err),
+        ...(trigger?.taskId ? { taskId: trigger.taskId } : {}),
+        ...(trigger?.nodeId ? { nodeId: trigger.nodeId } : {}),
+      });
+    };
+
+    const compactUncovered = async (messageIds: LcmMessageId[]): Promise<void> => {
+      const result = await this.serialize(sessionId, () =>
+        this.compactLocked(sessionId, messageIds, operator, trigger, summaryTarget));
+      compactionTokens += result.reportedTokens.reduce((s, n) => s + n, 0);
+      summaryCalls.push(...result.calls);
+      summaryFailures.push(...result.failures);
+    };
+
+    let uncompacted = this.store.getUncompactedMessages(sessionId, 0);
+    let context: LcmContext | undefined;
+    let converged = false;
+
+    // V1: the protected tail is what was rendered. New summaries leave less room for `<recent>`,
+    // so the rendered set only shrinks and this converges; `MAX_ASSEMBLY_PASSES` is a backstop.
+    for (let pass = 0; pass < MAX_ASSEMBLY_PASSES; pass++) {
+      const rawTokens = uncompacted.reduce((s, m) => s + m.tokens, 0);
+      const overThreshold = rawTokens > tokenBudget * this.config.contextThreshold;
+      const { archive, recent } = await assembleNow(
+        uncompacted, overThreshold ? this.config.freshTailCount : undefined,
+      );
+      context = build(archive, recent);
+
+      const rendered = new Set(recent.messages.map((message) => message.id));
+      const uncovered = uncompacted.filter((message) => !rendered.has(message.id));
+      if (uncovered.length === 0) {
+        converged = true;
+        break;
+      }
+
+      try {
+        await compactUncovered(uncovered.map((message) => message.id));
+      } catch (err: unknown) {
+        await recordDegradation(err);
+        break;
+      }
+      uncompacted = this.store.getUncompactedMessages(sessionId, 0);
     }
 
-    // Need compaction — trigger if not already done
-    const uncompacted = this.store.getUncompactedMessages(sessionId, this.config.freshTailCount);
-    if (uncompacted.length > 0) {
-      await this.summarizeChunk(uncompacted.map((m) => m.id), 'LLM-Map');
+    // The bound is a backstop, not a rule. If it is reached with messages still uncovered, the
+    // guarantee outranks the rendering: compact everything that is left and return the archive
+    // alone (the converged case never takes this branch — its messages were rendered).
+    if (!converged && !degraded && context !== undefined) {
+      const stillUncompacted = this.store.getUncompactedMessages(sessionId, 0);
+      if (stillUncompacted.length > 0) {
+        try {
+          await compactUncovered(stillUncompacted.map((message) => message.id));
+        } catch (err: unknown) {
+          await recordDegradation(err);
+        }
+        const { archive, recent } = await assembleNow([], undefined);
+        context = build(archive, recent);
+      }
     }
 
-    // Re-fetch: fresh tail (raw) + summaries as ghost cues
-    const fresh    = this.store.getMessagesBySession(sessionId, this.config.freshTailCount);
-    const ghosts   = mode === 'Dolt' ? this.buildGhostCues(sessionId) : [];
-    const freshTokens = fresh.reduce((s, m) => s + m.tokens, 0);
+    // F5: in the degraded state the guarantee cannot hold — no summary was written — so the node
+    // sees as much raw history as the budget holds, and the recording says the archive is behind.
+    if (degraded && context !== undefined) {
+      const remaining = this.store.getUncompactedMessages(sessionId, 0);
+      const { archive, recent } = await assembleNow(remaining, undefined);
+      context = build(archive, recent);
+    }
 
-    return { messages: fresh, ghosts, totalTokens: freshTokens };
+    return context ?? emptyContext(mode);
   }
 
   async lcm_grep(query: string, sessionId: string): Promise<LcmMessage[]> {
@@ -75,36 +493,711 @@ export class LcmEngine implements LcmApi {
   }
 
   async lcm_expand(summaryId: LcmSummaryId): Promise<LcmMessage[]> {
-    const summary = this.store.getSummary(summaryId);
-    if (!summary) return [];
-    // Recursively expand: if messages are themselves summaries, drill further
-    const messages = this.store.getMessagesByIds(summary.messageIds);
-    return messages;
+    return (await this.expandSummary(summaryId))?.messages ?? [];
+  }
+
+  /**
+   * A summary and the messages it covers, the API behind `lcm.expand` (WP-3.2 F8, R9): the Dolt cue
+   * tells the model to call a tool, so the tool needs the summary text as well as the messages.
+   *
+   * `summaryId` is a plain `string` because this is the tool boundary, where the id comes from a
+   * model. The lookup is a bound store parameter (never query text), so the brand adds no safety
+   * here. What does matter is the run: `.maf/lcm.db` outlives a run, so an id copied or guessed
+   * from an earlier one is a real id in this database. A scoped engine (`sessionId` set) resolves
+   * only summaries that cover at least one message of its own session; anything else is refused
+   * exactly as an unknown id is. The version this replaces looked the id up on its own and called
+   * the result "not found" only because the caller had no way to ask.
+   */
+  async expandSummary(summaryId: string): Promise<{ summary: LcmSummary; messages: LcmMessage[] } | undefined> {
+    const id = summaryId as LcmSummaryId;
+    const summary = this.config.sessionId !== undefined
+      ? this.store.getSummaryInSession(id, this.config.sessionId)
+      : this.store.getSummary(id);
+    if (!summary) return undefined;
+    return { summary, messages: this.store.getMessagesByIds(summary.messageIds) };
   }
 
   async mergeRuns(runIds: RunId[], targetRunId: RunId): Promise<void> {
-    // For each run, re-tag its messages to the target run (union merge)
-    // In a production system this would handle conflicts; here we do a simple copy
-    for (const runId of runIds) {
-      const messages = this.store.getMessagesBySession(runId);
-      for (const msg of messages) {
-        this.store.insertMessage({ ...msg, runId: targetRunId, sessionId: targetRunId });
-      }
-    }
-  }
-
-  private buildGhostCues(sessionId: string): GhostCue[] {
-    // Dolt mode: build cues from sessions' summaries so model can recall via lcm_expand
-    const messages = this.store.getMessagesBySession(sessionId);
-    const summarized = messages.filter((m) => m.summaryId);
-    const summaryIds = [...new Set(summarized.map((m) => m.summaryId!))];
-
-    return summaryIds.slice(0, 10).map((summaryId, i) => ({
-      summaryId,
-      cueText: `[Archived context segment ${i + 1} — call lcm_expand("${summaryId}") to recover]`,
-      relevance: 1 - i * 0.1,
-    }));
+    // One implementation (D-18): the same union merge `SessionMerger` exposes, so the two
+    // cannot drift apart.
+    await this.merger.mergeRuns(runIds, targetRunId);
   }
 
   close(): void { this.store.close(); }
+
+  // ── Compaction ───────────────────────────────────────────────────────────────
+
+  /**
+   * The compaction run inside the session lock. Re-reads the messages after acquiring the lock,
+   * because another pass may have summarized some of them in the meantime (F6), and works only
+   * on those still uncovered.
+   */
+  private async compactLocked(
+    sessionId: string,
+    messageIds: LcmMessageId[],
+    operator: 'LLM-Map' | 'Agentic-Map',
+    trigger?: LcmTrigger,
+    targetTokens?: number,
+  ): Promise<{
+    summaryId: LcmSummaryId; reportedTokens: number[]; calls: LcmSummarySurface[];
+    failures: LcmSummaryFailureSurface[];
+  }> {
+    const fresh = this.store.getMessagesByIds(messageIds);
+    if (fresh.length !== messageIds.length) throw this.missing(messageIds, fresh);
+    const uncovered = fresh.filter((m) => m.summaryId === undefined);
+    if (uncovered.length === 0) {
+      // Every message is already covered. Return the summary that covers the requested set when
+      // one summary covers all of it, so a caller that drops them still names a real archive.
+      const covering = new Set(fresh.map((m) => m.summaryId!));
+      const first = [...covering][0];
+      if (covering.size === 1 && first !== undefined) {
+        return { summaryId: first, reportedTokens: [], calls: [], failures: [] };
+      }
+      const newest = this.rootSummaries(sessionId).at(-1);
+      if (newest) return { summaryId: newest.id, reportedTokens: [], calls: [], failures: [] };
+      throw new Error('LCM compaction was asked to summarize messages that are already covered, and no summary covers them.');
+    }
+
+    const units = this.unitsOf(uncovered);
+    const groups = packUnits(units);
+    const reported: number[] = [];
+    const calls: LcmSummarySurface[] = [];
+    const failures: LcmSummaryFailureSurface[] = [];
+    const level0: ParentUnit[] = [];
+
+    for (const group of groups) {
+      const output = await this.callBounded(group, 0, operator, targetTokens, sessionId, trigger, failures);
+      // F7: an injected summarizer may return a credential the model echoed, so the store keeps
+      // the masked text, not whatever came back. The call's own surface still hashes the true
+      // bytes; the archive is the model-facing side.
+      const content = redactCredentials(summaryContent(output));
+      const contentTokens = estimateTokens(content);
+      const messageIdsInGroup = [...new Set(group.flatMap((u) => (u.messageId ? [u.messageId] : [])))];
+      const summaryId = this.store.insertSummary(content, contentTokens, 0, operator, [], messageIdsInGroup);
+      this.store.markSummarized(messageIdsInGroup, summaryId);
+      const spent = reportedTokensOf(output, content);
+      reported.push(spent);
+      const surface = await this.recordCall({
+        sessionId, summaryId, level: 0, messageIds: messageIdsInGroup, childIds: [],
+        content, contentTokens, output, trigger, inputTokens: promptTokensOf(group),
+      });
+      if (surface) calls.push(surface);
+      level0.push({ id: summaryId, content });
+    }
+
+    // F9: summarize the summaries upward until one root covers everything. Nothing is dropped
+    // without a parent: each level records its children and links every descendant message, so
+    // `lcm.expand` on the root recovers the whole segment.
+    const rootId = await this.raise(level0, 1, operator, sessionId, trigger, reported, calls, failures, targetTokens);
+    return { summaryId: rootId, reportedTokens: reported, calls, failures };
+  }
+
+  /** Builds level+1 summaries over `children` until exactly one root remains. */
+  private async raise(
+    children: ParentUnit[],
+    level: number,
+    operator: 'LLM-Map' | 'Agentic-Map',
+    sessionId: string,
+    trigger: LcmTrigger | undefined,
+    reported: number[],
+    calls: LcmSummarySurface[],
+    failures: LcmSummaryFailureSurface[],
+    targetTokens?: number,
+  ): Promise<LcmSummaryId> {
+    if (children.length === 1) return children[0]!.id;
+
+    // Each child's rendered text is split into byte-bounded units that carry its id, so a child
+    // too large for one prompt is genuinely split across summaries (R11) and each summary names
+    // exactly the children whose text it saw (F4). The version this replaces built one unit per
+    // child and then claimed every child in the chunk regardless: a summary could name a parent
+    // whose text had been elsewhere, and a comment described a split that never happened.
+    const units: Unit[] = [];
+    for (const child of children) {
+      const rendered = `[Level-${level - 1} summary ${child.id}]\n${child.content}`;
+      for (const content of splitByBytes(rendered, MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD)) {
+        units.push({ role: 'system', content, summaryId: child.id });
+      }
+    }
+    const parents: ParentUnit[] = [];
+    for (const chunk of packUnits(units)) {
+      const childIds = [...new Set(chunk.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
+      const output = await this.callBounded(chunk, level, operator, targetTokens, sessionId, trigger, failures);
+      // R10: the same masking as level 0. A model can echo a credential it read, and this text is
+      // stored and shown by `lcm.expand` exactly like a level-0 summary's.
+      const content = redactCredentials(summaryContent(output));
+      const contentTokens = estimateTokens(content);
+      const childSummaries = childIds
+        .map((id) => this.store.getSummary(id))
+        .filter((summary): summary is LcmSummary => summary !== undefined);
+      const messageIds = [...new Set(childSummaries.flatMap((s) => s.messageIds))];
+      const summaryId = this.store.insertSummary(content, contentTokens, level, operator, childIds, messageIds);
+      reported.push(reportedTokensOf(output, content));
+      const surface = await this.recordCall({
+        sessionId, summaryId, level, messageIds, childIds,
+        content, contentTokens, output, trigger, inputTokens: promptTokensOf(chunk),
+      });
+      if (surface) calls.push(surface);
+      parents.push({ id: summaryId, content });
+    }
+    return this.raise(parents, level + 1, operator, sessionId, trigger, reported, calls, failures, targetTokens);
+  }
+
+  /**
+   * The Upward archive, newest first, compacting the oldest roots upward when they no longer fit
+   * (D-52 F2/F9). Summaries get room before anything else the injector renders, because they are
+   * what the injector renders; `roots` is returned so a budget too small for every root can fall
+   * back to cues (R12).
+   */
+  private async fitUpward(
+    sessionId: string,
+    budget: number,
+    targetTokens: number,
+    trigger: LcmTrigger | undefined,
+    recordDegradedRoot: boolean,
+  ): Promise<{
+    summaries: LcmSummary[]; calls: LcmSummarySurface[]; roots: LcmSummary[];
+    /** Z3: every attempt that failed after the adapter was called, for the transcript line. */
+    failures: LcmSummaryFailureSurface[];
+    /**
+     * L3c: the root the archive gave up on, when it still exceeds `budget`. `reason` distinguishes
+     * a root that was retried and did not shrink from one whose retry failed (V8). W1/W2: present
+     * only on the assembly that recorded it, under the session lock — one record per root, not one
+     * per assembly that found it.
+     */
+    degradedRoot?: { summaryId: LcmSummaryId; tokens: number; reason: string };
+    /** V5: the upward merge that failed, if one did. The assembly degrades; the node runs. */
+    mergeFailure?: unknown;
+  }> {
+    const calls: LcmSummarySurface[] = [];
+    const failures: LcmSummaryFailureSurface[] = [];
+    let roots = this.rootSummaries(sessionId);
+    if (roots.length === 0) return { summaries: [], calls, roots, failures };
+    let mergeFailure: unknown;
+    // Bounded: each pass halves the root count or stops. A budget too small for even one root
+    // stops the loop rather than summarizing forever.
+    for (let pass = 0; pass < 8 && roots.length > 1; pass++) {
+      const overflow = overflowNewestFirst(roots, budget);
+      if (overflow.length === 0) break;
+
+      // L4: every compaction pass runs under the session lock, and re-reads the roots after taking
+      // it. Assemblies of one session used to reach here together, summarize the same roots twice
+      // (double charge, duplicate calls) and write a summary with two parents into what should be a
+      // tree. Under the lock the second assembly finds the merge already done and does nothing.
+      const progressed = await this.serialize(sessionId, async () => {
+        const current = this.rootSummaries(sessionId);
+        const pending = overflowNewestFirst(current, budget);
+        if (pending.length === 0) return false;
+        // Summarize the oldest roots — at least two, so the parent covers more than it replaces.
+        const take = Math.max(2, pending.length);
+        const oldest = current.slice(0, take);
+        const operator = this.config.operator ?? 'LLM-Map';
+        const level = Math.max(...oldest.map((s) => s.level)) + 1;
+        // A group is bounded by the byte cap, so a large set of roots becomes several summaries.
+        // A root whose text exceeds one prompt is split into byte-bounded units carrying its id,
+        // exactly as `raise` does (R11); no summary's text is truncated and no prompt overflows.
+        const units: Unit[] = [];
+        for (const summary of oldest) {
+          const rendered = `[Level-${summary.level} summary ${summary.id}]\n${summary.content}`;
+          for (const content of splitByBytes(rendered, MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD)) {
+            units.push({ role: 'system', content, summaryId: summary.id });
+          }
+        }
+        for (const group of packUnits(units)) {
+          const childIds = [...new Set(group.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
+          const children = childIds
+            .map((id) => this.store.getSummary(id))
+            .filter((summary): summary is LcmSummary => summary !== undefined);
+          const messageIds = [...new Set(children.flatMap((s) => s.messageIds))];
+          const output = await this.callBounded(group, level, operator, targetTokens, sessionId, trigger, failures);
+          const content = redactCredentials(summaryContent(output));
+          const summaryId = this.store.insertSummary(
+            content, estimateTokens(content), level, operator, childIds, messageIds,
+          );
+          const surface = await this.recordCall({
+            sessionId, summaryId, level, messageIds, childIds,
+            content, contentTokens: estimateTokens(content), output, trigger,
+            inputTokens: promptTokensOf(group),
+          });
+          if (surface) calls.push(surface);
+        }
+        return true;
+      }).catch((err: unknown) => {
+        // V5 (D-52 F5): a failed upward merge is a background optimization failing, not the node
+        // failing. Whatever the passes inserted before this one stays; the caller records the
+        // failure and renders the roots that fit.
+        mergeFailure = err;
+        return false;
+      });
+      roots = this.rootSummaries(sessionId);
+      if (mergeFailure !== undefined) break;
+      if (!progressed) break;
+    }
+
+    // L3b: a root still larger than the whole archive gets one more summarization, at half the
+    // target, before the archive gives up (L3c). The retry is allowed once per root **for the
+    // whole run** (V1): it is claimed in the store before the call, so no later assembly retries
+    // the same root — not after a failure, and not when the root is the output of a retry.
+    let degradedRoot: { summaryId: LcmSummaryId; tokens: number; reason: string } | undefined;
+    if (mergeFailure === undefined && roots.length === 1 && roots[0]!.tokens > budget) {
+      // W1: the decision is taken under the session lock even when this assembly did not claim the
+      // retry. An assembly that found the retry already claimed used to skip the lock, read the
+      // pre-retry root and record a `root-over-budget` degradation for a root the retry was about
+      // to supersede — 4 of 4 runs at N=8. Queuing on the same lock waits for that retry, and the
+      // roots are re-read under it: the caller renders the retried summary when it fits, and one
+      // degradation is recorded only when it does not.
+      degradedRoot = await this.serialize(sessionId, async () => {
+        let current = this.rootSummaries(sessionId);
+        if (current.length !== 1) return undefined;
+        let root = current[0]!;
+        if (root.tokens <= budget) return undefined;
+        let retryFailure: unknown;
+        if (!this.store.hasRootRetry(root.id) && !this.store.isRootRetryOutput(root.id)) {
+          // Claim before the call: a retry that fails is still the root's one retry. A claim lost
+          // to another process means that process owns the decision; this assembly says nothing
+          // about a root whose retry may yet supersede what it can see.
+          if (!this.store.claimRootRetry(root.id)) return undefined;
+          let summaryId: LcmSummaryId | undefined;
+          try {
+            const operator = this.config.operator ?? 'LLM-Map';
+            const level = root.level + 1;
+            const units: Unit[] = splitByBytes(
+              `[Level-${root.level} summary ${root.id}]\n${root.content}`,
+              MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD,
+            ).map((content) => ({ role: 'system', content, summaryId: root.id }));
+            const output = await this.callBounded(
+              units, level, operator, Math.max(1, Math.floor(targetTokens / 2)), sessionId, trigger, failures,
+            );
+            const content = redactCredentials(summaryContent(output));
+            summaryId = this.store.insertSummary(
+              content, estimateTokens(content), level, operator, [root.id], root.messageIds,
+            );
+            const surface = await this.recordCall({
+              sessionId, summaryId, level, messageIds: root.messageIds, childIds: [root.id],
+              content, contentTokens: estimateTokens(content), output, trigger,
+              inputTokens: promptTokensOf(units),
+            });
+            if (surface) calls.push(surface);
+          } catch (err: unknown) {
+            // The retry is a second chance, not a guarantee. V8: what remains is reported as what
+            // happened — a failed retry (`root-retry-failed`) is not "after a tighter retry".
+            retryFailure = err;
+          } finally {
+            this.store.finishRootRetry(root.id, summaryId);
+          }
+          // V2: decide on the roots as they are now, not as this assembly read them before
+          // queuing. Another pass may have changed the archive while this one waited.
+          current = this.rootSummaries(sessionId);
+          if (current.length !== 1) return undefined;
+          root = current[0]!;
+          if (root.tokens <= budget) return undefined;
+        }
+        if (!recordDegradedRoot) return undefined;
+        // A summary written by the retry (even if the record callback then threw) means the retry
+        // happened and produced text; the archive's size is what failed, not the call.
+        const produced = this.store.isRootRetryOutput(root.id);
+        if (!produced && retryFailure === undefined) {
+          // W1: a claim another engine or process wrote may belong to a retry that is still
+          // running; reporting this root now would name one that retry may supersede.
+          const claim = this.store.rootRetry(root.id);
+          const claimLifetime = rootRetryClaimLifetimeMs(
+            this.config.summaryTimeoutMs ?? DEFAULT_SUMMARY_TIMEOUT_MS,
+            this.config.summaryRetry ?? 1,
+          );
+          if (claim?.outcome === 'attempted'
+            && Date.now() - claim.claimedAt.getTime() < claimLifetime) {
+            return undefined;
+          }
+          // W2: one record per root. The assembly that ran the retry writes the reason that names
+          // its failure; an assembly that waited on that retry must not add `root-over-budget` for
+          // the same root, which the (root, reason) key would store as a second fact.
+          if (this.store.hasRootDegradation(root.id)) return undefined;
+        }
+        const reason = retryFailure === undefined || produced
+          ? 'root-over-budget'
+          : `root-retry-failed: ${messageOf(retryFailure)}`;
+        const summaryId = root.id;
+        const tokens = root.tokens;
+        // The record is inserted under the lock, so the assembly that returns it is the only one
+        // that reports it; `markRootDegraded` still guards the cross-process case.
+        return this.store.markRootDegraded(summaryId, reason, tokens)
+          ? { summaryId, tokens, reason }
+          : undefined;
+      });
+      // V2: the roots are re-read whatever the retry block decided, so the caller fits and renders
+      // the archive as it stands now.
+      roots = this.rootSummaries(sessionId);
+    }
+
+    const fit = overflowNewestFirst(roots, budget);
+    const kept = roots.filter((s) => !fit.includes(s));
+    return {
+      summaries: kept.slice().reverse(), calls, roots, failures, // chronological for the prompt
+      ...(degradedRoot !== undefined ? { degradedRoot } : {}),
+      ...(mergeFailure !== undefined ? { mergeFailure } : {}),
+    };
+  }
+
+  /**
+   * Roots: summaries with no parent, oldest first (L2). The archive is a tree grown upward, so a
+   * root is precisely a summary nothing else was built from — `LcmSummary.parentIds` names the
+   * summaries a summary was built INTO (its parents), so a root's list is empty. The inverted
+   * version computed the same set from inverted edges, so the engine stayed self-consistent while
+   * every outside reader of the table saw the relation upside down.
+   */
+  private rootSummaries(sessionId: string): LcmSummary[] {
+    return this.store.getSummariesForSession(sessionId).filter((summary) => summary.parentIds.length === 0);
+  }
+
+  /**
+   * Fits ghost cues, newest first, into `budget`, appending the ones that fit. A cue is a single
+   * sentence, so one the budget cannot hold is skipped rather than truncated: a truncated cue
+   * would name an id that is no longer the whole id, and the model would expand nothing.
+   */
+  private fitCues(roots: LcmSummary[], budget: number, ghosts: GhostCue[]): number {
+    let used = 0;
+    for (const cue of this.ghostCues.buildWithContent(roots)) {
+      const cost = estimateTokens(cue.cueText);
+      if (used + cost > budget) continue;
+      ghosts.push(cue);
+      used += cost;
+    }
+    return used;
+  }
+
+  // ── The model call ───────────────────────────────────────────────────────────
+
+  /**
+   * One bounded summarization call, retried when it failed in transport (F5). The retry is on the
+   * typed error only: a call the model answered badly is a verdict, not a transport failure.
+   */
+  private async callBounded(
+    units: Unit[],
+    depth: number,
+    operator: 'LLM-Map' | 'Agentic-Map',
+    targetTokens: number | undefined,
+    sessionId: string,
+    trigger: LcmTrigger | undefined,
+    failures: LcmSummaryFailureSurface[],
+  ): Promise<SummaryOutput> {
+    const attempts = 1 + Math.max(0, this.config.summaryRetry ?? 1);
+    let lastError: unknown;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        return await this.callOperator(units, depth, operator, targetTokens);
+      } catch (err: unknown) {
+        lastError = err;
+        // R2-S1 on this path: an attempt that threw is still a model call MAF made. Record it
+        // before deciding whether another attempt follows, so a retried call contributes one record
+        // per invocation and the bundle can be matched to the adapter's ledger exactly.
+        await this.recordFailedSummaryCall({ err, units, depth, sessionId, trigger, failures });
+        if (!isTransport(err)) break;
+      }
+    }
+    throw lastError;
+  }
+
+  /**
+   * Records a summarization attempt that failed after the adapter was called (WP-3.0c R2-S1/R4-L2,
+   * applied to this lane). The summarizer attaches the surface of the call — the adapter's own when it
+   * reported one, otherwise what the summarizer sent, marked `fallback` — so the record carries the
+   * digests of what was sent and what came back. A failure before the adapter is called (an oversized
+   * prompt, a missing Agentic-Map backend) carries no surface and is not recorded: there was no model
+   * call to account for.
+   *
+   * Z1: `error` is a fact about a call that never came back. An adapter that *returned* a failed
+   * result records its output digest and no `error`, exactly as the planner and the gate record the
+   * same result (D-52). Only a throw records `'thrown'`, and a throw before anything was sent records
+   * `'not-sent'` (R4-L2).
+   *
+   * Z3: the failure is also appended to the caller's `failures`, which the transcript writer renders
+   * as one `[surface]` line per failed attempt — the role-call pattern from #62's S9. The write is
+   * best-effort, as it is for a role call (R2-L2): the attempt's own error decides whether it is
+   * retried, and a recorder that failed must not replace it.
+   */
+  private async recordFailedSummaryCall(args: {
+    err: unknown; units: Unit[]; depth: number; sessionId: string; trigger: LcmTrigger | undefined;
+    failures: LcmSummaryFailureSurface[];
+  }): Promise<void> {
+    const surface = attachedModelSurface(args.err);
+    if (!surface) return;
+    const messageIds = [...new Set(args.units.flatMap((unit) => (unit.messageId ? [unit.messageId] : [])))];
+    const childIds = [...new Set(args.units.flatMap((unit) => (unit.summaryId ? [unit.summaryId] : [])))];
+    const returned = modelSurfaceWasReturned(args.err);
+    // Z3: the flattened record is what the transcript line is built from. It is appended before the
+    // recorder runs, so a recorder that throws still leaves the attempt visible to the transcript.
+    args.failures.push({
+      level:              args.depth,
+      messages:           args.depth === 0 ? messageIds.length : childIds.length,
+      ...(returned ? {} : { error: modelSurfaceWasSent(args.err) ? 'thrown' as const : 'not-sent' as const }),
+      ...(modelSurfaceIsFallback(args.err) ? { surfaceSource: 'fallback' as const } : {}),
+      ...(surface.model !== undefined ? { model: surface.model } : {}),
+      systemPromptSha256: surface.systemPromptSha256,
+      ...(surface.promptSha256 !== undefined ? { promptSha256: surface.promptSha256 } : {}),
+      ...(surface.outputSha256 !== undefined ? { outputSha256: surface.outputSha256 } : {}),
+    });
+    const call: LcmSummaryFailure = {
+      sessionId:  args.sessionId,
+      level:      args.depth,
+      messageIds,
+      childIds,
+      ...(returned ? {} : { error: modelSurfaceWasSent(args.err) ? 'thrown' as const : 'not-sent' as const }),
+      ...(modelSurfaceIsFallback(args.err) ? { surfaceSource: 'fallback' as const } : {}),
+      surface,
+      ...(args.trigger !== undefined ? { trigger: args.trigger } : {}),
+    };
+    try {
+      await this.config.recordSummaryCall?.(call);
+    } catch {
+      // R2-L2: the call's own outcome decides what happens next; the evidence write does not.
+    }
+  }
+
+  private async callOperator(
+    units: Unit[],
+    depth: number,
+    operator: 'LLM-Map' | 'Agentic-Map',
+    targetTokens?: number,
+  ): Promise<SummaryOutput> {
+    // F7: masked again here, not only at `addMessage`. A summary can be re-summarized at a higher
+    // level, and `summaryChunk` accepts ids from any caller, so the input is masked at the one
+    // place every prompt passes through.
+    const sources = units.map((unit) => ({ role: unit.role, content: redactCredentials(unit.content) }));
+    if (operator === 'Agentic-Map') {
+      if (!this.agenticMap) {
+        throw new Error('Agentic-Map was requested but this LcmEngine has no runSubAgent; supply one or use LLM-Map.');
+      }
+      return this.agenticMap.complete(sources, depth, targetTokens);
+    }
+    return this.llmMap.complete(sources, depth, targetTokens);
+  }
+
+  private async recordCall(call: {
+    sessionId: string;
+    summaryId: LcmSummaryId;
+    level: number;
+    messageIds: LcmMessageId[];
+    childIds: LcmSummaryId[];
+    content: string;
+    contentTokens: number;
+    output: SummaryOutput;
+    trigger: LcmTrigger | undefined;
+    /** The rendered prompt's estimate — the input half of the charge when nothing was reported. */
+    inputTokens: number;
+  }): Promise<LcmSummarySurface> {
+    const reported = typeof call.output === 'string' ? undefined : call.output.tokensUsed;
+    const modelSurface = typeof call.output === 'string' ? undefined : call.output.surface;
+    const model = typeof call.output === 'string' ? undefined : call.output.model;
+    // R5: what the call spent against the triggering node's budget. The backend's count when it
+    // gave one — note openrouter reports prompt plus output, which is exactly the whole call — and
+    // otherwise the same estimate the package uses everywhere: input plus output.
+    const charged = isTokenCount(reported)
+      ? Math.ceil(reported)
+      : call.inputTokens + call.contentTokens;
+    const surface: LcmSummarySurface = {
+      summaryId: call.summaryId,
+      level:     call.level,
+      messages:  call.messageIds.length,
+      chars:     call.content.length,
+      contentTokens: call.contentTokens,
+      tokenBudgetCharged: charged,
+      ...(call.trigger?.nodeId !== undefined ? { nodeId: call.trigger.nodeId } : {}),
+      ...(call.trigger?.taskId !== undefined ? { taskId: call.trigger.taskId } : {}),
+      ...(isTokenCount(reported) ? { reportedTokens: Math.ceil(reported) } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(modelSurface?.systemPromptSha256 !== undefined
+        ? { systemPromptSha256: modelSurface.systemPromptSha256 } : {}),
+      ...(modelSurface?.promptSha256 !== undefined ? { promptSha256: modelSurface.promptSha256 } : {}),
+      ...(modelSurface?.outputSha256 !== undefined ? { outputSha256: modelSurface.outputSha256 } : {}),
+    };
+    if (!this.config.recordSummaryCall) return surface;
+    await this.config.recordSummaryCall({
+      sessionId: call.sessionId,
+      summaryId: call.summaryId,
+      level: call.level,
+      messageIds: call.messageIds,
+      childIds: call.childIds,
+      content: call.content,
+      contentTokens: call.contentTokens,
+      tokenBudgetCharged: charged,
+      ...(isTokenCount(reported) ? { reportedTokens: Math.ceil(reported) } : {}),
+      ...(typeof call.output !== 'string' && call.output.model !== undefined ? { model: call.output.model } : {}),
+      ...(typeof call.output !== 'string' && call.output.surface !== undefined ? { surface: call.output.surface } : {}),
+      ...(call.trigger !== undefined ? { trigger: call.trigger } : {}),
+    });
+    return surface;
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Splits each message into units at the byte cap and keeps its attribution (R3). The cap is
+   * bytes, because that is what the operating system counts: a 64 KiB prompt of `'中'` is 192 KiB
+   * on the wire and the process refused to start.
+   */
+  private unitsOf(messages: LcmMessage[]): Unit[] {
+    const perUnit = MAX_SUMMARY_PROMPT_BYTES - SUMMARY_UNIT_OVERHEAD;
+    const units: Unit[] = [];
+    for (const message of messages) {
+      for (const content of splitByBytes(message.content, perUnit)) {
+        units.push({ role: message.role, content, messageId: message.id });
+      }
+    }
+    return units;
+  }
+
+  private missing(requested: LcmMessageId[], found: LcmMessage[]): Error {
+    const known = new Set(found.map((m) => m.id));
+    const missing = requested.filter((id) => !known.has(id));
+    return new Error(
+      `LCM compaction was asked to summarize ${requested.length} message(s) but ${missing.length} ` +
+      `are not in the store (${missing.slice(0, 3).join(', ')}). Refusing to drop context that would ` +
+      `not be in the summary.`,
+    );
+  }
+
+  /** One compaction per session: each call waits for the previous one, which never rejects. */
+  private serialize<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const prior = this.sessionLocks.get(sessionId) ?? Promise.resolve();
+    const next = prior.then(work, work);
+    this.sessionLocks.set(sessionId, next.then(() => undefined, () => undefined));
+    return next;
+  }
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isTransport(err: unknown): boolean {
+  // `instanceof` across the package boundary would be enough in this monorepo, but a structured
+  // check also survives a duplicated copy of `@maf/types` in a host: the class carries the name.
+  return err instanceof Error && (err.name === 'TransportError' || err.constructor?.name === 'TransportError');
+}
+
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function reportedTokensOf(output: SummaryOutput, content: string): number {
+  if (typeof output !== 'string' && isTokenCount(output.tokensUsed)) return Math.ceil(output.tokensUsed);
+  return estimateTokens(content);
+}
+
+/**
+ * Units into groups whose rendered prompt fits one argument, measured in bytes (R3).
+ *
+ * `splitByBytes` bounds every unit, so a unit always fits a group on its own; the `group.length > 0`
+ * guard keeps that invariant rather than producing an empty group for one oversized unit.
+ */
+function packUnits(units: Unit[]): Unit[][] {
+  const groups: Unit[][] = [];
+  let group: Unit[] = [];
+  let size = 0;
+  for (const unit of units) {
+    const cost = byteLength(unit.content) + SUMMARY_UNIT_OVERHEAD;
+    if (group.length > 0 && size + cost > MAX_SUMMARY_PROMPT_BYTES) {
+      groups.push(group);
+      group = [];
+      size = 0;
+    }
+    group.push(unit);
+    size += cost;
+  }
+  if (group.length > 0) groups.push(group);
+  return groups;
+}
+
+/**
+ * Splits text into chunks of at most `maxBytes` UTF-8 bytes without splitting a code point. The
+ * previous cap sliced by UTF-16 code unit, which both miscounted non-ASCII text and could cut a
+ * surrogate pair in half.
+ */
+function splitByBytes(text: string, maxBytes: number): string[] {
+  const chunks: string[] = [];
+  let chunk = '';
+  let size = 0;
+  for (const char of text) {
+    const bytes = byteLength(char);
+    if (chunk !== '' && size + bytes > maxBytes) {
+      chunks.push(chunk);
+      chunk = '';
+      size = 0;
+    }
+    chunk += char;
+    size += bytes;
+  }
+  if (chunk !== '' || chunks.length === 0) chunks.push(chunk);
+  return chunks;
+}
+
+/** The prompt as the summarizer renders it, estimated the package's one way (R5's input half). */
+function promptTokensOf(units: Unit[]): number {
+  return estimateTokens(units.map((unit) => `[${unit.role.toUpperCase()}] ${unit.content}`).join('\n'));
+}
+
+/**
+ * Root summaries fitted newest-first into `budget` without compacting (R14): the Dolt archive for a
+ * caller that cannot expand a cue. Returned oldest-first, like the Upward archive, because that is
+ * the order the injector renders.
+ */
+function fitRootsNewestFirst(
+  roots: LcmSummary[],
+  budget: number,
+): { summaries: LcmSummary[]; used: number } {
+  const kept: LcmSummary[] = [];
+  let used = 0;
+  for (let i = roots.length - 1; i >= 0; i--) {
+    const summary = roots[i]!;
+    if (used + summary.tokens > budget) continue;
+    kept.push(summary);
+    used += summary.tokens;
+  }
+  return { summaries: kept.reverse(), used };
+}
+
+/**
+ * The newest messages fitted into the room the archive left (R4c). `candidates` is oldest-first, so
+ * iterating backwards renders newest-first; a message that does not fit is skipped here and is
+ * compacted by `assembleContext` at this same assembly (V1), not left for a later one. The wrapper
+ * and per-message overheads are the injector's own rendering costs, so the returned size is the
+ * rendered size, not an estimate of the content alone.
+ */
+function fitRecent(
+  candidates: LcmMessage[],
+  budget: number,
+): { messages: LcmMessage[]; tokens: number } {
+  if (budget <= RECENT_WRAPPER_TOKENS || candidates.length === 0) return { messages: [], tokens: 0 };
+  const kept: LcmMessage[] = [];
+  let used = RECENT_WRAPPER_TOKENS;
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const message = candidates[i]!;
+    const cost = estimateTokens(message.content) + RECENT_MESSAGE_OVERHEAD_TOKENS;
+    if (used + cost > budget) continue;
+    kept.push(message);
+    used += cost;
+  }
+  return { messages: kept, tokens: used };
+}
+
+/**
+ * The summaries that do NOT fit when taken newest-first: the oldest ones, plus any oversized
+ * newer one. `roots` is oldest-first, so iterating backwards is newest-first.
+ */
+function overflowNewestFirst(roots: LcmSummary[], budget: number): LcmSummary[] {
+  let used = 0;
+  const kept = new Set<LcmSummaryId>();
+  for (let i = roots.length - 1; i >= 0; i--) {
+    const summary = roots[i]!;
+    if (used + summary.tokens > budget) continue;
+    kept.add(summary.id);
+    used += summary.tokens;
+  }
+  return roots.filter((summary) => !kept.has(summary.id));
+}
+
+function emptyContext(mode: LcmMode): LcmContext {
+  return {
+    messages: [], ghosts: [], totalTokens: 0,
+    ...(mode === 'Upward' ? { summaries: [] } : {}),
+  };
 }

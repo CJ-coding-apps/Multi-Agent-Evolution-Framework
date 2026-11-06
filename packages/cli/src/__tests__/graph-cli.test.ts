@@ -81,7 +81,7 @@ test('graph export refuses a row the importer would reject, and writes no file',
     try {
       await graph.addNode({ kind: 'Task', label: 'no run', properties: {}, runId: makeRunId('') });
     } finally {
-      graph.close();
+      await graph.close();
     }
 
     const out = path.join(dir, 'export.json');

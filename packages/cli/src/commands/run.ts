@@ -3,11 +3,11 @@ import crypto from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import tty from 'node:tty';
 import type { Command } from 'commander';
-import { makeRunId, makeTaskId, makeAgentId, redactText } from '@maf/types';
-import type { AdapterName, CliAdapter, Dag, DagNode, PlanSource, RetryPolicy } from '@maf/types';
+import { attachedModelSurface, callModelSurface, makeRunId, makeTaskId, makeAgentId, modelSurfaceWasSent, redactText } from '@maf/types';
+import type { AdapterInvokeResult, AdapterName, CliAdapter, Dag, DagNode, ModelSurfaceRecord, PlanSource, RetryPolicy, RunOutcome, TaskId } from '@maf/types';
 import { failureTail } from '@maf/adapter-base';
 import { BlackboardStore } from '@maf/blackboard';
-import { LcmEngine } from '@maf/lcm';
+import type { LcmEngine } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
 import { MemoryGraph } from '@maf/memory-graph';
 import { Attestor, componentId } from '@maf/attestation';
@@ -24,9 +24,10 @@ import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterR
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, lookupAdapter, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { loadCommandPolicy, planRunHarness } from '../wiring.js';
+import { createRunLcm, loadCommandPolicy, planRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
+import type { ResolvedMafConfig } from '../config/ConfigLoader.js';
 import type { MafConfig } from '../config/ConfigLoader.js';
 
 const SECURITY_REVIEW_FALLBACK_PROMPT = `You are a security auditor. Review the supplied diff for vulnerabilities. Respond with a strict JSON block:
@@ -314,11 +315,23 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     // Wire all components
     const board     = new BlackboardStore();
-    lcm             = new LcmEngine({
-      dbPath:    path.join(mafDir, 'lcm.db'),
-      ...cfg.lcm,
-      summarize: async (messages) => messages.map((m) => m.content.slice(0, 200)).join('\n'),
+    // D-17, F1, R1: summaries come from the run's own adapter, with the model the run chose, and
+    // the whole LCM construction is the one factory goldens and evolve use. It records the settings
+    // in force once (R4a), attributes every summary call to the node whose assembly triggered it,
+    // records what that call cost (R5), and logs/records a degraded compaction (F5). The attestor
+    // is built first because the factory records into it.
+    const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
+    const runLcm = createRunLcm({
+      mafDir,
+      cwd:     dir,
+      adapter,
+      ...(cfg.model !== undefined ? { model: cfg.model } : {}),
+      lcm:       cfg.lcm,
+      sessionId,
+      attestor,
     });
+    const engine = runLcm.engine;
+    lcm = engine;
 
     // ── Worktree, once the run's configuration is known to be usable.
     run = cfg.worktree ? await worktrees.createForRun(runId) : undefined;
@@ -330,7 +343,12 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // The registry the agent gets is bound to the run's working directory now that it exists: the
     // git tools learn the repository root here, before any agent action, so a `.git` the agent later
     // removes or rewrites cannot redirect them (WP-2.17). `baseTools` above only validated the roles.
-    const agentTools = createDefaultRegistry({ projectRoot: cwd });
+    // WP-3.2 F8: `lcm.expand` resolves against this run's archive, so the registry is given the
+    // expander here, beside the engine that owns it.
+    const agentTools = createDefaultRegistry({
+      projectRoot: cwd,
+      lcmExpand: (summaryId: string) => runLcm.expand(summaryId),
+    });
 
     const transcript = new TranscriptLogger(runId, makeAgentId(taskId), {
       logDir: path.join(mafDir, 'transcripts'),
@@ -344,7 +362,25 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
     // and the transcript as the run goes, so a run that fails still says what it was asked to run.
     await transcript.append('system', planSourceLine(planSource), { planSource });
     const lcmBridge = new BlackboardToLcmAdapter(board, lcm, sessionId, runId);
-    const attestor = new Attestor(runId, graph, path.join(mafDir, 'attestations'), Attestor.resolveSigningSecret(env), harness.sha);
+    // L1-S9: one model call's surface goes to the bundle's array and to the transcript, in that
+    // order. The transcript is written as the run goes, so a run that fails before its bundle is
+    // written still says which calls it made. The planner's and the gate's call sites both record
+    // through here, so neither can reach one store and miss the other.
+    const recordSurface = makeSurfaceRecorder(attestor, transcript, warn);
+
+    // L1-S2: the bundle a finished run writes, and the one a run whose planning call failed writes
+    // before it rethrows. Same builder, same harness config source, so `maf attest verify` reads
+    // either the same way.
+    const writeBundle = async (outcome: RunOutcome) => attestor.bundle(
+      { id: componentId(`@maf/adapter-${cfg.adapter}`), modelVersion: cfg.model ?? 'default' },
+      {
+        configSource: await harnessStore.configSource(harness),
+        parameters:  { harnessId: harness.id, planSource },
+        environment: {},
+      },
+      [],
+      outcome,
+    );
     // One gate for the run (D-02): an escalated tool call is put to the operator at the terminal,
     // or refused and left as a pending record when no one can answer; either way it is attested.
     const approvalGate = createApprovalGate({ recorder: attestor, mafDir, env, ...(terminal ? { terminal } : {}) });
@@ -363,6 +399,9 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       projectRoot:    cwd,
       securityPrompt,
       timeoutMs:      cfg.timeouts.securityReviewMs,
+      // L1: every gate call is a model call. The gate names the node whose diff it read, so the
+      // record joins that node's role records in the same array; S9 mirrors it into the transcript.
+      recordSurface, warn,
       ...model,
     });
 
@@ -427,9 +466,35 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
         // and *warn* before assigning the default, which was the writer.
         roles,
         roleCatalog: roles.catalog(),
-        generatePlan: planGenerator(adapter, { workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry, ...model }),
+        // L1: the planner's call is the run's first model call, and it was the one the live row
+        // found missing from the record. `makeTaskId('planner')` is deliberate: the call belongs to
+        // the run, not to any node the planner has yet written; S9 mirrors it into the transcript.
+        generatePlan: planGenerator(adapter, {
+          workingDir: cwd, timeoutMs: cfg.timeouts.planMs, retry: cfg.dag.retry,
+          recordSurface, warn,
+          ...model,
+        }),
       });
-      dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
+      // L1-S2: a planning failure — a judged failure, a transport failure after its retries, or an
+      // adapter that threw — ends the run before any node exists. The model calls it made are still
+      // spend, and the surface records still hold them, so the run is attested like any other: one
+      // signed bundle with `planning_failed` and no subjects, and its path printed. A failure to
+      // write that bundle is a warning, never a replacement for the planning error.
+      try {
+        dag = applyDagSettings(await planner.plan({ title: taskDescription, description: taskDescription, runId, sessionId }), cfg.dag);
+      } catch (planError) {
+        try {
+          const bundle = await writeBundle({ status: 'Failed', unscheduled: [], failure: { kind: 'planning_failed' } });
+          say(`[maf] planning failed. Attestation: ${path.join(mafDir, 'attestations', runId + '.bundle.json')}`);
+          say(`[maf] signature: ${bundle.signature.slice(0, 16)}... (keySource: ${bundle.keySource})`);
+        } catch (attestError) {
+          warn(
+            `[maf] warning: planning failed and its attestation could not be written: ` +
+            `${attestError instanceof Error ? attestError.message : String(attestError)}`,
+          );
+        }
+        throw planError;
+      }
     }
 
     // Run DAG
@@ -460,16 +525,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
 
     // Bundle attestation — the harness IS the build's config source (signed): the stored file and
     // its sha, re-verified now, so the digest names what was dispatched.
-    const bundle = await attestor.bundle(
-      { id: componentId(`@maf/adapter-${cfg.adapter}`), modelVersion: cfg.model ?? 'default' },
-      {
-        configSource: await harnessStore.configSource(harness),
-        parameters:  { harnessId: harness.id, planSource },
-        environment: {},
-      },
-      [],
-      outcome,
-    );
+    const bundle = await writeBundle(outcome);
 
     say(`[maf] done. Attestation: ${path.join(mafDir, 'attestations', runId + '.bundle.json')}`);
     say(`[maf] signature: ${bundle.signature.slice(0, 16)}... (keySource: ${bundle.keySource})`);
@@ -489,7 +545,7 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   } finally {
     // Reached by a failure or a throw as well, so the worktree is always reported. Never removed.
     if (isolated && run) refusal = await finishWorktree(worktrees, run, succeeded, say, warn);
-    graph?.close();
+    await graph?.close();
     lcm?.close();
   }
   // Only a run that succeeded gets a reason here: its hand-over was refused or could not be finished.
@@ -504,16 +560,58 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
  */
 export function planGenerator(
   adapter: CliAdapter,
-  call: { workingDir: string; timeoutMs: number; retry: RetryPolicy; model?: string },
+  call: {
+    workingDir: string;
+    timeoutMs: number;
+    retry: RetryPolicy;
+    model?: string;
+    /**
+     * L1: where the planning call's surface goes. Called once per attempt, before the result is
+     * judged, so a failed or timed-out planning call is in the record too — its error text is what
+     * the model was shown back, not a reason to leave the spend unrecorded. A call that threw
+     * (L1-S5) records as well: its prompt digests are known and its output digest is absent.
+     */
+    recordSurface?: (record: ModelSurfaceRecord) => unknown;
+    /** The id this call is recorded under. The planner is the run's call, not a node's. */
+    taskId?: TaskId;
+    /** R4-L1: where a warning about a malformed attached surface goes. Defaults to silence. */
+    warn?: (line: string) => void;
+  },
 ): (systemPrompt: string, userPrompt: string) => Promise<string> {
   return (systemPrompt, userPrompt) => withRetry(async () => {
-    const result = await adapter.invoke({
-      prompt: userPrompt, systemPrompt,
-      workingDir: call.workingDir, timeoutMs: call.timeoutMs,
-      maxOutputBytes: 64 * 1024, // planning only needs a JSON block
-      nativeTools: false,
-      ...(call.model !== undefined ? { model: call.model } : {}),
-    });
+    let result: AdapterInvokeResult | undefined;
+    let failure: unknown;
+    try {
+      result = await adapter.invoke({
+        prompt: userPrompt, systemPrompt,
+        workingDir: call.workingDir, timeoutMs: call.timeoutMs,
+        maxOutputBytes: 64 * 1024, // planning only needs a JSON block
+        nativeTools: false,
+        ...(call.model !== undefined ? { model: call.model } : {}),
+      });
+    } catch (err: unknown) {
+      failure = err;
+      throw err;
+    } finally {
+      // L1: record the attempt before any judgement of it, and whether or not it returned (S5).
+      // A backend that reports its own surface keeps it (its argv is evidence this call site cannot
+      // reconstruct); one that reports none gets the digests of what was sent and received, with no
+      // argv claimed. R3-S1: a call that threw reports through the surface the adapter attached to
+      // its error; only an adapter that attached none falls back to this call site, and that record
+      // is marked `surfaceSource: 'fallback'` — the system prompt here is the planner's role prompt,
+      // not the block a backend that composes one was sent. A throw leaves `outputSha256` absent and
+      // says `error: 'thrown'` — or `'not-sent'` (R4-L2) when the adapter marks that the failure came
+      // before any request left it.
+      const reported = result?.modelSurface ?? attachedModelSurface(failure, call.warn);
+      await call.recordSurface?.({
+        role: 'planner', taskId: call.taskId ?? makeTaskId('planner'), turn: 1,
+        ...(reported ?? callModelSurface(systemPrompt, userPrompt, result?.output)),
+        tier: 'cli', nativeTools: 'none', kind: 'planner',
+        ...(result === undefined ? { error: (modelSurfaceWasSent(failure) ? 'thrown' : 'not-sent') as 'thrown' | 'not-sent' } : {}),
+        ...(reported === undefined ? { surfaceSource: 'fallback' as const } : {}),
+        ...(call.model !== undefined ? { model: call.model } : {}),
+      });
+    }
     if (result.transportError !== undefined) throw result.transportError;
     if (!result.success) {
       throw new Error(
@@ -536,11 +634,65 @@ export function writerLock(roles: RoleRegistry, adapter: CliAdapter, baseTools: 
   return (node) => roles.hasRole(node.agentRole) ? isWriterForLock(roles.getRole(node.agentRole), adapter, baseTools) : true;
 }
 
+/**
+ * L1-S9: the one recorder the planner and the security gate write their surfaces through — the
+ * bundle's array first, then the transcript, in that order.
+ *
+ * R2-L2, R3-M1: both call sites invoke it from a `finally`, so a write failure that escaped would
+ * replace the call's own error, or turn a valid result into a throw, with a transcript error. The
+ * surface record is evidence about the call; it does not outrank the call. A failure is reported on
+ * the run's stderr and the call's outcome stands, whichever store refused. Exported so a test can
+ * drive it with a sink that fails and see the call's result unchanged.
+ */
+export function makeSurfaceRecorder(
+  attestor: { recordModelSurface(record: ModelSurfaceRecord): void },
+  transcript: { append(role: 'system', content: string, metadata?: Record<string, unknown>): Promise<void> },
+  warn: (line: string) => void,
+): (record: ModelSurfaceRecord) => Promise<void> {
+  return async (record: ModelSurfaceRecord): Promise<void> => {
+    try {
+      attestor.recordModelSurface(record);
+      await transcript.append('system', surfaceLine(record), surfaceMetadata(record));
+    } catch (err: unknown) {
+      warn(`[maf] warning: could not record the ${record.kind ?? 'call'} surface ` +
+        `(turn ${record.turn}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+}
+
 /** The transcript's line for where the plan came from (WP-3.6, F4). */
 function planSourceLine(source: PlanSource): string {
   return source.kind === 'spec'
     ? `plan source: spec ${source.path} (sha256 ${source.sha256})`
     : 'plan source: the planner';
+}
+
+/**
+ * The transcript's line for one model-facing surface (F4, L1-S9): digests and the argv the call was
+ * run with, never the prompt or the output themselves, so the transcript ties a bundle's
+ * `modelSurfaces` entry to the run without holding a second copy of model text.
+ */
+function surfaceLine(record: ModelSurfaceRecord): string {
+  return `[surface] ${record.kind ?? 'call'} turn ${record.turn}: system sha256 ${record.systemPromptSha256}; ` +
+    `prompt sha256 ${record.promptSha256 ?? '(none)'}; output sha256 ${record.outputSha256 ?? '(none)'}; ` +
+    `native tools ${record.nativeTools ?? '(unrecorded)'}; argv ${JSON.stringify(record.argv)}` +
+    (record.error !== undefined ? `; error ${record.error}` : '') +
+    (record.surfaceSource !== undefined ? `; surface source ${record.surfaceSource}` : '');
+}
+
+/** What rides with that line, field for field: the digests, the tier, and the call's identity. */
+function surfaceMetadata(record: ModelSurfaceRecord): Record<string, unknown> {
+  return {
+    agentRole: record.role, taskId: record.taskId, turn: record.turn, tier: record.tier,
+    ...(record.kind !== undefined ? { kind: record.kind } : {}),
+    systemPromptSha256: record.systemPromptSha256, toolCatalog: record.toolCatalog, argv: record.argv,
+    ...(record.promptSha256 !== undefined ? { promptSha256: record.promptSha256 } : {}),
+    ...(record.outputSha256 !== undefined ? { outputSha256: record.outputSha256 } : {}),
+    ...(record.stdinSha256 !== undefined ? { stdinSha256: record.stdinSha256 } : {}),
+    ...(record.error !== undefined ? { error: record.error } : {}),
+    ...(record.surfaceSource !== undefined ? { surfaceSource: record.surfaceSource } : {}),
+    nativeTools: record.nativeTools,
+  };
 }
 
 /**

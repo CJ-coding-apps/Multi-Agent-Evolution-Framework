@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { TransportError } from '@maf/types';
+import { TransportError, attachedModelSurface, modelSurfaceWasSent } from '@maf/types';
+import { serializeHistory } from '@maf/adapter-base';
 import type { AdapterInvokeOptions, TurnMessage } from '@maf/types';
 import type { SpawnResult, spawnAndCollect } from '@maf/adapter-base';
 import { CodexAdapter } from '../index.js';
@@ -159,4 +160,80 @@ test('invoke records the cli-tier model surface; codex\'s prompt is on stdin, no
     'the stdin digest is of the joined blob, not of either part');
   assert.notEqual(surface.stdinSha256, surface.promptSha256,
     'and it is distinct from the prompt digest, so it is not a second copy of it');
+});
+
+// R4-M1/R4-L2: the attach path on this adapter's two call shapes. The surface must equal what the
+// child was actually given — argv and the blob written to stdin — and the record must distinguish a
+// turn that ran and failed (sent) from a binary that never started (not sent).
+
+interface RecordedSpawn { cmd: string; args: string[]; input: string | undefined }
+
+/** A spawn that records argv and stdin and resolves with `result`. */
+function recordingSpawn(result: SpawnResult): { spawn: typeof spawnAndCollect; calls: RecordedSpawn[] } {
+  const calls: RecordedSpawn[] = [];
+  const spawn: typeof spawnAndCollect = async (cmd, args, opts) => {
+    calls.push({ cmd, args: [...args], input: opts?.input });
+    return result;
+  };
+  return { spawn, calls };
+}
+
+test('R4-M1: a sendTurn that ran and failed attaches the argv and stdin it was given, and is sent', async () => {
+  const { spawn, calls } = recordingSpawn(timedOut());
+  let err: unknown;
+  try {
+    await new CodexAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, systemPrompt: 'be brief', model: 'o4' });
+    assert.fail('the turn was expected to throw');
+  } catch (thrown: unknown) {
+    err = thrown;
+  }
+
+  const surface = attachedModelSurface(err);
+  assert.ok(surface, 'the failed turn says what it was written');
+  const call = calls[0];
+  assert.ok(call?.input, 'the child was given a stdin blob');
+  assert.equal(surface.stdinSha256, sha256Hex(call.input), 'the digest is of the blob the child received');
+  assert.equal(surface.promptSha256, sha256Hex(serializeHistory(HISTORY)), 'the digest is of the history text written to stdin');
+  assert.deepEqual(surface.argv, call.args, 'the argv the child received');
+  assert.equal('outputSha256' in surface, false, 'nothing came back, so there is no output digest');
+  assert.equal(modelSurfaceWasSent(err), true, 'the binary ran, so the attempt was sent');
+});
+
+test('R4-L2: a sendTurn whose binary cannot start attaches its surface and is marked not-sent', async () => {
+  const failure = new TransportError('Could not run "codex": spawn codex ENOENT');
+  const spawn: typeof spawnAndCollect = async () => { throw failure; };
+  let err: unknown;
+  try {
+    await new CodexAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, systemPrompt: 'be brief' });
+    assert.fail('the turn was expected to throw');
+  } catch (thrown: unknown) {
+    err = thrown;
+  }
+
+  assert.equal(err, failure, 'the same error object, so its class and message survive');
+  const surface = attachedModelSurface(err);
+  assert.ok(surface, 'the failed turn says what it was asked to send');
+  assert.equal(modelSurfaceWasSent(err), false, 'the binary never ran');
+});
+
+test('R4-M1: an invoke whose binary cannot start attaches its argv and is not-sent', async () => {
+  const failure = new TransportError('Could not run "codex": spawn codex ENOENT');
+  const spawn: typeof spawnAndCollect = async () => { throw failure; };
+  let err: unknown;
+  try {
+    await new CodexAdapter({ spawn }).invoke({ ...CALL, systemPrompt: 'be brief', model: 'o4' });
+    assert.fail('the call was expected to throw');
+  } catch (thrown: unknown) {
+    err = thrown;
+  }
+
+  assert.equal(err, failure);
+  const surface = attachedModelSurface(err);
+  assert.ok(surface);
+  assert.equal(surface.systemPromptSha256, sha256Hex('be brief'));
+  assert.equal(surface.promptSha256, sha256Hex('say hi'));
+  assert.equal(surface.stdinSha256, sha256Hex('be brief\n\nsay hi'));
+  assert.deepEqual(surface.argv, ['--full-auto', '--model', 'o4']);
+  assert.equal('outputSha256' in surface, false);
+  assert.equal(modelSurfaceWasSent(err), false);
 });

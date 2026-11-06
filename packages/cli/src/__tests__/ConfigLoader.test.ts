@@ -117,7 +117,7 @@ test('every problem in the file is reported, each with its line', async () => {
     await rejectsWith(
       ConfigLoader.load(file),
       /line 1: worktree must be true or false; found "yes"\./,
-      /line 3: lcm\.mode must be "Upward" or "Dolt"; found "upward"\./,
+      /line 3: lcm\.mode must be "Upward", "Dolt" or "off"; found "upward"\./,
       /line 4: lcm\.contextThreshold must be a number greater than 0 and at most 1; found 1\.5\./,
       /line 6: timeouts\.planMs must be/,
     );
