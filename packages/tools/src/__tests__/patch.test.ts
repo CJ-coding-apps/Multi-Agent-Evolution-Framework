@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync,
-  symlinkSync, writeFileSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
+  rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1016,9 +1016,10 @@ test('a file replaced by a directory in one diff is allowed: git deletes the fil
 });
 
 /**
- * Every name under `root`, `.git` aside: its kind, and for a file the mode and a digest of its
- * bytes. Directories are recorded too — a failed apply can turn a file into one, and the restore
- * has to turn it back — which `snapshot` above deliberately does not.
+ * Every name under `root`, `.git` aside: its kind, and its mode — directories included (K2/K3),
+ * because a failed apply can remove an emptied directory and the restore has to bring its
+ * permissions back — and, for a file, a digest of its bytes. Comparing two of these is the whole
+ * of what a restore promises: existence, kind, content and mode, and no extra path.
  */
 function treeState(root: string): Record<string, string> {
   const state: Record<string, string> = {};
@@ -1028,7 +1029,7 @@ function treeState(root: string): Record<string, string> {
       const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
       const absolute = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        state[relative] = 'dir';
+        state[relative] = `dir:${(lstatSync(absolute).mode & 0o777).toString(8)}`;
         walk(absolute, relative);
       } else if (entry.isSymbolicLink()) {
         state[relative] = `link:${readlinkSync(absolute)}`;
@@ -1084,6 +1085,16 @@ for (const [name, files, diff] of [
 ] as const) {
   test(`a failed apply restores every declared path: ${name} (R4-H1)`, async () => {
     const dir = seededRepo('restore-', files as Record<string, string>);
+    // Non-default modes on both kinds (K3): the restore has to bring back what it found, not what
+    // the process's umask would create. `d/a` is executable; `d` and the files are private.
+    chmodSync(path.join(dir, 'd'), 0o700);
+    chmodSync(path.join(dir, 'd/a'), 0o755);
+    chmodSync(path.join(dir, 'd/keep'), 0o600);
+    if (existsSync(path.join(dir, 'x'))) {
+      if (lstatSync(path.join(dir, 'x')).isDirectory()) chmodSync(path.join(dir, 'x'), 0o750);
+      else chmodSync(path.join(dir, 'x'), 0o600);
+    }
+    if (existsSync(path.join(dir, 'x/y'))) chmodSync(path.join(dir, 'x/y'), 0o600);
     const before = treeState(dir);
     const ctx = ctxIn({ cwd: dir, projectRoot: dir });
     const declared = tool.declaredPaths({ diff }, ctx);
@@ -1101,6 +1112,30 @@ for (const [name, files, diff] of [
   });
 }
 
+// K3, "leave created directories behind": when the apply creates a directory whose parents all
+// existed, nothing in the snapshot's second pass removes it — only the removal pass can. The shapes
+// above cannot show this, because the created names sit under a file the apply turned into a
+// directory, and restoring that file removes them with it.
+const K3_NEW_NESTED = 'diff --git a/n/created/f b/n/created/f\nnew file mode 100644\n--- /dev/null\n+++ b/n/created/f\n@@ -0,0 +1 @@\n+f\n';
+
+test('a failed apply removes the directory it created, not only the files in it (K3)', async () => {
+  const dir = seededRepo('restore-created-dir-', { 'd/a': 'a\n', 'd/keep': 'keep\n', 'n/keep': 'keep\n' });
+  const before = treeState(dir);
+  const diff = K3_NEW_NESTED + R4_FAIL_C;
+  const declared = tool.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+  assert.equal(
+    spawnSync('git', ['apply', '--check', '-'], { cwd: dir, input: diff, encoding: 'utf8' }).status,
+    0, 'git passes --check on this diff',
+  );
+
+  const result = await tool.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+  assert.notEqual(result.exitCode, 0, 'the apply fails after it created n/created/f');
+  assert.match(result.stderr, /every declared path was restored/);
+  assert.equal(existsSync(path.join(dir, 'n/created')), false,
+    'the directory the apply created is removed, not left empty or holding a file');
+  assert.deepEqual(treeState(dir), before);
+});
+
 test('an apply is not snapshotted for a dry run, and a dry run writes nothing (R4-H1)', async () => {
   // `dryRun` returns after `--check`, so it never needs the restore. The assertion is the tree: a
   // dry run of the failing shape above changes nothing and reports no restore, because nothing ran.
@@ -1112,6 +1147,83 @@ test('an apply is not snapshotted for a dry run, and a dry run writes nothing (R
   assert.equal(result.exitCode, 0);
   assert.doesNotMatch(result.stderr, /restored/);
   assert.deepEqual(treeState(dir), before);
+});
+
+// K2: `git apply` removes a directory it empties (measured), so a failed apply leaves that
+// directory's permissions to the restore. The snapshot records the mode; this shape empties `d`
+// and then fails on a file over the non-empty `k`, so the call must recreate `d` as it was.
+const K2_DEL_D = 'diff --git a/d/a b/d/a\ndeleted file mode 100644\n--- a/d/a\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n';
+const K2_FAIL_K = 'diff --git a/k/a b/k/a\ndeleted file mode 100644\n--- a/k/a\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n'
+  + 'diff --git a/k b/k\nnew file mode 100644\n--- /dev/null\n+++ b/k\n@@ -0,0 +1 @@\n+b\n';
+
+for (const mode of [0o700, 0o750] as const) {
+  test(`a failed apply restores an emptied ${mode.toString(8)} directory's mode (K2)`, async () => {
+    const dir = seededRepo('restore-mode-', { 'd/a': 'a\n', 'k/a': 'a\n', 'k/keep': 'keep\n' });
+    chmodSync(path.join(dir, 'd'), mode);
+    const before = treeState(dir);
+    const diff = K2_DEL_D + K2_FAIL_K;
+    const ctx = ctxIn({ cwd: dir, projectRoot: dir });
+    const declared = tool.declaredPaths({ diff }, ctx);
+    assert.equal(
+      spawnSync('git', ['apply', '--check', '-'], { cwd: dir, input: diff, encoding: 'utf8' }).status,
+      0, 'git passes --check on this diff',
+    );
+
+    const result = await tool.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+    assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+    assert.match(result.stderr, /every declared path was restored/);
+    assert.equal(lstatSync(path.join(dir, 'd')).mode & 0o777, mode,
+      'the restore recreated the directory with the mode it had, not the umask default');
+    assert.deepEqual(treeState(dir), before, 'every name, mode and byte is as it was');
+  });
+}
+
+test('a restore that does not put the tree back reports restoreFailed; a complete one does not (K4/K5)', async () => {
+  const dir = seededRepo('restore-failed-', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' });
+  const diff = R4_DEL_X + R4_NEW_XY + R4_FAIL_C;
+  let snapshotDirs: string[] = [];
+  let snapshotMode = 0;
+  const hooked = new PatchApplyTool({
+    beforeRestore: () => {
+      // The snapshot is live here, before the call's `finally` removes it, so its directory can be
+      // inspected (K5). Then make the project root unwritable, which is the injected failure K4
+      // names: the restore cannot remove or write anything under it.
+      snapshotDirs = readdirSync(tmpdir()).filter((name) => name.startsWith('maf-restore-'));
+      snapshotMode = lstatSync(path.join(tmpdir(), snapshotDirs[0]!)).mode & 0o777;
+      chmodSync(dir, 0o500);
+    },
+  });
+  try {
+    const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+    const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+    assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+    assert.equal(result.metadata['restoreFailed'], true, 'verification found the tree different from the snapshot');
+    assert.deepEqual(
+      [...(result.metadata['restoreFailedPaths'] as string[])].sort(), ['x'],
+      'the path that differs, not the exception that could not be avoided',
+    );
+    assert.match(result.stderr, /did not put the tree back/);
+    assert.doesNotMatch(result.stderr, /every declared path was restored/);
+  } finally {
+    chmodSync(dir, 0o700);
+  }
+  assert.equal(snapshotDirs.length, 1, 'a live snapshot directory existed while the restore ran');
+  assert.equal(snapshotMode, 0o700, 'the snapshot directory is private (K5)');
+  assert.equal(
+    readdirSync(tmpdir()).filter((name) => name.startsWith('maf-restore-')).length, 0,
+    'the snapshot directory is removed when the call ends, whatever the restore did (K5)',
+  );
+});
+
+test('a successful restore reports nothing structured as failed (K4)', async () => {
+  const dir = seededRepo('restore-ok-', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' });
+  const diff = R4_NEW_XY + R4_DEL_X + R4_FAIL_C;
+  const declared = tool.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+  const result = await tool.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stderr, /every declared path was restored/);
+  assert.equal(result.metadata['restoreFailed'], undefined);
+  assert.equal(result.metadata['restoreFailedPaths'], undefined);
 });
 
 test('deleting an unrelated file does not exempt a regular-file parent (R5-L1)', async () => {
