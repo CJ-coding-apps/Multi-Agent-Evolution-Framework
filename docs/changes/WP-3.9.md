@@ -531,6 +531,15 @@ the bytes right and the mode wrong, and a verification that compares content alo
 restored (1 test red). At this head the five restore mutants measure K5c 4 tests red, K5e 1, K3a 4,
 K4d 1, K4f 1.
 
+**The round's own verification found one more instrument defect (V-L6).** The seven process-group
+tests in `test-runner` answered "is the grandchild gone?" with `kill(pid, 0)`, which succeeds for a
+process that was killed but whose new parent has not reaped it. In a container whose pid 1 does not
+reap, all seven fail although the group was killed — measured as root with `sleep` as pid 1 and as
+an ordinary user under a `su` that adopts orphans without reaping them. The probe now reads state
+field 3 of `/proc/<pid>/stat` and treats `Z` as gone (platforms without `/proc` keep the signal
+answer), after which the seven pass in that harness; the product code was already right. The
+ordinary-user verification below runs in the same `su` harness that failed before the probe changed.
+
 **The documents name a command that exists (round 5, M1).** The K1 paragraphs told the operator to
 apply a sensitive candidate with `maf evolve approve <id>` — WP-3.7's command, not built yet. Today
 typing it starts a new evolve session and spends money. The evaluated candidate is now saved to the
