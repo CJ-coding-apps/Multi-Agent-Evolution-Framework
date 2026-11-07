@@ -162,10 +162,15 @@ function runGitApply(sealed: SealedGit, args: readonly string[]): GitResult {
     '-c', `core.attributesFile=${devNull}`,
     'apply', `-p${sealed.strip}`, ...args, sealed.file,
   ], { cwd: sealed.cwd, env: sealedEnv(sealed), encoding: 'utf8', maxBuffer: MAX_OUTPUT });
+  // A child killed by a signal has `status: null` and no `error`: without this, the caller reported
+  // exit 1 with empty stderr, which says nothing about what happened (V-L5).
+  const killed = r.status === null && r.signal !== null
+    ? `git apply was killed by ${r.signal}`
+    : undefined;
   return {
     status: r.status,
     stdout: r.stdout ?? '',
-    stderr: r.stderr ?? '',
+    stderr: killed === undefined ? (r.stderr ?? '') : [r.stderr?.trim(), killed].filter((s) => s).join('\n'),
     ...(r.error !== undefined ? { error: r.error.message } : {}),
   };
 }
@@ -648,6 +653,9 @@ function snapshotDeclared(root: string, declared: readonly string[]): TreeSnapsh
     return { dir, entries: [...entries.values()] };
   } catch (err) {
     // A snapshot that cannot be completed must not leave its directory behind either.
+    // Unreachable in a normal call (V-L3): `git apply --check` reads every declared file before the
+    // snapshot is taken, so an unreadable file has already failed the call; this is defence for a
+    // file that disappears between the check and the snapshot, and is kept untested deliberately.
     rmSync(dir, { recursive: true, force: true });
     throw err;
   }
@@ -656,6 +664,12 @@ function snapshotDeclared(root: string, declared: readonly string[]): TreeSnapsh
 /** What a restore achieved: the paths verification found different from the snapshot. */
 interface RestoreOutcome {
   readonly failedPaths: readonly string[];
+}
+
+/** Test seams for the restore's passes (V-H1, V-L2, K5e); production passes none. */
+interface RestoreSeams {
+  readonly beforeWrite?: () => void;
+  readonly beforeVerify?: () => void;
 }
 
 /**
@@ -669,16 +683,21 @@ interface RestoreOutcome {
  * (directories included, K2). A name whose kind is unchanged is left in place in the first pass and
  * rewritten in the second, because its content may have changed.
  *
- * Every write is no-follow (K5): each parent component is `lstat`ed and a symbolic link is refused
- * rather than written through, and the name itself is unlinked before anything is created there.
+ * No part of the restore follows a link (K5, V-H1): the removal pass, the write pass and the
+ * verification all resolve a name with `resolveRestorePath`, which `lstat`s every component from
+ * the project root down and refuses a symbolic link — the root included — instead of removing,
+ * writing or verifying through it. A name so refused is never touched, and verification names it.
  * A refusal is not thrown — verification names the entry instead, so the apply's own error is not
  * replaced by a second one.
  */
-function restoreTree(root: string, snapshot: TreeSnapshot): RestoreOutcome {
+function restoreTree(root: string, snapshot: TreeSnapshot, seams: RestoreSeams = {}): RestoreOutcome {
   const depth = (p: string): number => p.split('/').length;
 
   for (const entry of [...snapshot.entries].sort((a, b) => depth(b.path) - depth(a.path))) {
-    const absolute = path.join(root, entry.path);
+    // A path whose parent chain runs through a link is not touched at all (V-H1): removing what is
+    // on the other side of the link would delete outside the project. Verification names it.
+    const { absolute } = resolveRestorePath(root, entry.path);
+    if (absolute === undefined) continue;
     try {
       const now = lstatSync(absolute, { throwIfNoEntry: false });
       if (now === undefined) continue;
@@ -686,26 +705,43 @@ function restoreTree(root: string, snapshot: TreeSnapshot): RestoreOutcome {
         (entry.kind === 'file' && now.isFile())
         || (entry.kind === 'directory' && now.isDirectory())
         || (entry.kind === 'symlink' && now.isSymbolicLink());
-      if (entry.kind === 'absent' || !sameKind) rmSync(absolute, { recursive: true, force: true });
+      if (entry.kind === 'absent' || !sameKind) {
+        // A link found at a name the snapshot does not record as a link is left alone and reported
+        // by verification (V-H1). The apply cannot have put it there — declaring a symlink is
+        // refused before git runs — so it was planted between the snapshot and the restore, and
+        // the restore does not get to decide what was meant. (`rmSync` would unlink the link rather
+        // than follow it, but replacing it would report a tree as restored that the racer moved.)
+        if (now.isSymbolicLink() && entry.kind !== 'symlink') continue;
+        if (now.isSymbolicLink()) rmSync(absolute, { force: true });
+        else rmSync(absolute, { recursive: true, force: true });
+      }
     } catch { /* verification below reports what is still wrong */ }
   }
 
+  seams.beforeWrite?.();
   for (const entry of [...snapshot.entries].sort((a, b) => depth(a.path) - depth(b.path))) {
     if (entry.kind === 'absent') continue;
-    const absolute = path.join(root, entry.path);
+    const { absolute } = resolveRestorePath(root, entry.path);
+    if (absolute === undefined) continue;
     try {
-      if (!ensureParentsNoFollow(root, entry.path)) continue;
       if (entry.kind === 'directory') {
         const now = lstatSync(absolute, { throwIfNoEntry: false });
-        if (now === undefined || now.isSymbolicLink() || !now.isDirectory()) {
-          rmSync(absolute, { recursive: true, force: true });
+        // A link at the name is refused here too (V-H1): it was not the apply's, and rebuilding
+        // the directory over it would erase the evidence while claiming the tree is back.
+        if (now !== undefined && now.isSymbolicLink()) continue;
+        if (now === undefined || !now.isDirectory()) {
+          rmSync(absolute, { force: true });
           mkdirSync(absolute);
         }
         chmodSync(absolute, entry.mode!);
         continue;
       }
-      // The name is unlinked before anything is created there, so a link the apply left at it is
-      // removed rather than written through.
+      // A link at a file name is refused for the same reason (V-H1).
+      const now = lstatSync(absolute, { throwIfNoEntry: false });
+      if (now !== undefined && now.isSymbolicLink() && entry.kind !== 'symlink') continue;
+      // The name is unlinked before anything is created there, so whatever a writer left at it
+      // between the two passes — a socket that `copyFileSync` would try to open, say — is removed
+      // rather than written through (K5e).
       rmSync(absolute, { force: true });
       if (entry.kind === 'symlink') {
         symlinkSync(entry.target!, absolute);
@@ -716,30 +752,49 @@ function restoreTree(root: string, snapshot: TreeSnapshot): RestoreOutcome {
     } catch { /* verification below reports what is still wrong */ }
   }
 
+  seams.beforeVerify?.();
   return { failedPaths: verifyRestored(root, snapshot) };
 }
 
 /**
- * Creates the missing parent components of `relative` without following a link (K5). Returns false
- * when a component that should be a directory is a symbolic link or a file: the restore will not
- * write through it, and verification reports the entry.
+ * What the restore's one resolution rule found (V-H1): the absolute path only when every component
+ * from the project root down — the root included — is a real directory; otherwise no path, and
+ * whether the refusal came from a symbolic link somewhere on the walk or from a component that is
+ * missing or is not a directory.
+ *
+ * The distinction matters to verification only. "Not a directory" means the name cannot exist
+ * there, which is a pass for a name the snapshot says was absent; a link means the name may exist
+ * somewhere the restore refused to look, which is a failure either way.
  */
-function ensureParentsNoFollow(root: string, relative: string): boolean {
-  const segments = relative.split('/');
-  let current = root;
-  for (const segment of segments.slice(0, -1)) {
-    current = path.join(current, segment);
+interface RestoreResolution {
+  readonly absolute?: string;
+  readonly throughLink: boolean;
+}
+
+function resolveRestorePath(root: string, relative: string): RestoreResolution {
+  const classify = (absolute: string): 'directory' | 'link' | 'other' => {
     let stat: Stats | undefined;
     try {
-      stat = lstatSync(current, { throwIfNoEntry: false });
-    } catch { return false; }
-    if (stat === undefined) {
-      try { mkdirSync(current); } catch { return false; }
-      continue;
+      stat = lstatSync(absolute, { throwIfNoEntry: false });
+    } catch {
+      return 'other';
     }
-    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    if (stat === undefined) return 'other';
+    if (stat.isSymbolicLink()) return 'link';
+    return stat.isDirectory() ? 'directory' : 'other';
+  };
+
+  const rootKind = classify(root);
+  if (rootKind === 'link') return { throughLink: true };
+  if (rootKind !== 'directory') return { throughLink: false };
+  let current = root;
+  for (const segment of relative.split('/').slice(0, -1)) {
+    current = path.join(current, segment);
+    const kind = classify(current);
+    if (kind === 'link') return { throughLink: true };
+    if (kind !== 'directory') return { throughLink: false };
   }
-  return true;
+  return { absolute: path.join(root, relative), throughLink: false };
 }
 
 /**
@@ -752,7 +807,19 @@ function ensureParentsNoFollow(root: string, relative: string): boolean {
 function verifyRestored(root: string, snapshot: TreeSnapshot): string[] {
   const failed: string[] = [];
   for (const entry of snapshot.entries) {
-    const absolute = path.join(root, entry.path);
+    // The same walk the two passes use (V-H1): a name whose parent chain contains a link is not
+    // read through it, because that would verify a different tree from the one the call found.
+    const resolution = resolveRestorePath(root, entry.path);
+    if (resolution.absolute === undefined) {
+      // A name the snapshot says was absent cannot exist under a component that is missing or is
+      // not a directory — the same fact the `ENOENT`/`ENOTDIR` branch below reports — so it is a
+      // pass. A link on the walk is different: the name may exist on the other side and nothing
+      // can be checked without following it, so the entry fails (V-H1).
+      if (entry.kind === 'absent' && !resolution.throughLink) continue;
+      failed.push(entry.path);
+      continue;
+    }
+    const absolute = resolution.absolute;
     let stat: Stats | undefined;
     try {
       stat = lstatSync(absolute, { throwIfNoEntry: false });
@@ -885,11 +952,26 @@ async function refuseGitDirTargets(tool: string, ctx: ToolContext, paths: readon
 
 export interface PatchApplyHooks {
   /**
-   * Test seam (K4): called after an apply fails and before its restore. A test uses it to inject
-   * the failure the ruling names — an unwritable path — which a single synchronous call cannot
-   * otherwise be made to meet; production passes nothing, and the restore is unchanged by it.
+   * Test seam (K4/V-H1/V-L4): called after an apply fails and before its restore, with the project
+   * root and the snapshot directory this call is about to restore from. A test uses it to inject
+   * the races and failures the rulings name — an unwritable path, a parent swapped for a link, a
+   * lost blob — which a single synchronous call cannot otherwise be made to meet; production
+   * passes nothing, and the restore is unchanged by it.
    */
-  readonly beforeRestore?: (projectRoot: string) => void;
+  readonly beforeRestore?: (projectRoot: string, snapshotDir: string) => void;
+  /**
+   * Test seam (K5e): called after the restore's removal pass and before its write pass, so a test
+   * can leave at a name what a writer racing those two passes could — the write pass must replace
+   * it, not open it. Production passes nothing.
+   */
+  readonly beforeWrite?: (projectRoot: string) => void;
+  /**
+   * Test seam (V-L2): called after the restore's writes and before its verification. Verification
+   * compares the restored file against the snapshot blob, so a change to the blob alone changes
+   * both sides; a same-length change made *after* the write is the only way to isolate the byte
+   * comparison. Production passes nothing.
+   */
+  readonly beforeVerify?: (projectRoot: string) => void;
 }
 
 export class PatchApplyTool extends BaseTool<PatchInput> {
@@ -969,8 +1051,13 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
       try {
         const applied = runGitApply(sealed, []);
         if (applied.status === 0) return { declared, result: applied };
-        this.hooks.beforeRestore?.(ctx.projectRoot);
-        const restore = restoreTree(ctx.projectRoot, snapshot);
+        this.hooks.beforeRestore?.(ctx.projectRoot, snapshot.dir);
+        const restore = restoreTree(ctx.projectRoot, snapshot, {
+          ...(this.hooks.beforeWrite === undefined
+            ? {} : { beforeWrite: () => this.hooks.beforeWrite!(ctx.projectRoot) }),
+          ...(this.hooks.beforeVerify === undefined
+            ? {} : { beforeVerify: () => this.hooks.beforeVerify!(ctx.projectRoot) }),
+        });
         return { declared, result: withRestoreNote(applied, restore), restore };
       } finally {
         // The snapshot costs disk while the call runs and nothing after it (K5).

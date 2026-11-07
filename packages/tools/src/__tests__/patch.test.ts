@@ -4,9 +4,10 @@ import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
-  rmSync, symlinkSync, writeFileSync,
+  renameSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
 import path from 'node:path';
 import type {
   AttestorHandle, PolicyDecision, PolicyEngineHandle, ToolContext, ToolResult,
@@ -1029,12 +1030,12 @@ function treeState(root: string): Record<string, string> {
       const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
       const absolute = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        state[relative] = `dir:${(lstatSync(absolute).mode & 0o777).toString(8)}`;
+        state[relative] = `dir:${(lstatSync(absolute).mode & 0o7777).toString(8)}`;
         walk(absolute, relative);
       } else if (entry.isSymbolicLink()) {
         state[relative] = `link:${readlinkSync(absolute)}`;
       } else {
-        const mode = (lstatSync(absolute).mode & 0o777).toString(8);
+        const mode = (lstatSync(absolute).mode & 0o7777).toString(8);
         const digest = crypto.createHash('sha256').update(readFileSync(absolute)).digest('hex');
         state[relative] = `file:${mode}:${digest}`;
       }
@@ -1086,9 +1087,11 @@ for (const [name, files, diff] of [
   test(`a failed apply restores every declared path: ${name} (R4-H1)`, async () => {
     const dir = seededRepo('restore-', files as Record<string, string>);
     // Non-default modes on both kinds (K3): the restore has to bring back what it found, not what
-    // the process's umask would create. `d/a` is executable; `d` and the files are private.
+    // the process's umask would create. `d/a` is executable and setgid (V-L1): `copyFileSync` creates
+    // the restoration without the setgid bit, so a restore that only rewrites bytes leaves 0755 and
+    // is now visible; `d` and the files are private.
     chmodSync(path.join(dir, 'd'), 0o700);
-    chmodSync(path.join(dir, 'd/a'), 0o755);
+    chmodSync(path.join(dir, 'd/a'), 0o2755);
     chmodSync(path.join(dir, 'd/keep'), 0o600);
     if (existsSync(path.join(dir, 'x'))) {
       if (lstatSync(path.join(dir, 'x')).isDirectory()) chmodSync(path.join(dir, 'x'), 0o750);
@@ -1181,45 +1184,248 @@ for (const mode of [0o700, 0o750] as const) {
 test('a restore that does not put the tree back reports restoreFailed; a complete one does not (K4/K5)', async () => {
   const dir = seededRepo('restore-failed-', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' });
   const diff = R4_DEL_X + R4_NEW_XY + R4_FAIL_C;
-  let snapshotDirs: string[] = [];
+  // Its own temp directory (V-L4): another maf process's `maf-restore-*` — or one a SIGKILL left
+  // behind, which the docs say happens — must not make this test red or mask what it asserts.
+  const ownTmp = mkdtempSync(path.join(scratch, 'restore-tmp-'));
+  const previousTmpDir = process.env['TMPDIR'];
+  process.env['TMPDIR'] = ownTmp;
+  let snapshotDir: string | undefined;
   let snapshotMode = 0;
   let removedBlobs = 0;
   const hooked = new PatchApplyTool({
-    beforeRestore: () => {
+    beforeRestore: (_root, liveSnapshotDir) => {
       // The snapshot is live here, before the call's `finally` removes it, so its directory can be
       // inspected (K5). The injected failure is the loss of the blob that would restore `x`, so the
       // restore cannot put that name back. It is not made by making the project root unwritable:
       // measured in the Linux container, which runs as root, a 0500 directory is still writable to
       // root, so a mode-based injection silently turns the restore into a success there and this
       // test would measure nothing. A missing snapshot source cannot be bypassed by privilege.
-      snapshotDirs = readdirSync(tmpdir()).filter((name) => name.startsWith('maf-restore-'));
-      const snapshot = path.join(tmpdir(), snapshotDirs[0]!);
-      snapshotMode = lstatSync(snapshot).mode & 0o777;
-      for (const blob of readdirSync(snapshot).filter((name) => name.startsWith('blob-'))) {
-        if (readFileSync(path.join(snapshot, blob), 'utf8') === 'old x\n') {
-          rmSync(path.join(snapshot, blob));
+      snapshotDir = liveSnapshotDir;
+      snapshotMode = lstatSync(liveSnapshotDir).mode & 0o777;
+      for (const blob of readdirSync(liveSnapshotDir).filter((name) => name.startsWith('blob-'))) {
+        if (readFileSync(path.join(liveSnapshotDir, blob), 'utf8') === 'old x\n') {
+          rmSync(path.join(liveSnapshotDir, blob));
           removedBlobs += 1;
         }
       }
     },
   });
-  const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
-  const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
-  assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
-  assert.equal(removedBlobs, 1, 'the injection removed exactly the snapshot source for x');
-  assert.equal(result.metadata['restoreFailed'], true, 'verification found the tree different from the snapshot');
-  assert.deepEqual(
-    [...(result.metadata['restoreFailedPaths'] as string[])].sort(), ['x'],
-    'the path that differs, not the exception that could not be avoided',
-  );
-  assert.match(result.stderr, /did not put the tree back/);
-  assert.doesNotMatch(result.stderr, /every declared path was restored/);
-  assert.equal(snapshotDirs.length, 1, 'a live snapshot directory existed while the restore ran');
-  assert.equal(snapshotMode, 0o700, 'the snapshot directory is private (K5)');
-  assert.equal(
-    readdirSync(tmpdir()).filter((name) => name.startsWith('maf-restore-')).length, 0,
-    'the snapshot directory is removed when the call ends, whatever the restore did (K5)',
-  );
+  try {
+    const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+    const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+    assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+    assert.equal(removedBlobs, 1, 'the injection removed exactly the snapshot source for x');
+    assert.equal(result.metadata['restoreFailed'], true, 'verification found the tree different from the snapshot');
+    assert.deepEqual(
+      [...(result.metadata['restoreFailedPaths'] as string[])].sort(), ['x'],
+      'the path that differs, not the exception that could not be avoided',
+    );
+    assert.match(result.stderr, /did not put the tree back/);
+    assert.doesNotMatch(result.stderr, /every declared path was restored/);
+    assert.ok(snapshotDir?.startsWith(ownTmp), 'the snapshot was created in this test\'s own TMPDIR');
+    assert.equal(snapshotMode, 0o700, 'the snapshot directory is private (K5)');
+    assert.deepEqual(readdirSync(ownTmp), [], 'the snapshot directory is removed when the call ends, whatever the restore did (K5)');
+  } finally {
+    if (previousTmpDir === undefined) delete process.env['TMPDIR'];
+    else process.env['TMPDIR'] = previousTmpDir;
+    rmSync(ownTmp, { recursive: true, force: true });
+  }
+});
+
+// V-H1: the reviewer's race. A concurrent writer swaps a directory the call declared for a link to
+// a directory *outside* the project, between the snapshot and the restore. One resolution rule now
+// covers all three passes, so nothing is removed, written or verified through the link; the link is
+// left where it was planted and every name on it is reported. The directory outside must be
+// byte-identical afterwards — the old removal pass deleted it — and the result must be
+// `restoreFailed`, naming the refused paths.
+/** A directory outside the project: each name is a directory holding one canary file. */
+function outsideWith(prefix: string, names: readonly string[]): string {
+  const outside = mkdtempSync(path.join(scratch, prefix));
+  for (const name of names) {
+    mkdirSync(path.join(outside, name), { recursive: true });
+    writeFileSync(path.join(outside, name, 'canary'), 'outside\n');
+  }
+  return outside;
+}
+
+for (const [name, files, diff, parent, child] of [
+  ['x file → x/y', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' }, R4_DEL_X + R4_NEW_XY + R4_FAIL_C, 'x', 'y'],
+  ['x/y and x/y/z', { 'x/y': 'old y\n', 'd/a': 'a\n', 'd/keep': 'keep\n' }, R4_DEL_XY + R4_NEW_XYZ + R4_FAIL_C, 'x/y', 'z'],
+  ['a file over a non-empty directory', { 'd/a': 'a\n', 'd/keep': 'keep\n' }, R4_FAIL_C, 'd', 'a'],
+  ['a created nested file', { 'd/a': 'a\n', 'd/keep': 'keep\n', 'n/keep': 'keep\n' }, K3_NEW_NESTED + R4_FAIL_C, 'n/created', 'f'],
+] as const) {
+  test(`the restore does not follow a parent swapped for a link: ${name} (V-H1)`, async () => {
+    const dir = seededRepo('restore-race-', files as Record<string, string>);
+    const before = treeState(dir);
+    const outside = outsideWith('restore-outside-', [child]);
+    const outsideBefore = treeState(outside);
+    try {
+      const hooked = new PatchApplyTool({
+        beforeRestore: () => {
+          // The race: the declared parent is now a link to the outside directory, whose child name
+          // is exactly what the apply created, so a removal pass that follows the link deletes it.
+          rmSync(path.join(dir, parent), { recursive: true, force: true });
+          symlinkSync(outside, path.join(dir, parent));
+        },
+      });
+      const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+      const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+      assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+      assert.deepEqual(treeState(outside), outsideBefore, 'nothing outside the project was removed or written');
+      // The link was not the apply's, so the restore neither replaces it nor descends it: it is
+      // left where it was planted and every name on it is reported (V-H1).
+      assert.equal(result.metadata['restoreFailed'], true);
+      assert.match(result.stderr, /did not put the tree back/);
+      const failed = result.metadata['restoreFailedPaths'] as string[];
+      assert.ok(failed.includes(parent), `the swapped name ${parent} is reported`);
+      for (const p of declared.filter((d) => d === parent || d.startsWith(`${parent}/`))) {
+        assert.ok(failed.includes(p), `${p} is reported, not acted on through the link`);
+      }
+      assert.ok(lstatSync(path.join(dir, parent), { throwIfNoEntry: false })?.isSymbolicLink(),
+        'the planted link is left in place, neither followed nor replaced');
+      // Nothing else in the project moved.
+      const outsideSubtree = (entry: [string, string]): boolean =>
+        entry[0] !== parent && !entry[0].startsWith(`${parent}/`);
+      assert.deepEqual(Object.fromEntries(Object.entries(treeState(dir)).filter(outsideSubtree)),
+        Object.fromEntries(Object.entries(before).filter(outsideSubtree)),
+        'the rest of the project is as the call found it');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('a link planted at the project root itself yields restoreFailed, and nothing outside changes (V-H1)', async () => {
+  const dir = seededRepo('restore-root-race-', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' });
+  const outside = outsideWith('restore-root-outside-', ['d', 'x']);
+  const outsideBefore = treeState(outside);
+  const real = `${dir}.real`;
+  try {
+    const hooked = new PatchApplyTool({
+      beforeRestore: () => {
+        // The root every walk starts from is now a link to a tree outside the project. No path can
+        // be resolved without going through it, so every path is refused and reported.
+        renameSync(dir, real);
+        symlinkSync(outside, dir);
+      },
+    });
+    const diff = R4_DEL_X + R4_NEW_XY + R4_FAIL_C;
+    // The declaration is read before the race, while `dir` is still the project root; the hook
+    // then renames the root away and leaves a link in its place, so the restore's walk starts at a
+    // name whose last component is a link.
+    const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+    const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+    assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+    assert.equal(result.metadata['restoreFailed'], true);
+    const failed = [...(result.metadata['restoreFailedPaths'] as string[])].sort();
+    for (const path of declared) assert.ok(failed.includes(path), `${path} is reported`);
+    assert.match(result.stderr, /did not put the tree back/);
+    assert.deepEqual(treeState(outside), outsideBefore, 'the root link was never followed');
+  } finally {
+    if (lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink()) rmSync(dir, { force: true });
+    rmSync(real, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('verification compares the restored bytes, not only their size and mode (V-L2)', async () => {
+  const dir = seededRepo('restore-bytes-', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' });
+  const diff = R4_DEL_X + R4_NEW_XY + R4_FAIL_C;
+  const hooked = new PatchApplyTool({
+    beforeVerify: (root) => {
+      // Same length, same mode, different bytes: only the content comparison can see this, so a
+      // verification that ignores bytes reports a restore it did not check.
+      writeFileSync(path.join(root, 'x'), 'old X\n');
+    },
+  });
+  try {
+    const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+    const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+    assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+    assert.equal(result.metadata['restoreFailed'], true);
+    assert.deepEqual([...(result.metadata['restoreFailedPaths'] as string[])].sort(), ['x']);
+    assert.match(result.stderr, /did not put the tree back/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('verification compares the restored mode, not only the bytes (K4d)', async () => {
+  const dir = seededRepo('restore-mode-verify-', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' });
+  const diff = R4_DEL_X + R4_NEW_XY + R4_FAIL_C;
+  // The restore itself writes the snapshotted mode; the seam changes it after the write, so a
+  // verification that compares content alone reports a restore whose mode the call did not put back.
+  chmodSync(path.join(dir, 'x'), 0o640);
+  const hooked = new PatchApplyTool({
+    beforeVerify: (root) => { chmodSync(path.join(root, 'x'), 0o600); },
+  });
+  try {
+    const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+    const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+    assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+    assert.equal(result.metadata['restoreFailed'], true);
+    assert.deepEqual([...(result.metadata['restoreFailedPaths'] as string[])].sort(), ['x']);
+    assert.match(result.stderr, /did not put the tree back/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the write pass replaces what a racing writer left at a name between the two passes (K5e)', async () => {
+  const dir = seededRepo('restore-midpass-', { x: 'old x\n', 'd/a': 'a\n', 'd/keep': 'keep\n' });
+  const before = treeState(dir);
+  // A listening UNIX socket is a name `copyFileSync` cannot create a file at — opening it fails —
+  // and the removal pass has already run when it appears, so only the write pass's unlink can make
+  // the name writable again. The socket is created elsewhere and renamed into place from the seam.
+  const socketFile = path.join(scratch, `restore-socket-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketFile, () => resolve());
+  });
+  try {
+    const hooked = new PatchApplyTool({
+      beforeWrite: (root) => { renameSync(socketFile, path.join(root, 'x')); },
+    });
+    const diff = R4_DEL_X + R4_NEW_XY + R4_FAIL_C;
+    const declared = hooked.declaredPaths({ diff }, ctxIn({ cwd: dir, projectRoot: dir }));
+    const result = await hooked.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: declared }));
+    assert.notEqual(result.exitCode, 0, 'the apply fails part-way');
+    assert.match(result.stderr, /every declared path was restored/);
+    assert.equal(result.metadata['restoreFailed'], undefined, 'the socket was replaced, so verification passes');
+    assert.equal(readFileSync(path.join(dir, 'x'), 'utf8'), 'old x\n', 'the snapshotted file is back');
+    assert.deepEqual(treeState(dir), before, 'the tree is byte-identical to what it was before the call');
+  } finally {
+    server.close();
+    rmSync(socketFile, { force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a git killed by a signal is reported as killed, not as exit 1 with empty stderr (V-L5)', async () => {
+  const dir = seededRepo('signal-git-', { x: 'x\n' });
+  const bin = mkdtempSync(path.join(scratch, 'signal-bin-'));
+  const realGit = spawnSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const previousPath = process.env['PATH'];
+  try {
+    writeFileSync(path.join(bin, 'git'), [
+      '#!/bin/sh',
+      'for a in "$@"; do [ "$a" = "--check" ] && kill -KILL $$; done',
+      `exec ${realGit} "$@"`,
+      '',
+    ].join('\n'), { mode: 0o755 });
+    process.env['PATH'] = `${bin}:${previousPath ?? ''}`;
+    const diff = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-x\n+y\n';
+    const result = await tool.execute({ diff }, ctxIn({ cwd: dir, projectRoot: dir, approvedPaths: ['x'] }));
+    assert.notEqual(result.exitCode, 0);
+    assert.match(result.stderr, /git apply was killed by SIGKILL/, `the signal is named (${result.stderr})`);
+  } finally {
+    if (previousPath === undefined) delete process.env['PATH'];
+    else process.env['PATH'] = previousPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a successful restore reports nothing structured as failed (K4)', async () => {
