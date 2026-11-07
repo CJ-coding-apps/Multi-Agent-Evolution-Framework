@@ -714,36 +714,40 @@ flag-support check was added afterwards.
 
 ## Verification
 
-Measured at `c178595`, the last commit that changes code; the commits after it are documentation.
-The earlier 1213/1212 count was measured at `4ead112` and predates rounds 2 and 3's tests.
+Measured at `52f7438`, the last commit that changes code; the commits after it are documentation.
 
-- `pnpm -r build` and `pnpm -r typecheck` clean, and `grep "error TS"` over the build output = 0.
-- **Linux (the arbiter): `pnpm -r test` — 1429 tests, 1428 passed, 1 skipped, 0 failed**, in a
-  `node:22` container on a fresh clone of this branch, `pnpm install --frozen-lockfile` against an
-  empty store, then `pnpm -r build`, then the suites (`TEST_RC=0`).
-- **macOS: the suite is red, on one test this branch does not own.** From a clean tree (`dist/` and
-  `*.tsbuildinfo` removed; `pnpm install --frozen-lockfile --offline`; `pnpm -r build`, 37 s), the
-  suite failed twice on the same assertion — `packages/roles/src/__tests__/review-gate.test.ts`,
-  "the reviewer was never asked", its own 5 s bound, reached under `pnpm -r`'s workspace
-  concurrency. That file was last changed by `a0da8d1`, which is an ancestor of this branch's base;
-  this branch changes only `roles-file-loading.test.ts` in that package. Isolated on the same
-  host: the file is 11/11 (5.1 s) and the package 229/229 (132 s). The red stops `pnpm -r` with
-  1218 tests counted (1216 passed, 1 failed, 1 skipped), before the remaining packages. It is
-  recorded rather than edited: the file is another lane's, and every package that ran is green.
-- **The five repository guards, at the same head, on both hosts:** `check:test-scripts` (23/27
-  packages declare a test script that runs their `src/__tests__` tests; four have none),
-  `check:build-output` (27/27 packages emitted the entry point their `main` names),
-  `check:workspace-deps` (27 packages, 94 internal edges, acyclic), `check:doc-refs` (81 `.md`
-  references across 5 dirs + 4 root files, all resolving), and `check:package` (36 files,
-  installed and run).
+- `pnpm -r build` clean on both hosts and `pnpm -r typecheck` clean on macOS, and `grep "error TS"`
+  over every build log = 0.
+- **Linux (the arbiter), as root and again as an ordinary user: `pnpm -r test` — 1654 tests,
+  1652 passed, 2 skipped, 0 failed** in both runs. Each is a `node:22-bookworm` container over a
+  `git archive` of the head with the container's own empty store: `pnpm install
+  --frozen-lockfile`, `pnpm -r build`, then `pnpm -r --no-bail --workspace-concurrency=1 test`
+  (`TEST_RC=0`). The ordinary-user run is the `su` harness whose pid 1 does not reap — the one that
+  failed before the V-L6 probe change (above) — and it is green there. The two skips are
+  `packages/tools`' ripgrep test (`ripgrep is not on PATH`) and `packages/cli`'s real-adapter LCM
+  test.
+- **macOS (this host, Node 22.17.1, pnpm 10.34.7), from a clean tree with no `dist/` and no
+  `*.tsbuildinfo` (`pnpm install --frozen-lockfile --offline`, `pnpm -r build`), then a serial
+  suite (`--workspace-concurrency=1`): 1654 tests, 1652 passed, 2 skipped, 0 failed.** The two
+  skips are the same pair. The `packages/roles` timing bound that was red under workspace
+  concurrency in round 3's Mac runs — "the reviewer was never asked", its own 5 s bound — passed
+  here, as did every other package; that file is another lane's and was not edited.
+- **The five repository guards, on both hosts, all `OK`:** `check:test-scripts` (`test-script
+  guard: 25/27 packages declare a test script that runs their src/__tests__ tests`; the two with
+  none are `@maf/blackboard` and `@maf/lcm-adapter`), `check:build-output` (27/27 packages emitted
+  the entry point their `main` names), `check:workspace-deps` (27 packages, 94 internal edges,
+  acyclic), `check:doc-refs` (84 `.md` references across 5 dirs + 4 root files, all resolving),
+  and `check:package` (`36 files, installed and run`, its demo at `goldens solved 4/10`).
 - **The spawn-heavy `test.run` fixtures were the other macOS flake, and are fixed here**
   (`354f24d`, `c178595`). A fixture's own `node` startup took 17.3 s while `patch.test.js` ran
   beside it, and the G16b call 29.5 s under the nine-file `tools` suite; the fixtures' 2 s pid
   poll, 2 s timeout guard and 8 s/10 s `npm` guards were below that, so four `tools` tests failed
   for latencies unrelated to the code under test, while they pass alone and on Linux. The poll is
   now 120 s, the timeout guard 60 s and the two `npm` guards 120 s — test-only, assertions
-  unchanged, and the three round-2 mutants re-measured above. After: `tools` is 129 tests,
-  128 passed, 1 skipped, 0 failed in the same parallel run.
+  unchanged, and the three round-2 mutants re-measured above. After that change, at the head it
+  was measured at, `tools` was 129 tests, 128 passed, 1 skipped, 0 failed in the same parallel run;
+  rounds 4 and 5 add their own tests, and at this head the package is 149 tests, 148 passed,
+  1 skipped, 0 failed.
 
 ## Recorded limits
 
