@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -230,12 +230,32 @@ async function waitForPid(file: string): Promise<number> {
   return pid;
 }
 
+/**
+ * Whether `pid` can still run. `kill(pid, 0)` answers "the process exists", and a process that was
+ * killed but whose new parent has not reaped it is a zombie: it exists, cannot run, hold a port or
+ * write a file, and `kill` cannot retire it further. Counting a zombie as alive makes these tests
+ * fail wherever nothing reaps orphans — measured: as root with `sleep` as the container's pid 1
+ * (all seven fail), and as an ordinary user under a `su` that adopts but does not reap them. On a
+ * host whose init reaps, and on macOS, the signal answer is the answer.
+ */
+function stillRuns(pid: number): boolean {
+  try { process.kill(pid, 0); } catch { return false; }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // Field 3 is the state; `comm` (field 2) is parenthesised and may contain spaces, so read the
+    // fields after the last ')'.
+    return stat.slice(stat.lastIndexOf(')') + 1).trim().split(' ')[0] !== 'Z';
+  } catch {
+    return true;
+  }
+}
+
 /** Wait for the kernel to retire `pid`; SIGKILL is delivered with the group, so allow a moment. */
 async function waitForDeath(pid: number, when: string): Promise<void> {
   let alive = true;
   for (let i = 0; i < 40 && alive; i++) {
-    try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 50)); }
-    catch { alive = false; }
+    if (!stillRuns(pid)) { alive = false; break; }
+    await new Promise((r) => setTimeout(r, 50));
   }
   assert.equal(alive, false, `grandchild ${String(pid)} survived ${when}`);
 }
