@@ -170,15 +170,19 @@ function formatSubgraph(subgraph: MemorySubgraph, tokenBudget: number): string {
  * past write, and every future writer that forgets, unmasked.
  */
 function formatNode(n: MemoryNode): string {
+  // Masked and then escaped (M2): a label arrives from whatever wrote the node, and a label
+  // carrying `</memory-graph><ghost …>` would otherwise close the block and forge a cue. Escape
+  // after the slice, so the mask and the length rule see the text as it was written.
   const props = Object.entries(n.properties)
     .slice(0, 3)
-    .map(([k, v]) => `${k}="${redactText(String(v)).slice(0, 80)}"`)
+    .map(([k, v]) => `${escapeXml(k)}="${escapeXml(redactText(String(v)).slice(0, 80))}"`)
     .join(' ');
-  return `  <node id="${n.id.slice(0, 8)}" kind="${n.kind}" label="${redactText(n.label)}" ${props}/>`;
+  return `  <node id="${escapeXml(n.id.slice(0, 8))}" kind="${escapeXml(n.kind)}"`
+    + ` label="${escapeXml(redactText(n.label))}" ${props}/>`;
 }
 
 function formatEdge(e: MemoryEdge): string {
-  return `  <edge from="${e.fromId.slice(0, 8)}" to="${e.toId.slice(0, 8)}" rel="${e.relation}"/>`;
+  return `  <edge from="${escapeXml(e.fromId.slice(0, 8))}" to="${escapeXml(e.toId.slice(0, 8))}" rel="${escapeXml(e.relation)}"/>`;
 }
 
 function formatGhosts(ghosts: GhostCue[]): string {
