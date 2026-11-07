@@ -181,9 +181,9 @@ export function gateStatic(ctx: GateStaticContext): GateVeto | undefined {
   }
 
   // ── stage b4: widening an ordinary role into a writer needs the operator ──
-  // Either the edit targets an ordinary role, or the operator pre-approved sensitive edits and b3
-  // let it through; a safety-adjacent role's allowlist can widen, and that still needs the
-  // operator. Widening a role's surface with a tool that can
+  // Either the edit targets an ordinary role, or the operator paid to evaluate a sensitive edit
+  // (`--approve-sensitive`) and stage b3 let it through; a safety-adjacent role's allowlist can
+  // widen, and that still needs the operator. Widening a role's surface with a tool that can
   // change the tree or run code is the mutation the evolver may not perform on its own: it may
   // tune a prompt, a budget or a model, but it may not make a reader a writer. The verdict is
   // `needs-approval` rather than `reject` (WP-3.9 F8): the operator may grant the tool, and a
@@ -221,7 +221,7 @@ export function gateEvaluate(ctx: GateContext): GateDecision {
       verdict: 'needs-approval',
       reason: `targets safety-adjacent role "${ctx.manifest.edit.role}": evaluated in full ` +
         '(critic, smoke test, golden suite) and its verdict is still needs-approval — a sensitive ' +
-        'edit never ships without a human; apply it with `maf evolve approve <id>`',
+        'edit never ships without a human; apply it with `maf harness set-current <candidateSha>`',
     };
   }
 

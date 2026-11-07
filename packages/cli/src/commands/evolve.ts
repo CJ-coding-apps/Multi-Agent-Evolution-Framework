@@ -49,10 +49,15 @@ export function registerEvolveCommand(program: Command): void {
       '--approve-sensitive',
       'Spend to evaluate edits to safety-adjacent roles (security/reviewer) in full (critic, smoke, '
       + 'goldens) instead of archiving them unevaluated; the verdict is still needs-approval and the '
-      + 'candidate is applied only by a human (maf evolve approve <id>); does not approve a tool widening',
+      + 'candidate is stored, not made current, and applied only by a human with '
+      + '`maf harness set-current <candidateSha>` (WP-3.7 will add `maf evolve approve` as a shortcut); '
+      + 'does not approve a tool widening',
       false,
     )
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
+    // `maf evolve approve <id>` was never this command's: commander would treat `approve` and `<id>`
+    // as surplus arguments and start a whole evolution run, spending money on a typo (M1).
+    .allowExcessArguments(false)
     .action(async (opts: EvolveCliOpts, cmd: Command) => {
       const cwd = path.resolve(opts.dir);
       const mafDir = path.join(cwd, '.maf');
@@ -140,6 +145,12 @@ export function registerEvolveCommand(program: Command): void {
           await store.save(candidate);
           await store.setCurrent(candidate.sha);
           console.log(`[maf] SHIP ${candidate.id} (${shortSha(candidate.sha)}) — improves ${improvements.join(', ')}`);
+        },
+        // M1: a candidate a human has to apply is saved but not made current. The evaluation is in
+        // the round record; CURRENT moves only when the human runs `maf harness set-current`.
+        storeCandidate: async (candidate) => {
+          await store.save(candidate);
+          console.log(`[maf] STORED ${candidate.id} (${shortSha(candidate.sha)}) — not current; apply it with \`maf harness set-current ${candidate.sha}\``);
         },
         roleCatalog: base.roleSet.roles.map((r) => ({
           role: r.role, description: r.description ?? '', allowedTools: r.allowedTools,

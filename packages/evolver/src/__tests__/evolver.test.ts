@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { GraphQuery, PermissionLevel } from '@maf/types';
 import { makeRunId } from '@maf/types';
-import { mintHarnessConfig } from '@maf/harness-config';
+import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { MemoryGraph } from '@maf/memory-graph';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
@@ -363,6 +363,7 @@ test('loop: sensitive-role edit archived unevaluated without approval', async ()
   let criticCalls = 0;
   let smoked = 0;
   let plannerCalls = 0;
+  let stored = 0;
   const opts = loopOpts({
     metaGenerate: async (system: string): Promise<string> => {
       if (system.includes('critic')) { criticCalls++; return '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
@@ -373,6 +374,7 @@ test('loop: sensitive-role edit archived unevaluated without approval', async ()
     },
     runGoldens: async (h) => { goldensRan++; return suite(['t1'], h.sha); },
     runSmoke: async () => { smoked++; },
+    storeCandidate: async () => { stored++; },
     patience: 1,
   });
   // baseline run counts once; after that, no evaluation for the sensitive edit
@@ -383,6 +385,7 @@ test('loop: sensitive-role edit archived unevaluated without approval', async ()
   assert.equal(criticCalls, 0, 'no critic ran for an unapproved sensitive edit');
   assert.equal(smoked, 0, 'no smoke test ran for an unapproved sensitive edit');
   assert.ok(goldensRan <= 1, 'no evaluation spend on unapproved sensitive edits');
+  assert.equal(stored, 0, 'an unevaluated archive stores nothing (M1 stores what was paid for)');
 });
 
 // WP-3.9 K1, correcting H1's own ruling. `--approve-sensitive` means "spend to evaluate it", not
@@ -439,7 +442,48 @@ test('loop: a flag-on sensitive edit is evaluated in full and its verdict is sti
   const round = store.nodes.find(
     (n) => (n as { kind?: string }).kind === 'EvolutionRound',
   ) as { properties?: Record<string, unknown> } | undefined;
-  assert.ok(round?.properties?.['evaluation'], 'the graph record — what `maf evolve approve` reads — carries it too');
+  assert.ok(round?.properties?.['evaluation'], 'the graph record a human reads before `maf harness set-current` carries it too');
+});
+
+// M1: the evaluated candidate reaches the store so a human can apply it, and saving it must not
+// move CURRENT — applying it is the reader's act. `maf harness set-current` is the step that
+// exists today; `maf evolve approve` is WP-3.7's command and typing it starts another run.
+test('loop: a flag-on sensitive candidate is stored, not current; set-current applies it (M1)', async () => {
+  const mafDir = await mkdtemp(path.join(tmpdir(), 'maf-m1-store-'));
+  try {
+    const store = new HarnessStore(mafDir);
+    let storedSha: string | undefined;
+    const opts = loopOpts({
+      approveSensitive: true,
+      maxRounds: 1,
+      metaGenerate: async (system: string): Promise<string> => {
+        if (system.includes('critic')) return '```json\n{"verdict":"ship","notes":"ok"}\n```';
+        return manifestJson({
+          kind: 'edit_role_prompt', role: 'security', newPrompt: 'be thorough when auditing', rationale: 'r',
+        }, ['t2']);
+      },
+      runGoldens: async (h) => {
+        const thorough = h.roleSet.roles.find((r) => r.role === 'security')?.systemPrompt?.includes('thorough');
+        return suite(thorough ? ['t1', 't2'] : ['t1'], h.sha);
+      },
+      storeCandidate: async (candidate) => { storedSha = candidate.sha; await store.save(candidate); },
+      patience: 1,
+    });
+    const report = await evolve(opts);
+
+    assert.equal(report.rounds[0]?.outcome, 'needs-approval');
+    assert.ok(report.rounds[0]?.evaluation, 'the candidate was evaluated');
+    assert.ok(storedSha !== undefined, 'the candidate was stored');
+    assert.ok(await store.tryLoad(storedSha), 'the candidate is in the harness store');
+    assert.notEqual((await store.current())?.sha, storedSha, 'storing it did not make it current');
+    assert.match(report.rounds[0]?.note ?? '', /stored, not current/);
+    assert.match(report.rounds[0]?.note ?? '', new RegExp(`maf harness set-current ${storedSha}`));
+
+    await store.setCurrent(storedSha);
+    assert.equal((await store.current())?.sha, storedSha, 'the human applies it with set-current');
+  } finally {
+    await rm(mafDir, { recursive: true, force: true });
+  }
 });
 
 test('loop: --approve-sensitive does not approve a tool widening (b4 unchanged, WP-3.9 H1)', async () => {

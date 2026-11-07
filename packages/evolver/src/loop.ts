@@ -23,7 +23,7 @@ export interface EvolveRoundRecord {
    * The evaluation a flag-on sensitive edit paid for and did not act on (WP-3.9 K1). The ruling
    * makes `--approve-sensitive` permission to SPEND on the evaluation, not to ship: the candidate
    * reaches the critic, the smoke test and the golden suite, its verdict is still `needs-approval`,
-   * and this is the evidence the operator applies by hand (`maf evolve approve <id>`).
+   * and this is the evidence the operator applies by hand (`maf harness set-current <candidateSha>`).
    */
   evaluation?: SensitiveEvaluation;
 }
@@ -50,6 +50,13 @@ export interface EvolveOptions {
   runSmoke: (harness: HarnessConfig, taskId: string) => Promise<void>;
   /** What to do when a candidate ships (persist + setCurrent etc). */
   onShip: (candidate: HarnessConfig, improvements: string[]) => Promise<void>;
+  /**
+   * Persist a `needs-approval` candidate WITHOUT making it current (WP-3.9 M1). The candidate a
+   * flag-on sensitive edit paid to evaluate is saved so the human who reads it can apply it with
+   * `maf harness set-current <candidateSha>`; applying it is the human's act, so this callback must
+   * not move CURRENT. Absent (tests, embedders) means nothing is stored.
+   */
+  storeCandidate?: (candidate: HarnessConfig, evaluation: SensitiveEvaluation) => Promise<void>;
   roleCatalog: RoleCatalogEntry[];
   knownToolIds: ReadonlySet<string>;
   /**
@@ -67,7 +74,7 @@ export interface EvolveOptions {
    * Permission to spend to evaluate a sensitive edit, not to ship it (WP-3.9 K1). When true, an
    * edit targeting a safety-adjacent role runs the full evaluation — critic, smoke test, golden
    * suite — and its verdict is still `needs-approval`: the candidate is stored with its evaluation
-   * and applied only by a human (`maf evolve approve <id>`). When false (default) it is archived
+   * and applied only by a human (`maf harness set-current <candidateSha>`). When false (default) it is archived
    * unevaluated as `needs-approval`. It does not approve a tool widening either: stage b4 asks the
    * operator whatever this says.
    */
@@ -339,13 +346,27 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
 
     // K1: a sensitive edit reaches this point only with the flag, and the gate returns
     // `needs-approval` even when the evaluation would ship. What the evaluation measured is stored
-    // with the candidate so the human who applies it (`maf evolve approve <id>`) sees the evidence.
-    // The role is read from the FINAL manifest: the critic may have revised the target role.
+    // with the candidate so the human who applies it (`maf harness set-current <candidateSha>`)
+    // sees the evidence. The role is read from the FINAL manifest: the critic may have revised the
+    // target role.
     const finalSensitiveRole = sensitiveRoleOf(finalManifest, safetyAdjacent);
     const evaluation: SensitiveEvaluation | undefined =
       finalSensitiveRole !== undefined && gate.verdict === 'needs-approval'
         ? { candidateSha: finalCandidate.sha, currentScores: baseline, candidateScores }
         : undefined;
+
+    // M1: the candidate reaches the store so a human can apply it, but CURRENT stays where it is —
+    // applying it is the reader's act. A store failure is reported with the round (the candidate
+    // has still been evaluated and the report names what could not be saved), never swallowed.
+    let storeNote = '';
+    if (evaluation !== undefined && opts.storeCandidate !== undefined) {
+      try {
+        await opts.storeCandidate(finalCandidate, evaluation);
+        storeNote = `; candidate ${finalCandidate.sha} stored, not current — apply it with \`maf harness set-current ${finalCandidate.sha}\``;
+      } catch (err) {
+        storeNote = `; candidate ${finalCandidate.sha} could not be stored: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
 
     if (gate.verdict === 'ship') {
       idle = 0;
@@ -360,7 +381,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     await record(rec({
       manifest: finalManifest, gate,
       outcome: gate.verdict === 'needs-approval' ? 'needs-approval' : 'reject',
-      note: gate.verdict === 'reject' ? `${gate.stage}: ${gate.reason}` : gate.reason,
+      note: (gate.verdict === 'reject' ? `${gate.stage}: ${gate.reason}` : gate.reason) + storeNote,
       ...(evaluation ? { evaluation } : {}),
     }));
     if (idle >= patience) { stopReason = 'patience'; break; }

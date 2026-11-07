@@ -82,6 +82,29 @@ test('goldens run and evolve take --allow-ungoverned to the stack they dispatch 
   }
 });
 
+// M1(b): `maf evolve approve <sha>` is WP-3.7's command and does not exist yet. Typing it must be
+// refused rather than read as `evolve` with surplus arguments and start a paid round.
+test('maf evolve refuses a positional argument instead of starting a run (M1)', async (t) => {
+  const resolved: string[] = [];
+  t.mock.method(AdapterRegistry, 'resolveAdapter', async (name: string) => {
+    resolved.push(name);
+    throw new Error('adapter built');
+  });
+  const program = new Command();
+  program.exitOverride();
+  registerEvolveCommand(program);
+  let error: unknown;
+  try {
+    await program.parseAsync(['evolve', 'approve', 'abc123'], { from: 'user' });
+  } catch (err: unknown) {
+    error = err;
+  }
+  assert.ok(error instanceof Error, 'the command refused the argument');
+  assert.equal((error as { code?: string }).code, 'commander.excessArguments');
+  assert.notEqual((error as { exitCode?: number }).exitCode, 0);
+  assert.deepEqual(resolved, [], 'no adapter was built for a command that does not exist');
+});
+
 // ORACLE (WP-3.9 round 2, G4): `maf evolve` hands the evolver the registry's tool ids and the
 // permission level of each. A manifest that adds a tool which is not in that registry is a
 // malformed candidate — the invariant stage refuses it, naming the tools that do exist — and it is
