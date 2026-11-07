@@ -461,8 +461,9 @@ The flag now means *spend to evaluate it*: with it the edit gets the critic, the
 golden suite, the candidate is stored with that evaluation, and its verdict is still
 `needs-approval` — the gate downgrades its own `ship` for a sensitive target, so no path ships
 one. Without the flag the round stops before the critic, as before. The evaluation is attached so
-the human who runs `maf evolve approve <id>` decides with the evidence in hand; a `reject` stays a
-`reject`.
+the human who runs `maf harness set-current <candidateSha>` decides with the evidence in hand; a
+`reject` stays a `reject`. The candidate is saved, not made current: applying it is the reader's
+act.
 
 **A failed apply's restore is measured, not assumed (round 4, K2–K5).** The restore added in round 3
 put back what it recorded, and three review findings said the record and the claim were both
@@ -489,6 +490,63 @@ contents are copied into it one at a time rather than read into memory, and the 
 in a `finally` whatever the call did; the restore is no-follow — every parent component is
 `lstat`ed, a symbolic link is refused rather than written through, and the refusal surfaces as a
 verification failure, not as a replacement for the apply's own error.
+
+**The restore follows no link in any pass (round 5, V-H1).** Round 4 stated that the restore was
+no-follow, and the statement was narrower than the code: only the *write* pass checked its parents.
+A reviewer raced the call — between the snapshot and the restore, a directory the call declared was
+replaced by a link to a directory outside the project — and the removal pass followed it, deleting
+files outside the project in three of the four shapes, as root and as an ordinary user; the check
+read through the same link and reported "restored". There is now one resolver, and the removal
+pass, the write pass and the verification all use it: it walks every component from the project
+root with `lstat`, and a symbolic link anywhere on the walk refuses the name. A link found at the
+name itself is refused too — the apply cannot have planted one (declaring a symlink is refused
+before git runs), so it was planted by someone else and the restore does not decide what was meant.
+A refused name is never removed, written or read through; it is named in `restoreFailedPaths` and
+the call reports `restoreFailed`. The four shapes the reviewer raced are tests, plus a root swapped
+for a link, asserting the outside tree is byte-identical afterwards and that the refused names are
+reported. Rejected: unlink the link and rebuild the name — it restores a tree the racer moved and
+reports it as restored. Rejected: `openat`-style handles — Node exposes no directory-relative
+`unlinkat`, so a `lstat` walk that refuses links is the strongest check available, and a race
+between that walk and the operation is the same race `git apply` itself has.
+
+**The restore's tests measure what its sentences say (round 5, V-L1–V-L5).** `treeState` compared
+modes without the setgid bit (`& 0o777`, not `& 0o7777`), so a fixture's `02755` file lost the bit
+unobserved; it now compares `& 0o7777` and the fixture carries `02755`. A same-length content change
+to a blob after the restore is a test (a new `beforeVerify` seam), so a verification that compares
+only size and mode dies. `beforeRestore` receives the snapshot directory and the test sets its own
+`TMPDIR`, so it reads the directory the call made instead of scanning the shared temp directory. A
+git child killed by a signal reports `git apply was killed by <SIGNAL>` in its stderr and result
+instead of exit 1 with empty stderr, with a stand-in that kills itself. The snapshot-creation
+`catch` is unreachable in a normal call and says so rather than pretending to be tested.
+
+**Two restore mutants that survived round 4 now die (round 5, K5e, K4d).** The write pass unlinks
+a name before it creates something there; with the earlier fixtures that unlink was unobservable,
+because the removal pass had already cleared every name whose kind changed and the write pass
+refused every link. A new `beforeWrite` seam — between the two passes — lets a test rename a live
+UNIX socket onto a file name the restore is about to write: the unlink replaces it and verification
+passes, while a mutant that drops the unlink hands the socket to `copyFileSync` and the restore
+reports the name (1 test red). The verification's mode comparison was likewise unobservable, because
+the restore itself writes the snapshotted mode; a `beforeVerify` `chmod` to a different mode leaves
+the bytes right and the mode wrong, and a verification that compares content alone reports the tree
+restored (1 test red). At this head the five restore mutants measure K5c 4 tests red, K5e 1, K3a 4,
+K4d 1, K4f 1.
+
+**The documents name a command that exists (round 5, M1).** The K1 paragraphs told the operator to
+apply a sensitive candidate with `maf evolve approve <id>` — WP-3.7's command, not built yet. Today
+typing it starts a new evolve session and spends money. The evaluated candidate is now saved to the
+harness store **without** becoming current, and `maf harness set-current <candidateSha>` — which
+exists — applies it. Every copy of the sentence says that, and says WP-3.7 will add `maf evolve
+approve` as a shortcut; `maf evolve` also refuses a positional argument, so the old line exits
+non-zero instead of evolving. Tests: the command refuses `approve <id>` without building an
+adapter, and a flag-on candidate's sha is in the store and not current, then current after
+`set-current`.
+
+**Every string the injector renders is escaped (round 5, M2).** Round 4 escaped summaries, recent
+messages and ghost cues; a node's label and properties were masked but not escaped, so a label
+carrying `</memory-graph><ghost id="forged">` could close the block and forge a cue. `formatNode`
+now renders `escapeXml(redactText(…))` for the label, the property names and the property values,
+and the id, kind and edge relation are escaped as well; a test drives the forged label through a
+real assembly and a mutant that drops the escape turns it red.
 
 Limits, stated in the present tense: there is no crash recovery — a `SIGKILL` between the apply's
 first write and the restore's last leaves the tree part-applied, and the snapshot directory the
@@ -617,10 +675,13 @@ than claimed as a change to the loader.
 
 ### Overlap with WP-3.2 (#52)
 
-An earlier draft measured eight shared files at `ae45750`; the branch has moved and #52 has grown
-since. The PR body carries the overlap re-measured at the head this branch is handed back at
-(`git merge-tree --write-tree HEAD wp/3.2-lcm`), with the two conflicts and the one remaining merge
-duty — the injector's redact-then-escape composition and `formatSummaries`'s render-time mask.
+Measured at the merge: **22 paths** were touched by both branches and **7 conflicted**; the rest
+auto-merged. The branch merged `wp/phase-3b` as `9e412af` and resolved all seven — the three
+adapters (the child's allowlisted `backendEnv()` from this branch, #52's model surface composed
+before the spawn and attached on a throw), `cli/commands/run.ts` and `types/index.ts` (unions of
+both import and export lists), `GraphAwareInjector.ts` (`escapeXml(redactText(…))` everywhere in
+the file — #52 supplied the text, this branch the mask — with `formatSummaries` redacted at render
+on merge duty 2's reasoning), and the comment-only `approval-gate-stack.test.ts`.
 
 ### Overlap with WP-3.6 (#54) and WP-3.7
 
@@ -693,8 +754,8 @@ The earlier 1213/1212 count was measured at `4ead112` and predates rounds 2 and 
 - `--approve-sensitive` changes only whether an edit targeting a safety-adjacent role is evaluated:
   without it the round is archived unevaluated as `needs-approval`; with it the candidate is
   evaluated in full — critic, smoke test, goldens — and its verdict is still `needs-approval`,
-  stored with that evaluation and applied only by `maf evolve approve <id>`. The flag is permission
-  to spend, not to ship: a sensitive edit never reaches `onShip`, whatever the evaluation says, and
+  stored with that evaluation and applied only by `maf harness set-current <candidateSha>`. The flag
+  is permission to spend, not to ship: a sensitive edit never reaches `onShip`, whatever the evaluation says, and
   the gate downgrades its own `ship` to `needs-approval`. `maf evolve` has no interactive approval,
   so without the flag there is no way to answer the question inside the run — and with it the
   answer is still the operator's, made with the evaluation in hand. The flag decides stage b3 only

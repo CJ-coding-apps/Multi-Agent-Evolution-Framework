@@ -815,8 +815,10 @@ An edit whose target role is safety-adjacent (`security`, `reviewer`) never ship
 Without `--approve-sensitive` the loop records `needs-approval` after the planner call and evaluates
 nothing. With the flag the edit is evaluated in full — critic, smoke test, golden suite — and its
 verdict is **still `needs-approval`**: the candidate is stored with the evaluation attached, and it
-is applied only by `maf evolve approve <id>`, which a human runs. The flag buys the evaluation, not
-the ship; the gate downgrades its own `ship` to `needs-approval` for a sensitive edit, so nothing
+is applied only by `maf harness set-current <candidateSha>`, which a human runs; the candidate is
+saved to the harness store and is not made current, so applying it is the reader's act. WP-3.7 will
+add `maf evolve approve` as a shortcut for that. The flag buys the evaluation, not the ship; the gate
+downgrades its own `ship` to `needs-approval` for a sensitive edit, so nothing
 about a sensitive role's result is exempt from that rule. `maf evolve` has no interactive prompt, so
 without the flag there is no way to answer the question inside the run — and with it the answer is
 still the operator's, made with the evaluation in hand. The flag does not touch the widening rule

@@ -39,7 +39,8 @@ is entitled to know which of their own code stops compiling.
   on its merits — approval granted in advance to something nobody had read. It now means *spend to
   evaluate it*: with the flag the edit gets the critic, the smoke test and the golden suite, the
   candidate is stored with that evaluation, and its verdict is still `needs-approval`, applied only by
-  a human with `maf evolve approve <id>`. The gate downgrades its own `ship` for a sensitive target,
+  a human with `maf harness set-current <candidateSha>` (storing it does not make it current; WP-3.7
+  will add `maf evolve approve` as a shortcut). The gate downgrades its own `ship` for a sensitive target,
   so no caller can ship one. Without the flag the round stops before the critic, as before. The flag's
   help text says this, and so do `docs/SECURITY.md` and `docs/DECISIONS.md` (D-15).
 
