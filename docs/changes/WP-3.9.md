@@ -733,12 +733,13 @@ flag-support check was added afterwards.
 
 ## Verification
 
-Measured at `52f7438`, the last commit that changes code; the commits after it are documentation.
+Measured at `8bf751f`; `7f36901` is the last commit that changes code, and every commit after it is
+documentation.
 
 - `pnpm -r build` clean on both hosts and `pnpm -r typecheck` clean on macOS, and `grep "error TS"`
   over every build log = 0.
-- **Linux (the arbiter), as root and again as an ordinary user: `pnpm -r test` — 1654 tests,
-  1652 passed, 2 skipped, 0 failed** in both runs. Each is a `node:22-bookworm` container over a
+- **Linux (the arbiter), as root and again as an ordinary user: `pnpm -r test` — 1656 tests,
+  1654 passed, 2 skipped, 0 failed** in both runs. Each is a `node:22-bookworm` container over a
   `git archive` of the head with the container's own empty store: `pnpm install
   --frozen-lockfile`, `pnpm -r build`, then `pnpm -r --no-bail --workspace-concurrency=1 test`
   (`TEST_RC=0`). The ordinary-user run is the `su` harness whose pid 1 does not reap — the one that
@@ -747,7 +748,7 @@ Measured at `52f7438`, the last commit that changes code; the commits after it a
   test.
 - **macOS (this host, Node 22.17.1, pnpm 10.34.7), from a clean tree with no `dist/` and no
   `*.tsbuildinfo` (`pnpm install --frozen-lockfile --offline`, `pnpm -r build`), then a serial
-  suite (`--workspace-concurrency=1`): 1654 tests, 1652 passed, 2 skipped, 0 failed.** The two
+  suite (`--workspace-concurrency=1`): 1656 tests, 1654 passed, 2 skipped, 0 failed.** The two
   skips are the same pair. The `packages/roles` timing bound that was red under workspace
   concurrency in round 3's Mac runs — "the reviewer was never asked", its own 5 s bound — passed
   here, as did every other package; that file is another lane's and was not edited.
