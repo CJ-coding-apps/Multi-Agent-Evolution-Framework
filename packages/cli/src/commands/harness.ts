@@ -5,6 +5,7 @@ import {
   HarnessStore, HarnessConfigError, HarnessIntegrityError, assertHarnessConfig, computeHarnessSha, shortSha,
 } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
+import { refusePrototypeKey } from '@maf/types';
 import { roleSetFromHarness } from '@maf/roles';
 import { createDefaultProcessorRegistry } from '@maf/processors';
 
@@ -27,7 +28,8 @@ const RESERVED_IDS = new Set(['legacy-default', 'current']);
 export async function loadHarnessFile(file: string): Promise<HarnessConfig> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(file, 'utf8'));
+    // WP-3.9 G5: the shared reviver, so a harness file naming a prototype key is refused here too.
+    parsed = JSON.parse(await readFile(file, 'utf8'), refusePrototypeKey);
   } catch (err) {
     throw new HarnessConfigError(`${file} could not be read as a JSON harness: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -58,7 +60,7 @@ export async function committedDefaults(store: HarnessStore): Promise<string[]> 
 /** The id a committed default declares, read without trusting it; the match is verified by loadHarnessFile. */
 async function declaredId(file: string): Promise<unknown> {
   try {
-    const parsed: unknown = JSON.parse(await readFile(file, 'utf8'));
+    const parsed: unknown = JSON.parse(await readFile(file, 'utf8'), refusePrototypeKey);
     return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>)['id'] : undefined;
   } catch {
     return undefined;

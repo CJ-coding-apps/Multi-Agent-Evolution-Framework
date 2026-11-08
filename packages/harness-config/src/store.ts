@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { access, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { SlsaMaterial } from '@maf/types';
+import { PrototypeKeyError, refusePrototypeKey } from '@maf/types';
 import type { HarnessRoleSet } from './types.js';
 import { computeHarnessSha, mintHarnessConfig } from './canonicalize.js';
 import {
@@ -205,8 +206,13 @@ export class HarnessStore {
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(text);
-    } catch {
+      // WP-3.9 G5: a harness file is a file in `.maf/`, so it is read through the same reviver as
+      // every other one — a document naming `__proto__`, `constructor` or `prototype` never
+      // becomes an object. It is refused as what it is, not reported as a syntax error.
+      parsed = JSON.parse(text, refusePrototypeKey);
+    } catch (err) {
+      if (err instanceof PrototypeKeyError)
+        throw new HarnessIntegrityError(`Harness file ${sha}.yaml ${err.message}; refused`);
       throw new HarnessIntegrityError(`Harness file ${sha}.yaml is not parseable`);
     }
     assertHarnessConfig(parsed);
@@ -259,7 +265,10 @@ export class HarnessStore {
   private async readIndex(): Promise<Record<string, string>> {
     try {
       const text = await readFile(path.join(this.dir, INDEX_FILE), 'utf8');
-      const parsed: unknown = JSON.parse(text);
+      // WP-3.9 G5: the index is a `.maf/` file, so it goes through the shared reviver. A refused
+      // index fails into the catch below and reads as empty — no id resolves, which is the same
+      // fail-closed answer an unparseable index gets, never a partial one built from a poisoned key.
+      const parsed: unknown = JSON.parse(text, refusePrototypeKey);
       if (!parsed || typeof parsed !== 'object') return {};
       const out: Record<string, string> = {};
       for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {

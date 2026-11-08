@@ -4,7 +4,7 @@ import type {
   AdapterCapabilities, AdapterInvokeOptions, AdapterInvokeResult, ToolCallRecord,
   TurnAdapter, TurnMessage, AssistantTurn, ModelSurface,
 } from '@maf/types';
-import { withModelSurface } from '@maf/types';
+import { backendEnv, withModelSurface } from '@maf/types';
 import {
   BaseAdapter, spawnAndCollect, spawnStreaming, turnStdout,
   buildTurnSystemPrompt, serializeHistory, parseTurn, cliModelSurface, sha256Hex,
@@ -88,7 +88,7 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
         cwd:       opts.workingDir,
         timeoutMs: opts.timeoutMs,
         input,
-        env:       { ...process.env },
+        env:       backendEnv(),
         ...(opts.maxOutputBytes !== undefined ? { maxOutputBytes: opts.maxOutputBytes } : {}),
       });
       sent = true;
@@ -103,7 +103,7 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
 
   async isAvailable(): Promise<boolean> {
     try {
-      await execFileAsync('codex', ['--version']);
+      await execFileAsync('codex', ['--version'], { env: backendEnv() });
       return true;
     } catch { return false; }
   }
@@ -128,7 +128,7 @@ export class CodexAdapter extends BaseAdapter implements TurnAdapter {
       cwd:       options.workingDir,
       timeoutMs: options.timeoutMs,
       input:     fullPrompt,
-      env:       { ...process.env },
+      env:       backendEnv(),
     }).catch((err: unknown): never => { throw attach(err, surface, false); });
     return {
       success:     result.exitCode === 0,

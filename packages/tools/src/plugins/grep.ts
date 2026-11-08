@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import type { ToolId, ToolContext, ToolResult } from '@maf/types';
 import { BaseTool, closedInput } from '../ToolPlugin.js';
-import { makeToolId, resolveInside } from '@maf/types';
+import { makeToolId, resolveInside, toolEnv } from '@maf/types';
 
 interface GrepInput {
   pattern:     string;
@@ -29,7 +29,7 @@ export interface GrepSpawnResult {
 export type GrepSpawn = (
   command: string,
   args: readonly string[],
-  options: { encoding: 'utf8'; cwd: string },
+  options: { encoding: 'utf8'; cwd: string; env?: NodeJS.ProcessEnv },
 ) => GrepSpawnResult;
 
 const spawnSearch: GrepSpawn = (command, args, options) => spawnSync(command, args, options);
@@ -86,9 +86,9 @@ export class GrepTool extends BaseTool<GrepInput> {
     args.push('-e', input.pattern, '--', searchPath);
 
     // prefer rg, fallback to grep
-    const rg = this.spawn('rg', args, { encoding: 'utf8', cwd: ctx.cwd });
+    const rg = this.spawn('rg', args, { encoding: 'utf8', cwd: ctx.cwd, env: toolEnv() });
     if (rg.error) {
-      const grep = this.spawn('grep', ['-rn', ...(input.ignoreCase ? ['-i'] : []), '-e', input.pattern, '--', searchPath], { encoding: 'utf8', cwd: ctx.cwd });
+      const grep = this.spawn('grep', ['-rn', ...(input.ignoreCase ? ['-i'] : []), '-e', input.pattern, '--', searchPath], { encoding: 'utf8', cwd: ctx.cwd, env: toolEnv() });
       return {
         stdout: grep.stdout ?? '',
         stderr: grep.stderr ?? '',

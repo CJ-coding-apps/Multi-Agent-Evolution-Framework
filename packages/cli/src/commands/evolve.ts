@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { makeRunId } from '@maf/types';
+import { makeRunId, refusePrototypeKey } from '@maf/types';
+import type { PermissionLevel } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { GoldenRunner, describeJudge, makeLlmJudge } from '@maf/eval-harness';
@@ -44,8 +45,19 @@ export function registerEvolveCommand(program: Command): void {
     .option('--rounds <n>', 'Max evolution rounds', '10')
     .option('--patience <n>', 'Consecutive no-ship rounds before stopping', '3')
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
-    .option('--approve-sensitive', 'Pre-approve edits to safety-adjacent roles (security/reviewer)', false)
+    .option(
+      '--approve-sensitive',
+      'Spend to evaluate edits to safety-adjacent roles (security/reviewer) in full (critic, smoke, '
+      + 'goldens) instead of archiving them unevaluated; the verdict is still needs-approval and the '
+      + 'candidate is stored, not made current, and applied only by a human with '
+      + '`maf harness set-current <candidateSha>` (WP-3.7 will add `maf evolve approve` as a shortcut); '
+      + 'does not approve a tool widening',
+      false,
+    )
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
+    // `maf evolve approve <id>` was never this command's: commander would treat `approve` and `<id>`
+    // as surplus arguments and start a whole evolution run, spending money on a typo (M1).
+    .allowExcessArguments(false)
     .action(async (opts: EvolveCliOpts, cmd: Command) => {
       const cwd = path.resolve(opts.dir);
       const mafDir = path.join(cwd, '.maf');
@@ -69,7 +81,10 @@ export function registerEvolveCommand(program: Command): void {
         lcm: DEFAULT_MAF_CONFIG.lcm,
       });
 
-      const corpus: GoldenTask[] = JSON.parse(await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'));
+      // WP-3.9 G5: a corpus file, through the shared reviver like `goldens run` reads it.
+      const corpus: GoldenTask[] = JSON.parse(
+        await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'), refusePrototypeKey,
+      );
 
       const metaGenerate = async (systemPrompt: string, userPrompt: string): Promise<string> => {
         const result = await adapter.invoke({
@@ -131,11 +146,22 @@ export function registerEvolveCommand(program: Command): void {
           await store.setCurrent(candidate.sha);
           console.log(`[maf] SHIP ${candidate.id} (${shortSha(candidate.sha)}) — improves ${improvements.join(', ')}`);
         },
+        // M1: a candidate a human has to apply is saved but not made current. The evaluation is in
+        // the round record; CURRENT moves only when the human runs `maf harness set-current`.
+        storeCandidate: async (candidate) => {
+          await store.save(candidate);
+          console.log(`[maf] STORED ${candidate.id} (${shortSha(candidate.sha)}) — not current; apply it with \`maf harness set-current ${candidate.sha}\``);
+        },
         roleCatalog: base.roleSet.roles.map((r) => ({
           role: r.role, description: r.description ?? '', allowedTools: r.allowedTools,
           ...(r.model ? { model: r.model } : {}),
         })),
         knownToolIds: new Set(createDefaultRegistry().getAll().map((t) => String(t.id))),
+        // What each known tool may do, so the gate can tell a widening that hands a role the tree
+        // (`fs.write`, `test.run`) from one that hands it another way to read.
+        toolPermissions: new Map<string, PermissionLevel>(
+          createDefaultRegistry().getAll().map((t): [string, PermissionLevel] => [String(t.id), t.permissionLevel]),
+        ),
         knownProcessorNames: processorNames,
         judgeOnlyTaskIds: new Set(corpus
           .filter((t) => t.verifiers.every((v) => v.kind === 'llm-judge'))

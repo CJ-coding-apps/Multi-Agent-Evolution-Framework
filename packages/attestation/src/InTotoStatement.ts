@@ -1,4 +1,5 @@
 import type { SlsaBuilder, SlsaInvocation } from '@maf/types';
+import { refusePrototypeKey } from '@maf/types';
 
 export const IN_TOTO_STATEMENT_TYPE = 'https://in-toto.io/Statement/v0.1';
 
@@ -59,5 +60,7 @@ export function buildInTotoStatement(
 }
 
 export function parseInTotoStatement(json: string): InTotoStatement {
-  return JSON.parse(json) as InTotoStatement;
+  // WP-3.9 G5: a statement is a document read from elsewhere, so it goes through the shared
+  // reviver — a prototype key makes the statement unreadable rather than an object with one.
+  return JSON.parse(json, refusePrototypeKey) as InTotoStatement;
 }

@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import {
-  closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync,
+  chmodSync, closeSync, copyFileSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync,
+  readSync, readlinkSync, rmSync, symlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
@@ -161,10 +162,15 @@ function runGitApply(sealed: SealedGit, args: readonly string[]): GitResult {
     '-c', `core.attributesFile=${devNull}`,
     'apply', `-p${sealed.strip}`, ...args, sealed.file,
   ], { cwd: sealed.cwd, env: sealedEnv(sealed), encoding: 'utf8', maxBuffer: MAX_OUTPUT });
+  // A child killed by a signal has `status: null` and no `error`: without this, the caller reported
+  // exit 1 with empty stderr, which says nothing about what happened (V-L5).
+  const killed = r.status === null && r.signal !== null
+    ? `git apply was killed by ${r.signal}`
+    : undefined;
   return {
     status: r.status,
     stdout: r.stdout ?? '',
-    stderr: r.stderr ?? '',
+    stderr: killed === undefined ? (r.stderr ?? '') : [r.stderr?.trim(), killed].filter((s) => s).join('\n'),
     ...(r.error !== undefined ? { error: r.error.message } : {}),
   };
 }
@@ -487,8 +493,9 @@ function lstatOrRefuse(target: string, declared: string): Stats | undefined {
  * a regular file. `--check` passes on it, because the diff parses; the apply then fails partway
  * through, after a multi-file patch has already changed or deleted the files before it (measured: the
  * other file deleted, exit 128). This is refused here — one of the shapes this walk can see that git
- * would otherwise fail partway after `--check`; the guarantee is the declared set, not atomicity, and
- * a structural conflict git only fails mid-apply is restored in 0.6.0 (WP-3.9, #53). The declared path itself may be a regular file: that is an
+ * would otherwise fail partway after `--check`. The shapes it cannot see are restored: every declared
+ * path is recorded before the apply, and a failed apply puts them all back, so a failed call changed
+ * nothing. The declared path itself may be a regular file: that is an
  * ordinary write to it. The exception is a prefix the *same diff deletes* — `x` (a file) deleted while
  * `x/y` is created: git removes `x` first, then writes beneath it, and the whole patch applies
  * (measured: exit 0, `x` becomes a directory). A deleted prefix is skipped and the walk stops there,
@@ -541,6 +548,348 @@ function refuseSymlinkTargets(root: string, paths: readonly string[], kinds: Sum
       }
     }
   }
+}
+
+/**
+ * One name — a declared path, or a parent of one — as the tree held it before the apply.
+ *
+ * `absent` is a name that did not exist: a file the diff creates, or a directory the apply would
+ * have to create. `mode` is recorded for files **and directories** (K2): an apply that empties a
+ * directory removes it (`git apply` does), and the restore recreates it, so its permissions are part
+ * of what "restore" means. A file's bytes are copied into the snapshot directory (`blob`), not held
+ * in this object (K5): a patch may touch files too large for memory. A symlink is recorded by its
+ * target, because the walk above refuses one at a declared name and a restore that cannot rebuild
+ * what it found would not be a restore.
+ */
+interface PathSnapshot {
+  readonly path:    string;
+  readonly kind:    'absent' | 'file' | 'directory' | 'symlink';
+  readonly blob?:   string;
+  readonly mode?:   number;
+  readonly target?: string;
+}
+
+/** A call's snapshot: the private directory holding file contents, and what each name was. */
+interface TreeSnapshot {
+  readonly dir:     string;
+  readonly entries: readonly PathSnapshot[];
+}
+
+/**
+ * What the tree holds at every declared path and every parent of one, before git writes anything.
+ *
+ * A declared path alone is not enough. `x` is a file and the diff deletes it and creates `x/y`: the
+ * apply turns `x` into a directory, and undoing that means removing `x/y` *and* the directory `x`
+ * before `x` can be written back as a file. Recording every prefix gives the restore that order,
+ * and the prefixes that did not exist are exactly the directories the apply creates — the ones a
+ * failed call has to remove again.
+ *
+ * The contents are copied to a fresh `0700` directory under the system temp directory, one file at
+ * a time, so the snapshot costs disk rather than memory and a file over the old read-into-memory
+ * limit no longer fails the call (K5). The caller removes that directory in a `finally`.
+ *
+ * A name that cannot be read refuses the call before anything is written: an apply this tool could
+ * not undo is not one it makes. A FIFO, socket or device at a declared name is refused the same
+ * way, by the `isFile` test at the end.
+ */
+function snapshotDeclared(root: string, declared: readonly string[]): TreeSnapshot {
+  // `mkdtemp` creates the directory 0700 on POSIX; the chmod states the requirement rather than
+  // relying on the platform's default (K5).
+  const dir = mkdtempSync(path.join(tmpdir(), 'maf-restore-'));
+  chmodSync(dir, 0o700);
+  try {
+    const entries = new Map<string, PathSnapshot>();
+    let blobs = 0;
+    const record = (relative: string): void => {
+      if (entries.has(relative)) return;
+      const absolute = path.join(root, relative);
+      let stat: Stats | undefined;
+      try {
+        stat = lstatSync(absolute, { throwIfNoEntry: false });
+      } catch (err: unknown) {
+        // `ENOTDIR` is a component above the name being a regular file, and `ENOENT` a parent removed
+        // between the walk and here. Neither names anything today: a component that is a file cannot
+        // contain this name, and the shapes that legitimately reach the apply in that state are the
+        // ones where the same diff deletes that file (`x` deleted, `x/y` created) — absent is right,
+        // and the restore removes whatever the apply puts there.
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOTDIR' || code === 'ENOENT') {
+          entries.set(relative, { path: relative, kind: 'absent' });
+          return;
+        }
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new ToolDeclarationError(
+          `patch.apply refused this call: it would write ${JSON.stringify(relative)}, and recording that `
+          + `path before the apply failed (${detail}). A write this tool cannot undo is not one it makes, `
+          + 'so nothing was written.',
+        );
+      }
+      if (stat === undefined) { entries.set(relative, { path: relative, kind: 'absent' }); return; }
+      if (stat.isSymbolicLink()) {
+        entries.set(relative, { path: relative, kind: 'symlink', target: readlinkSync(absolute) });
+        return;
+      }
+      if (stat.isDirectory()) {
+        entries.set(relative, { path: relative, kind: 'directory', mode: stat.mode & 0o7777 });
+        return;
+      }
+      if (!stat.isFile()) {
+        throw new ToolDeclarationError(
+          `patch.apply refused this call: ${JSON.stringify(relative)} is not a regular file, a directory `
+          + 'or a symlink, and this tool cannot record what a write to it would replace, so nothing was '
+          + 'written.',
+        );
+      }
+      const blob = `blob-${blobs++}`;
+      copyFileSync(absolute, path.join(dir, blob));
+      entries.set(relative, {
+        path: relative, kind: 'file', blob, mode: stat.mode & 0o7777,
+      });
+    };
+    for (const p of declared) {
+      const segments = p.split('/');
+      for (let i = 1; i <= segments.length; i++) record(segments.slice(0, i).join('/'));
+    }
+    return { dir, entries: [...entries.values()] };
+  } catch (err) {
+    // A snapshot that cannot be completed must not leave its directory behind either.
+    // Unreachable in a normal call (V-L3): `git apply --check` reads every declared file before the
+    // snapshot is taken, so an unreadable file has already failed the call; this is defence for a
+    // file that disappears between the check and the snapshot, and is kept untested deliberately.
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
+}
+
+/** What a restore achieved: the paths verification found different from the snapshot. */
+interface RestoreOutcome {
+  readonly failedPaths: readonly string[];
+}
+
+/** Test seams for the restore's passes (V-H1, V-L2, K5e); production passes none. */
+interface RestoreSeams {
+  readonly beforeWrite?: () => void;
+  readonly beforeVerify?: () => void;
+}
+
+/**
+ * Puts every snapshotted name back, removes what the apply created, and then **verifies the tree
+ * against the snapshot** (K3/K4). Only that verification decides whether the restore succeeded: an
+ * attempt that throws but leaves the tree right is a success, and an attempt that reports nothing
+ * but leaves a mode wrong is a failure.
+ *
+ * Deepest first, so a file the apply turned into a directory is emptied from the bottom up; then
+ * files and directories are written back shallowest first, each with the mode the snapshot recorded
+ * (directories included, K2). A name whose kind is unchanged is left in place in the first pass and
+ * rewritten in the second, because its content may have changed.
+ *
+ * No part of the restore follows a link (K5, V-H1): the removal pass, the write pass and the
+ * verification all resolve a name with `resolveRestorePath`, which `lstat`s every component from
+ * the project root down and refuses a symbolic link — the root included — instead of removing,
+ * writing or verifying through it. A name so refused is never touched, and verification names it.
+ * A refusal is not thrown — verification names the entry instead, so the apply's own error is not
+ * replaced by a second one.
+ */
+function restoreTree(root: string, snapshot: TreeSnapshot, seams: RestoreSeams = {}): RestoreOutcome {
+  const depth = (p: string): number => p.split('/').length;
+
+  for (const entry of [...snapshot.entries].sort((a, b) => depth(b.path) - depth(a.path))) {
+    // A path whose parent chain runs through a link is not touched at all (V-H1): removing what is
+    // on the other side of the link would delete outside the project. Verification names it.
+    const { absolute } = resolveRestorePath(root, entry.path);
+    if (absolute === undefined) continue;
+    try {
+      const now = lstatSync(absolute, { throwIfNoEntry: false });
+      if (now === undefined) continue;
+      const sameKind =
+        (entry.kind === 'file' && now.isFile())
+        || (entry.kind === 'directory' && now.isDirectory())
+        || (entry.kind === 'symlink' && now.isSymbolicLink());
+      if (entry.kind === 'absent' || !sameKind) {
+        // A link found at a name the snapshot does not record as a link is left alone and reported
+        // by verification (V-H1). The apply cannot have put it there — declaring a symlink is
+        // refused before git runs — so it was planted between the snapshot and the restore, and
+        // the restore does not get to decide what was meant. (`rmSync` would unlink the link rather
+        // than follow it, but replacing it would report a tree as restored that the racer moved.)
+        if (now.isSymbolicLink() && entry.kind !== 'symlink') continue;
+        if (now.isSymbolicLink()) rmSync(absolute, { force: true });
+        else rmSync(absolute, { recursive: true, force: true });
+      }
+    } catch { /* verification below reports what is still wrong */ }
+  }
+
+  seams.beforeWrite?.();
+  for (const entry of [...snapshot.entries].sort((a, b) => depth(a.path) - depth(b.path))) {
+    if (entry.kind === 'absent') continue;
+    const { absolute } = resolveRestorePath(root, entry.path);
+    if (absolute === undefined) continue;
+    try {
+      if (entry.kind === 'directory') {
+        const now = lstatSync(absolute, { throwIfNoEntry: false });
+        // A link at the name is refused here too (V-H1): it was not the apply's, and rebuilding
+        // the directory over it would erase the evidence while claiming the tree is back.
+        if (now !== undefined && now.isSymbolicLink()) continue;
+        if (now === undefined || !now.isDirectory()) {
+          rmSync(absolute, { force: true });
+          mkdirSync(absolute);
+        }
+        chmodSync(absolute, entry.mode!);
+        continue;
+      }
+      // A link at a file name is refused for the same reason (V-H1).
+      const now = lstatSync(absolute, { throwIfNoEntry: false });
+      if (now !== undefined && now.isSymbolicLink() && entry.kind !== 'symlink') continue;
+      // The name is unlinked before anything is created there, so whatever a writer left at it
+      // between the two passes — a socket that `copyFileSync` would try to open, say — is removed
+      // rather than written through (K5e).
+      rmSync(absolute, { force: true });
+      if (entry.kind === 'symlink') {
+        symlinkSync(entry.target!, absolute);
+        continue;
+      }
+      copyFileSync(path.join(snapshot.dir, entry.blob!), absolute);
+      chmodSync(absolute, entry.mode!);
+    } catch { /* verification below reports what is still wrong */ }
+  }
+
+  seams.beforeVerify?.();
+  return { failedPaths: verifyRestored(root, snapshot) };
+}
+
+/**
+ * What the restore's one resolution rule found (V-H1): the absolute path only when every component
+ * from the project root down — the root included — is a real directory; otherwise no path, and
+ * whether the refusal came from a symbolic link somewhere on the walk or from a component that is
+ * missing or is not a directory.
+ *
+ * The distinction matters to verification only. "Not a directory" means the name cannot exist
+ * there, which is a pass for a name the snapshot says was absent; a link means the name may exist
+ * somewhere the restore refused to look, which is a failure either way.
+ */
+interface RestoreResolution {
+  readonly absolute?: string;
+  readonly throughLink: boolean;
+}
+
+function resolveRestorePath(root: string, relative: string): RestoreResolution {
+  const classify = (absolute: string): 'directory' | 'link' | 'other' => {
+    let stat: Stats | undefined;
+    try {
+      stat = lstatSync(absolute, { throwIfNoEntry: false });
+    } catch {
+      return 'other';
+    }
+    if (stat === undefined) return 'other';
+    if (stat.isSymbolicLink()) return 'link';
+    return stat.isDirectory() ? 'directory' : 'other';
+  };
+
+  const rootKind = classify(root);
+  if (rootKind === 'link') return { throughLink: true };
+  if (rootKind !== 'directory') return { throughLink: false };
+  let current = root;
+  for (const segment of relative.split('/').slice(0, -1)) {
+    current = path.join(current, segment);
+    const kind = classify(current);
+    if (kind === 'link') return { throughLink: true };
+    if (kind !== 'directory') return { throughLink: false };
+  }
+  return { absolute: path.join(root, relative), throughLink: false };
+}
+
+/**
+ * The snapshot, compared with the tree (K3): for every name its existence, kind, content and mode,
+ * directories included; and, through the `absent` names, that nothing the apply created is left
+ * behind. A file is compared by size and by bytes read in chunks, so verification never loads a
+ * large file into memory either. Returns the names that differ; empty means the tree is as the
+ * snapshot recorded it.
+ */
+function verifyRestored(root: string, snapshot: TreeSnapshot): string[] {
+  const failed: string[] = [];
+  for (const entry of snapshot.entries) {
+    // The same walk the two passes use (V-H1): a name whose parent chain contains a link is not
+    // read through it, because that would verify a different tree from the one the call found.
+    const resolution = resolveRestorePath(root, entry.path);
+    if (resolution.absolute === undefined) {
+      // A name the snapshot says was absent cannot exist under a component that is missing or is
+      // not a directory — the same fact the `ENOENT`/`ENOTDIR` branch below reports — so it is a
+      // pass. A link on the walk is different: the name may exist on the other side and nothing
+      // can be checked without following it, so the entry fails (V-H1).
+      if (entry.kind === 'absent' && !resolution.throughLink) continue;
+      failed.push(entry.path);
+      continue;
+    }
+    const absolute = resolution.absolute;
+    let stat: Stats | undefined;
+    try {
+      stat = lstatSync(absolute, { throwIfNoEntry: false });
+    } catch (err: unknown) {
+      // `ENOTDIR` — a component above the name is a regular file — is the same fact as `ENOENT`
+      // for this check: the name does not exist, and cannot while its parent is a file.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        failed.push(entry.path);
+        continue;
+      }
+      stat = undefined;
+    }
+    if (entry.kind === 'absent') {
+      if (stat !== undefined) failed.push(entry.path);
+      continue;
+    }
+    if (stat === undefined) {
+      failed.push(entry.path);
+      continue;
+    }
+    if (entry.kind === 'symlink') {
+      if (!stat.isSymbolicLink() || readlinkSync(absolute) !== entry.target) failed.push(entry.path);
+      continue;
+    }
+    if (entry.kind === 'directory') {
+      if (!stat.isDirectory() || (stat.mode & 0o7777) !== entry.mode) failed.push(entry.path);
+      continue;
+    }
+    if (!stat.isFile()
+      || (stat.mode & 0o7777) !== entry.mode
+      || !sameBytes(absolute, path.join(snapshot.dir, entry.blob!))) failed.push(entry.path);
+  }
+  return failed;
+}
+
+/** Two files compared in 64 KiB chunks, so neither is read into memory whole. */
+function sameBytes(left: string, right: string): boolean {
+  let a: number | undefined;
+  let b: number | undefined;
+  try {
+    a = openSync(left, 'r');
+    b = openSync(right, 'r');
+    if (fstatSync(a).size !== fstatSync(b).size) return false;
+    const bufA = Buffer.allocUnsafe(64 * 1024);
+    const bufB = Buffer.allocUnsafe(64 * 1024);
+    for (;;) {
+      const readA = readSync(a, bufA, 0, bufA.length, null);
+      const readB = readSync(b, bufB, 0, bufB.length, null);
+      if (readA !== readB) return false;
+      if (readA === 0) return true;
+      if (!bufA.subarray(0, readA).equals(bufB.subarray(0, readB))) return false;
+    }
+  } catch {
+    return false;
+  } finally {
+    if (a !== undefined) closeSync(a);
+    if (b !== undefined) closeSync(b);
+  }
+}
+
+/** The apply's own failure, plus what the restore did, as the stderr an agent and a bundle read. */
+function withRestoreNote(result: GitResult, restore: RestoreOutcome): GitResult {
+  const note = restore.failedPaths.length === 0
+    ? 'patch.apply: the apply failed part-way; every declared path was restored, so the tree is as it '
+      + 'was before the call.'
+    : 'patch.apply: the apply failed part-way and the restore did not put the tree back: '
+      + `${restore.failedPaths.join(', ')} differ from what the call found. Report this to the `
+      + 'operator before trying again.';
+  return { ...result, stderr: [result.stderr.trimEnd(), note].filter((line) => line !== '').join('\n') };
 }
 
 /**
@@ -601,7 +950,39 @@ async function refuseGitDirTargets(tool: string, ctx: ToolContext, paths: readon
   }
 }
 
+export interface PatchApplyHooks {
+  /**
+   * Test seam (K4/V-H1/V-L4): called after an apply fails and before its restore, with the project
+   * root and the snapshot directory this call is about to restore from. A test uses it to inject
+   * the races and failures the rulings name — an unwritable path, a parent swapped for a link, a
+   * lost blob — which a single synchronous call cannot otherwise be made to meet; production
+   * passes nothing, and the restore is unchanged by it.
+   *
+   * @internal Test-only; not part of the tool's public surface (V5-L2).
+   */
+  readonly beforeRestore?: (projectRoot: string, snapshotDir: string) => void;
+  /**
+   * Test seam (K5e): called after the restore's removal pass and before its write pass, so a test
+   * can leave at a name what a writer racing those two passes could — the write pass must replace
+   * it, not open it. Production passes nothing.
+   *
+   * @internal Test-only; not part of the tool's public surface (V5-L2).
+   */
+  readonly beforeWrite?: (projectRoot: string) => void;
+  /**
+   * Test seam (V-L2): called after the restore's writes and before its verification. Verification
+   * compares the restored file against the snapshot blob, so a change to the blob alone changes
+   * both sides; a same-length change made *after* the write is the only way to isolate the byte
+   * comparison. Production passes nothing.
+   *
+   * @internal Test-only; not part of the tool's public surface (V5-L2).
+   */
+  readonly beforeVerify?: (projectRoot: string) => void;
+}
+
 export class PatchApplyTool extends BaseTool<PatchInput> {
+  constructor(private readonly hooks: PatchApplyHooks = {}) { super(); }
+
   readonly id: ToolId = makeToolId('patch.apply');
   readonly name = 'patch.apply';
   readonly description = 'Apply a unified diff to the working tree with git apply. Use dryRun to verify before applying.';
@@ -659,9 +1040,11 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
       refuseSymlinkTargets(ctx.projectRoot, declared, kinds);
 
       // Check first, and apply only what passed: all-or-nothing for everything `--check` verifies,
-      // since no `--reject` is passed. A structural conflict git accepts at `--check` and only fails
-      // mid-apply (the `x`/`x/y` shape) can still write some declared, allowed files; 0.6.0 restores
-      // the declared paths on failure (WP-3.9, #53).
+      // since no `--reject` is passed. `--check` does not model the sections before it, so a
+      // structural conflict can pass the check and fail mid-apply, after earlier sections wrote —
+      // the `x`/`x/y` and `x/y`/`x/y/z` shapes, and a file over a non-empty directory. Every declared
+      // path (and every parent of one) is recorded before the apply, and a failed apply restores
+      // them, so a call that fails is a call that changed nothing.
       const check = runGitApply(sealed, ['--check']);
       if (check.status !== 0) return { declared, result: check };
       if (input.dryRun) {
@@ -670,16 +1053,39 @@ export class PatchApplyTool extends BaseTool<PatchInput> {
           result: { status: 0, stdout: `checked ${declared.length} file(s)`, stderr: '' } satisfies GitResult,
         };
       }
-      return { declared, result: runGitApply(sealed, []) };
+      const snapshot = snapshotDeclared(ctx.projectRoot, declared);
+      try {
+        const applied = runGitApply(sealed, []);
+        if (applied.status === 0) return { declared, result: applied };
+        this.hooks.beforeRestore?.(ctx.projectRoot, snapshot.dir);
+        const restore = restoreTree(ctx.projectRoot, snapshot, {
+          ...(this.hooks.beforeWrite === undefined
+            ? {} : { beforeWrite: () => this.hooks.beforeWrite!(ctx.projectRoot) }),
+          ...(this.hooks.beforeVerify === undefined
+            ? {} : { beforeVerify: () => this.hooks.beforeVerify!(ctx.projectRoot) }),
+        });
+        return { declared, result: withRestoreNote(applied, restore), restore };
+      } finally {
+        // The snapshot costs disk while the call runs and nothing after it (K5).
+        rmSync(snapshot.dir, { recursive: true, force: true });
+      }
     });
 
     const result = outcome.result;
+    const restore = 'restore' in outcome ? outcome.restore : undefined;
     return {
       stdout: result.stdout,
       stderr: result.stderr || result.error || '',
       exitCode: typeof result.status === 'number' ? result.status : 1,
       duration: performance.now() - t,
-      metadata: { dryRun: input.dryRun ?? false },
+      metadata: {
+        dryRun: input.dryRun ?? false,
+        // Reported only when the post-restore check found a path that differs from the snapshot;
+        // the attestation carries this result object with it (K4).
+        ...(restore !== undefined && restore.failedPaths.length > 0
+          ? { restoreFailed: true, restoreFailedPaths: restore.failedPaths }
+          : {}),
+      },
     };
   }
 }

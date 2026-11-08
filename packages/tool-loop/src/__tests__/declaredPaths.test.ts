@@ -95,6 +95,51 @@ test('D-05: patch.apply writing .env is DENIED, and the file is untouched', asyn
   });
 });
 
+test('WP-3.9 F1: an Index:-only patch writing .env is DENIED, and the file is untouched', async () => {
+  // The released bypass: this diff declared [], so protect-secrets never saw a path, and `patch
+  // -p0` wrote .env. The declaration now reads `Index:`.
+  await inScratch({ '.env': 'SAFE=1\n' }, async (dir) => {
+    const engine = new PolicyEngine({} as never);
+    engine.loadRules([PROTECT_SECRETS]);
+    const attestor = new SpyAttestor();
+    const ctx = ctxIn(dir, attestor, engine);
+
+    const patch = 'Index: .env\n@@ -1 +1 @@\n-SAFE=1\n+API_KEY=ATTACKER-CONTROLLED\n';
+
+    await assert.rejects(
+      () => executeToolGated(new PatchApplyTool(), { diff: patch, strip: 0 }, ctx, { policy: engine, attestor }),
+      /Policy violation: Deny/,
+      'the protect-secrets rule sees the path the Index: header names',
+    );
+
+    assert.equal(await readFile(path.join(dir, '.env'), 'utf8'), 'SAFE=1\n');
+    assert.equal(attestor.records[0]?.policyDecision.verdict, 'Deny');
+  });
+});
+
+test('WP-3.9 F1: a diff whose targets cannot be read is refused before any rule runs', async () => {
+  await inScratch({ 'notes.txt': 'SAFE=1\n' }, async (dir) => {
+    const engine = new PolicyEngine({} as never);
+    engine.loadRules([PROTECT_SECRETS]);
+    const attestor = new SpyAttestor();
+    const ctx = ctxIn(dir, attestor, engine);
+
+    await assert.rejects(
+      () => executeToolGated(new PatchApplyTool(), { diff: 'not a diff at all' }, ctx, { policy: engine, attestor }),
+      /Policy violation: Deny/,
+    );
+
+    assert.equal(attestor.records.length, 1, 'the refusal is attested');
+    const decision = attestor.records[0]?.policyDecision;
+    assert.equal(decision?.verdict, 'Deny');
+    assert.equal(decision !== undefined && decision.verdict === 'Deny' ? decision.ruleId : undefined,
+      'builtin:declaration');
+    assert.equal(attestor.records[0]?.result.metadata['ruleId'], 'builtin:declaration');
+    assert.equal(attestor.records[0]?.result.metadata['refused'], true);
+    assert.equal(await readFile(path.join(dir, 'notes.txt'), 'utf8'), 'SAFE=1\n');
+  });
+});
+
 test('D-05 control: the same shape of patch, to a non-secret file, still runs', async () => {
   // Without this the test above would pass on a maf that denied everything.
   await inScratch({ 'notes.txt': 'SAFE=1\n' }, async (dir) => {

@@ -83,6 +83,29 @@ test('a file that parses but is not a role set refuses, naming the file', async 
   });
 });
 
+test('a roles file that names a prototype key refuses, in YAML and in JSON form (WP-3.9 F10)', async () => {
+  // The refusal is in `parseYamlDocument`, so it covers the block form, the JSON form the
+  // `#`-comment files are written in, and a key nested inside a role — the file never reaches
+  // the role-set shape check.
+  await withDir(async (dir) => {
+    const file = path.join(dir, 'roles.yaml');
+    for (const { text, key } of [
+      { text: '__proto__:\n  polluted: true\nversion: 1\ndefaultRole: coder\nroles: []\n', key: '__proto__' },
+      { text: '{"version": 1, "defaultRole": "coder", "__proto__": {"polluted": true}, "roles": []}', key: '__proto__' },
+      { text: 'version: 1\ndefaultRole: coder\nroles:\n  - role: coder\n    constructor:\n      polluted: true\n', key: 'constructor' },
+    ]) {
+      await writeFile(file, text, 'utf8');
+      await refuses(
+        RoleRegistry.fromYamlOrDefault(file, dir, BASE_TOOLS),
+        new RegExp(escapeRegExp(JSON.stringify(file))),
+        /names a prototype/,
+        new RegExp(escapeRegExp(key)),
+      );
+    }
+  });
+  assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
+});
+
 test('an empty roles file refuses: it exists, so it is not "no roles file"', async () => {
   await withDir(async (dir) => {
     const file = path.join(dir, 'roles.yaml');

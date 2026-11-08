@@ -8,7 +8,7 @@ import path from 'node:path';
 import type {
   ToolContext, ToolInput, ToolPlugin, PolicyDecision, PolicyEngineHandle, AttestorHandle,
 } from '@maf/types';
-import { makeRunId, makeTaskId, makeAgentId } from '@maf/types';
+import { makeRunId, makeTaskId, makeAgentId, toolEnv } from '@maf/types';
 import {
   GitStatusTool, GitDiffTool, GitAddTool, GitCommitTool, GitLogTool, GitResetTool, RepositoryRoots,
 } from '../plugins/git.js';
@@ -257,6 +257,17 @@ const HOST_REPOSITORY_VARS = {
   GIT_DISCOVERY_ACROSS_FILESYSTEM:  '1',
 };
 
+/**
+ * Compares two spawn environments a variable at a time. `deepEqual` on the whole object prints
+ * both maps when they differ, and one of them is built from `process.env` — so a failure would
+ * print whatever credentials the host exported. The allowlist this now compares holds no secret.
+ */
+function assertSameEnv(actual: NodeJS.ProcessEnv | undefined, expected: NodeJS.ProcessEnv, what: string): void {
+  const env = actual ?? {};
+  assert.deepEqual(Object.keys(env).sort(), Object.keys(expected).sort(), `${what}: the variables`);
+  for (const [k, v] of Object.entries(expected)) assert.equal(env[k], v, `${what}: ${k}`);
+}
+
 test('every git tool runs isolated: hooks, fsmonitor and signing pinned off, host config and repository ignored, no prompt, literal pathspecs, discovery ceiling at the tree', async () => {
   // The variables are set on this process for the length of the test because the tools read
   // process.env, as they would in a shell that exported them.
@@ -275,9 +286,10 @@ test('every git tool runs isolated: hooks, fsmonitor and signing pinned off, hos
     ];
     for (const [tool, input] of runs) await tool.execute(input, ctxIn(CWD));
 
-    // Everything the host exported reaches git except its config: PATH, HOME, the locale. The
-    // counted form is dropped whole — every KEY_n/VALUE_n the host has, not only the ones set here.
-    const expected: NodeJS.ProcessEnv = { ...process.env };
+    // git gets the tool allowlist — PATH, HOME, the locale — and none of MAF's own environment
+    // (WP-3.9: a backend or a tool has no reason to read MAF_SIGNING_KEY). The counted form is
+    // dropped whole: every KEY_n/VALUE_n the host has, not only the ones set here.
+    const expected: NodeJS.ProcessEnv = toolEnv();
     for (const k of Object.keys(expected)) {
       if (k in HOST_CONFIG_VARS || k in HOST_REPOSITORY_VARS || /^GIT_CONFIG_(?:KEY|VALUE)_[0-9]+$/.test(k)) delete expected[k];
     }
@@ -301,14 +313,14 @@ test('every git tool runs isolated: hooks, fsmonitor and signing pinned off, hos
       assert.equal(call.file, 'git', what);
       assert.equal(call.cwd, CWD, what);
       assert.deepEqual(call.argv.slice(0, ISOLATION.length), ISOLATION, `${what}: the isolation prefix comes first`);
-      assert.deepEqual(call.env, expected, what);
+      assertSameEnv(call.env, expected, what);
     }
     // Every call was preceded by the repository probe, run where and how the call itself ran.
     assert.equal(probes.length, calls.length, 'one probe per git call');
     for (const probe of probes) {
       assert.equal(probe.cwd, CWD);
       assert.deepEqual(probe.argv.slice(0, ISOLATION.length), ISOLATION);
-      assert.deepEqual(probe.env, expected);
+      assertSameEnv(probe.env, expected, 'the probe');
     }
     // Each standalone tool learned its root once, from the root, isolated the same way but with git's
     // own discovery (no ceiling) and without literal pathspecs, which check-ignore refuses.
@@ -318,7 +330,7 @@ test('every git tool runs isolated: hooks, fsmonitor and signing pinned off, hos
     for (const call of learning) {
       assert.equal(call.cwd, CWD);
       assert.deepEqual(call.argv.slice(0, ISOLATION.length), ISOLATION);
-      assert.deepEqual(call.env, learningEnv);
+      assertSameEnv(call.env, learningEnv, 'learning');
     }
   } finally {
     for (const [k, v] of saved) {

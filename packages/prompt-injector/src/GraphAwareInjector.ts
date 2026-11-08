@@ -1,3 +1,4 @@
+import { redactText } from '@maf/types';
 import type {
   MemorySubgraph, MemoryNode, MemoryEdge, GhostCue, LcmSummary, LcmMessage, LcmTrigger,
   LcmSummarySurface, LcmSummaryFailureSurface, LcmDegradedRecord,
@@ -161,43 +162,58 @@ function formatSubgraph(subgraph: MemorySubgraph, tokenBudget: number): string {
   return lines.join('\n');
 }
 
+/**
+ * Every string this file renders reaches a model: the assembled block is prepended to the next
+ * agent's system prompt. A node label or property arrives from whatever wrote it — this run's
+ * `Run` node, an agent's own Task, a Failure recorded from tool output — so the text is masked on
+ * the way OUT as well as on the way in (WP-3.9 G1). Masking at the writer alone would leave every
+ * past write, and every future writer that forgets, unmasked.
+ */
 function formatNode(n: MemoryNode): string {
+  // Masked and then escaped (M2): a label arrives from whatever wrote the node, and a label
+  // carrying `</memory-graph><ghost …>` would otherwise close the block and forge a cue. Escape
+  // after the slice, so the mask and the length rule see the text as it was written.
   const props = Object.entries(n.properties)
     .slice(0, 3)
-    .map(([k, v]) => `${k}="${String(v).slice(0, 80)}"`)
+    .map(([k, v]) => `${escapeXml(k)}="${escapeXml(redactText(String(v)).slice(0, 80))}"`)
     .join(' ');
-  return `  <node id="${n.id.slice(0, 8)}" kind="${n.kind}" label="${n.label}" ${props}/>`;
+  return `  <node id="${escapeXml(n.id.slice(0, 8))}" kind="${escapeXml(n.kind)}"`
+    + ` label="${escapeXml(redactText(n.label))}" ${props}/>`;
 }
 
 function formatEdge(e: MemoryEdge): string {
-  return `  <edge from="${e.fromId.slice(0, 8)}" to="${e.toId.slice(0, 8)}" rel="${e.relation}"/>`;
+  return `  <edge from="${escapeXml(e.fromId.slice(0, 8))}" to="${escapeXml(e.toId.slice(0, 8))}" rel="${escapeXml(e.relation)}"/>`;
 }
 
 function formatGhosts(ghosts: GhostCue[]): string {
+  // Same channel as a node: this text is prompt. A ghost cue is short by construction, but it is
+  // built from summary content, and the mask belongs wherever prompt text is assembled (G1).
   const lines = ghosts.map((g) =>
-    `  <ghost id="${g.summaryId}" relevance="${g.relevance.toFixed(2)}">${escapeXml(g.cueText)}</ghost>`,
+    `  <ghost id="${g.summaryId}" relevance="${g.relevance.toFixed(2)}">${escapeXml(redactText(g.cueText))}</ghost>`,
   );
   return `<ghost-cues>\n${lines.join('\n')}\n</ghost-cues>`;
 }
 
 /**
  * Upward mode's archive. Summary content is text an earlier model produced from an earlier run,
- * so it goes into the prompt escaped: a summary is data, not markup and not instructions.
+ * so it goes into the prompt masked and escaped: a summary is data, not markup and not
+ * instructions. This is the composition the merge between #52 and WP-3.9 needs — #52 added the
+ * text, WP-3.9 added the mask, and neither alone covers a summary (G1).
  */
 function formatSummaries(summaries: LcmSummary[]): string {
   const lines = summaries.map((s) =>
-    `  <summary id="${escapeXml(s.id)}" level="${s.level}" tokens="${s.tokens}">${escapeXml(s.content)}</summary>`,
+    `  <summary id="${escapeXml(s.id)}" level="${s.level}" tokens="${s.tokens}">${escapeXml(redactText(s.content))}</summary>`,
   );
   return `<summaries>\n${lines.join('\n')}\n</summaries>`;
 }
 
 /**
  * The session's newest messages, newest first (R4c). Message text can contain anything a tool or a
- * model wrote, so it is escaped for the same reason a summary is: data, never markup.
+ * model wrote, so it is masked and escaped for the same reason a summary is: data, never markup.
  */
 function formatRecent(messages: LcmMessage[]): string {
   const lines = messages.map((m) =>
-    `  <message role="${escapeXml(m.role)}">${escapeXml(m.content)}</message>`,
+    `  <message role="${escapeXml(m.role)}">${escapeXml(redactText(m.content))}</message>`,
   );
   return `<recent>\n${lines.join('\n')}\n</recent>`;
 }

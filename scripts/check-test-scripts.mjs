@@ -63,7 +63,8 @@ const REQUIRED_TESTED = new Set([
   '@maf/adapter-base', '@maf/adapter-claude', '@maf/adapter-codex', '@maf/adapter-gemini',
   '@maf/adapter-ollama', '@maf/adapter-openrouter', '@maf/approval-gate', '@maf/attestation', '@maf/cli', '@maf/dag-runner',
   '@maf/eval-harness', '@maf/evolver', '@maf/git-ops', '@maf/harness-config', '@maf/memory-graph',
-  '@maf/planning-agent', '@maf/policy-engine', '@maf/processors', '@maf/roles', '@maf/tool-loop',
+  '@maf/planning-agent', '@maf/policy-engine', '@maf/processors', '@maf/prompt-injector',
+  '@maf/roles', '@maf/tool-loop',
   '@maf/tools', '@maf/types',
 ]);
 

@@ -11,6 +11,7 @@ import { ScriptedAdapter } from '@maf/eval-harness';
 import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import { MemoryGraph, recallFailures } from '@maf/memory-graph';
 import { DagSynthesizer, RetrievalAugmentedPlanner } from '@maf/planning-agent';
+import type { CliAdapter } from '@maf/types';
 import { makeRunId, makeToolId } from '@maf/types';
 import { RoleRegistry, defineRoleName } from '@maf/roles';
 import { runIsolatedGit } from '@maf/git-ops';
@@ -142,6 +143,46 @@ test('a refused spec leaves a repository maf has run in as it was (F1)', async (
 
     assert.deepEqual(await treeDigest(path.join(repo, '.maf')), mafTree, '.maf/ was not written to');
     assert.deepEqual(await userState(repo), state, "the user's checkout is untouched");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a malformed spec is refused before the backend is resolved or probed (D-59 merge duty 5)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-plan-refuse-no-backend-'));
+  try {
+    const repo = await dirtyUserRepo(root);
+    for (const { name, body, expected } of SPEC_REFUSALS) {
+      const spec = path.join(root, `${name}.json`);
+      if (body !== undefined) await writeFile(spec, body);
+      // Both adapter shapes: one with a preflight (`--version`/`--help`, the claude path) and one
+      // without (the `isAvailable` path). Neither may be reached — a malformed spec is the
+      // operator's error, and a run that probed a backend for it has paid for the wrong question.
+      for (const withPreflight of [false, true]) {
+        const counts = { available: 0, preflight: 0, invoked: 0 };
+        const inner = new ScriptedAdapter([]);
+        const adapter: CliAdapter = {
+          name:          'claude',
+          capabilities:  () => inner.capabilities(),
+          isAvailable:   async () => { counts.available += 1; return true; },
+          invoke:        (o) => { counts.invoked += 1; return inner.invoke(o); },
+          stream:        (o) => inner.stream(o),
+          ...(withPreflight
+            ? { preflight: async () => { counts.preflight += 1; return undefined; } }
+            : {}),
+        };
+        const run = await driveRun([FIRST, '--dir', repo, '--adapter', 'claude', '--plan-from', spec], {
+          adapters: registryOf(adapter),
+          io: { stdin: new PassThrough(), isTTY: false, env: { MAF_SIGNING_KEY: 'plan-no-backend-key' } },
+        });
+        const which = `${name}/${withPreflight ? 'preflight' : 'availability'}`;
+        assert.ok(run.error !== undefined, `${which}: the run was expected to refuse\n${run.out}${run.err}`);
+        assert.match(messageOf(run.error), expected, which);
+        assert.equal(counts.available, 0, `${which}: the availability check was never asked`);
+        assert.equal(counts.preflight, 0, `${which}: preflight was never asked`);
+        assert.equal(counts.invoked, 0, `${which}: the backend was never invoked`);
+      }
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

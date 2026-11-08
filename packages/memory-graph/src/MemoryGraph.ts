@@ -4,6 +4,7 @@ import type {
   MemoryNodeKind, MemoryRelation, MergeReport, RunId,
   GraphQuery, GraphRow, GraphQueryRunner, FailureRecorder, NodeFailureRecord,
 } from '@maf/types';
+import { PrototypeKeyError, refusePrototypeKey } from '@maf/types';
 import { KuzuDriver } from './KuzuDriver.js';
 import { SCHEMA_DDL } from './schema.js';
 import { intLiteral, idListParams } from './cypherText.js';
@@ -481,9 +482,14 @@ function rowToEdge(r: GraphRow): MemoryEdge {
  */
 function tryParse(s: string, what: string): Record<string, unknown> {
   try {
-    return JSON.parse(s) as Record<string, unknown>;
-  } catch {
-    console.warn(`[maf] memory-graph: ${what} is not valid JSON, reading it as empty: ${s.slice(0, 120)}`);
+    // WP-3.9 G5: a `.maf/` properties blob goes through the shared reviver. A refused key is said
+    // to be what it is, and read as empty like an unparseable blob — never as an object with one.
+    return JSON.parse(s, refusePrototypeKey) as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof PrototypeKeyError)
+      console.warn(`[maf] memory-graph: ${what} ${err.message}, reading it as empty`);
+    else
+      console.warn(`[maf] memory-graph: ${what} is not valid JSON, reading it as empty: ${s.slice(0, 120)}`);
     return {};
   }
 }
