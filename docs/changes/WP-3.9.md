@@ -508,7 +508,7 @@ reported. Rejected: unlink the link and rebuild the name — it restores a tree 
 reports it as restored. Rejected: `openat`-style handles — Node exposes no directory-relative
 `unlinkat`, so a `lstat` walk that refuses links is the strongest check available, and a race
 between that walk and the operation is the same race `git apply` itself has. That window is stated
-in `SECURITY.md` rather than implied closed: a link planted in it is refused at the next component
+in `docs/SECURITY.md` rather than implied closed: a link planted in it is refused at the next component
 the walk reaches, or by the verification that follows, and the race tests exercise that path
 (round 6, V5-L1).
 
