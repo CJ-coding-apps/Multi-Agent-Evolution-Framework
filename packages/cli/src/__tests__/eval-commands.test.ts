@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
@@ -11,7 +11,7 @@ import * as wiring from '../wiring.js';
 import * as AdapterRegistry from '../AdapterRegistry.js';
 import { HarnessStore } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
-import { registerGoldensCommand } from '../commands/goldens.js';
+import { registerGoldensCommand, resolveGoldensHarness } from '../commands/goldens.js';
 import { registerEvolveCommand } from '../commands/evolve.js';
 import { registerHarnessCommand } from '../commands/harness.js';
 import { messageOf } from './runFixture.js';
@@ -325,6 +325,109 @@ test('real evolve.ts: a flag-on sensitive candidate is stored, not current, and 
     registerHarnessCommand(harnessProgram);
     await harnessProgram.parseAsync(['harness', 'set-current', sha, '--dir', root], { from: 'user' });
     assert.equal((await store.current())?.sha, sha, 'set-current applied it');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Q1 (round 7, Reviewer A's probe m1g): the base moves only on a ship. Round 1 here stores a
+// sensitive edit as needs-approval; round 2 ships an ordinary coder edit. The P1 test runs one
+// round, so a loop that adopted the stored candidate as the next base (`base = finalCandidate`
+// after storing) left the whole suite green — and in the real wiring that round-2 SHIP saves the
+// harness and makes it CURRENT, carrying the unread security prompt with no human involved.
+// `--rounds 2` drives that path through `evolve.ts`, the loop, the gate, the golden runner and
+// the store; only the adapter and the stack stand in.
+test('real evolve.ts: an unapproved sensitive candidate never becomes a later round\'s base (Q1)', async (t) => {
+  const SENSITIVE = '```json\n' + JSON.stringify({
+    edit: { kind: 'edit_role_prompt', role: 'security', newPrompt: 'be thorough when auditing', rationale: 'r' },
+    expectedImprovement: 'x', targetTasks: ['security-eval-endpoint'],
+  }) + '\n```';
+  const CODER = '```json\n' + JSON.stringify({
+    edit: { kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'r' },
+    expectedImprovement: 'x', targetTasks: ['coder-sum'],
+  }) + '\n```';
+
+  const { root, defaultSha } = await freshClone();
+  try {
+    const calls = { planner: 0, critic: 0, judge: 0, audit: 0 };
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        const prompt = o.prompt ?? '';
+        const systemPrompt = o.systemPrompt ?? '';
+        let output: string;
+        // The diff the coder edit produces is scored by the security gate, which is another call
+        // on this adapter; it must not consume a planner slot.
+        if (prompt.includes('Audit this diff')) { calls.audit++; output = '{"findings":[],"summary":"clean"}'; }
+        else if (prompt.includes('THOROUGH-ANSWER')) { calls.judge++; output = '{"passed":true,"rationale":"ok"}'; }
+        else if (prompt.includes('NAIVE-ANSWER')) { calls.judge++; output = '{"passed":false,"rationale":"no"}'; }
+        else if (systemPrompt.includes('critic')) { calls.critic++; output = '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+        else {
+          calls.planner++;
+          output = calls.planner === 1 ? SENSITIVE : calls.planner === 2 ? CODER : '```json\n{"no_op":true}\n```';
+        }
+        return { success: true, output, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+
+    const logs: string[] = [];
+    t.mock.method(console, 'log', (...parts: unknown[]) => { logs.push(parts.map(String).join(' ')); });
+
+    const graph = { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph;
+    t.mock.method(wiring, 'buildRunStack', async () => ({
+      adapter, graph,
+      securityPrompt: '',
+      dispatchTask: async (harness: HarnessConfig, role: string, prompt: string, workDir: string) => {
+        const rolePrompt = harness.roleSet.roles.find((r) => r.role === role)?.systemPrompt ?? '';
+        if (role === 'security' || role === 'reviewer')
+          return rolePrompt.includes('thorough') ? 'THOROUGH-ANSWER' : 'NAIVE-ANSWER';
+        // The coder edit's improvement is grounded in a test-script task, so it can ship; write the
+        // one fixture fix the corpus checks.
+        if (rolePrompt.includes('thorough') && prompt.includes('Fix sum.js')) {
+          await writeFile(path.join(workDir, 'sum.js'),
+            'function sum(a,b){ return a + b; }\nmodule.exports = { sum };\n');
+          return 'fixed sum.js';
+        }
+        return 'no change';
+      },
+      close: async () => {},
+    }) as unknown as wiring.RunStack);
+
+    const store = new HarnessStore(path.join(root, '.maf'));
+    // A fresh clone has no CURRENT yet; evolve starts from the committed default harness, read in
+    // place — the same resolution `goldens run` takes.
+    const { harness: base } = await resolveGoldensHarness(path.join(root, '.maf'));
+    assert.equal(base.sha, defaultSha, 'a fresh clone ships the default harness');
+
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--rounds', '2', '--patience', '2', '--approve-sensitive'), { from: 'user' });
+
+    const reportDir = path.join(root, '.maf', 'evolve');
+    const reports = await readdir(reportDir);
+    const report = JSON.parse(await readFile(path.join(reportDir, reports[0]!), 'utf8')) as {
+      rounds: { outcome: string; evaluation?: { candidateSha: string } }[];
+      ships: number;
+    };
+    assert.deepEqual(report.rounds.map((r) => r.outcome), ['needs-approval', 'ship']);
+    assert.equal(report.ships, 1, 'round 2 shipped the ordinary edit');
+
+    const storedSha = report.rounds[0]!.evaluation!.candidateSha;
+    const current = await store.current();
+    assert.ok(current, 'round 2 made a harness current');
+    assert.notEqual(current.sha, storedSha, 'the unread sensitive candidate did not become current');
+
+    const promptOf = (h: HarnessConfig, role: string) =>
+      h.roleSet.roles.find((r) => r.role === role)?.systemPrompt;
+    assert.equal(promptOf(current, 'security'), promptOf(base, 'security'),
+      'the shipped harness did not carry the unread security prompt');
+    assert.equal(current.id, `${base.id}-r2`, 'round 2 started from the pre-round-1 base');
+    assert.ok(promptOf(current, 'coder')?.includes('thorough'), 'the ship is the coder edit');
+    assert.ok(await store.tryLoad(storedSha), 'the sensitive candidate is still there for a human');
+    assert.equal(logs.filter((l) => l.includes('[maf] SHIP')).length, 1, 'exactly one ship');
+    assert.equal(logs.filter((l) => l.includes('[maf] STORED')).length, 1, 'exactly one store');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

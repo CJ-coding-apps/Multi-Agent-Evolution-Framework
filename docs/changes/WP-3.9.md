@@ -508,9 +508,11 @@ reported. Rejected: unlink the link and rebuild the name — it restores a tree 
 reports it as restored. Rejected: `openat`-style handles — Node exposes no directory-relative
 `unlinkat`, so a `lstat` walk that refuses links is the strongest check available, and a race
 between that walk and the operation is the same race `git apply` itself has. That window is stated
-in `docs/SECURITY.md` rather than implied closed: a link planted in it is refused at the next component
-the walk reaches, or by the verification that follows, and the race tests exercise that path
-(round 6, V5-L1).
+in `docs/SECURITY.md` rather than implied closed: Node has no directory-relative `openat`/`unlinkat`,
+so a link planted in it may let that one operation follow the link, and the next component, or the
+verification that follows, refuses and reports it as `restoreFailed` — the call never reports a
+restore that touched a planted link as restored. The race tests exercise that path
+(round 6, V5-L1; reworded in round 7, V6-L1).
 
 **The restore's tests measure what its sentences say (round 5, V-L1–V-L5).** `treeState` compared
 modes without the setgid bit (`& 0o777`, not `& 0o7777`), so a fixture's `02755` file lost the bit

@@ -491,6 +491,65 @@ test('loop: a flag-on sensitive candidate is stored, not current; set-current ap
   }
 });
 
+// Q1 (round 7, Reviewer A's probe): the base moves only on a ship. A `needs-approval` candidate is
+// stored for a human and MUST NOT become the next round's starting point — otherwise an ordinary
+// later ship carries the unread sensitive prompt with it, and in the real wiring `onShip` makes that
+// harness CURRENT with no human. One planted bug (`base = finalCandidate` after storing the candidate)
+// passed every test, because the test above runs one round. This one runs two.
+test('loop: an unapproved sensitive candidate never becomes the base of a later round (Q1)', async () => {
+  const SECURITY_EDIT = {
+    kind: 'edit_role_prompt', role: 'security', newPrompt: 'UNREAD thorough security prompt', rationale: 'r',
+  } as const;
+  const CODER_EDIT = {
+    kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'r',
+  } as const;
+  const stored: string[] = [];
+  const shipped: HarnessConfig[] = [];
+  let plannerCalls = 0;
+  const opts = loopOpts({
+    approveSensitive: true,
+    maxRounds: 2,
+    patience: 3,
+    metaGenerate: async (system: string): Promise<string> => {
+      if (system.includes('critic')) return '```json\n{"verdict":"ship","notes":"ok"}\n```';
+      plannerCalls++;
+      return plannerCalls === 1 ? manifestJson(SECURITY_EDIT, ['t2']) : manifestJson(CODER_EDIT, ['t3']);
+    },
+    // model: the revised SECURITY prompt solves t2; the revised CODER prompt solves t3
+    runGoldens: async (h) => {
+      const promptOf = (role: string) =>
+        h.roleSet.roles.find((r) => r.role === role)?.systemPrompt ?? '';
+      const solved = ['t1'];
+      if (promptOf('security').includes('thorough')) solved.push('t2');
+      if (promptOf('coder').includes('thorough')) solved.push('t3');
+      return suite(solved, h.sha);
+    },
+    storeCandidate: async (c) => { stored.push(c.sha); },
+    onShip: async (c) => { shipped.push(c); },
+  });
+  const report = await evolve(opts);
+
+  assert.deepEqual(report.rounds.map((r) => r.outcome), ['needs-approval', 'ship']);
+  assert.equal(stored.length, 1, 'round 1 stored exactly the evaluated sensitive candidate');
+  assert.equal(report.ships, 1, 'round 2 shipped the ordinary candidate');
+
+  // Every harness a ship would make CURRENT has the base's safety-adjacent roles, untouched.
+  const securityPrompt = (h: HarnessConfig) =>
+    h.roleSet.roles.find((r) => r.role === 'security')?.systemPrompt;
+  assert.ok(shipped.length > 0);
+  for (const harness of shipped)
+    assert.equal(securityPrompt(harness), securityPrompt(CURRENT),
+      'the unread security prompt did not ride into a shipped harness');
+
+  const candidate = shipped[0]!;
+  assert.equal(candidate.id, 'base-r2', 'round 2 started from the pre-round-1 base');
+  assert.equal(candidate.sha, applyEdit(CURRENT, CODER_EDIT, 'base-r2').sha,
+    'the shipped harness is the ordinary edit on the original base, not on the stored candidate');
+  assert.notEqual(candidate.sha, stored[0], 'the stored candidate was not the parent of the ship');
+  assert.notEqual(candidate.sha, CURRENT.sha);
+  assert.equal(report.finalHarness.sha, candidate.sha, 'the report names the harness that shipped');
+});
+
 test('loop: --approve-sensitive does not approve a tool widening (b4 unchanged, WP-3.9 H1)', async () => {
   let criticCalls = 0;
   let smoked = 0;
