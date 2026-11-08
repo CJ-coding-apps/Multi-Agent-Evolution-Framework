@@ -507,7 +507,10 @@ for a link, asserting the outside tree is byte-identical afterwards and that the
 reported. Rejected: unlink the link and rebuild the name — it restores a tree the racer moved and
 reports it as restored. Rejected: `openat`-style handles — Node exposes no directory-relative
 `unlinkat`, so a `lstat` walk that refuses links is the strongest check available, and a race
-between that walk and the operation is the same race `git apply` itself has.
+between that walk and the operation is the same race `git apply` itself has. That window is stated
+in `SECURITY.md` rather than implied closed: a link planted in it is refused at the next component
+the walk reaches, or by the verification that follows, and the race tests exercise that path
+(round 6, V5-L1).
 
 **The restore's tests measure what its sentences say (round 5, V-L1–V-L5).** `treeState` compared
 modes without the setgid bit (`& 0o777`, not `& 0o7777`), so a fixture's `02755` file lost the bit
@@ -517,7 +520,10 @@ only size and mode dies. `beforeRestore` receives the snapshot directory and the
 `TMPDIR`, so it reads the directory the call made instead of scanning the shared temp directory. A
 git child killed by a signal reports `git apply was killed by <SIGNAL>` in its stderr and result
 instead of exit 1 with empty stderr, with a stand-in that kills itself. The snapshot-creation
-`catch` is unreachable in a normal call and says so rather than pretending to be tested.
+`catch` is unreachable in a normal call and says so rather than pretending to be tested. The three
+seams — `beforeRestore`, `beforeWrite` and `beforeVerify` — are marked `@internal` (test-only) on
+the exported `PatchApplyTool` options, so they are not read as part of the tool's surface (round 6,
+V5-L2).
 
 **Two restore mutants that survived round 4 now die (round 5, K5e, K4d).** The write pass unlinks
 a name before it creates something there; with the earlier fixtures that unlink was unobservable,
@@ -555,7 +561,20 @@ messages and ghost cues; a node's label and properties were masked but not escap
 carrying `</memory-graph><ghost id="forged">` could close the block and forge a cue. `formatNode`
 now renders `escapeXml(redactText(…))` for the label, the property names and the property values,
 and the id, kind and edge relation are escaped as well; a test drives the forged label through a
-real assembly and a mutant that drops the escape turns it red.
+real assembly and a mutant that drops the escape turns it red. Round 6 gives the two code-written
+values their own hostile input — a node's `kind` and an edge's `relation`, both rendered inside
+attributes — and the mutants that drop either escape turn the test red (P2).
+
+**M1's guarantee is held by the real wiring's tests (round 6, P1).** Saving an evaluated sensitive
+candidate and applying it are two acts. The suite proved the loop's use of `storeCandidate`, but
+nothing held `evolve.ts`: a `storeCandidate` that also set CURRENT, one that stored nothing, and
+one whose candidate also ran `onShip` — which, in the real wiring, ships a sensitive edit with no
+human — each left every test green. Reviewer A's end-to-end probe is now a test: the real command,
+loop, gate and `HarnessStore`, with only the adapter and the stack standing in. It asserts the
+candidate's sha is in the store, CURRENT has not moved, the `STORED` line names `maf harness
+set-current <sha>`, no `SHIP` line is printed, and `set-current` then applies it; the loop's M1
+test also asserts `onShip` is never called. All three mutants are dead (one test red each, restored
+and sha256-verified).
 
 Limits, stated in the present tense: there is no crash recovery — a `SIGKILL` between the apply's
 first write and the restore's last leaves the tree part-applied, and the snapshot directory the
@@ -743,7 +762,8 @@ Measured at `52f7438`, the last commit that changes code; the commits after it a
   beside it, and the G16b call 29.5 s under the nine-file `tools` suite; the fixtures' 2 s pid
   poll, 2 s timeout guard and 8 s/10 s `npm` guards were below that, so four `tools` tests failed
   for latencies unrelated to the code under test, while they pass alone and on Linux. The poll is
-  now 120 s, the timeout guard 60 s and the two `npm` guards 120 s — test-only, assertions
+  now 120 s and the two `npm` guards 120 s; the timeout test was returned to a 750 ms timeout in
+  round 4 (J3, with an elapsed guard below 5 s) — test-only, assertions
   unchanged, and the three round-2 mutants re-measured above. After that change, at the head it
   was measured at, `tools` was 129 tests, 128 passed, 1 skipped, 0 failed in the same parallel run;
   rounds 4 and 5 add their own tests, and at this head the package is 149 tests, 148 passed,

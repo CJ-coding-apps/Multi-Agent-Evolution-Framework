@@ -696,7 +696,11 @@ kind, mode and byte matches, and otherwise reports `restoreFailed: true` with th
 the tool result metadata (which the attestation carries as the call's recorded result) and on stderr, beside
 the apply's own error rather than replacing it. The restore is no-follow: every parent component is
 `lstat`ed, a symbolic link is refused rather than written through, and the refusal is a verification
-failure. Two limits, stated plainly: there is no crash recovery — a `SIGKILL` between the apply's first
+failure. There is a small window between checking a path and acting on it, which Node cannot close:
+it exposes no directory-relative `openat`/`unlinkat`, so the check and the operation cannot share a
+handle. A link planted in that window is refused at the next component the walk reaches, or by the
+verification that follows — the race tests exercise that path rather than claiming the window is
+closed, and it is the same race `git apply` itself has. Two limits, stated plainly: there is no crash recovery — a `SIGKILL` between the apply's first
 write and the restore's last leaves the tree part-applied, the snapshot directory is not removed, and
 nothing consults it — and a successful edit takes git's file mode, as in 0.5.1, so a mode is preserved by a
 restore, not chosen by an apply. Absolute names and
