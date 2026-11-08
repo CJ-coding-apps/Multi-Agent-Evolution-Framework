@@ -957,12 +957,16 @@ export interface PatchApplyHooks {
    * the races and failures the rulings name — an unwritable path, a parent swapped for a link, a
    * lost blob — which a single synchronous call cannot otherwise be made to meet; production
    * passes nothing, and the restore is unchanged by it.
+   *
+   * @internal Test-only; not part of the tool's public surface (V5-L2).
    */
   readonly beforeRestore?: (projectRoot: string, snapshotDir: string) => void;
   /**
    * Test seam (K5e): called after the restore's removal pass and before its write pass, so a test
    * can leave at a name what a writer racing those two passes could — the write pass must replace
    * it, not open it. Production passes nothing.
+   *
+   * @internal Test-only; not part of the tool's public surface (V5-L2).
    */
   readonly beforeWrite?: (projectRoot: string) => void;
   /**
@@ -970,6 +974,8 @@ export interface PatchApplyHooks {
    * compares the restored file against the snapshot blob, so a change to the blob alone changes
    * both sides; a same-length change made *after* the write is the only way to isolate the byte
    * comparison. Production passes nothing.
+   *
+   * @internal Test-only; not part of the tool's public surface (V5-L2).
    */
   readonly beforeVerify?: (projectRoot: string) => void;
 }
