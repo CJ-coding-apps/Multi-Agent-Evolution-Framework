@@ -2,12 +2,14 @@ import { access, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
 import {
-  HarnessStore, HarnessConfigError, HarnessIntegrityError, assertHarnessConfig, computeHarnessSha, shortSha,
+  HarnessStore, HarnessConfigError, HarnessIntegrityError, LEGACY_DEFAULT_ID, assertHarnessConfig,
+  assertPromptsCarried, computeHarnessSha, shortSha,
 } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { refusePrototypeKey } from '@maf/types';
-import { roleSetFromHarness } from '@maf/roles';
+import { RoleRegistry, harnessRoleSetFromRegistry, roleSetFromHarness } from '@maf/roles';
 import { createDefaultProcessorRegistry } from '@maf/processors';
+import { createDefaultRegistry } from '@maf/tools';
 
 const SHA_PREFIX_RE = /^[0-9a-f]{4,64}$/;
 const SHA_RE = /^[0-9a-f]{64}$/;
@@ -135,6 +137,21 @@ export async function importHarness(store: HarnessStore, file: string): Promise<
   return cfg;
 }
 
+/**
+ * S6 (WP-3.15): the harness a plain run would dispatch when there is no CURRENT — `legacy-default`,
+ * minted from the roles file as it is now, or from the built-in set when there is no file (D-08).
+ * Minted, never adopted: `harness show` writes nothing, so asking what would run cannot change it.
+ */
+export async function plainRunHarness(store: HarnessStore, mafDir: string): Promise<HarnessConfig> {
+  const registry = await RoleRegistry.fromYamlOrDefault(
+    path.join(mafDir, 'roles.yaml'), mafDir, createDefaultRegistry(),
+  );
+  const roleSet = await harnessRoleSetFromRegistry(registry);
+  assertPromptsCarried(roleSet, 'The legacy role set',
+    'Build it with harnessRoleSetFromRegistry (@maf/roles), which inlines the text.');
+  return store.mint(roleSet, LEGACY_DEFAULT_ID);
+}
+
 function printConfig(cfg: HarnessConfig, currentSha?: string): void {
   const mark = cfg.sha === currentSha ? ' (CURRENT)' : '';
   const bundles = cfg.processorBundles.length
@@ -180,6 +197,17 @@ export function registerHarnessCommand(program: Command): void {
     .action(async (ref: string, opts: { dir: string }) => {
       const mafDir = path.join(path.resolve(opts.dir), '.maf');
       const store = new HarnessStore(mafDir);
+      // S6: with no CURRENT, name the harness a plain run actually uses rather than refusing the
+      // question. The note goes to stderr so stdout stays the harness JSON alone.
+      if ((ref === 'current' || ref === 'CURRENT') && (await store.current()) === undefined) {
+        const cfg = await plainRunHarness(store, mafDir);
+        console.error(
+          `[maf] no CURRENT in ${store.dir}: a plain run uses ${cfg.id} (${shortSha(cfg.sha)}) — ` +
+          'the roles file as it is now, or the built-in set when there is no roles.yaml',
+        );
+        console.log(JSON.stringify(cfg, null, 2));
+        return;
+      }
       const cfg = await loadStoredHarness(store, ref);
       console.log(JSON.stringify(cfg, null, 2));
     });

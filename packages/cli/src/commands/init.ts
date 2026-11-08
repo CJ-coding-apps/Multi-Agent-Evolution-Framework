@@ -3,8 +3,11 @@ import path from 'node:path';
 import { lstat, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import type { Command } from 'commander';
 import { runIsolatedGit } from '@maf/git-ops';
+import { HarnessStore, shortSha } from '@maf/harness-config';
+import type { HarnessConfig } from '@maf/harness-config';
 import { assetPath, readAsset } from '../assets.js';
 import { ensureMafDir } from '../ensureMafDir.js';
+import { importHarness } from './harness.js';
 
 /**
  * `maf init`: writes the shipped `.maf/` — policy, roles, config, prompts and the default harness —
@@ -13,8 +16,13 @@ import { ensureMafDir } from '../ensureMafDir.js';
  * The files come from the package's own `assets/`, byte for byte as this repository's `.maf/` holds
  * them; the drift test beside `assets.ts` keeps the two the same. That is a statement about the
  * bytes, not about what a run uses when a file is absent: only the policy falls back to the shipped
- * file (D-49). With no `roles.yaml`, `run` uses its built-in role set, which is not the shipped
- * one (F2).
+ * file (D-49). With no `roles.yaml`, `run` uses its built-in role set, which since D-61 *is* the
+ * shipped one — `scripts/generate-default-roles.mjs` generates it from these files.
+ *
+ * S6 (WP-3.15): `init` also records which harness a plain run uses. It imports the default it just
+ * installed into the store and points CURRENT at it, so a fresh repository runs the harness the
+ * package shipped rather than minting `legacy-default` from the roles file on first use. An
+ * existing CURRENT is the operator's and is left alone.
  */
 
 /** The files `init` copies, relative to `.maf/`. Prompts and harnesses are whatever the package ships. */
@@ -92,12 +100,46 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
   for (const relative of result.skipped) {
     out.write(`[maf] init: kept .maf/${relative} (already exists; use --force to overwrite)\n`);
   }
+  const current = await recordInstalledHarness(mafDir, files);
+  if (current !== undefined) {
+    out.write(`[maf] init: CURRENT → ${current.id} (${shortSha(current.sha)}), the default harness it installed\n`);
+  }
   out.write(
     'Next steps:\n' +
     '  export MAF_SIGNING_KEY="$(openssl rand -hex 32)"\n' +
     '  maf run "…"\n',
   );
   return result;
+}
+
+/**
+ * S6 (WP-3.15): record which harness a plain run uses, by importing the default `init` installed
+ * and pointing CURRENT at it. Without this a fresh repository has no CURRENT, so its first plain
+ * run mints `legacy-default` from the roles file — the same content, under a name that says
+ * "adopted from the file" rather than "the default that shipped" — and `harness show current`
+ * has nothing to show.
+ *
+ * An existing CURRENT is the operator's and is left alone: `--force` overwrites the files `init`
+ * ships, not the pointer they chose. The import reads the package's copy rather than the file just
+ * written — the same bytes, and it cannot be a file the run skipped or a user edited.
+ */
+async function recordInstalledHarness(
+  mafDir: string,
+  files: string[],
+): Promise<HarnessConfig | undefined> {
+  const store = new HarnessStore(mafDir);
+  if ((await store.current()) !== undefined) return undefined;
+  const installed = files.filter((relative) => /^harnesses\/default-[0-9a-f]{64}\.json$/.test(relative));
+  if (installed.length === 0) return undefined;
+  if (installed.length > 1) {
+    throw new Error(
+      `maf init: the package ships ${installed.length} default harnesses (${installed.join(', ')}), ` +
+      'so there is no single default to record as CURRENT. Install a release that ships one.',
+    );
+  }
+  const cfg = await importHarness(store, assetPath(installed[0] as string));
+  await store.setCurrent(cfg.sha);
+  return cfg;
 }
 
 /**

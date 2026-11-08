@@ -180,14 +180,14 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
   // Dispatched FROM the harness, so the sha the attestation names is the content that ran.
   const roles = RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), mafDir, baseTools);
   say(`[maf] harness: ${harness.id} (${shortSha(harness.sha)}) [${harnessSource}]`);
-  // F2: the built-in role set is not the shipped `.maf/roles.yaml` — their prompts differ, and so do
-  // the tester's tools. A run without the file therefore uses roles `maf init` would not have
-  // written. The docs used to call the two identical; say which one is in force at the point it
-  // happens, before any agent acts.
+  // F2 said the two sets differed — their prompts, and the tester's tools. Since D-61 they are one
+  // set: the built-in one is generated from the shipped files. A run without the file still says
+  // which one is in force, at the point it happens and before any agent acts, because the file is
+  // what an operator edits and its absence is why their edit is not taking effect.
   if (harnessSource === 'legacy') {
     const rolesPath = path.resolve(dir, opts.roles);
     if (!(await nameExists(rolesPath))) {
-      say(`[maf] roles: no ${path.relative(dir, rolesPath)} — using the built-in role set (maf init writes the shipped one)`);
+      say(`[maf] roles: no ${path.relative(dir, rolesPath)} — using the built-in role set (the same one maf init writes)`);
     }
   }
 

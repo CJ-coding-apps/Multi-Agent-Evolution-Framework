@@ -5,10 +5,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
 import { runIsolatedGit } from '@maf/git-ops';
+import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import { MAF_DIR_GITIGNORE } from '../ensureMafDir.js';
 import { initFiles, runInit, registerInitCommand } from '../commands/init.js';
 import type { InitDeps } from '../commands/init.js';
-import { readAsset } from '../assets.js';
+import { loadHarnessFile } from '../commands/harness.js';
+import { assetPath, readAsset } from '../assets.js';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { collector } from './runFixture.js';
 
@@ -88,6 +90,57 @@ test('a fresh repository gets every shipped .maf file, byte-identical to the pac
     assert.match(run.out, /^Next steps:$/m);
     assert.ok(run.out.includes('export MAF_SIGNING_KEY="$(openssl rand -hex 32)"'), run.out);
     assert.match(run.out, /^\s+maf run /m, 'and the command that does the work');
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('S6: a fresh init records the default harness as CURRENT, naming the file it installed', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-current-'));
+  try {
+    const repo = await createDemoFixture(root);
+    const run = await driveInit(['--dir', repo]);
+    assert.equal(run.error, undefined, run.out);
+
+    const installed = (await shipped()).find((f) => /^harnesses\/default-[0-9a-f]{64}\.json$/.test(f));
+    assert.ok(installed, 'init installs a default harness');
+    const installedSha = /default-([0-9a-f]{64})\.json/.exec(installed)?.[1];
+
+    const store = new HarnessStore(path.join(repo, '.maf'));
+    const current = await store.current();
+    assert.equal(current?.sha, installedSha, 'CURRENT names the harness init installed');
+    assert.equal(current?.id, 'default');
+    assert.ok(
+      await access(path.join(store.dir, `${installedSha as string}.yaml`)).then(() => true, () => false),
+      'the installed default is in the store, so a plain run dispatches a stored harness',
+    );
+    assert.ok(
+      run.out.includes(`[maf] init: CURRENT → default (${(installedSha as string).slice(0, 8)})`),
+      `the report says which harness a plain run will use: ${run.out}`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('S6: init leaves a CURRENT the operator set alone, even with --force', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-current-keep-'));
+  try {
+    const repo = await createDemoFixture(root);
+    await runInit({ dir: repo, out: collector() });
+
+    // A harness the operator chose: the shipped default's content under their own id.
+    const installed = (await shipped()).find((f) => /^harnesses\/default-[0-9a-f]{64}\.json$/.test(f)) as string;
+    const shippedCfg = await loadHarnessFile(assetPath(installed));
+    const mine = mintHarnessConfig({ id: 'mine', roleSet: shippedCfg.roleSet, processorBundles: [] });
+    const store = new HarnessStore(path.join(repo, '.maf'));
+    await store.save(mine);
+    await store.setCurrent(mine.sha);
+
+    const forced = await driveInit(['--dir', repo, '--force']);
+    assert.equal(forced.error, undefined, forced.out);
+    assert.equal((await store.current())?.sha, mine.sha, 'CURRENT is the operator\'s, and --force does not re-point it');
+    assert.doesNotMatch(forced.out, /CURRENT →/, `init says nothing about CURRENT when it keeps it: ${forced.out}`);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
