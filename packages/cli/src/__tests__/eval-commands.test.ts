@@ -9,8 +9,11 @@ import type { AdapterInvokeOptions, AdapterInvokeResult, CliAdapter } from '@maf
 import type { MemoryGraph } from '@maf/memory-graph';
 import * as wiring from '../wiring.js';
 import * as AdapterRegistry from '../AdapterRegistry.js';
+import { HarnessStore } from '@maf/harness-config';
+import type { HarnessConfig } from '@maf/harness-config';
 import { registerGoldensCommand } from '../commands/goldens.js';
 import { registerEvolveCommand } from '../commands/evolve.js';
+import { registerHarnessCommand } from '../commands/harness.js';
 import { messageOf } from './runFixture.js';
 
 // ORACLE: verifier F3 and F11 — `goldens run` and `evolve` take `--allow-ungoverned` to the stack
@@ -242,6 +245,86 @@ test('on a fresh clone, evolve starts from the harness goldens evaluates: the co
     assert.deepEqual(stacks.map((s) => s.harnessSha), [defaultSha, defaultSha], 'one harness, not two');
     assert.ok(logs.some((l) => l.includes(`| harness: default (${defaultSha.slice(0, 8)})`)), logs.join('\n'));
     assert.ok(logs.some((l) => l.includes(`| base: default (${defaultSha.slice(0, 8)})`)), logs.join('\n'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ORACLE (WP-3.9 round 6, P1 — Reviewer A's probe): saving an evaluated sensitive candidate and
+// applying it are two acts, and no test proved either through the real `evolve.ts` wiring. Three
+// planted bugs left the whole suite green: `storeCandidate` also set CURRENT (M1b), stored nothing
+// (M1c), and the stored candidate also went through `onShip` (M1e) — which, in the real wiring,
+// ships a sensitive edit with no human. This drives the real command, loop, gate and store; only
+// the adapter and the stack stand in.
+test('real evolve.ts: a flag-on sensitive candidate is stored, not current, and set-current applies it (P1)', async (t) => {
+  const MANIFEST = '```json\n' + JSON.stringify({
+    edit: { kind: 'edit_role_prompt', role: 'security', newPrompt: 'be thorough when auditing', rationale: 'r' },
+    expectedImprovement: 'x', targetTasks: ['security-eval-endpoint'],
+  }) + '\n```';
+
+  const { root } = await freshClone();
+  try {
+    const calls = { planner: 0, critic: 0, judge: 0 };
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        const prompt = o.prompt ?? '';
+        const systemPrompt = o.systemPrompt ?? '';
+        let output: string;
+        if (prompt.includes('THOROUGH-ANSWER')) { calls.judge++; output = '{"passed":true,"rationale":"ok"}'; }
+        else if (prompt.includes('NAIVE-ANSWER')) { calls.judge++; output = '{"passed":false,"rationale":"no"}'; }
+        else if (systemPrompt.includes('critic')) { calls.critic++; output = '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+        else { calls.planner++; output = calls.planner === 1 ? MANIFEST : '```json\n{"no_op":true}\n```'; }
+        return { success: true, output, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+
+    const logs: string[] = [];
+    t.mock.method(console, 'log', (...parts: unknown[]) => { logs.push(parts.map(String).join(' ')); });
+
+    const graph = { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph;
+    t.mock.method(wiring, 'buildRunStack', async () => ({
+      adapter, graph,
+      securityPrompt: '',
+      dispatchTask: async (harness: HarnessConfig) =>
+        (harness.roleSet.roles.find((r) => r.role === 'security')?.systemPrompt ?? '').includes('thorough')
+          ? 'THOROUGH-ANSWER' : 'NAIVE-ANSWER',
+      close: async () => {},
+    }) as unknown as wiring.RunStack);
+
+    const store = new HarnessStore(path.join(root, '.maf'));
+    const before = (await store.current())?.sha;
+
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--rounds', '1', '--patience', '1', '--approve-sensitive'), { from: 'user' });
+
+    const reportDir = path.join(root, '.maf', 'evolve');
+    const reports = await readdir(reportDir);
+    const report = JSON.parse(await readFile(path.join(reportDir, reports[0]!), 'utf8')) as {
+      rounds: { outcome: string; evaluation?: { candidateSha: string } }[];
+      ships: number;
+    };
+    const round = report.rounds[0]!;
+    assert.equal(round.outcome, 'needs-approval');
+    assert.equal(report.ships, 0);
+    assert.ok(calls.critic >= 1, 'evaluated: the critic ran');
+
+    const sha = round.evaluation!.candidateSha;
+    assert.ok(await store.tryLoad(sha), 'candidate is in the harness store');
+    assert.equal((await store.current())?.sha, before, 'CURRENT did not move');
+    assert.notEqual((await store.current())?.sha, sha);
+    assert.ok(logs.some((l) => l.includes('[maf] STORED') && l.includes(`maf harness set-current ${sha}`)),
+      'STORED line names set-current');
+    assert.ok(!logs.some((l) => l.includes('[maf] SHIP')), 'no SHIP line');
+
+    const harnessProgram = new Command();
+    harnessProgram.exitOverride();
+    registerHarnessCommand(harnessProgram);
+    await harnessProgram.parseAsync(['harness', 'set-current', sha, '--dir', root], { from: 'user' });
+    assert.equal((await store.current())?.sha, sha, 'set-current applied it');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

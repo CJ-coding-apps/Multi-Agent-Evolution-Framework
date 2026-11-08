@@ -453,9 +453,13 @@ test('loop: a flag-on sensitive candidate is stored, not current; set-current ap
   try {
     const store = new HarnessStore(mafDir);
     let storedSha: string | undefined;
+    const shipped: string[] = [];
     const opts = loopOpts({
       approveSensitive: true,
       maxRounds: 1,
+      // P1: with the real wiring `onShip` saves the candidate AND makes it current. A loop that
+      // also ran it for a needs-approval candidate would ship a sensitive edit unattended.
+      onShip: async (candidate) => { shipped.push(candidate.id); },
       metaGenerate: async (system: string): Promise<string> => {
         if (system.includes('critic')) return '```json\n{"verdict":"ship","notes":"ok"}\n```';
         return manifestJson({
@@ -473,6 +477,7 @@ test('loop: a flag-on sensitive candidate is stored, not current; set-current ap
 
     assert.equal(report.rounds[0]?.outcome, 'needs-approval');
     assert.ok(report.rounds[0]?.evaluation, 'the candidate was evaluated');
+    assert.deepEqual(shipped, [], 'onShip never ran for a needs-approval candidate');
     assert.ok(storedSha !== undefined, 'the candidate was stored');
     assert.ok(await store.tryLoad(storedSha), 'the candidate is in the harness store');
     assert.notEqual((await store.current())?.sha, storedSha, 'storing it did not make it current');
