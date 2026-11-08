@@ -124,7 +124,8 @@ too — the two directions of `harnessBridge.ts` remain a pair.
 - **`docs/ROLES.md`, the `\*` footnote ("The two tester definitions in this repository differ")**:
   it is no longer true and the whole paragraph should be replaced by:
   > The built-in role set is the shipped `.maf/roles.yaml` and prompts, generated from them
-  > ([D-61](DECISIONS.md)); a target with no roles file gets exactly the set `maf init` writes. The
+  > (D-61, `docs/DECISIONS.md`); a target with no roles file gets exactly the set `maf init`
+  > writes. The
   > shipped tester holds `fs.write` and is a writer (see [Writer roles](#writer-roles)), so its
   > changes are security-reviewed. On the in-process tier the shipped policy also limits *where* it
   > may write — `tester-write-only-tests` and `tester-no-ci-config` in `.maf/policy.yaml` — because
