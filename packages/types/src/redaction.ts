@@ -64,6 +64,34 @@ export function redactText(text: string, extra: readonly RegExp[] = []): string 
   return apply(text, DEFAULT_PATTERNS, extra);
 }
 
+/**
+ * Absolute POSIX and Windows paths as they occur inside a message: the start of the text, or after
+ * whitespace, a quote, an opening bracket, `=` or a backtick, and running to the next whitespace or
+ * quote. A path is required to have a body, so a lone `/` in prose is left alone.
+ */
+const ABSOLUTE_PATH_PATTERNS: ReadonlyArray<{ label: string; re: RegExp }> = [
+  { label: 'path', re: /(?:^|(?<=[\s"'(=`]))\/(?=[^\s"'])[^\s"']*/g },
+  { label: 'path', re: /(?:^|(?<=[\s"'(=`]))[A-Za-z]:\\[^\s"']*/g },
+];
+
+/**
+ * Text that is evidence about a decision and may also be shown to a model: credential formats and
+ * assignment heuristics masked (`redactText`'s tier, which is the stricter of the two), and every
+ * absolute path replaced with `[REDACTED:path]`.
+ *
+ * The policy engine writes a refusal's `reason` into the memory graph; a confinement refusal quotes
+ * the path it refused and the project root it resolved against, and a refusal reason can quote tool
+ * input. The evolver's digester reads that node into a planner prompt, which in WP-3.7b goes to a
+ * real model. A credential-shaped path segment is a secret wherever it appears, and the machine's
+ * layout is not the planner's business. Paths are masked first so a secret inside one cannot leave
+ * its surroundings behind as a path fragment.
+ */
+export function redactEvidenceText(text: string): string {
+  let out = text;
+  for (const p of ABSOLUTE_PATH_PATTERNS) out = out.replace(p.re, `[REDACTED:${p.label}]`);
+  return redactText(out);
+}
+
 /** Shallow-redact string values of a record with credential FORMATS only (evidence-grade). */
 export function redactCredentialsRecord(
   obj: Record<string, unknown>,

@@ -5,7 +5,7 @@ import type {
   ToolId, ToolInput, ToolContext, ApprovalRequest, GraphQueryRunner,
   PolicyInForce, PolicyRuleSummary, PolicyVerdictCounts, PolicySourceKind, RunId,
 } from '@maf/types';
-import { resolveInside, PathEscapeError, VerdictError } from '@maf/types';
+import { redactEvidenceText, resolveInside, PathEscapeError, VerdictError } from '@maf/types';
 import { bindPolicyTemplate } from './policyTemplate.js';
 
 /**
@@ -158,21 +158,40 @@ export class PolicyEngine implements PolicyEngineHandle {
    * The decision becomes a `PolicyEvent` node, which is what the evolver's digester reads. A
    * recorder failure is swallowed: a graph hiccup must not change what the policy answered, and
    * the call it is deciding is more important than the evidence about it.
+   *
+   * Only refusals are evidence (WP-3.7a MED-2). An `Allow` is the normal case — one per tool call,
+   * 62 of them for two golden runs — and a newest-first digest window full of them crowded the one
+   * denial that a proposal could target out of the planner's view. The verdict counts in
+   * `inForce()` remain the complete tally; the graph holds the decisions worth reading.
+   *
+   * Every string property is masked at write (MED-1): a refusal's reason quotes the path it
+   * refused and the root it resolved against, and this node is read into a model prompt. The
+   * digester masks again on read, because a graph written by an older version holds raw ones.
    */
   private async recordEvent(toolId: ToolId, decision: PolicyDecision, ctx: ToolContext): Promise<void> {
     if (this.recorder === undefined) return;
+    if (decision.verdict === 'Allow') return;
+    const ruleId = decision.verdict === 'Escalate'
+      // L3: an Escalate decision has no top-level `ruleId`; the rule that escalated it is on the
+      // approval request, and that is the id a reader would look up.
+      ? decision.approvalRequest.policyRuleId
+      : decision.ruleId;
+    const properties: Record<string, unknown> = {
+      toolId,
+      verdict: decision.verdict,
+      reason: decision.reason,
+      ...(ruleId !== undefined ? { ruleId } : {}),
+      taskId: ctx.taskId,
+      ...(ctx.agentRole !== undefined ? { role: ctx.agentRole } : {}),
+      ...(ctx.goldenTaskId !== undefined ? { goldenTaskId: ctx.goldenTaskId } : {}),
+    };
     try {
       await this.recorder.addNode({
         kind: 'PolicyEvent',
         label: `policy ${decision.verdict} ${toolId}`,
-        properties: {
-          toolId,
-          verdict: decision.verdict,
-          ...(decision.verdict === 'Allow' ? {} : { reason: decision.reason }),
-          ...('ruleId' in decision && decision.ruleId !== undefined ? { ruleId: decision.ruleId } : {}),
-          taskId: ctx.taskId,
-          ...(ctx.agentRole !== undefined ? { role: ctx.agentRole } : {}),
-        },
+        properties: Object.fromEntries(Object.entries(properties).map(
+          ([key, value]) => [key, typeof value === 'string' ? redactEvidenceText(value) : value],
+        )),
         runId: ctx.runId,
       });
     } catch { /* the verdict stands; the evidence is best-effort */ }

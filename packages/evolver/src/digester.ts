@@ -1,6 +1,6 @@
 import type { MemoryGraph } from '@maf/memory-graph';
 import { intLiteral } from '@maf/memory-graph';
-import { refusePrototypeKey } from '@maf/types';
+import { redactEvidenceText, refusePrototypeKey } from '@maf/types';
 
 /**
  * Digester (plan §6.2 step 1) — deterministic evidence assembly. No LLM in v1:
@@ -78,13 +78,31 @@ export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Pro
     label: String(raw['n.label'] ?? ''), properties: parseProps(raw), runId: String(raw['n.run_id'] ?? ''),
   }));
 
+  // WP-3.7a MED-2: the graph may still hold `Allow` events written before the engine stopped
+  // recording them, so the query reads a wider window and the filter happens here. The events are
+  // newest-first; the first `failureLimit` non-Allow ones are returned. The wider window is the
+  // stated cap: a graph can hold at most `failureLimit * 10` rows for one digest, and an evidence
+  // set older than that is out of view — but an Allow can no longer push a Deny out of it.
+  const policyScan = intLiteral(failureLimit * 10, 'policyScanLimit');
   const policyRows = await graph.run({
-    cypher: `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
+    cypher: `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${policyScan}`,
     params: {},
   });
-  const policyEvents: FailureRow[] = policyRows.map((raw) => ({
-    label: String(raw['n.label'] ?? ''), properties: parseProps(raw), runId: String(raw['n.run_id'] ?? ''),
-  }));
+  // WP-3.7a MED-1, second layer: a row written by an older version may hold an unmasked reason,
+  // and this text reaches the planner's prompt. Mask on the way out as well as on the way in.
+  const masked = (text: string): string => redactEvidenceText(text);
+  const maskProps = (props: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(Object.entries(props).map(
+      ([key, value]) => [key, typeof value === 'string' ? masked(value) : value],
+    ));
+  const policyEvents: FailureRow[] = policyRows
+    .map((raw) => ({
+      label: masked(String(raw['n.label'] ?? '')),
+      properties: maskProps(parseProps(raw)),
+      runId: String(raw['n.run_id'] ?? ''),
+    }))
+    .filter((e) => e.properties['verdict'] !== 'Allow' && !e.label.startsWith('policy Allow '))
+    .slice(0, failureLimit);
 
   return { goldenHistory, currentFailures, policyEvents, generatedAt: new Date().toISOString() };
 }

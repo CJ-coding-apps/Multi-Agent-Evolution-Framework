@@ -144,6 +144,16 @@ export interface ToolContext {
    * the paths it was approved for; the tests do.
    */
   approvedPaths?: readonly string[];
+
+  /**
+   * The golden-corpus task this call belongs to, when a golden runner dispatched it (WP-3.7a L5).
+   *
+   * `taskId` is unique per dispatch, so the same corpus task evaluated under two harnesses has two
+   * of them and neither says which task it was. This is the corpus id, so a refusal recorded as
+   * evidence can be read against the score it belongs to. Absent for anything that is not a golden
+   * dispatch, which is every ordinary run.
+   */
+  goldenTaskId?: string;
 }
 
 export interface ToolPlugin<I extends ToolInput = ToolInput> {
@@ -1887,7 +1897,7 @@ export type { ToolInputCheckOptions } from './toolInput.js';
 export {
   CREDENTIAL_PATTERNS, ASSIGNMENT_PATTERNS, DEFAULT_PATTERNS,
   redactCredentials, redactSecrets, redactText,
-  redactCredentialsRecord, redactRecord,
+  redactCredentialsRecord, redactRecord, redactEvidenceText,
 } from './redaction.js';
 
 // WP-3.9 — additive only: a new re-export; no existing export moved or changed. The child-process
