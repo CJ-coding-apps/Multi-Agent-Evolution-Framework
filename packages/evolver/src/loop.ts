@@ -12,12 +12,13 @@ import {
 import type { CurrentHarnessStatus, HistoryLabel, MetaGenerate, RoleCatalogEntry } from './planner.js';
 import { gateEvaluate, gateStatic } from './gate.js';
 import type { GateDecision, GateVeto } from './gate.js';
+import type { BudgetMeter, BudgetSnapshot } from './budget.js';
 
 export interface EvolveRoundRecord {
   round: number;
   manifest?: ChangeManifest;
   gate?: GateDecision;
-  outcome: 'ship' | 'reject' | 'no-op' | 'needs-approval' | 'planner-error' | 'smoke-failed' | 'critic-reject' | 'record-failed';
+  outcome: 'ship' | 'reject' | 'no-op' | 'needs-approval' | 'planner-error' | 'smoke-failed' | 'critic-reject' | 'record-failed' | 'budget';
   note: string;
   /**
    * The evaluation a flag-on sensitive edit paid for and did not act on (WP-3.9 K1). The ruling
@@ -38,6 +39,18 @@ export interface SensitiveEvaluation {
    * `candidateScores` is what the run measured; it is not in the graph, so the report says so.
    */
   unrecorded?: true;
+}
+
+/**
+ * A golden run the loop paid for whose result could not be written as evidence (WP-3.7b R3-L3).
+ * The candidate case keeps its measured scores in the round's `evaluation`; a baseline failure has
+ * no round to attach them to, so the partial report carries them here instead of dropping them.
+ */
+export interface UnrecordedGolden {
+  harnessId: string;
+  harnessSha: string;
+  scores: GoldenSuiteResult;
+  unrecorded: true;
 }
 
 export interface EvolveOptions {
@@ -95,6 +108,49 @@ export interface EvolveOptions {
    * operator whatever this says.
    */
   approveSensitive?: boolean;
+  /**
+   * The effective tier each role runs on under the adapter this run uses (WP-3.7 §7). The loop
+   * cannot compute it — `effectiveTier` needs the adapter — so the caller resolves it once and the
+   * gate refuses an edit that cannot reach its target role's tier. Absent (tests, embedders) skips
+   * that rule rather than guessing.
+   */
+  roleTiers?: ReadonlyMap<string, 'cli' | 'in-process'>;
+  /** The adapter's name, for the refusal's reason when an edit cannot reach the tier. */
+  adapterName?: string;
+  /**
+   * D-57: `runGoldens` measures one split of the corpus, and a golden row from a different split
+   * (a full-corpus `goldens run`, a row from before the split existed) is not this run's baseline.
+   * Set it and history rows must say the same, or the loop measures its own baseline.
+   */
+  splitName?: 'train' | 'held-out';
+  /**
+   * D-57: the yardstick the evolver may not see. Called after the rounds, twice per harness, and
+   * its result is NEVER passed to `recordGoldens` — the held-out tasks must not enter the evidence
+   * graph the planner reads, or they are no longer held out.
+   */
+  runHeldOut?: (harness: HarnessConfig) => Promise<GoldenSuiteResult>;
+  /** D-57: sha of the split definition the held-out runner measures, for the report. */
+  heldOutSplitsSha?: string;
+  /** D-57: the meter. The loop asks it before every round and before every step that costs money. */
+  budget?: BudgetMeter;
+}
+
+/** D-57: what a held-out evaluation measured, and the sentence the report carries. */
+export interface HeldOutReport {
+  splitsSha?: string;
+  /** The same harness scored twice — that is what makes the noise floor measurable. */
+  repeats: number;
+  baseline: GoldenSuiteResult[];
+  candidate?: GoldenSuiteResult[];
+  /** Tasks on which the two runs of the SAME harness disagreed. */
+  noiseFloor: number;
+  /** Held-out tasks the candidate solved that the baseline did not, minus the reverse. */
+  delta: number;
+  /** The gate CJ set for 0.6.0: an improvement that clears the noise floor. */
+  aboveNoiseFloor: boolean;
+  statement: string;
+  /** Present when the split was not scored, with the reason. */
+  skipped?: string;
 }
 
 export interface EvolveReport {
@@ -109,6 +165,22 @@ export interface EvolveReport {
   stopReason: 'budget' | 'patience' | 'record-failed';
   /** Present exactly when `stopReason` is `record-failed`. */
   error?: string;
+  /**
+   * WP-3.7b R3-L3: when the BASELINE run's own write failed, the scores it measured are kept here,
+   * marked `unrecorded`, as a candidate's are kept in the round's `evaluation`. They are not in the
+   * graph; the report is the only copy.
+   */
+  unrecordedBaseline?: UnrecordedGolden;
+  /**
+   * WP-3.7 §7: digest reads that failed during this run, deduplicated. The loop kept going on a
+   * thinner digest — a missing read must not abort a run the operator is paying for — and this is
+   * how the degradation is reported instead of passing silently.
+   */
+  digestErrors?: string[];
+  /** D-57: what the run spent, against what it was allowed to spend. */
+  budget?: BudgetSnapshot;
+  /** D-57: the held-out verdict, or the reason the split was not scored. */
+  heldOut?: HeldOutReport;
 }
 
 const CRITIC_SYSTEM_PROMPT = `You are the MAF harness evolution critic. Compare the change manifest against the
@@ -147,8 +219,12 @@ async function recordRound(
   });
 }
 
-function baselineFromHistory(history: Digest['goldenHistory'], harness: HarnessConfig): GoldenSuiteResult | undefined {
-  const row = history.find((h) => h.harnessSha === harness.sha);
+function baselineFromHistory(
+  history: Digest['goldenHistory'], harness: HarnessConfig, split?: 'train' | 'held-out',
+): GoldenSuiteResult | undefined {
+  // D-57: a row measured on another split (or on the whole corpus) is not this run's baseline.
+  const row = history.find((h) => h.harnessSha === harness.sha
+    && (split === undefined || h.split === split));
   if (!row) return undefined;
   return {
     harnessSha: row.harnessSha, harnessId: row.harnessId,
@@ -159,8 +235,10 @@ function baselineFromHistory(history: Digest['goldenHistory'], harness: HarnessC
 /** What the planner is told about the harness in force (MED-3): the base, never a candidate. */
 function currentStatus(
   digest: Digest, base: HarnessConfig, baseline: GoldenSuiteResult | undefined,
+  split?: 'train' | 'held-out',
 ): CurrentHarnessStatus {
-  const row = digest.goldenHistory.find((h) => h.harnessSha === base.sha);
+  const row = digest.goldenHistory.find((h) => h.harnessSha === base.sha
+    && (split === undefined || h.split === split));
   if (row !== undefined) {
     return { id: base.id, sha: base.sha, solved: row.solved, total: row.total, failed: row.failed };
   }
@@ -192,12 +270,30 @@ class RecordFailedError extends Error {
 /**
  * The partial report a `RecordFailedError` produces, or undefined for any other error (which keeps
  * propagating). Every round already paid for is in `rounds`; the harness in force is `base`.
+ *
+ * `unrecordedBaseline` is set only by the baseline call site (R3-L3): that run was paid for and its
+ * scores would otherwise exist nowhere. A candidate failure passes nothing — its round already
+ * carries the evaluation.
  */
 function recordFailureReport(
   err: unknown, rounds: EvolveRoundRecord[], base: HarnessConfig, ships: number,
+  unrecordedBaseline?: GoldenSuiteResult,
 ): EvolveReport | undefined {
   if (!(err instanceof RecordFailedError)) return undefined;
-  return { rounds, finalHarness: base, ships, stopReason: 'record-failed', error: err.message };
+  return {
+    rounds, finalHarness: base, ships, stopReason: 'record-failed',
+    error: err.message + (unrecordedBaseline === undefined
+      ? ''
+      : ' — its measured scores are kept in this report (unrecorded)'),
+    ...(unrecordedBaseline === undefined ? {} : {
+      unrecordedBaseline: {
+        harnessId: unrecordedBaseline.harnessId,
+        harnessSha: unrecordedBaseline.harnessSha,
+        scores: unrecordedBaseline,
+        unrecorded: true as const,
+      },
+    }),
+  };
 }
 
 const CRASH_OK = (e: unknown): e is Error => e instanceof Error;
@@ -209,6 +305,86 @@ function sensitiveRoleOf(
   return 'role' in manifest.edit && safetyAdjacent.has(manifest.edit.role)
     ? manifest.edit.role
     : undefined;
+}
+
+const HELD_OUT_REPEATS = 2;
+
+/** How many task ids two runs disagree about. */
+function symDiff(a: readonly string[], b: readonly string[]): number {
+  const A = new Set(a);
+  const B = new Set(b);
+  let n = 0;
+  for (const id of A) if (!B.has(id)) n++;
+  for (const id of B) if (!A.has(id)) n++;
+  return n;
+}
+
+/**
+ * D-57: score the harness that survived on the held-out split, twice, and state the delta against
+ * the noise floor — the same harness scored twice. Returns undefined when the caller wired no
+ * held-out runner; every other reason for not scoring is carried in `skipped` so the report says
+ * why rather than staying silent.
+ *
+ * These runs are deliberately NOT passed to `recordGoldens`: a held-out task in the evidence graph
+ * is a held-out task the next round's planner reads, and then it is not held out.
+ */
+async function evaluateHeldOut(
+  opts: EvolveOptions, base: HarnessConfig, finalHarness: HarnessConfig, ships: number,
+): Promise<HeldOutReport | undefined> {
+  const runHeldOut = opts.runHeldOut;
+  if (runHeldOut === undefined) return undefined;
+
+  const skipped = (reason: string): HeldOutReport => ({
+    ...(opts.heldOutSplitsSha !== undefined ? { splitsSha: opts.heldOutSplitsSha } : {}),
+    repeats: HELD_OUT_REPEATS,
+    baseline: [],
+    noiseFloor: 0,
+    delta: 0,
+    aboveNoiseFloor: false,
+    statement: `held-out: not scored — ${reason}`,
+    skipped: reason,
+  });
+
+  if (ships === 0)
+    return skipped('no candidate shipped, so there is no survivor to score on the held-out split');
+  if (opts.budget?.snapshot().exhausted === true)
+    return skipped('the budget was exhausted before the held-out evaluation');
+
+  let runs: GoldenSuiteResult[];
+  try {
+    // Baseline first, then the survivor — the same split, the same runner, twice each.
+    runs = [
+      await runHeldOut(base), await runHeldOut(base),
+      await runHeldOut(finalHarness), await runHeldOut(finalHarness),
+    ];
+  } catch (err) {
+    return skipped(`the held-out run failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const wrongSplit = runs.find((r) => r.split !== undefined && r.split !== 'held-out');
+  if (wrongSplit !== undefined)
+    return skipped(`the held-out runner measured split "${wrongSplit.split}", not "held-out"`);
+
+  const [b1, b2, c1, c2] = runs as [GoldenSuiteResult, GoldenSuiteResult, GoldenSuiteResult, GoldenSuiteResult];
+  const noiseFloor = Math.max(symDiff(b1.solvedTaskIds, b2.solvedTaskIds), symDiff(c1.solvedTaskIds, c2.solvedTaskIds));
+  const delta = c1.solvedTaskIds.length - b1.solvedTaskIds.length;
+  const aboveNoiseFloor = delta > noiseFloor;
+  const total = b1.tasks.length;
+  const splitsSha = opts.heldOutSplitsSha ?? c1.splitsSha ?? b1.splitsSha;
+  return {
+    ...(splitsSha !== undefined ? { splitsSha } : {}),
+    repeats: HELD_OUT_REPEATS,
+    baseline: [b1, b2],
+    candidate: [c1, c2],
+    noiseFloor,
+    delta,
+    aboveNoiseFloor,
+    statement:
+      `held-out: baseline solved ${b1.solvedTaskIds.length}/${total} then ${b2.solvedTaskIds.length}/${total}; ` +
+      `candidate solved ${c1.solvedTaskIds.length}/${total} then ${c2.solvedTaskIds.length}/${total}; ` +
+      `delta ${delta >= 0 ? '+' : ''}${delta} against a noise floor of ${noiseFloor} ` +
+      `(each harness scored ${HELD_OUT_REPEATS} times) — ` +
+      (aboveNoiseFloor ? 'above the noise floor' : 'NOT above the noise floor'),
+  };
 }
 
 /**
@@ -230,6 +406,25 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   // What each golden row this loop caused actually is (R2-L1). Rows with no entry are another
   // session's or another harness's; the prompt calls them `earlier result`, never "rejected".
   const historyLabels = new Map<string, HistoryLabel>();
+
+  // WP-3.7 §7: candidate ids must not grow. The old id was `${base.id}-r${round}`, and `base`
+  // becomes the candidate on a ship, so a run that shipped k times produced `default-r1-r1-r1…`,
+  // longer with every round and every later run. A candidate is now `<root>-e<n>`: the root is the
+  // base's id with any previous counter stripped and a hard length cap, and the counter continues
+  // from where this base left off, so ids stay short and do not collide across runs.
+  const idRoot = base.id.replace(/-e\d+$/, '').slice(0, 64);
+  let idSeq = Number(/-e(\d+)$/.exec(base.id)?.[1] ?? 0);
+  const nextCandidateId = (): string => `${idRoot}-e${++idSeq}`;
+
+  // Digest reads that failed (WP-3.7 §7): collected, reported, never fatal.
+  const digestErrors = new Set<string>();
+  const readDigest = async (): Promise<Digest> => {
+    const digest = await digestEvidence(opts.graph);
+    for (const e of digest.errors) digestErrors.add(e);
+    return digest;
+  };
+  const digestErrorField = (): Pick<EvolveReport, 'digestErrors'> =>
+    digestErrors.size === 0 ? {} : { digestErrors: [...digestErrors] };
 
   // Every golden run the loop pays for is evidence for the rounds after it (WP-3.7 amendment 1).
   // Recording before returning means the next digest reads it; a throw is not swallowed, because
@@ -267,13 +462,22 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       }
     };
 
+    // D-57: the budget is asked before anything this round costs. An exhausted run records the
+    // round it could not start, so the report says what stopped it rather than looking patient.
+    const spentAtRoundTop = opts.budget?.snapshot();
+    if (spentAtRoundTop?.exhausted === true) {
+      await record(rec({ outcome: 'budget', note: spentAtRoundTop.statement }));
+      stopReason = 'budget';
+      break;
+    }
+
     // Every gate stage that is free (WP-3.9 G3/G4): the candidate is built and the invariants and
     // widening rule are asked, with no model call and no evaluation. Called as soon as a manifest
     // exists and again on the final one, because a critic revision can introduce either defect.
     const freeCheck = (m: ChangeManifest): { candidate: HarnessConfig } | { veto: GateVeto } => {
       let candidate: HarnessConfig;
       try {
-        candidate = applyEdit(base, m.edit, `${base.id}-r${round + 1}`);
+        candidate = applyEdit(base, m.edit, nextCandidateId());
       } catch (err) {
         // An edit the harness cannot express is a malformed candidate, not a reason to abort the
         // loop; the invariant stage is where a refusal belongs, and it names what it refused.
@@ -289,26 +493,32 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
         safetyAdjacentRoles: safetyAdjacent,
         approveSensitive: opts.approveSensitive === true,
         ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
+        ...(opts.roleTiers ? { roleTiers: opts.roleTiers } : {}),
+        ...(opts.adapterName !== undefined ? { adapterName: opts.adapterName } : {}),
       });
       return veto ? { veto } : { candidate };
     };
 
     // ── 1. Digester ──
-    let digest = await digestEvidence(opts.graph);
-    if (round === 0) baseline = baselineFromHistory(digest.goldenHistory, base);
+    let digest = await readDigest();
+    if (round === 0) baseline = baselineFromHistory(digest.goldenHistory, base, opts.splitName);
     if (!baseline) {
       try {
         baseline = await evaluate(base);
       } catch (err) {
-        const stopped = recordFailureReport(err, rounds, base, ships);
-        if (stopped !== undefined) return stopped;
+        // R3-L3: this is the baseline's own run, so `err.result` is the baseline's measured result —
+        // the one the partial report keeps (marked unrecorded) rather than dropping.
+        const stopped = recordFailureReport(
+          err, rounds, base, ships, err instanceof RecordFailedError ? err.result : undefined,
+        );
+        if (stopped !== undefined) return { ...stopped, ...digestErrorField() };
         throw err;
       }
       // L1: the baseline was just paid for, so it is evidence for THIS round's planner. Without
       // this, round 1 planned from the empty digest it read before running and burned a tick.
-      digest = await digestEvidence(opts.graph);
+      digest = await readDigest();
     }
-    const current = currentStatus(digest, base, baseline);
+    const current = currentStatus(digest, base, baseline, opts.splitName);
 
     // ── 2. Planner ──
     let manifest: ChangeManifest | undefined;
@@ -431,6 +641,13 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       continue;
     }
     const finalCandidate = finalCheck.candidate;
+    // D-57: the smoke test spends adapter time; the budget is asked before it, not after.
+    const spentBeforeSmoke = opts.budget?.snapshot();
+    if (spentBeforeSmoke?.exhausted === true) {
+      await record(rec({ manifest: finalManifest, outcome: 'budget', note: spentBeforeSmoke.statement }));
+      stopReason = 'budget';
+      break;
+    }
     try {
       const smokeTarget = finalManifest.targetTasks[0];
       if (smokeTarget) await opts.runSmoke(finalCandidate, smokeTarget);
@@ -445,6 +662,14 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     }
 
     // ── 6. Gate (mandatory, deterministic) ──
+    // D-57: the golden suite is the expensive step. The budget is asked immediately before it, so
+    // an exhausted run does not spend on a candidate whose result it would then have to discard.
+    const spentBeforeGoldens = opts.budget?.snapshot();
+    if (spentBeforeGoldens?.exhausted === true) {
+      await record(rec({ manifest: finalManifest, outcome: 'budget', note: spentBeforeGoldens.statement }));
+      stopReason = 'budget';
+      break;
+    }
     let candidateScores: GoldenSuiteResult;
     try {
       candidateScores = await evaluate(finalCandidate);
@@ -465,7 +690,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
         }));
       }
       const stopped = recordFailureReport(err, rounds, base, ships);
-      if (stopped !== undefined) return stopped;
+      if (stopped !== undefined) return { ...stopped, ...digestErrorField() };
       throw err;
     }
     const gate = gateEvaluate({
@@ -478,6 +703,8 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       approveSensitive: opts.approveSensitive === true,
       ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
       ...(opts.judgeOnlyTaskIds ? { judgeOnlyTaskIds: opts.judgeOnlyTaskIds } : {}),
+      ...(opts.roleTiers ? { roleTiers: opts.roleTiers } : {}),
+      ...(opts.adapterName !== undefined ? { adapterName: opts.adapterName } : {}),
     });
 
     // K1: a sensitive edit reaches this point only with the flag, and the gate returns
@@ -531,5 +758,13 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     if (idle >= patience) { stopReason = 'patience'; break; }
   }
 
-  return { rounds, finalHarness: base, ships, stopReason };
+  // D-57: the held-out verdict, measured after the loop and never recorded as evidence.
+  const heldOut = await evaluateHeldOut(opts, opts.baseHarness, base, ships);
+  const budget = opts.budget?.snapshot();
+  return {
+    rounds, finalHarness: base, ships, stopReason,
+    ...digestErrorField(),
+    ...(heldOut !== undefined ? { heldOut } : {}),
+    ...(budget !== undefined ? { budget } : {}),
+  };
 }

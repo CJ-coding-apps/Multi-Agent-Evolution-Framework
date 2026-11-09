@@ -19,7 +19,8 @@
     "@maf/types": "workspace:*",
     "@maf/harness-config": "workspace:*",
     "@maf/eval-harness": "workspace:*",
-    "@maf/memory-graph": "workspace:*"
+    "@maf/memory-graph": "workspace:*",
+    "@maf/processors": "workspace:*"
   },
   "devDependencies": {
     "typescript": "*",

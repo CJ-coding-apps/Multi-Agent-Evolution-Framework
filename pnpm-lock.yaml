@@ -314,6 +314,9 @@ importers:
       '@maf/memory-graph':
         specifier: workspace:*
         version: link:../memory-graph
+      '@maf/processors':
+        specifier: workspace:*
+        version: link:../processors
       '@maf/types':
         specifier: workspace:*
         version: link:../types

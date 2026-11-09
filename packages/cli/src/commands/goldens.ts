@@ -228,6 +228,14 @@ export function incomparable(a: GoldenSuiteResult, b: GoldenSuiteResult): string
     return `the results were measured on different corpora (${shortSha(a.corpusSha)} vs ${shortSha(b.corpusSha)}), so a difference in score says nothing about the harness.`;
   }
   const show = (v: string | number | undefined, absent: string) => (v === undefined ? absent : String(v));
+  // D-57: a train result and a held-out result measure different tasks, so one does not beat the
+  // other. A result with no split predates the split (or ran the whole corpus) and is its own kind.
+  if ((a.split ?? '') !== (b.split ?? '')) {
+    return `the results measured different splits (${show(a.split, 'the full corpus')} vs ${show(b.split, 'the full corpus')}), so a difference in score says nothing about the harness.`;
+  }
+  if (a.split !== undefined && a.splitsSha !== b.splitsSha) {
+    return `the results were measured against different split definitions (${show(a.splitsSha, 'unrecorded')} vs ${show(b.splitsSha, 'unrecorded')}), so a difference in score says nothing about the harness.`;
+  }
   const differs = [
     a.adapter !== b.adapter ? `adapter ${show(a.adapter, 'unrecorded')} vs ${show(b.adapter, 'unrecorded')}` : '',
     a.model !== b.model ? `model ${show(a.model, 'the adapter default')} vs ${show(b.model, 'the adapter default')}` : '',

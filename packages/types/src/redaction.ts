@@ -75,11 +75,21 @@ export function redactText(text: string, extra: readonly RegExp[] = []): string 
  *    have a body. The POSIX form does not take a leading `//`, so a URL after `https:` is not read
  *    as a path.
  *
+ *    An unquoted path may contain spaces (`C:\Program Files\…`), and stopping at the first one
+ *    leaves the tail behind — a refusal reason is free text, so nothing bounds the path but the
+ *    path itself (WP-3.7b R3-L2). After the first segment the match continues over a
+ *    space-separated token that still looks like part of a path, i.e. one that contains a
+ *    separator. That masks the whole path in every shape a refusal quotes it; a token with no
+ *    separator is prose and ends the path.
+ *
  * Covered prefixes: `/…`, `C:\…`, `C:/…` and `\\server\share\…`.
  */
 const ABSOLUTE_PATH_PATTERNS: ReadonlyArray<{ label: string; re: RegExp }> = [
   { label: 'path', re: /(["'])(?:[A-Za-z]:[\\/]|\\\\|\/)[^"'\n]*\1/g },
-  { label: 'path', re: /(?:^|(?<=[\s"'(=:`]))(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^\s"']*/g },
+  {
+    label: 'path',
+    re: /(?:^|(?<=[\s"'(=:`]))(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^\s"']*(?:[^\S\r\n]+[^\s"']*[\\/][^\s"']*)*/g,
+  },
 ];
 
 function escapeRegExp(text: string): string {

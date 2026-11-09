@@ -199,6 +199,19 @@ async function compare(dir: string, a: string, b: string): Promise<{ code: numbe
   );
 }
 
+test('goldens compare refuses results measured on different splits (D-57)', () => {
+  const one = 'c'.repeat(64);
+  const sha = 'e'.repeat(64);
+  const train = result({ corpusSha: one, split: 'train', splitsSha: sha });
+  // A train score and a held-out score answer different questions.
+  assert.match(incomparable(train, result({ corpusSha: one, split: 'held-out', splitsSha: sha })) ?? '', /different splits \(train vs held-out\)/);
+  assert.match(incomparable(train, result({ corpusSha: one })) ?? '', /different splits \(train vs the full corpus\)/);
+  // Two definitions of the same-named split are two yardsticks.
+  assert.match(incomparable(train, result({ corpusSha: one, split: 'train', splitsSha: 'f'.repeat(64) })) ?? '', /different split definitions/);
+  assert.equal(incomparable(train, result({ corpusSha: one, split: 'train', splitsSha: sha })), undefined);
+  assert.equal(incomparable(result({ corpusSha: one }), result({ corpusSha: one })), undefined);
+});
+
 test('goldens compare refuses results measured on different corpora, or on an unknown one', async () => {
   const one = 'c'.repeat(64);
   assert.equal(incomparable(result({ corpusSha: one }), result({ corpusSha: one })), undefined);

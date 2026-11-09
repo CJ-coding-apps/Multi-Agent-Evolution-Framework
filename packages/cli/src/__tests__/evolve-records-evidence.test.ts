@@ -64,9 +64,12 @@ interface Project {
 }
 
 /**
- * A demo project with one golden task. Its script reads `sum.js` and then tries to write `.env`,
- * which the built-in policy denies — so the golden run leaves a `PolicyEvent` behind, and the task
- * is unsolved. The score is incidental; the records are the point.
+ * A demo project with two golden tasks: the measured `coder-sum`, whose script reads `sum.js` and
+ * then tries to write `.env` (which the built-in policy denies, so the run leaves a `PolicyEvent`
+ * behind and the task is unsolved), and a `coder-heldout` twin that D-57 puts on the other side of
+ * the split. The held-out one is never dispatched here — no candidate ships on identical scores —
+ * but the split must be a partition, so it has to exist. The score is incidental; the records are
+ * the point.
  */
 async function project(): Promise<Project> {
   const container = await mkdtemp(path.join(tmpdir(), 'maf-evolve-evidence-'));
@@ -75,18 +78,32 @@ async function project(): Promise<Project> {
 
   const corpus = path.join(root, 'corpus');
   await mkdir(path.join(corpus, 'fixtures'), { recursive: true });
-  await mkdir(path.join(corpus, 'fixtures', 'coder-sum'), { recursive: true });
-  for (const file of ['sum.js', 'test.js']) {
-    await writeFile(
-      path.join(corpus, 'fixtures', 'coder-sum', file),
-      await readFile(path.join(SEED, 'fixtures', 'coder-sum', file), 'utf8'),
-      'utf8',
-    );
+  for (const fixture of ['coder-sum', 'coder-heldout']) {
+    await mkdir(path.join(corpus, 'fixtures', fixture), { recursive: true });
+    for (const file of ['sum.js', 'test.js']) {
+      await writeFile(
+        path.join(corpus, 'fixtures', fixture, file),
+        await readFile(path.join(SEED, 'fixtures', 'coder-sum', file), 'utf8'),
+        'utf8',
+      );
+    }
   }
-  const corpusJson = JSON.parse(await readFile(path.join(SEED, 'corpus.json'), 'utf8')) as Array<{ id: string }>;
-  const task = corpusJson.find((t) => t.id === 'coder-sum');
+  const corpusJson = JSON.parse(await readFile(path.join(SEED, 'corpus.json'), 'utf8')) as Array<Record<string, unknown>>;
+  const task = corpusJson.find((t) => t['id'] === 'coder-sum');
   assert.ok(task, 'the seed corpus has coder-sum');
-  await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([task]), 'utf8');
+  const heldOut = {
+    ...task,
+    id: 'coder-heldout',
+    prompt: 'Fix sum.js so test.js passes (the held-out check).',
+    repoFixture: 'fixtures/coder-heldout',
+  };
+  await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([task, heldOut]), 'utf8');
+  // D-57: the evolver refuses to start without a committed partition.
+  await writeFile(
+    path.join(corpus, 'splits.json'),
+    JSON.stringify({ version: 1, train: ['coder-sum'], heldOut: ['coder-heldout'] }),
+    'utf8',
+  );
 
   return { root, mafDir: path.join(root, '.maf'), corpus };
 }
@@ -162,7 +179,8 @@ test('MED-4: maf evolve records its golden runs, writes policy evidence and prin
     const shas = new Set(rows.map((r) => r.harness_sha));
     assert.equal(shas.size, 2, 'the candidate was recorded under its own sha');
     assert.ok(shas.has(base.sha), 'one row is the base the loop started from');
-    assert.ok(rows.some((r) => r.harnessId.endsWith('-r1') && r.harness_sha !== base.sha),
+    // §7 bounds the id (`<root>-e<n>`), so the candidate row is the one minted off the base.
+    assert.ok(rows.some((r) => /-e\d+$/.test(r.harnessId) && r.harness_sha !== base.sha),
       'the candidate row names the candidate harness');
 
     // M12: the policy engine was built without the graph as its recorder, so a denial left nothing.

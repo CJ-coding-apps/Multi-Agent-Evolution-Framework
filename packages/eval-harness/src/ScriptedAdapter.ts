@@ -18,15 +18,35 @@ export interface ScriptedStep {
 export interface ScriptedTask {
   /** Matched exactly against the task prompt the dispatcher hands the model. */
   prompt: string;
+  /**
+   * When set, this variant applies only if the system prompt (the role prompt, in a gated run)
+   * contains this text. Two scripts may then answer the same task prompt differently, which is how
+   * an evolved role prompt is shown to change the model's answer with no model in the loop.
+   */
+  systemContains?: string;
   steps:  ScriptedStep[];
   /** The final assistant text, after the last step. */
   final:  string;
 }
 
+/**
+ * Answers to the evolution loop's own calls (D-57 offline rows). The loop asks the planner once per
+ * round and the critic once per candidate; the scripted adapter answers in order and repeats its
+ * last answer once the list is spent, so a run of any length is a pure function of this file.
+ */
+export interface ScriptedEvolution {
+  planner: string[];
+  critic:  string[];
+}
+
+/** How the scripted adapter recognises the evolver's two system prompts without importing it. */
+const PLANNER_PROMPT_PREFIX = 'You are the MAF harness evolution planner.';
+const CRITIC_PROMPT_PREFIX  = 'You are the MAF harness evolution critic.';
+
 /** One call the adapter answered, kept so a caller can see what the model was shown. */
 export interface ScriptedExchange {
   via:  'turn' | 'invoke';
-  kind: 'task' | 'security-review' | 'judge';
+  kind: 'task' | 'security-review' | 'judge' | 'planner' | 'critic';
   systemPrompt: string;
   /** The task prompt (on a turn, the first user message), or the invoke prompt. */
   prompt: string;
@@ -72,15 +92,39 @@ const CLI_EFFECTS = new Set(['fs.write', 'fs.delete']);
 export class ScriptedAdapter implements TurnAdapter {
   readonly name = SCRIPTED_ADAPTER_NAME;
   readonly exchanges: ScriptedExchange[] = [];
-  private readonly scripts = new Map<string, ScriptedTask>();
+  private readonly scripts = new Map<string, ScriptedTask[]>();
+  private readonly evolution: ScriptedEvolution | undefined;
 
-  constructor(tasks: readonly ScriptedTask[] = []) {
+  constructor(tasks: readonly ScriptedTask[] = [], evolution?: ScriptedEvolution) {
     for (const t of tasks) {
-      if (this.scripts.has(t.prompt)) {
-        throw new Error(`scripted adapter: two scripts answer the same prompt ${JSON.stringify(t.prompt)}; each prompt needs exactly one.`);
+      const variants = this.scripts.get(t.prompt) ?? [];
+      if (variants.some((v) => v.systemContains === t.systemContains)) {
+        throw new Error(`scripted adapter: two scripts answer the same prompt ${JSON.stringify(t.prompt)}`
+          + `${t.systemContains === undefined ? '' : ` for the same system-prompt marker ${JSON.stringify(t.systemContains)}`}; each needs exactly one.`);
       }
-      this.scripts.set(t.prompt, t);
+      variants.push(t);
+      this.scripts.set(t.prompt, variants);
     }
+    this.evolution = evolution;
+  }
+
+  /** The variant for this call: the one whose marker the system prompt satisfies, if any. */
+  private scriptFor(prompt: string, systemPrompt: string): ScriptedTask | undefined {
+    const variants = this.scripts.get(prompt);
+    if (variants === undefined) return undefined;
+    // A marked variant is the specific answer; the unmarked one is the default. The order in the
+    // file must not decide this, or adding a variant would change nothing.
+    const marked = variants.find((v) => v.systemContains !== undefined && systemPrompt.includes(v.systemContains));
+    return marked ?? variants.find((v) => v.systemContains === undefined);
+  }
+
+  /** The evolution answer for this call: in order, then the last one repeats. */
+  private evolutionAnswer(kind: 'planner' | 'critic'): string {
+    const answers = this.evolution?.[kind];
+    if (answers === undefined || answers.length === 0) {
+      throw new Error(`scripted adapter: this ${kind} call has no script; add an "evolution.${kind}" answer to ${SCRIPTED_FILE}.`);
+    }
+    return answers.length > 1 ? answers.shift()! : answers[0]!;
   }
 
   capabilities(): AdapterCapabilities {
@@ -108,9 +152,10 @@ export class ScriptedAdapter implements TurnAdapter {
     let result: AdapterInvokeResult;
     if (kind === 'judge') result = answer(formatJudgeVerdict({ passed: false, rationale: SCRIPTED_JUDGE_RATIONALE }));
     else if (kind === 'security-review') result = answer(SCRIPTED_REVIEW);
+    else if (kind === 'planner' || kind === 'critic') result = answer(this.evolutionAnswer(kind));
     else {
-      const script = this.scripts.get(o.prompt);
-      if (!script) result = answer(noScript(o.prompt), false);
+      const script = this.scriptFor(o.prompt, o.systemPrompt ?? '');
+      if (!script) result = answer(noScript(o.prompt, o.systemPrompt ?? '', this.scripts.has(o.prompt)), false);
       else {
         for (const step of script.steps) {
           if (CLI_EFFECTS.has(step.tool)) await applyEffect(o.workingDir, step);
@@ -135,10 +180,10 @@ export class ScriptedAdapter implements TurnAdapter {
       ...(lastTool && lastTool.kind === 'tool' ? { lastToolResult: lastTool.content } : {}),
     };
 
-    const script = this.scripts.get(prompt);
+    const script = this.scriptFor(prompt, o.systemPrompt ?? '');
     if (!script) {
       this.exchanges.push(exchange);
-      throw new Error(noScript(prompt));
+      throw new Error(noScript(prompt, o.systemPrompt ?? '', this.scripts.has(prompt)));
     }
     const taken = history.filter((m) => m.kind === 'assistant').length;
     const step = script.steps[taken];
@@ -154,10 +199,18 @@ export class ScriptedAdapter implements TurnAdapter {
 function classify(o: AdapterInvokeOptions): ScriptedExchange['kind'] {
   if (o.systemPrompt === JUDGE_SYSTEM_PROMPT) return 'judge';
   if (SECURITY_REVIEW_RE.test(o.prompt)) return 'security-review';
+  if (o.systemPrompt?.startsWith(PLANNER_PROMPT_PREFIX) === true) return 'planner';
+  if (o.systemPrompt?.startsWith(CRITIC_PROMPT_PREFIX) === true) return 'critic';
   return 'task';
 }
 
-function noScript(prompt: string): string {
+function noScript(prompt: string, systemPrompt: string, promptIsKnown: boolean): string {
+  if (promptIsKnown) {
+    // The prompt has scripts, but every one of them asks for a system-prompt marker this call's
+    // role prompt does not contain. Say what was compared rather than calling the task unknown.
+    return `scripted adapter: no script for ${JSON.stringify(prompt.slice(0, 160))} matches this role prompt`
+      + ` (${JSON.stringify(systemPrompt.slice(0, 120))}).`;
+  }
   return `scripted adapter: no script answers the task ${JSON.stringify(prompt.slice(0, 160))}.`;
 }
 
@@ -193,7 +246,13 @@ export const SCRIPTED_FILE = 'scripted.json';
  * and returns the scripts keyed by the prompt each task hands the model. Scripts are written
  * per task id because that is what a corpus author knows; the model only ever sees the prompt.
  */
-export async function loadScriptedTasks(corpusRoot: string, corpus: readonly GoldenTask[]): Promise<ScriptedTask[]> {
+export interface ScriptedBundle {
+  tasks: ScriptedTask[];
+  /** The loop's own answers, when the corpus scripts an evolution run (D-57 offline rows). */
+  evolution?: ScriptedEvolution;
+}
+
+export async function loadScriptedBundle(corpusRoot: string, corpus: readonly GoldenTask[]): Promise<ScriptedBundle> {
   const file = path.join(corpusRoot, SCRIPTED_FILE);
   let parsed: unknown;
   try {
@@ -214,16 +273,43 @@ export async function loadScriptedTasks(corpusRoot: string, corpus: readonly Gol
   for (const [id, raw] of Object.entries(tasks as Record<string, unknown>)) {
     const task = byId.get(id);
     if (!task) fail(`script "${id}" names no task in the corpus`);
-    const s = raw as Record<string, unknown> | null;
-    if (!s || typeof s !== 'object' || !Array.isArray(s['steps']) || typeof s['final'] !== 'string')
-      fail(`script "${id}" needs a "steps" array and a string "final"`);
-    const steps = (s as { steps: unknown[] }).steps.map((st, i): ScriptedStep => {
-      const step = st as Record<string, unknown> | null;
-      if (!step || typeof step['tool'] !== 'string' || !step['input'] || typeof step['input'] !== 'object' || Array.isArray(step['input']))
-        fail(`script "${id}" step ${i} needs a string "tool" and an object "input"`);
-      return { tool: (step as { tool: string }).tool, input: (step as { input: ToolInput }).input };
-    });
-    out.push({ prompt: (task as GoldenTask).prompt, steps, final: (s as { final: string }).final });
+    // A task may have several scripts, keyed apart by the role prompt they are written for. The
+    // author writes either one object or an array of them (`evolution` offline rows use this).
+    const entries = Array.isArray(raw) ? raw : [raw];
+    for (const entry of entries) {
+      const rawScript = entry as Record<string, unknown> | null;
+      if (!rawScript || typeof rawScript !== 'object' || !Array.isArray(rawScript['steps']) || typeof rawScript['final'] !== 'string')
+        fail(`script "${id}" needs a "steps" array and a string "final"`);
+      const s = rawScript as Record<string, unknown>;
+      if (s['systemContains'] !== undefined && (typeof s['systemContains'] !== 'string' || s['systemContains'].length === 0))
+        fail(`script "${id}": "systemContains" must be a non-empty string when present`);
+      const steps = (s['steps'] as unknown[]).map((st, i): ScriptedStep => {
+        const step = st as Record<string, unknown> | null;
+        if (!step || typeof step['tool'] !== 'string' || !step['input'] || typeof step['input'] !== 'object' || Array.isArray(step['input']))
+          fail(`script "${id}" step ${i} needs a string "tool" and an object "input"`);
+        return { tool: (step as { tool: string }).tool, input: (step as { input: ToolInput }).input };
+      });
+      out.push({
+        prompt: (task as GoldenTask).prompt,
+        ...(typeof s['systemContains'] === 'string' ? { systemContains: s['systemContains'] } : {}),
+        steps, final: s['final'] as string,
+      });
+    }
   }
-  return out;
+
+  const evo = (o as Record<string, unknown>)['evolution'];
+  if (evo === undefined) return { tasks: out };
+  if (!evo || typeof evo !== 'object' || Array.isArray(evo)) fail('"evolution" must be an object with "planner" and "critic" answer lists');
+  const answers = (name: string): string[] => {
+    const list = (evo as Record<string, unknown>)[name];
+    if (!Array.isArray(list) || list.length === 0 || list.some((a) => typeof a !== 'string' || a.length === 0))
+      fail(`"evolution.${name}" must be a non-empty array of non-empty strings`);
+    return list as string[];
+  };
+  return { tasks: out, evolution: { planner: answers('planner'), critic: answers('critic') } };
+}
+
+/** The task scripts alone — `goldens run` and the demo do not drive the evolution loop. */
+export async function loadScriptedTasks(corpusRoot: string, corpus: readonly GoldenTask[]): Promise<ScriptedTask[]> {
+  return (await loadScriptedBundle(corpusRoot, corpus)).tasks;
 }

@@ -114,6 +114,12 @@ export function buildPlannerUserPrompt(
       return `- ${label} ${row.harnessId} (${row.harnessSha}): ${scoreLine(row)}`;
     })
     : ['- (none)'];
+  // The rounds already run (WP-3.7 §7). A rejected proposal's own gate reason is the most useful
+  // thing the planner can be told: it names what will not be accepted, which the golden rows alone
+  // do not. Newest first, as the digester returned them.
+  const roundLines = evidence.evolutionRounds.length > 0
+    ? evidence.evolutionRounds.map((r) => `- round ${r.round}: ${r.outcome} — ${r.note}`)
+    : ['- (none)'];
   return [
     '## Evidence digest',
     JSON.stringify(evidence, null, 2),
@@ -122,6 +128,9 @@ export function buildPlannerUserPrompt(
     '',
     '## Earlier results',
     ...earlierLines,
+    '',
+    '## Evolution so far',
+    ...roundLines,
     '',
     '## Role catalog',
     JSON.stringify(catalog, null, 2),

@@ -56,3 +56,24 @@ test('a credential inside a path is masked and leaves no path fragment behind', 
   assert.doesNotMatch(out, /ghp_/);
   assert.doesNotMatch(out, /notes\.txt/, 'the whole path went, not just the secret segment');
 });
+
+// R3-L2: an unquoted path with a space used to be matched only to the first space, so the tail
+// after it survived the mask — a leak in free-text reasons, where nothing bounds the path but the
+// path itself. The whole path goes; a token that still carries a separator is part of it.
+test('an unquoted POSIX path with a space is one path, not a head and a leaked tail', () => {
+  const out = redactEvidenceText('Path /Users/a b/secret.txt refused');
+  assert.equal(out, 'Path [REDACTED:path] refused');
+  assert.doesNotMatch(out, /b\/secret\.txt/, 'nothing after the space survives');
+});
+
+test('an unquoted Windows path with a space is masked whole', () => {
+  const out = redactEvidenceText('Path C:\\Program Files\\x\\key.pem refused');
+  assert.equal(out, 'Path [REDACTED:path] refused');
+  assert.doesNotMatch(out, /Files|x\\key\.pem/, 'nothing after the space survives');
+});
+
+test('an unquoted spaced path inside the repo still keeps its repo-relative tail', () => {
+  const out = redactEvidenceText('refused /Users/a b/proj/secret.txt', ['/Users/a b/proj']);
+  assert.equal(out, 'refused secret.txt');
+  assert.doesNotMatch(out, /\/Users/);
+});

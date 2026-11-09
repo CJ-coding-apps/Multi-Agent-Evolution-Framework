@@ -88,27 +88,63 @@ test('goldens run and evolve take --allow-ungoverned to the stack they dispatch 
   }
 });
 
-// M1(b): `maf evolve approve <sha>` is WP-3.7's command and does not exist yet. Typing it must be
-// refused rather than read as `evolve` with surplus arguments and start a paid round.
-test('maf evolve refuses a positional argument instead of starting a run (M1)', async (t) => {
+// M1 (§7): a sensitive candidate is stored, not made current, and `maf evolve approve <id>` ships
+// it. Approve is a real subcommand — a positional to plain `evolve` is still refused (M1b) so a
+// typo cannot buy a round — and approving spends nothing: no adapter is built and no run starts.
+// An intact stored candidate becomes CURRENT through the same write `maf harness set-current` makes;
+// an unknown name is refused and moves nothing.
+test('maf evolve approve applies a stored candidate and refuses an unknown one without a run (M1)', async (t) => {
   const resolved: string[] = [];
   t.mock.method(AdapterRegistry, 'resolveAdapter', async (name: string) => {
     resolved.push(name);
     throw new Error('adapter built');
   });
-  const program = new Command();
-  program.exitOverride();
-  registerEvolveCommand(program);
-  let error: unknown;
+  const logs: string[] = [];
+  const errors: string[] = [];
+  t.mock.method(console, 'log', (...parts: unknown[]) => { logs.push(parts.map(String).join(' ')); });
+  t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-evolve-approve-'));
+  const saved = process.exitCode;
+  process.exitCode = 0;
   try {
-    await program.parseAsync(['evolve', 'approve', 'abc123'], { from: 'user' });
-  } catch (err: unknown) {
-    error = err;
+    // A positional on the parent is still an excess argument (M1b), never a run.
+    const parent = new Command().exitOverride();
+    registerEvolveCommand(parent);
+    let excess: unknown;
+    try {
+      await parent.parseAsync(['evolve', 'abc123'], { from: 'user' });
+    } catch (err: unknown) {
+      excess = err;
+    }
+    assert.equal((excess as { code?: string } | undefined)?.code, 'commander.excessArguments');
+
+    // Minted and saved, but not current: exactly the state `maf evolve` leaves a needs-approval
+    // candidate in.
+    const store = new HarnessStore(path.join(root, '.maf'));
+    const candidate = store.mint(
+      { version: 1, defaultRole: 'coder', roles: [{ role: 'coder', systemPrompt: 'improved', allowedTools: ['fs.read'] }] },
+      'legacy-default-e1',
+    );
+    await store.save(candidate);
+    assert.equal(await store.current(), undefined, 'a stored candidate is not current');
+
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(['evolve', 'approve', candidate.id, '-d', root], { from: 'user' });
+    assert.equal((await store.current())?.sha, candidate.sha, 'CURRENT names the approved candidate');
+    assert.ok(logs.some((l) => l.includes(`[maf] APPROVED ${candidate.id}`)), logs.join('\n'));
+
+    const unknown = new Command().exitOverride();
+    registerEvolveCommand(unknown);
+    await unknown.parseAsync(['evolve', 'approve', 'no-such-candidate', '-d', root], { from: 'user' });
+    assert.equal(process.exitCode, 2, 'an unknown candidate is refused, non-zero');
+    assert.ok(errors.some((l) => l.includes('no stored harness named no-such-candidate')), errors.join('\n'));
+    assert.equal((await store.current())?.sha, candidate.sha, 'a refused approval moves nothing');
+    assert.deepEqual(resolved, [], 'approving builds no adapter and starts no run');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
   }
-  assert.ok(error instanceof Error, 'the command refused the argument');
-  assert.equal((error as { code?: string }).code, 'commander.excessArguments');
-  assert.notEqual((error as { exitCode?: number }).exitCode, 0);
-  assert.deepEqual(resolved, [], 'no adapter was built for a command that does not exist');
 });
 
 // ORACLE (WP-3.9 round 2, G4): `maf evolve` hands the evolver the registry's tool ids and the
@@ -234,6 +270,63 @@ test('maf evolve gives the gate each tool\'s registry permission: fs.write widen
     assert.match(report.rounds[0]?.note ?? '', /b4-write-tool-widening/);
     assert.match(report.rounds[0]?.gate?.reason ?? '', /"fs\.write"/, 'the refusal names the tool it would have granted');
     assert.equal(calls.filter((s) => s.includes('critic')).length, 0, 'refused before any further model call');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ORACLE (WP-3.7 §7): the loop's tier rule is only as good as the map `maf evolve` hands it, and
+// nothing proved that wiring — deleting the two options at the call site left the whole suite
+// green. The adapter here has no `sendTurn`, so every role runs on the cli tier, where the
+// in-process loop's `maxToolIterations` is never read; the edit can only be refused there. The
+// command runs end to end (real registry, loop and gate), so the refusal is the product's.
+test('maf evolve refuses a budget edit that cannot reach its role\'s tier (§7)', async (t) => {
+  const MANIFEST = '```json\n' + JSON.stringify({
+    edit: { kind: 'tune_role_budgets', role: 'coder', maxToolIterations: 3 },
+    expectedImprovement: 'x', targetTasks: ['coder-sum'],
+  }) + '\n```';
+
+  const { root } = await freshClone();
+  try {
+    const calls: string[] = [];
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        calls.push(o.systemPrompt ?? '');
+        return { success: true, output: MANIFEST, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+    t.mock.method(console, 'log', () => {});
+
+    const graph = {
+      run: async () => [], addNode: async () => 'id', addEdge: async () => 'e',
+    } as unknown as MemoryGraph;
+    t.mock.method(wiring, 'buildRunStack', async () => ({
+      adapter, graph,
+      securityPrompt: '',
+      dispatchTask: async () => 'done',
+      close: () => {},
+    }) as unknown as wiring.RunStack);
+
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
+
+    const reportDir = path.join(root, '.maf', 'evolve');
+    const reports = (await readdir(reportDir)).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1, 'the command wrote one report');
+    const report = JSON.parse(await readFile(path.join(reportDir, reports[0]!), 'utf8')) as {
+      rounds: { outcome: string; note: string; gate?: { verdict: string; stage?: string; reason: string } }[];
+      ships: number;
+    };
+    assert.equal(report.ships, 0);
+    assert.equal(report.rounds[0]?.outcome, 'reject');
+    assert.equal(report.rounds[0]?.gate?.stage, 'b-proposal-relevance',
+      'refused at proposal, before the critic, the smoke test or a golden run');
+    assert.match(report.rounds[0]?.gate?.reason ?? '', /runs on the cli tier under adapter "scripted"/);
+    assert.equal(calls.filter((s) => s.includes('critic')).length, 0, 'no critic call after the refusal');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -442,7 +535,9 @@ test('real evolve.ts: an unapproved sensitive candidate never becomes a later ro
       h.roleSet.roles.find((r) => r.role === role)?.systemPrompt;
     assert.equal(promptOf(current, 'security'), promptOf(base, 'security'),
       'the shipped harness did not carry the unread security prompt');
-    assert.equal(current.id, `${base.id}-r2`, 'round 2 started from the pre-round-1 base');
+    // §7 bounds the id: each minted candidate is `<root>-e<n>`, so it stays rooted at the base
+    // whatever round it came from (the old `${base.id}-r${round}` grew a segment per round).
+    assert.match(current.id, /^legacy-default-e\d+$/, 'the shipped id is rooted at the pre-round-1 base');
     assert.ok(promptOf(current, 'coder')?.includes('thorough'), 'the ship is the coder edit');
     assert.ok(await store.tryLoad(storedSha), 'the sensitive candidate is still there for a human');
     assert.equal(logs.filter((l) => l.includes('[maf] SHIP')).length, 1, 'exactly one ship');

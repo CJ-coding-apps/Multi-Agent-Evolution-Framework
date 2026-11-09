@@ -1,5 +1,6 @@
 import type { HarnessConfig } from '@maf/harness-config';
 import { mintHarnessConfig } from '@maf/harness-config';
+import { DEFAULT_BUNDLE_REFS } from '@maf/processors';
 
 /**
  * The bounded mutation surface (plan §6.1). Anything not expressible as one of
@@ -135,11 +136,17 @@ export function applyEdit(current: HarnessConfig, edit: HarnessEdit, candidateId
         if (edit.timeoutMs !== undefined) r.timeoutMs = edit.timeoutMs;
       });
       break;
-    case 'add_processor':
-      bundles = [...bundles, edit.bundle.config !== undefined
+    case 'add_processor': {
+      // WP-3.7 §7: an empty list is not "no processors" — the dispatcher reads it as "use the
+      // default bundle". Appending to the empty list would REPLACE policy-audit, secret-redact,
+      // transcript and security-gate with the one processor the edit names, which is a silent
+      // security regression. Start from what dispatch would have used.
+      const base = bundles.length > 0 ? bundles : DEFAULT_BUNDLE_REFS.map((b) => ({ ...b }));
+      bundles = [...base, edit.bundle.config !== undefined
         ? { name: edit.bundle.name, config: edit.bundle.config }
         : { name: edit.bundle.name }];
       break;
+    }
     case 'rebind_planner_recall':
       recall = {
         ...(recall ?? {}),

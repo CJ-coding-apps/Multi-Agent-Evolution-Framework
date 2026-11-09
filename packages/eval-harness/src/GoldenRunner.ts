@@ -39,6 +39,13 @@ export interface GoldenSuiteResult {
   model?: string;
   /** Who judged the llm-judge verifiers; absent when no judge was wired (they then fail closed). */
   judge?: JudgeDisclosure;
+  /**
+   * D-57: the split this run measured, named in the result. A full-corpus run (the `goldens run`
+   * default, and every result written before the split existed) names none.
+   */
+  split?: 'train' | 'held-out';
+  /** D-57: sha of the split definition. Results from different splits do not compare. */
+  splitsSha?: string;
   tasks: GoldenTaskResult[];
   /** Task ids that passed. */
   solvedTaskIds: string[];
@@ -73,6 +80,8 @@ export interface GoldenRunnerOptions {
     verdict: NonNullable<VerifierContext['llmJudge']>;
     disclosure: JudgeDisclosure;
   };
+  /** D-57: stamped on every result this runner emits (the caller still names the ids to run()). */
+  split?: { name: 'train' | 'held-out'; sha: string };
 }
 
 export class GoldenRunner {
@@ -89,6 +98,13 @@ export class GoldenRunner {
   /** Runs the corpus, or only the tasks named in `only` (each must be in the corpus). */
   async run(only?: readonly string[]): Promise<GoldenSuiteResult> {
     const corpus = await this.loadCorpus();
+    // D-57: a split-scoped runner must be given that split's ids. Without this a caller that
+    // forgot them would measure the whole corpus and stamp it `train` — a result that names a
+    // split it did not measure, and a held-out task silently spent on the evolver.
+    if (this.opts.split !== undefined && only === undefined)
+      throw new Error(
+        `goldens: a ${this.opts.split.name} runner must be given the split's task ids; run(only) was called without them.`,
+      );
     const corpusSha = await computeCorpusSha(this.opts.corpusRoot, corpus);
     const missing = (only ?? []).filter((id) => !corpus.some((t) => t.id === id));
     if (missing.length > 0) {
@@ -107,6 +123,7 @@ export class GoldenRunner {
       adapter: this.opts.adapter,
       ...(this.opts.model !== undefined ? { model: this.opts.model } : {}),
       ...(this.opts.llmJudge ? { judge: this.opts.llmJudge.disclosure } : {}),
+      ...(this.opts.split ? { split: this.opts.split.name, splitsSha: this.opts.split.sha } : {}),
       tasks,
       solvedTaskIds: tasks.filter((t) => t.passed).map((t) => t.taskId),
       ranAt: new Date().toISOString(),

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "train": [
+    "coder-sum",
+    "coder-reverse",
+    "coder-clamp",
+    "coder-isodd",
+    "coder-capitalize",
+    "security-eval-endpoint",
+    "security-path-traversal"
+  ],
+  "heldOut": [
+    "coder-fib",
+    "security-sql-concat",
+    "review-off-by-one"
+  ]
+}

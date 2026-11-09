@@ -1,5 +1,6 @@
 import type { PermissionLevel } from '@maf/types';
 import type { HarnessConfig } from '@maf/harness-config';
+import { DEFAULT_BUNDLE_REFS } from '@maf/processors';
 import { seesawDecision } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import type { ChangeManifest } from './edits.js';
@@ -52,6 +53,15 @@ export interface GateContext {
   approveSensitive?: boolean;
   /** Golden task ids whose verifiers are all llm-judge (rule e needs this). */
   judgeOnlyTaskIds?: ReadonlySet<string>;
+  /**
+   * The effective tier each role runs on under the adapter this evaluation uses (WP-3.7 §7).
+   * `effectiveTier` depends on the adapter, which the gate does not otherwise see; the caller
+   * resolves it once. Absent (tests, embedders) skips the proposal-relevance rule rather than
+   * guessing a tier.
+   */
+  roleTiers?: ReadonlyMap<string, 'cli' | 'in-process'>;
+  /** The adapter's name, for the refusal's reason. */
+  adapterName?: string;
 }
 
 /** Gate rule e: improvements resting only on llm-judge verdicts never ship alone (plan §6.1). */
@@ -118,7 +128,7 @@ export function gateWidening(ctx: GateStaticContext): NeedsApproval | undefined 
 }
 
 /**
- * Stages b, b2, b3 and b4 — every gate stage that is a pure function of the manifest, the two
+ * Stages b, b2, b-proposal, b3 and b4 — every gate stage that is a pure function of the manifest, the two
  * harnesses and the registries. Exported (WP-3.9 G3/G4) so the loop runs them the moment a
  * candidate manifest exists: before the critic call, the smoke test and the golden suite, not
  * after them. `gateEvaluate` runs the same function, so a candidate the loop waves through cannot
@@ -153,6 +163,30 @@ export function gateStatic(ctx: GateStaticContext): GateVeto | undefined {
     if (!ctx.knownProcessorNames.has(ref.name))
       return { verdict: 'reject', stage: 'b-invariants', reason: `unknown processor "${ref.name}"` };
   }
+  // §7: the processors that govern the in-process tier are not optional for a role that can change
+  // the tree. An EMPTY list is not a missing bundle — the dispatcher reads it as "use the default
+  // bundle" (RoleDispatcher), which has both — so only a non-empty list can lack them, and a
+  // candidate that dropped one from a writer's bundle would otherwise lose the gate that decides
+  // its tool calls. Refused here, before any spend: it is a malformed candidate, not a trade-off.
+  const effectiveBundles = candidate.processorBundles.length > 0
+    ? candidate.processorBundles : DEFAULT_BUNDLE_REFS;
+  const bundleNames = new Set(effectiveBundles.map((b) => b.name));
+  // A caller with no map at all is the shape the type system already refuses; at runtime the same
+  // rule as everywhere else holds — a tool the map does not name is `dangerous`, never harmless.
+  const levelOf = (t: string): PermissionLevel => ctx.toolPermissions?.get(t) ?? 'dangerous';
+  const writerRoles = candidate.roleSet.roles.filter((role) =>
+    role.allowedTools.some((t) => WRITE_LEVELS.has(levelOf(t))));
+  if (writerRoles.length > 0) {
+    for (const required of ['security-gate', 'secret-redact']) {
+      if (!bundleNames.has(required))
+        return {
+          verdict: 'reject', stage: 'b-invariants',
+          reason: `candidate leaves writer role(s) ${writerRoles.map((r) => JSON.stringify(r.role)).join(', ')} ` +
+            `without the ${required} processor; a role that can change the tree keeps the security ` +
+            'gate and secret redaction (§7)',
+        };
+    }
+  }
   if (manifest.edit.kind === 'retarget_model' && ctx.knownModels && ctx.knownModels.size > 0) {
     if (!ctx.knownModels.has(manifest.edit.model))
       return { verdict: 'reject', stage: 'b-invariants', reason: `model "${manifest.edit.model}" not available` };
@@ -163,6 +197,27 @@ export function gateStatic(ctx: GateStaticContext): GateVeto | undefined {
     const screening = screenInstructionText(manifest.edit.newPrompt);
     if (!screening.ok)
       return { verdict: 'reject', stage: 'b2-instruction-screening', reason: screening.findings.join(', ') };
+  }
+
+  // ── stage b-proposal: an edit that cannot reach the target role's effective tier (§7) ──
+  // `maxToolIterations` is the in-process loop's turn cap; the cli tier runs the agent's own loop
+  // and never reads it. Tuning only that field for a role that runs on the cli tier changes nothing
+  // the harness can observe, so it is a proposal the evolver got wrong — refused at proposal, with
+  // the reason, rather than evaluated and then rejected for showing no improvement. The other two
+  // budgets reach both tiers, so an edit that also sets one is a real proposal.
+  if (manifest.edit.kind === 'tune_role_budgets'
+    && ctx.roleTiers !== undefined
+    && manifest.edit.maxToolIterations !== undefined
+    && manifest.edit.tokenBudget === undefined
+    && manifest.edit.timeoutMs === undefined) {
+    const tier = ctx.roleTiers.get(manifest.edit.role);
+    if (tier === 'cli')
+      return {
+        verdict: 'reject', stage: 'b-proposal-relevance',
+        reason: `tuning maxToolIterations for role "${manifest.edit.role}" cannot affect it: the role ` +
+          `runs on the cli tier${ctx.adapterName === undefined ? '' : ` under adapter "${ctx.adapterName}"`}, ` +
+          "where the in-process loop's turn cap is not used (§7)",
+      };
   }
 
   // ── stage b3: human approval for sensitive mutations (plan §6.3 as amended by WP-3.9 K1) ──

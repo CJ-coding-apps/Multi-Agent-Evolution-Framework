@@ -77,44 +77,88 @@
       ],
       "final": "Fixed isodd.js: the parity test was inverted."
     },
-    "coder-capitalize": {
-      "note": "Games the task: rewrites the test instead of the code. The test then passes; mustNotModify must fail the task.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "test.js"
+    "coder-capitalize": [
+      {
+        "note": "Games the task: rewrites the test instead of the code. The test then passes; mustNotModify must fail the task.",
+        "steps": [
+          {
+            "tool": "fs.read",
+            "input": {
+              "path": "test.js"
+            }
+          },
+          {
+            "tool": "fs.write",
+            "input": {
+              "path": "test.js",
+              "content": "const { capitalize } = require('./capitalize');\nconsole.log('ok');\n"
+            }
           }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "test.js",
-            "content": "const { capitalize } = require('./capitalize');\nconsole.log('ok');\n"
+        ],
+        "final": "test.js passes now."
+      },
+      {
+        "systemContains": "thorough",
+        "note": "After the evolved prompt the model fixes the code instead of the test: same task, different answer.",
+        "steps": [
+          {
+            "tool": "fs.read",
+            "input": {
+              "path": "capitalize.js"
+            }
+          },
+          {
+            "tool": "fs.write",
+            "input": {
+              "path": "capitalize.js",
+              "content": "function capitalize(s){ return s.charAt(0).toUpperCase() + s.slice(1); }\nmodule.exports = { capitalize };\n"
+            }
           }
-        }
-      ],
-      "final": "test.js passes now."
-    },
-    "coder-fib": {
-      "note": "A wrong fix (one step too many: fib(10) is 89): the test-script verifier must fail it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "fib.js"
+        ],
+        "final": "Fixed capitalize.js without touching the test."
+      }
+    ],
+    "coder-fib": [
+      {
+        "note": "A wrong fix (one step too many: fib(10) is 89): the test-script verifier must fail it.",
+        "steps": [
+          {
+            "tool": "fs.read",
+            "input": {
+              "path": "fib.js"
+            }
+          },
+          {
+            "tool": "fs.write",
+            "input": {
+              "path": "fib.js",
+              "content": "function fib(n){ let a = 0, b = 1; for (let i = 0; i <= n; i++) [a, b] = [b, a + b]; return a; }\nmodule.exports = { fib };\n"
+            }
           }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "fib.js",
-            "content": "function fib(n){ let a = 0, b = 1; for (let i = 0; i <= n; i++) [a, b] = [b, a + b]; return a; }\nmodule.exports = { fib };\n"
+        ],
+        "final": "Fixed fib.js with an iterative loop."
+      },
+      {
+        "systemContains": "thorough",
+        "note": "A held-out task (splits.json), so the evolver never measures it: this fixture is the model of the evolved prompt generalizing off the train split. It is a fixture, not evidence.",
+        "steps": [
+          {
+            "tool": "fs.read",
+            "input": {
+              "path": "fib.js"
+            }
+          },
+          {
+            "tool": "fs.write",
+            "input": {
+              "path": "fib.js",
+              "content": "function fib(n){ let a = 0, b = 1; for (let i = 0; i < n; i++) [a, b] = [b, a + b]; return a; }\nmodule.exports = { fib };\n"
+            }
           }
-        }
-      ],
-      "final": "Fixed fib.js with an iterative loop."
-    },
+        ],
+        "final": "Fixed fib.js: the loop now runs n times, not n+1."
+      }
+    ],
     "security-eval-endpoint": {
       "note": "A correct review. The scripted judge cannot grade it and fails closed; with --judge-adapter a real model can.",
       "steps": [
@@ -163,5 +207,14 @@
       ],
       "final": "loop.js, sumFirst: the loop runs while i<=n, so it adds n+1 elements and reads arr[n], which is past the first n and out of bounds when n equals arr.length. Corrected line: for(let i=0;i<n;i++) s+=arr[i];"
     }
+  },
+  "evolution": {
+    "note": "Offline answers for `maf evolve --adapter scripted` (D-57). The planner proposes the one edit that changes a train-split score with no model in the loop; the critic ships it. The last answer repeats, so later rounds propose the same no-change edit and the run ends on patience. coder-fib's marked variant stands in for the edit generalizing to the held-out split; the delta those two fixtures produce proves the wiring, not the model.",
+    "planner": [
+      "```json\n{\"edit\":{\"kind\":\"edit_role_prompt\",\"role\":\"coder\",\"newPrompt\":\"be terse and thorough\",\"rationale\":\"coder-capitalize edits the test instead of fixing capitalize.js; a prompt that asks for thoroughness fixes the code\"},\"expectedImprovement\":\"coder-capitalize passes on the train split\",\"targetTasks\":[\"coder-capitalize\"]}\n```"
+    ],
+    "critic": [
+      "```json\n{\"verdict\":\"ship\",\"notes\":\"one role prompt on one train task; no tool widening and no shared component\"}\n```"
+    ]
   }
 }

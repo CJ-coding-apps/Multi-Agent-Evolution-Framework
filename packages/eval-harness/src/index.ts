@@ -9,11 +9,16 @@ export type {
 export { GoldenRunner, seesawDecision } from './GoldenRunner.js';
 export { ScoreRecorder } from './ScoreRecorder.js';
 export { computeCorpusSha } from './corpusSha.js';
+export type { CorpusSplits, LoadedSplits, SplitName } from './splits.js';
+export { SPLITS_FILE, SplitsError, computeSplitsSha, loadSplits } from './splits.js';
 export type { JudgeVerdict, JudgeDisclosure, ModelRef } from './judge.js';
 export {
   JUDGE_SYSTEM_PROMPT, judgePrompt, formatJudgeVerdict, parseJudgeVerdict, describeJudge, makeLlmJudge,
 } from './judge.js';
-export type { ScriptedStep, ScriptedTask, ScriptedExchange } from './ScriptedAdapter.js';
+export type {
+  ScriptedStep, ScriptedTask, ScriptedExchange, ScriptedEvolution, ScriptedBundle,
+} from './ScriptedAdapter.js';
 export {
-  ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SCRIPTED_JUDGE_RATIONALE, SCRIPTED_FILE, loadScriptedTasks,
+  ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SCRIPTED_JUDGE_RATIONALE, SCRIPTED_FILE,
+  loadScriptedBundle, loadScriptedTasks,
 } from './ScriptedAdapter.js';

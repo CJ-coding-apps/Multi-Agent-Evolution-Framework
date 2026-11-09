@@ -3,7 +3,7 @@ export { assertChangeManifest, applyEdit, ManifestError } from './edits.js';
 export { screenInstructionText } from './screening.js';
 export type { ScreeningResult } from './screening.js';
 export { digestEvidence, isEmptyDigest } from './digester.js';
-export type { Digest, GoldenHistoryRow, FailureRow } from './digester.js';
+export type { Digest, GoldenHistoryRow, FailureRow, EvolutionRoundRow } from './digester.js';
 export {
   PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, parsePlannerResponse,
 } from './planner.js';
@@ -11,4 +11,8 @@ export type { MetaGenerate, RoleCatalogEntry, CurrentHarnessStatus } from './pla
 export { gateEvaluate, gateStatic, gateWidening } from './gate.js';
 export type { GateDecision, GateContext, GateStaticContext, GateVeto } from './gate.js';
 export { evolve } from './loop.js';
-export type { EvolveOptions, EvolveReport, EvolveRoundRecord, SensitiveEvaluation } from './loop.js';
+export type {
+  EvolveOptions, EvolveReport, EvolveRoundRecord, HeldOutReport, SensitiveEvaluation, UnrecordedGolden,
+} from './loop.js';
+export { EvolveBudget } from './budget.js';
+export type { BudgetMeter, BudgetSnapshot, EvolveBudgetLimits } from './budget.js';
