@@ -50,13 +50,78 @@ export function parsePlannerResponse(text: string): ChangeManifest | undefined {
   return parsed;
 }
 
-export function buildPlannerUserPrompt(evidence: Digest, catalog: RoleCatalogEntry[], processorNames: string[]): string {
-  const lastGolden = evidence.goldenHistory[0];
+/**
+ * The harness the loop is evolving right now, and what it last measured (WP-3.7a MED-3).
+ *
+ * The prompt's `Current harness:` line used to be built from the newest golden row, which after a
+ * rejected candidate was that candidate: the planner was told the harness in force was
+ * `default-r1` at 3/10 while the real base was `default` at 4/10, and a proposal aimed at the
+ * wrong baseline. The loop knows which harness is in force — its own `base` — so it says so.
+ */
+export interface CurrentHarnessStatus {
+  id: string;
+  sha: string;
+  solved: readonly string[];
+  total: number;
+  failed: readonly string[];
+}
+
+function scoreLine(row: { solved: readonly string[]; total: number; failed: readonly string[] }): string {
+  return `solved ${row.solved.length}/${row.total}`
+    + (row.failed.length > 0 ? `; failed ${row.failed.join(', ')}` : '');
+}
+
+/**
+ * What an earlier golden row is, as far as this loop knows (WP-3.7a R2-L1). The loop labels the
+ * rows it caused; anything else — a `goldens run` of another harness, a row from an earlier
+ * session — is an earlier result and is not claimed to have been rejected or shipped by anyone.
+ */
+export type HistoryLabel = 'rejected' | 'shipped' | 'needs approval' | 'previous base' | 'earlier result';
+
+const LABEL_TEXT: Record<HistoryLabel, string> = {
+  rejected: 'rejected candidate',
+  shipped: 'shipped candidate',
+  'needs approval': 'needs-approval candidate',
+  'previous base': 'previous base',
+  'earlier result': 'earlier result',
+};
+
+/**
+ * The planner's user prompt: the digest, then one line naming the harness actually in force, then
+ * the runs it is not using — each under the label the loop knows for it, with its own score.
+ *
+ * `current` is what the loop is evolving; when a caller does not know it (an embedder, a test), the
+ * newest row is named as before. `labels` is keyed by harness sha and says what each non-current
+ * row is; a row with no label is an `earlier result` — never "rejected" by default.
+ */
+export function buildPlannerUserPrompt(
+  evidence: Digest,
+  catalog: RoleCatalogEntry[],
+  processorNames: string[],
+  current?: CurrentHarnessStatus,
+  labels?: ReadonlyMap<string, HistoryLabel>,
+): string {
+  const rows = evidence.goldenHistory;
+  const currentLine = current === undefined
+    ? (rows[0]
+      ? `${rows[0].harnessId} (${rows[0].harnessSha}): ${scoreLine(rows[0])}`
+      : '(no golden history)')
+    : `${current.id} (${current.sha}): ${current.total > 0 ? scoreLine(current) : 'not scored yet'}`;
+  const earlier = rows.filter((row) => current === undefined ? row !== rows[0] : row.harnessSha !== current.sha);
+  const earlierLines = earlier.length > 0
+    ? earlier.map((row) => {
+      const label = LABEL_TEXT[labels?.get(row.harnessSha) ?? 'earlier result'];
+      return `- ${label} ${row.harnessId} (${row.harnessSha}): ${scoreLine(row)}`;
+    })
+    : ['- (none)'];
   return [
     '## Evidence digest',
     JSON.stringify(evidence, null, 2),
     '',
-    `Current harness: ${lastGolden ? `${lastGolden.harnessId} solved ${lastGolden.solved.length}/${lastGolden.total}` : '(no golden history)'}`,
+    `Current harness: ${currentLine}`,
+    '',
+    '## Earlier results',
+    ...earlierLines,
     '',
     '## Role catalog',
     JSON.stringify(catalog, null, 2),

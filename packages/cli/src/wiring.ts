@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { canonicalJson, makeAgentId, makeNodeId, makeTaskId } from '@maf/types';
-import type { DagNode, CliAdapter, GraphQueryRunner, RunId } from '@maf/types';
+import type { DagNode, CliAdapter, RunId } from '@maf/types';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine, createAdapterSummarizer, createAdapterSubAgent } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
@@ -56,17 +56,25 @@ export interface PolicyChoice {
 export async function loadCommandPolicy(
   cwd: string,
   choice: PolicyChoice,
-  graph: GraphQueryRunner,
+  graph: MemoryGraph,
 ): Promise<PolicyEngine> {
   const none = choice.typed && choice.value === 'none';
   return PolicyLoader.loadEngine(
     path.resolve(cwd, choice.value),
     graph,
-    none
-      ? { none: true }
-      : choice.typed
-        ? { explicit: true }
-        : { builtInText: await readAsset('policy.yaml') },
+    {
+      // WP-3.7 amendment: a decision that is evidence is written where the digester reads. `run`
+      // and `evolve` build this engine over the project's graph, so their refusals reach it.
+      // `goldens run` builds the same engine over its isolated evaluation graph (D-14): its policy
+      // events are written there and discarded with that directory, and only the score is copied
+      // into the project's memory. Do not say that command's calls are in the digest — they are not.
+      recorder: graph,
+      ...(none
+        ? { none: true }
+        : choice.typed
+          ? { explicit: true }
+          : { builtInText: await readAsset('policy.yaml') }),
+    },
   );
 }
 
@@ -238,7 +246,12 @@ export interface RunStack {
    * built here, and a caller that reaches into two fields to pair them can pair them wrongly.
    */
   recordPolicyInForce(): void;
-  dispatchTask(harness: HarnessConfig, role: string, prompt: string, workDir: string, timeoutMs: number, temperature?: number): Promise<string>;
+  /**
+   * `goldenTaskId` is the golden-corpus task id when a golden runner is dispatching (WP-3.7a L5).
+   * It is not the node's task id — that is unique per attempt — and it is what a refusal's
+   * `PolicyEvent` carries so the evidence joins the score of the task it belongs to.
+   */
+  dispatchTask(harness: HarnessConfig, role: string, prompt: string, workDir: string, timeoutMs: number, temperature?: number, goldenTaskId?: string): Promise<string>;
   /** Resolves once the graph's files are released; a caller may remove `mafDir` after awaiting it. */
   close(): Promise<void>;
 }
@@ -309,7 +322,7 @@ export async function buildRunStack(cfg: {
       securityPrompt: SECURITY_REVIEW_FALLBACK_PROMPT,
       rolesFor: (harness) => RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), cfg.mafDir, baseTools),
       recordPolicyInForce: () => attestor.recordPolicyInForce(policy.inForce()),
-      async dispatchTask(harness, role, prompt, workDir, timeoutMs, temperature) {
+      async dispatchTask(harness, role, prompt, workDir, timeoutMs, temperature, goldenTaskId) {
         const taskId = makeTaskId(crypto.randomUUID());
         const roles = stack.rolesFor(harness);
         // `role` arrives as a corpus string, and this is the only place it can be checked against
@@ -345,6 +358,7 @@ export async function buildRunStack(cfg: {
           ...(cfg.allowUngoverned === true ? { allowUngoverned: true } : {}),
           ...(cfg.model ? { modelOverride: cfg.model } : {}),
           ...(temperature !== undefined ? { temperature } : {}),
+          ...(goldenTaskId !== undefined ? { goldenTaskId } : {}),
         });
         const node: DagNode = {
           id: makeNodeId(`task-${taskId}`), label: prompt, agentRole: resolvedRole.value,

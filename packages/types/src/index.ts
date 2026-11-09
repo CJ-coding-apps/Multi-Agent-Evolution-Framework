@@ -144,6 +144,18 @@ export interface ToolContext {
    * the paths it was approved for; the tests do.
    */
   approvedPaths?: readonly string[];
+
+  // WP-3.7a — additive only: an optional member, so every caller written before this still
+  // type-checks.
+  /**
+   * The golden-corpus task this call belongs to, when a golden runner dispatched it (WP-3.7a L5).
+   *
+   * `taskId` is unique per dispatch, so the same corpus task evaluated under two harnesses has two
+   * of them and neither says which task it was. This is the corpus id, so a refusal recorded as
+   * evidence can be read against the score it belongs to. Absent for anything that is not a golden
+   * dispatch, which is every ordinary run.
+   */
+  goldenTaskId?: string;
 }
 
 export interface ToolPlugin<I extends ToolInput = ToolInput> {
@@ -1889,6 +1901,11 @@ export {
   redactCredentials, redactSecrets, redactText,
   redactCredentialsRecord, redactRecord,
 } from './redaction.js';
+
+// WP-3.7a — additive only: a new re-export; no existing export moved or changed. Evidence-grade
+// masking for text written to the memory graph and read into a model prompt: absolute paths are
+// replaced, and a path inside the caller's repo keeps its repo-relative tail.
+export { redactEvidenceText } from './redaction.js';
 
 // WP-3.9 — additive only: a new re-export; no existing export moved or changed. The child-process
 // environment helpers. Two policies, one home: backend CLIs get the user's environment minus maf's

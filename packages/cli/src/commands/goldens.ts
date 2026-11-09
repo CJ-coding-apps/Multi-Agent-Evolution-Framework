@@ -164,7 +164,9 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
         attempts: o.attempts, temperature: 0, ...agent,
         dispatch: async (task, workDir, { timeoutMs, temperature }) => {
           await stack.graph.run({ cypher: 'MATCH (n:MemoryNode) DETACH DELETE n', params: {} });
-          return stack.dispatchTask(o.harness, task.role, task.prompt, workDir, timeoutMs, temperature);
+          // L5: the corpus task id travels with the dispatch, so a refusal's `PolicyEvent` names
+          // the task whose score it belongs to.
+          return stack.dispatchTask(o.harness, task.role, task.prompt, workDir, timeoutMs, temperature, task.id);
         },
         llmJudge: { verdict: makeLlmJudge(o.judge, o.cwd), disclosure: describeJudge(agent, judge) },
         securityScore: async (diff) => {

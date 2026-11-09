@@ -1,6 +1,6 @@
 import type { MemoryGraph } from '@maf/memory-graph';
 import { intLiteral } from '@maf/memory-graph';
-import { refusePrototypeKey } from '@maf/types';
+import { redactEvidenceText, refusePrototypeKey } from '@maf/types';
 
 /**
  * Digester (plan §6.2 step 1) — deterministic evidence assembly. No LLM in v1:
@@ -12,6 +12,8 @@ export interface GoldenHistoryRow {
   harnessId: string;
   harnessSha: string;
   solved: string[];
+  /** Tasks the run failed, from the recorder's per-task rows; empty for an older row without them. */
+  failed: string[];
   total: number;
   ranAt: string;
 }
@@ -50,10 +52,19 @@ export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Pro
   });
   const goldenHistory: GoldenHistoryRow[] = goldenRows.map((raw) => {
     const props = parseProps(raw);
+    // `ScoreRecorder` writes every task's verdict beside the score. The ids of the ones that did
+    // not pass are what a proposal can target, so the digest carries them rather than leaving the
+    // planner to subtract two counts.
+    const perTask = Array.isArray(props['perTask']) ? (props['perTask'] as unknown[]) : [];
+    const failed = perTask
+      .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
+      .filter((t) => t['passed'] === false)
+      .map((t) => String(t['taskId'] ?? ''));
     return {
       harnessId: String(props['harnessId'] ?? ''),
       harnessSha: String(props['harness_sha'] ?? ''),
       solved: Array.isArray(props['solved']) ? (props['solved'] as string[]) : [],
+      failed,
       total: Number(props['total'] ?? 0),
       ranAt: String(props['ranAt'] ?? ''),
     };
@@ -67,13 +78,40 @@ export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Pro
     label: String(raw['n.label'] ?? ''), properties: parseProps(raw), runId: String(raw['n.run_id'] ?? ''),
   }));
 
+  // WP-3.7a MED-2, R2-L2: the graph may still hold `Allow` events written before the engine stopped
+  // recording them. The filter is in the query — on the label, which is a column — so no number of
+  // newer Allows can starve an older refusal out of the window. The events are newest-first and the
+  // query itself caps the result at `failureLimit`. A client-side filter stays as a backstop for a
+  // row whose label was written by something other than this engine's `recordEvent`.
   const policyRows = await graph.run({
-    cypher: `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
+    cypher: `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' AND NOT n.label STARTS WITH 'policy Allow' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
     params: {},
   });
-  const policyEvents: FailureRow[] = policyRows.map((raw) => ({
-    label: String(raw['n.label'] ?? ''), properties: parseProps(raw), runId: String(raw['n.run_id'] ?? ''),
-  }));
+  // WP-3.7a MED-1, second layer: a row written by an older version may hold an unmasked reason,
+  // and this text reaches the planner's prompt. Mask on the way out as well as on the way in.
+  const masked = (text: string): string => redactEvidenceText(text);
+  const maskProps = (props: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(Object.entries(props).map(
+      ([key, value]) => [key, typeof value === 'string' ? masked(value) : value],
+    ));
+  const policyEvents: FailureRow[] = policyRows
+    .map((raw) => ({
+      label: masked(String(raw['n.label'] ?? '')),
+      properties: maskProps(parseProps(raw)),
+      runId: String(raw['n.run_id'] ?? ''),
+    }))
+    .filter((e) => e.properties['verdict'] !== 'Allow' && !e.label.startsWith('policy Allow '))
+    .slice(0, failureLimit);
 
   return { goldenHistory, currentFailures, policyEvents, generatedAt: new Date().toISOString() };
+}
+
+/**
+ * Whether the digest carries nothing a proposal could be based on. `no_op` is the right answer to
+ * this state — the loop says so in the round note instead of leaving it silent.
+ */
+export function isEmptyDigest(digest: Digest): boolean {
+  return digest.goldenHistory.length === 0
+    && digest.currentFailures.length === 0
+    && digest.policyEvents.length === 0;
 }

@@ -2,14 +2,14 @@ import type { PermissionLevel, RunId } from '@maf/types';
 import type { HarnessConfig } from '@maf/harness-config';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
-import { digestEvidence } from './digester.js';
+import { digestEvidence, isEmptyDigest } from './digester.js';
 import type { Digest } from './digester.js';
 import { applyEdit, ManifestError } from './edits.js';
 import type { ChangeManifest } from './edits.js';
 import {
   PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, parsePlannerResponse,
 } from './planner.js';
-import type { MetaGenerate, RoleCatalogEntry } from './planner.js';
+import type { CurrentHarnessStatus, HistoryLabel, MetaGenerate, RoleCatalogEntry } from './planner.js';
 import { gateEvaluate, gateStatic } from './gate.js';
 import type { GateDecision, GateVeto } from './gate.js';
 
@@ -17,7 +17,7 @@ export interface EvolveRoundRecord {
   round: number;
   manifest?: ChangeManifest;
   gate?: GateDecision;
-  outcome: 'ship' | 'reject' | 'no-op' | 'needs-approval' | 'planner-error' | 'smoke-failed' | 'critic-reject';
+  outcome: 'ship' | 'reject' | 'no-op' | 'needs-approval' | 'planner-error' | 'smoke-failed' | 'critic-reject' | 'record-failed';
   note: string;
   /**
    * The evaluation a flag-on sensitive edit paid for and did not act on (WP-3.9 K1). The ruling
@@ -33,6 +33,11 @@ export interface SensitiveEvaluation {
   candidateSha: string;
   currentScores: GoldenSuiteResult;
   candidateScores: GoldenSuiteResult;
+  /**
+   * WP-3.7a R2-L4: set when the loop paid for this evaluation but the recorder could not write it.
+   * `candidateScores` is what the run measured; it is not in the graph, so the report says so.
+   */
+  unrecorded?: true;
 }
 
 export interface EvolveOptions {
@@ -46,6 +51,17 @@ export interface EvolveOptions {
   graph: MemoryGraph;
   /** Full golden suite under an arbitrary harness. Injected. */
   runGoldens: (harness: HarnessConfig) => Promise<GoldenSuiteResult>;
+  /**
+   * Writes one golden run's result as evidence — the same recorder `maf goldens run` uses.
+   *
+   * WP-3.7 amendment item 1: without this the loop digests a graph it never writes to, so the
+   * planner sees `(no golden history)` in every round and `no_op` is the correct answer. It is
+   * called for the baseline and for every candidate, before the next round's digest is taken.
+   * A failure to record propagates: continuing would silently run blind, which is the defect.
+   */
+  recordGoldens?: (result: GoldenSuiteResult) => Promise<void>;
+  /** Called for every round as it is recorded, so a caller can surface what the loop did. */
+  onRound?: (round: EvolveRoundRecord) => void;
   /** One-task smoke evaluation (fail fast on crash). Injected. */
   runSmoke: (harness: HarnessConfig, taskId: string) => Promise<void>;
   /** What to do when a candidate ships (persist + setCurrent etc). */
@@ -85,7 +101,14 @@ export interface EvolveReport {
   rounds: EvolveRoundRecord[];
   finalHarness: HarnessConfig;
   ships: number;
-  stopReason: 'budget' | 'patience';
+  /**
+   * `record-failed` is a stop the caller must report (WP-3.7a L2): a golden run was paid for and
+   * its result could not be written as evidence. The report still carries every round up to that
+   * point; `error` says what could not be recorded and how many rounds completed.
+   */
+  stopReason: 'budget' | 'patience' | 'record-failed';
+  /** Present exactly when `stopReason` is `record-failed`. */
+  error?: string;
 }
 
 const CRITIC_SYSTEM_PROMPT = `You are the MAF harness evolution critic. Compare the change manifest against the
@@ -133,6 +156,50 @@ function baselineFromHistory(history: Digest['goldenHistory'], harness: HarnessC
   };
 }
 
+/** What the planner is told about the harness in force (MED-3): the base, never a candidate. */
+function currentStatus(
+  digest: Digest, base: HarnessConfig, baseline: GoldenSuiteResult | undefined,
+): CurrentHarnessStatus {
+  const row = digest.goldenHistory.find((h) => h.harnessSha === base.sha);
+  if (row !== undefined) {
+    return { id: base.id, sha: base.sha, solved: row.solved, total: row.total, failed: row.failed };
+  }
+  if (baseline !== undefined) {
+    return {
+      id: base.id, sha: base.sha,
+      solved: baseline.solvedTaskIds,
+      total: baseline.tasks.length,
+      // A baseline rebuilt from history carries no per-task rows; only a run this loop paid for has
+      // them, and then this is the same list the digest row would have carried.
+      failed: baseline.tasks.filter((t) => !t.passed).map((t) => t.taskId),
+    };
+  }
+  return { id: base.id, sha: base.sha, solved: [], total: 0, failed: [] };
+}
+
+/**
+ * A golden run this loop paid for whose result could not be written as evidence. It stops the run
+ * (continuing would evolve from a graph the loop is not filling) and carries the sentence the CLI
+ * prints and the report keeps.
+ */
+class RecordFailedError extends Error {
+  /** The run that was paid for and could not be written; the partial report keeps it. */
+  constructor(message: string, readonly result: GoldenSuiteResult) {
+    super(message);
+  }
+}
+
+/**
+ * The partial report a `RecordFailedError` produces, or undefined for any other error (which keeps
+ * propagating). Every round already paid for is in `rounds`; the harness in force is `base`.
+ */
+function recordFailureReport(
+  err: unknown, rounds: EvolveRoundRecord[], base: HarnessConfig, ships: number,
+): EvolveReport | undefined {
+  if (!(err instanceof RecordFailedError)) return undefined;
+  return { rounds, finalHarness: base, ships, stopReason: 'record-failed', error: err.message };
+}
+
 const CRASH_OK = (e: unknown): e is Error => e instanceof Error;
 
 /** The safety-adjacent role an edit targets, or undefined when it targets none (or no role). */
@@ -160,11 +227,37 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   let stopReason: EvolveReport['stopReason'] = 'budget';
 
   let baseline: GoldenSuiteResult | undefined;
+  // What each golden row this loop caused actually is (R2-L1). Rows with no entry are another
+  // session's or another harness's; the prompt calls them `earlier result`, never "rejected".
+  const historyLabels = new Map<string, HistoryLabel>();
+
+  // Every golden run the loop pays for is evidence for the rounds after it (WP-3.7 amendment 1).
+  // Recording before returning means the next digest reads it; a throw is not swallowed, because
+  // the alternative is a loop that keeps proposing from an empty graph and calling that no_op.
+  const evaluate = async (harness: HarnessConfig): Promise<GoldenSuiteResult> => {
+    const result = await opts.runGoldens(harness);
+    if (opts.recordGoldens) {
+      try {
+        await opts.recordGoldens(result);
+      } catch (err) {
+        // L2: the run was paid for. Say which result was lost, how much of the evolution is still
+        // in the report, and why — rather than a bare graph error from inside a recorder.
+        throw new RecordFailedError(
+          `could not record the golden result for ${result.harnessId} (${result.harnessSha})`
+          + `; rounds completed: ${rounds.length}`
+          + `; ${err instanceof Error ? err.message : String(err)}`,
+          result,
+        );
+      }
+    }
+    return result;
+  };
 
   for (let round = 0; round < maxRounds; round++) {
     const rec = (r: Omit<EvolveRoundRecord, 'round'>): EvolveRoundRecord => ({ round, ...r });
     const record = async (r: EvolveRoundRecord): Promise<void> => {
       rounds.push(r);
+      opts.onRound?.(r);
       // Recording is best-effort: a graph hiccup must never abort evolution (L4).
       // The failure is surfaced in the round note rather than thrown.
       try {
@@ -201,16 +294,30 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     };
 
     // ── 1. Digester ──
-    const digest = await digestEvidence(opts.graph);
+    let digest = await digestEvidence(opts.graph);
     if (round === 0) baseline = baselineFromHistory(digest.goldenHistory, base);
-    if (!baseline) baseline = await opts.runGoldens(base);
+    if (!baseline) {
+      try {
+        baseline = await evaluate(base);
+      } catch (err) {
+        const stopped = recordFailureReport(err, rounds, base, ships);
+        if (stopped !== undefined) return stopped;
+        throw err;
+      }
+      // L1: the baseline was just paid for, so it is evidence for THIS round's planner. Without
+      // this, round 1 planned from the empty digest it read before running and burned a tick.
+      digest = await digestEvidence(opts.graph);
+    }
+    const current = currentStatus(digest, base, baseline);
 
     // ── 2. Planner ──
     let manifest: ChangeManifest | undefined;
     try {
       const response = await opts.metaGenerate(
         PLANNER_SYSTEM_PROMPT,
-        buildPlannerUserPrompt(digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])]),
+        buildPlannerUserPrompt(
+          digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])], current, historyLabels,
+        ),
       );
       manifest = parsePlannerResponse(response);
     } catch (err) {
@@ -224,7 +331,12 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     }
     if (!manifest) {
       idle++;
-      await record(rec({ outcome: 'no-op', note: 'planner returned no_op' }));
+      // Amendment item 2: an empty digest is a state the operator should see named, not the
+      // silent `no_op` that made six live rounds look like a planner preference.
+      await record(rec({
+        outcome: 'no-op',
+        note: isEmptyDigest(digest) ? 'no evidence to propose from' : 'planner returned no_op',
+      }));
       if (idle >= patience) { stopReason = 'patience'; break; }
       continue;
     }
@@ -272,7 +384,9 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     if (critic.verdict === 'revise') {
       const revised = await opts.metaGenerate(
         PLANNER_SYSTEM_PROMPT,
-        buildPlannerUserPrompt(digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])])
+        buildPlannerUserPrompt(
+          digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])], current, historyLabels,
+        )
           + `\n\nCritic revision request: ${critic.notes}\nPrevious manifest: ${JSON.stringify(manifest)}`,
       );
       try {
@@ -331,7 +445,29 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     }
 
     // ── 6. Gate (mandatory, deterministic) ──
-    const candidateScores = await opts.runGoldens(finalCandidate);
+    let candidateScores: GoldenSuiteResult;
+    try {
+      candidateScores = await evaluate(finalCandidate);
+    } catch (err) {
+      // R2-L4: the in-flight round was paid for, so the partial report says what it held — the
+      // manifest and the scores the recorder could not write — instead of dropping it.
+      if (err instanceof RecordFailedError) {
+        await record(rec({
+          manifest: finalManifest,
+          outcome: 'record-failed',
+          note: `the candidate result for ${err.result.harnessId} (${err.result.harnessSha}) could not be recorded`,
+          evaluation: {
+            candidateSha: finalCandidate.sha,
+            currentScores: baseline,
+            candidateScores: err.result,
+            unrecorded: true,
+          },
+        }));
+      }
+      const stopped = recordFailureReport(err, rounds, base, ships);
+      if (stopped !== undefined) return stopped;
+      throw err;
+    }
     const gate = gateEvaluate({
       manifest: finalManifest, candidate: finalCandidate, current: base,
       currentScores: baseline, candidateScores,
@@ -373,11 +509,19 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       ships++;
       await opts.onShip(finalCandidate, gate.improvements);
       await record(rec({ manifest: finalManifest, gate, outcome: 'ship', note: `improves ${gate.improvements.join(', ')}` }));
+      // R2-L1: the harness that was in force is now a previous base, not a rejected candidate; the
+      // one that replaced it was shipped by this loop. A harness this loop shipped on an earlier
+      // round keeps `shipped` — it is not merely the base it started from.
+      if (!historyLabels.has(base.sha)) historyLabels.set(base.sha, 'previous base');
+      historyLabels.set(finalCandidate.sha, 'shipped');
       base = finalCandidate;
       baseline = candidateScores;
       continue;
     }
     idle++;
+    historyLabels.set(
+      finalCandidate.sha, gate.verdict === 'needs-approval' ? 'needs approval' : 'rejected',
+    );
     await record(rec({
       manifest: finalManifest, gate,
       outcome: gate.verdict === 'needs-approval' ? 'needs-approval' : 'reject',

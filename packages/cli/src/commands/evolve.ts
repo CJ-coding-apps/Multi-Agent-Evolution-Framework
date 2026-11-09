@@ -3,13 +3,14 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { makeRunId, refusePrototypeKey } from '@maf/types';
-import type { PermissionLevel } from '@maf/types';
+import type { AdapterName, CliAdapter, PermissionLevel } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
-import { GoldenRunner, describeJudge, makeLlmJudge } from '@maf/eval-harness';
+import { GoldenRunner, ScoreRecorder, describeJudge, makeLlmJudge } from '@maf/eval-harness';
 import type { GoldenSuiteResult, GoldenTask } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
 import { evolve } from '@maf/evolver';
+import type { EvolveOptions, EvolveReport } from '@maf/evolver';
 import { createDefaultRegistry } from '@maf/tools';
 import { createDefaultProcessorRegistry } from '@maf/processors';
 import { SecurityReviewGate } from '@maf/git-ops';
@@ -33,7 +34,19 @@ interface EvolveCliOpts {
   rounds: string; patience: string; policy: string; approveSensitive: boolean; allowUngoverned?: boolean;
 }
 
-export function registerEvolveCommand(program: Command): void {
+/** What a test may replace. The real registry and streams are the defaults. */
+export interface EvolveDeps {
+  /** The registry `--adapter` resolves against; `createAdapterRegistry()` when unset. */
+  adapters?: Map<AdapterName, CliAdapter>;
+  /**
+   * Where a paid-for golden result becomes evidence. Defaults to the `ScoreRecorder` over the run's
+   * graph; a test injects one that fails on a chosen result to drive the `record-failed` path
+   * (R2-L4) without making the graph unwritable.
+   */
+  recordGoldens?: (result: GoldenSuiteResult) => Promise<void>;
+}
+
+export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): void {
   program
     .command('evolve')
     .description('AEGIS-lite harness evolution over the golden corpus (experimental; drives a live adapter, claude by default; never in the serving path)')
@@ -69,7 +82,7 @@ export function registerEvolveCommand(program: Command): void {
       const { harness: base } = await resolveGoldensHarness(mafDir, opts.harness);
       console.log(`[maf] evolve ${runId} | base: ${base.id} (${shortSha(base.sha)}) | rounds=${opts.rounds} patience=${opts.patience}`);
 
-      const adapter = await resolveAdapter(opts.adapter, createAdapterRegistry());
+      const adapter = await resolveAdapter(opts.adapter, deps.adapters ?? createAdapterRegistry());
       const stack = await buildRunStack({
         cwd, mafDir, adapter, runId,
         // D-49, F7: the same resolution `run` and `goldens` take.
@@ -116,7 +129,9 @@ export function registerEvolveCommand(program: Command): void {
           corpusRoot, harnessSha: harness.sha, harnessId: harness.id,
           attempts, temperature: 0,
           dispatch: (task, workDir, { timeoutMs, temperature }) =>
-            stack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature),
+            // L5: the corpus task id travels with the dispatch, so a refusal's `PolicyEvent` names
+            // the task whose score it belongs to.
+            stack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature, task.id),
           ...agent,
           llmJudge: {
             verdict: makeLlmJudge({ adapter, ...(opts.model ? { model: opts.model } : {}) }, cwd),
@@ -125,14 +140,20 @@ export function registerEvolveCommand(program: Command): void {
           securityScore,
         });
 
-      const runGoldensFor = (harness: HarnessConfig) => runnerFor(harness, 2).run();
+      // WP-3.7 amendment item 1: the loop's own runs are evidence. `goldens run` already writes
+      // each score through this recorder; `evolve` paid for the same runs and threw the evidence
+      // away, so every round's digest was empty. One recorder for the run, on the graph the loop
+      // digests.
+      const scoreRecorder = new ScoreRecorder(stack.graph, runId);
+
+      const runGoldensFor = (harness: HarnessConfig): Promise<GoldenSuiteResult> => runnerFor(harness, 2).run();
 
       const runSmoke = (harness: HarnessConfig, taskId: string) => smokeCheck(runnerFor(harness, 1), taskId);
 
       // Static registry membership = the allowlist (§10.2; registry-driven, not hardcoded here)
       const processorNames = new Set(createDefaultProcessorRegistry().names());
 
-      const report = await evolve({
+      const evolveOptions: EvolveOptions = {
         baseHarness: base,
         runId,
         maxRounds: Number(opts.rounds) || 10,
@@ -140,6 +161,10 @@ export function registerEvolveCommand(program: Command): void {
         metaGenerate,
         graph: stack.graph,
         runGoldens: runGoldensFor,
+        recordGoldens: deps.recordGoldens ?? ((result) => scoreRecorder.record(result)),
+        // Amendment item 2: the rounds were silent, and six live rounds of `no_op` looked like a
+        // planner preference. Each round now says what it did and why, including "no evidence".
+        onRound: (r) => console.log(`[maf] round ${r.round}: ${r.outcome} — ${r.note}`),
         runSmoke,
         onShip: async (candidate, improvements) => {
           await store.save(candidate);
@@ -167,12 +192,26 @@ export function registerEvolveCommand(program: Command): void {
           .filter((t) => t.verifiers.every((v) => v.kind === 'llm-judge'))
           .map((t) => t.id)),
         ...(opts.approveSensitive ? { approveSensitive: true } : {}),
-      });
+      };
+
+      // L2: the stack is released however the loop ends — a throw from the loop used to leave the
+      // graph's files open. A record failure does not throw out of `evolve`: it comes back as a
+      // partial report, so the rounds already paid for are still written below.
+      let report: EvolveReport;
+      try {
+        report = await evolve(evolveOptions);
+      } finally {
+        await stack.close();
+      }
 
       const reportPath = path.join(mafDir, 'evolve', `${runId}.json`);
       await mkdir(path.dirname(reportPath), { recursive: true });
       await writeFile(reportPath, JSON.stringify(report, null, 2), 'utf8');
       console.log(`[maf] evolve done: ships=${report.ships} stop=${report.stopReason} → ${reportPath}`);
-      await stack.close();
+      if (report.error !== undefined) {
+        // The run did not evolve to a stopping condition; the report above is what it paid for.
+        console.error(`[maf] evolve stopped: ${report.error}`);
+        process.exitCode = 1;
+      }
     });
 }
