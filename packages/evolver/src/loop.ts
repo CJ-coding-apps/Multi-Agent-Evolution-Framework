@@ -17,7 +17,7 @@ export interface EvolveRoundRecord {
   round: number;
   manifest?: ChangeManifest;
   gate?: GateDecision;
-  outcome: 'ship' | 'reject' | 'no-op' | 'needs-approval' | 'planner-error' | 'smoke-failed' | 'critic-reject';
+  outcome: 'ship' | 'reject' | 'no-op' | 'needs-approval' | 'planner-error' | 'smoke-failed' | 'critic-reject' | 'record-failed';
   note: string;
   /**
    * The evaluation a flag-on sensitive edit paid for and did not act on (WP-3.9 K1). The ruling
@@ -33,6 +33,11 @@ export interface SensitiveEvaluation {
   candidateSha: string;
   currentScores: GoldenSuiteResult;
   candidateScores: GoldenSuiteResult;
+  /**
+   * WP-3.7a R2-L4: set when the loop paid for this evaluation but the recorder could not write it.
+   * `candidateScores` is what the run measured; it is not in the graph, so the report says so.
+   */
+  unrecorded?: true;
 }
 
 export interface EvolveOptions {
@@ -177,7 +182,12 @@ function currentStatus(
  * (continuing would evolve from a graph the loop is not filling) and carries the sentence the CLI
  * prints and the report keeps.
  */
-class RecordFailedError extends Error {}
+class RecordFailedError extends Error {
+  /** The run that was paid for and could not be written; the partial report keeps it. */
+  constructor(message: string, readonly result: GoldenSuiteResult) {
+    super(message);
+  }
+}
 
 /**
  * The partial report a `RecordFailedError` produces, or undefined for any other error (which keeps
@@ -236,6 +246,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
           `could not record the golden result for ${result.harnessId} (${result.harnessSha})`
           + `; rounds completed: ${rounds.length}`
           + `; ${err instanceof Error ? err.message : String(err)}`,
+          result,
         );
       }
     }
@@ -438,6 +449,21 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     try {
       candidateScores = await evaluate(finalCandidate);
     } catch (err) {
+      // R2-L4: the in-flight round was paid for, so the partial report says what it held — the
+      // manifest and the scores the recorder could not write — instead of dropping it.
+      if (err instanceof RecordFailedError) {
+        await record(rec({
+          manifest: finalManifest,
+          outcome: 'record-failed',
+          note: `the candidate result for ${err.result.harnessId} (${err.result.harnessSha}) could not be recorded`,
+          evaluation: {
+            candidateSha: finalCandidate.sha,
+            currentScores: baseline,
+            candidateScores: err.result,
+            unrecorded: true,
+          },
+        }));
+      }
       const stopped = recordFailureReport(err, rounds, base, ships);
       if (stopped !== undefined) return stopped;
       throw err;

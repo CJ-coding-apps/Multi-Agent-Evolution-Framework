@@ -38,6 +38,12 @@ interface EvolveCliOpts {
 export interface EvolveDeps {
   /** The registry `--adapter` resolves against; `createAdapterRegistry()` when unset. */
   adapters?: Map<AdapterName, CliAdapter>;
+  /**
+   * Where a paid-for golden result becomes evidence. Defaults to the `ScoreRecorder` over the run's
+   * graph; a test injects one that fails on a chosen result to drive the `record-failed` path
+   * (R2-L4) without making the graph unwritable.
+   */
+  recordGoldens?: (result: GoldenSuiteResult) => Promise<void>;
 }
 
 export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): void {
@@ -155,7 +161,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         metaGenerate,
         graph: stack.graph,
         runGoldens: runGoldensFor,
-        recordGoldens: (result) => scoreRecorder.record(result),
+        recordGoldens: deps.recordGoldens ?? ((result) => scoreRecorder.record(result)),
         // Amendment item 2: the rounds were silent, and six live rounds of `no_op` looked like a
         // planner preference. Each round now says what it did and why, including "no evidence".
         onRound: (r) => console.log(`[maf] round ${r.round}: ${r.outcome} — ${r.note}`),

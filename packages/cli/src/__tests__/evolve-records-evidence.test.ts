@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
@@ -179,4 +179,85 @@ test('MED-4: maf evolve records its golden runs, writes policy evidence and prin
   } finally {
     await graph.close();
   }
+});
+
+// R2-L4: when the evidence writer fails, the run must not look like it succeeded. It exits
+// non-zero, and the report left on disk keeps the round that was in flight — including the score
+// that could not be written — instead of dropping it and leaving the operator nothing to act on.
+test('R2-L4: a recorder failure exits 1 and the partial report keeps the in-flight round', needsLcm, async (t) => {
+  const p = await project();
+  t.after(() => rm(path.dirname(p.root), { recursive: true, force: true }));
+
+  const corpusJson = JSON.parse(await readFile(path.join(p.corpus, 'corpus.json'), 'utf8')) as Array<{ prompt: string }>;
+  const goldenTask = corpusJson[0];
+  assert.ok(goldenTask);
+  const script: ScriptedTask = {
+    prompt: goldenTask.prompt,
+    steps: [
+      { tool: 'fs.read', input: { path: 'sum.js' } },
+      // A writer must change the tree (the `no_work` rule).
+      {
+        tool: 'fs.write',
+        input: { path: 'sum.js', content: 'function sum(a,b){ return a + b; }\nmodule.exports = { sum };\n' },
+      },
+    ],
+    final: 'Fixed sum.js.',
+  };
+  const prompts: string[] = [];
+  const adapter = plannerAdapter(new ScriptedAdapter([script]), prompts);
+
+  // The baseline (call 1) records; the candidate's result (call 2) cannot be written.
+  let recorded = 0;
+  const log = captureLog(t);
+  const program = new Command().exitOverride();
+  registerEvolveCommand(program, {
+    adapters: new Map<AdapterName, CliAdapter>([['scripted', adapter]]),
+    recordGoldens: async () => {
+      recorded++;
+      if (recorded === 2) throw new Error('graph refused the evidence write');
+    },
+  });
+
+  const before = process.exitCode;
+  process.exitCode = 0;
+  try {
+    await program.parseAsync([
+      'evolve', '--dir', p.root, '--corpus', p.corpus, '--adapter', 'scripted',
+      '--rounds', '1', '--patience', '1',
+    ], { from: 'user' });
+    assert.equal(process.exitCode, 1, 'a run that could not record its evidence exits non-zero');
+  } finally {
+    process.exitCode = before;
+  }
+
+  assert.ok(log.errors.some((line) => line.includes('[maf] evolve stopped:')),
+    `the operator is told: ${log.errors.join(' | ')}`);
+
+  const reports = await readdir(path.join(p.mafDir, 'evolve'));
+  assert.equal(reports.length, 1, 'the partial report was written');
+  const report = JSON.parse(
+    await readFile(path.join(p.mafDir, 'evolve', reports[0]!), 'utf8'),
+  ) as {
+    stopReason: string;
+    error?: string;
+    finalHarness: { sha: string };
+    rounds: Array<{
+      outcome: string;
+      evaluation?: {
+        candidateSha: string;
+        unrecorded?: boolean;
+        candidateScores?: { harnessSha: string; solvedTaskIds: string[] };
+      };
+    }>;
+  };
+
+  assert.equal(report.stopReason, 'record-failed');
+  assert.match(report.error ?? '', /could not record the golden result/);
+  const round = report.rounds[0];
+  assert.equal(round?.outcome, 'record-failed', 'the in-flight round is in the report');
+  assert.equal(round?.evaluation?.unrecorded, true, 'its candidate result is marked unrecorded');
+  assert.notEqual(round?.evaluation?.candidateSha, report.finalHarness.sha,
+    'the candidate that could not be written is not the base');
+  assert.equal(round?.evaluation?.candidateScores?.harnessSha, round?.evaluation?.candidateSha,
+    'the score the recorder did not get is kept with the round, under the candidate sha');
 });
