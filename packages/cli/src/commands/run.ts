@@ -24,7 +24,7 @@ import { RoleRegistry, RoleDispatcher, effectiveTier, isWriterForLock, isWriterR
 import { HarnessStore, LEGACY_DEFAULT_ID, shortSha } from '@maf/harness-config';
 import { createAdapterRegistry, lookupAdapter, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { createRunLcm, loadCommandPolicy, planRunHarness } from '../wiring.js';
+import { createRunLcm, harnessDriftNotice, loadCommandPolicy, planRunHarness } from '../wiring.js';
 import { createTtyReviewer, reviewerUnavailable } from '../reviewers/tty.js';
 import { ConfigLoader, DEFAULT_MAF_CONFIG, applyDagSettings, resolveConfig } from '../config/ConfigLoader.js';
 import type { ResolvedMafConfig } from '../config/ConfigLoader.js';
@@ -190,6 +190,13 @@ export async function runTask(taskDescription: string, opts: RunOptions, ctx: Ru
       say(`[maf] roles: no ${path.relative(dir, rolesPath)} — using the built-in role set (the same one maf init writes)`);
     }
   }
+  // HIGH-1(d): a pinned CURRENT keeps running while the roles file it replaced moves on. Say so on
+  // every run — one line, naming both harnesses and the command that hands dispatch back.
+  const drift = await harnessDriftNotice({
+    store: harnessStore, harness, source: harnessSource,
+    rolesPath: path.resolve(dir, opts.roles), mafDir, baseTools,
+  });
+  if (drift !== undefined) say(drift);
 
   // ── The plan, when the operator wrote one (WP-3.6, F1): read, validate and synthesize it here —
   // after the role set, and before anything is written: `.maf/` itself, the harness the role set

@@ -20,7 +20,7 @@ import type { GoldenSuiteResult } from '@maf/eval-harness';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { harnessesAssetRoot } from '../assets.js';
 import { ensureMafDir } from '../ensureMafDir.js';
-import { RESOLVER_REFS, buildRunStack, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
+import { RESOLVER_REFS, buildRunStack, harnessDriftNotice, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
 import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import type { PolicyChoice } from '../wiring.js';
 import { committedDefaults, loadHarnessFile, locateStoredHarness } from './harness.js';
@@ -88,9 +88,15 @@ export async function resolveGoldensHarness(mafDir: string, ref?: string): Promi
   }
   // Everything else is resolved as `run` resolves it, so a CURRENT that tracks the roles file
   // evaluates the roles file now, and a harness whose prompts are not in its sha is refused.
-  const { harness } = await resolveRunHarness({
-    store, ref: plain ? undefined : ref, rolesPath: path.join(mafDir, 'roles.yaml'), mafDir, baseTools: createDefaultRegistry(),
+  const baseTools = createDefaultRegistry();
+  const rolesPath = path.join(mafDir, 'roles.yaml');
+  const { harness, source } = await resolveRunHarness({
+    store, ref: plain ? undefined : ref, rolesPath, mafDir, baseTools,
   });
+  // HIGH-1(d): a golden run dispatches the same way `run` does, so it prints the same disagreement
+  // between an operator-pinned CURRENT and the roles file that CURRENT replaced.
+  const drift = await harnessDriftNotice({ store, harness, source, rolesPath, mafDir, baseTools });
+  if (drift !== undefined) console.error(drift);
   return { harness, source: (await store.configSource(harness)).uri };
 }
 

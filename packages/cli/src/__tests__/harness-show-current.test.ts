@@ -4,13 +4,15 @@ import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
+import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { registerHarnessCommand } from '../commands/harness.js';
 
-// ORACLE: S6 (WP-3.15) — `maf harness show current` answers the question it is asked. With no
-// CURRENT, a plain run adopts `legacy-default` minted from the roles file as it is now (or the
-// built-in set when there is no file, D-08), and `show` names that harness instead of failing with
-// "No harness found for ref \"current\"". It writes nothing: asking what would run cannot change it.
+// ORACLE: S6 (WP-3.15, corrected after HIGH-1) — `maf harness show current` answers the question it
+// is asked: which harness a plain run dispatches. There are three states, and each has one answer:
+// no CURRENT → the roles file, labelled `[roles file]`; a CURRENT that names `legacy-default` → the
+// roles file too, since that CURRENT tracks the file (D-39); any other CURRENT → that harness,
+// labelled `[current]`. `show` writes nothing: asking what would run cannot change it.
 
 /** Runs `maf harness <args>`, returning stdout lines, stderr lines and the rejection if any. */
 async function maf(args: string[]): Promise<{ out: string[]; err: string[]; error?: unknown }> {
@@ -54,6 +56,7 @@ test('show current with no CURRENT names the harness a plain run adopts, and wri
     assert.equal(err.length, 1, 'one note says CURRENT is absent, on stderr');
     assert.match(err[0] as string, /no CURRENT/);
     assert.ok((err[0] as string).includes(cfg.sha.slice(0, 8)), 'and names the harness');
+    assert.ok((err[0] as string).includes('[roles file]'), `and says where dispatch comes from: ${err[0]}`);
     assert.equal(await exists(path.join(root, '.maf')), false, 'show writes nothing, not even .maf/');
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -84,6 +87,70 @@ test('with a roles file and no CURRENT, show current names the harness minted fr
     ) as HarnessConfig;
     assert.notEqual(fromFile.sha, builtin.sha);
     assert.equal(await exists(path.join(root, '.maf', 'harnesses')), false, 'no store is created on the way');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('show current with CURRENT naming legacy-default reports the roles file as it is now', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-show-current-tracks-'));
+  try {
+    await mkdir(path.join(root, '.maf'), { recursive: true });
+    const rolesPath = path.join(root, '.maf', 'roles.yaml');
+    const file = (defaultRole: string) => JSON.stringify({
+      version: 1,
+      defaultRole,
+      roles: [{ role: defaultRole, systemPrompt: 'Answer.\n', allowedTools: ['fs.read'] }],
+    });
+    await writeFile(rolesPath, file('analyst'), 'utf8');
+
+    const pinned = await maf(['harness', 'set-current', 'legacy-default', '-d', root]);
+    assert.equal(pinned.error, undefined, pinned.out.join('\n'));
+
+    const first = await maf(['harness', 'show', 'current', '-d', root]);
+    const shown = JSON.parse(first.out.join('\n')) as HarnessConfig;
+    assert.equal(shown.id, 'legacy-default');
+    assert.deepEqual(shown.roleSet.roles.map((r) => r.role), ['analyst']);
+    assert.equal(first.err.length, 1);
+    assert.ok((first.err[0] as string).includes('[roles file]'), first.err[0]);
+
+    // The file moves; CURRENT still names legacy-default, and show follows the file, not the snapshot.
+    await writeFile(rolesPath, file('auditor'), 'utf8');
+    const second = await maf(['harness', 'show', 'current', '-d', root]);
+    const after = JSON.parse(second.out.join('\n')) as HarnessConfig;
+    assert.deepEqual(after.roleSet.roles.map((r) => r.role), ['auditor'], 'a plain run would dispatch the edit');
+    assert.notEqual(after.sha, shown.sha);
+    assert.equal((await new HarnessStore(path.join(root, '.maf')).current())?.id, 'legacy-default',
+      'and CURRENT itself was not touched by show');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('show current with an operator-pinned CURRENT reports that harness, labelled [current]', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-show-current-pinned-'));
+  try {
+    const mafDir = path.join(root, '.maf');
+    await mkdir(mafDir, { recursive: true });
+    const store = new HarnessStore(mafDir);
+    const mine = mintHarnessConfig({
+      id: 'mine',
+      roleSet: {
+        version: 1,
+        defaultRole: 'solo',
+        roles: [{ role: 'solo', systemPrompt: 'Work alone.\n', allowedTools: ['fs.read'] }],
+      },
+      processorBundles: [],
+    });
+    await store.save(mine);
+    await store.setCurrent(mine.sha);
+
+    const { out, err, error } = await maf(['harness', 'show', 'current', '-d', root]);
+    assert.equal(error, undefined);
+    assert.equal((JSON.parse(out.join('\n')) as HarnessConfig).sha, mine.sha);
+    assert.equal(err.length, 1);
+    assert.ok((err[0] as string).includes('[current]'), err[0]);
+    assert.ok(!(err[0] as string).includes('[roles file]'), err[0]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

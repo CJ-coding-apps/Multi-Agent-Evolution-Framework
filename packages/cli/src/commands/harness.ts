@@ -197,15 +197,29 @@ export function registerHarnessCommand(program: Command): void {
     .action(async (ref: string, opts: { dir: string }) => {
       const mafDir = path.join(path.resolve(opts.dir), '.maf');
       const store = new HarnessStore(mafDir);
-      // S6: with no CURRENT, name the harness a plain run actually uses rather than refusing the
-      // question. The note goes to stderr so stdout stays the harness JSON alone.
-      if ((ref === 'current' || ref === 'CURRENT') && (await store.current()) === undefined) {
-        const cfg = await plainRunHarness(store, mafDir);
+      // S6 (corrected by HIGH-1): answer which harness a plain run dispatches, not which pointer
+      // happens to exist. With no CURRENT that is the roles file; so is a CURRENT that names
+      // `legacy-default`, because such a CURRENT tracks the file (D-39) and the stored snapshot is
+      // not what the next run mints. The note goes to stderr so stdout stays the harness JSON alone.
+      if (ref === 'current' || ref === 'CURRENT') {
+        const current = await store.current();
+        if (current === undefined || current.id === LEGACY_DEFAULT_ID) {
+          const cfg = await plainRunHarness(store, mafDir);
+          console.error(
+            current === undefined
+              ? `[maf] no CURRENT in ${store.dir}: a plain run uses ${cfg.id} (${shortSha(cfg.sha)}) [roles file] — ` +
+                '.maf/roles.yaml as it is now, or the built-in set when there is no roles file'
+              : `[maf] CURRENT names ${LEGACY_DEFAULT_ID}, which tracks .maf/roles.yaml: a plain run uses ` +
+                `${cfg.id} (${shortSha(cfg.sha)}) [roles file]`,
+          );
+          console.log(JSON.stringify(cfg, null, 2));
+          return;
+        }
         console.error(
-          `[maf] no CURRENT in ${store.dir}: a plain run uses ${cfg.id} (${shortSha(cfg.sha)}) — ` +
-          'the roles file as it is now, or the built-in set when there is no roles.yaml',
+          `[maf] CURRENT → ${current.id} (${shortSha(current.sha)}) [current] — ` +
+          'plain runs use it until `maf harness set-current` changes it',
         );
-        console.log(JSON.stringify(cfg, null, 2));
+        console.log(JSON.stringify(current, null, 2));
         return;
       }
       const cfg = await loadStoredHarness(store, ref);
@@ -215,10 +229,23 @@ export function registerHarnessCommand(program: Command): void {
   cmd
     .command('set-current <ref>')
     .option('-d, --dir <path>', 'Working directory', process.cwd())
-    .description('Point CURRENT at a stored harness')
+    .description('Point CURRENT at a stored harness (or at legacy-default, the roles file as it is now)')
     .action(async (ref: string, opts: { dir: string }) => {
       const mafDir = path.join(path.resolve(opts.dir), '.maf');
       const store = new HarnessStore(mafDir);
+      // MED-1: the documented way back must work in a repository that has never run. `legacy-default`
+      // is not in the store — a plain run mints it in memory — so mint it for real here, store it, and
+      // point CURRENT at it; `set-current` is an explicit request, and an explicit request may write.
+      if (ref === LEGACY_DEFAULT_ID) {
+        const cfg = await plainRunHarness(store, mafDir);
+        await store.save(cfg);
+        await store.setCurrent(cfg.sha);
+        console.log(
+          `[maf] CURRENT → ${cfg.id} (${shortSha(cfg.sha)}) — plain runs follow .maf/roles.yaml; ` +
+          'CURRENT records the set they have now, and the next edit re-mints it',
+        );
+        return;
+      }
       const { harness: cfg, source } = await locateStoredHarness(store, ref);
       // CURRENT can name only what the store holds; a committed default is imported on the way.
       if (source !== path.join(store.dir, `${cfg.sha}.yaml`)) await importHarness(store, source);

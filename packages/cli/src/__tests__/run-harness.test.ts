@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, copyFile, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import { createDefaultRegistry } from '@maf/tools';
-import { resolveRunHarness } from '../wiring.js';
+import { harnessDriftNotice, resolveRunHarness } from '../wiring.js';
 import { resolveGoldensHarness } from '../commands/goldens.js';
-import { cliOnlyAdapter, driveRun, registryOf } from './runFixture.js';
+import { createDemoFixture } from '../commands/inprocessDemo.js';
+import { runInit } from '../commands/init.js';
+import { cliOnlyAdapter, collector, driveRun, registryOf } from './runFixture.js';
 
 // ORACLE: WP-2.9 + WP-2.7 integration (rule 3) — `run`, `goldens` and `evolve` pick their harness
 // by one path: a stored ref or a committed default by id or sha prefix, else an operator-set
@@ -147,5 +149,74 @@ test('run: a typed --roles is that file even when the operator set CURRENT; a pl
     const typed = await driveRun(['t', '--dir', root, '--adapter', 'cli-only', '--roles', '.maf/roles.yaml'], { adapters });
     assert.match(typed.out, /\[maf\] harness: legacy-default \([0-9a-f]{8}\) \[legacy\]/);
     assert.equal((await store.current())?.sha, chosen.sha, 'CURRENT is still the operator\'s');
+  });
+});
+
+// ORACLE (S6 HIGH-1). The verifier's own case: after `maf init`, remove `fs.write` from the tester
+// in `.maf/roles.yaml` and take a plain run. Before the correction, `init` had pointed CURRENT at the
+// default harness, so the run kept the shipped tester and the edit was silently ignored.
+
+test('HIGH-1: after init, removing fs.write from the tester changes what a plain run dispatches', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-run-harness-edit-'));
+  try {
+    const repo = await createDemoFixture(root);
+    await runInit({ dir: repo, out: collector() });
+    const mafDir = path.join(repo, '.maf');
+    const rolesPath = path.join(mafDir, 'roles.yaml');
+
+    const before = await resolve(mafDir, rolesPath);
+    assert.equal(before.source, 'legacy', 'a plain run with no CURRENT dispatches the roles file');
+    const testerBefore = before.harness.roleSet.roles.find((r) => r.role === 'tester');
+    assert.ok(testerBefore?.allowedTools.includes('fs.write'), 'the shipped tester holds fs.write');
+
+    const parsed = JSON.parse(await readFile(rolesPath, 'utf8')) as {
+      roles: Array<{ role: string; allowedTools: string[] }>;
+    };
+    const tester = parsed.roles.find((r) => r.role === 'tester') as { allowedTools: string[] };
+    tester.allowedTools = tester.allowedTools.filter((tool) => tool !== 'fs.write');
+    await writeFile(rolesPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    const after = await resolve(mafDir, rolesPath);
+    assert.equal(after.source, 'legacy');
+    const testerAfter = after.harness.roleSet.roles.find((r) => r.role === 'tester');
+    assert.ok(!testerAfter?.allowedTools.includes('fs.write'), "the run's tester is the edited one");
+    assert.notEqual(after.harness.sha, before.harness.sha, 'a different role set is a different harness');
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+// ORACLE (S6 HIGH-1(d)). Once a harness is pinned, the roles file can drift away from it with no
+// visible effect. Every resolution of a pinned CURRENT returns one line naming both and the way back.
+
+test('HIGH-1(d): a pinned CURRENT reports a roles file that differs from it, and stays silent when it agrees', async () => {
+  await withMafDir(async (mafDir, rolesPath) => {
+    const store = new HarnessStore(mafDir);
+    const pinned = mintHarnessConfig({
+      id: 'pinned', processorBundles: [],
+      roleSet: { version: 1, defaultRole: 'coder', roles: [{ role: 'coder', systemPrompt: 'pinned', allowedTools: ['fs.read'] }] },
+    });
+    await store.save(pinned);
+    await store.setCurrent(pinned.sha);
+
+    const drifted = await harnessDriftNotice({ store, harness: pinned, source: 'current', rolesPath, mafDir, baseTools });
+    assert.ok(drifted !== undefined, 'the file differs from the pinned harness, so a run says so');
+    assert.ok(drifted.includes('.maf/roles.yaml'), drifted);
+    assert.ok(drifted.includes('"pinned"') && drifted.includes(pinned.sha.slice(0, 8)), `names the harness that runs: ${drifted}`);
+    assert.ok(drifted.includes('"legacy-default"'), `and the one the file would mint: ${drifted}`);
+    assert.ok(drifted.includes('maf harness set-current legacy-default'), `and the way back: ${drifted}`);
+
+    // Pinning the file's own content: nothing to say.
+    const resolved = await resolveRunHarness({ store, ref: 'legacy-default', rolesPath, mafDir, baseTools });
+    const same = await harnessDriftNotice({ store, harness: resolved.harness, source: 'current', rolesPath, mafDir, baseTools });
+    assert.equal(same, undefined, 'the roles file and CURRENT agree');
+
+    // Dispatch that never consulted CURRENT is not in disagreement with the file.
+    for (const source of ['legacy', 'flag'] as const) {
+      assert.equal(
+        await harnessDriftNotice({ store, harness: pinned, source, rolesPath, mafDir, baseTools }),
+        undefined,
+      );
+    }
   });
 });

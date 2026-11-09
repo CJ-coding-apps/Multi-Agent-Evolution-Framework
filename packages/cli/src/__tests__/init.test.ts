@@ -95,45 +95,54 @@ test('a fresh repository gets every shipped .maf file, byte-identical to the pac
   }
 });
 
-test('S6: a fresh init records the default harness as CURRENT, naming the file it installed', async () => {
+// ORACLE (S6, corrected by HIGH-1 of its verification). S6 asked `harness show current` to tell the
+// truth; pointing CURRENT at the default `init` installed made the truth a harness the operator never
+// chose, and silently stopped the `roles.yaml` edit `init` had just reported keeping from applying.
+// A fresh init therefore records no harness at all: a plain run dispatches the roles file, and only
+// `maf harness set-current` pins one.
+
+test('S6 (HIGH-1): a fresh init records no CURRENT — a plain run dispatches .maf/roles.yaml', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-init-current-'));
   try {
     const repo = await createDemoFixture(root);
     const run = await driveInit(['--dir', repo]);
     assert.equal(run.error, undefined, run.out);
 
-    const installed = (await shipped()).find((f) => /^harnesses\/default-[0-9a-f]{64}\.json$/.test(f));
-    assert.ok(installed, 'init installs a default harness');
-    const installedSha = /default-([0-9a-f]{64})\.json/.exec(installed)?.[1];
-
     const store = new HarnessStore(path.join(repo, '.maf'));
-    const current = await store.current();
-    assert.equal(current?.sha, installedSha, 'CURRENT names the harness init installed');
-    assert.equal(current?.id, 'default');
+    assert.equal(await store.current(), undefined, 'init does not choose a harness');
     assert.ok(
-      await access(path.join(store.dir, `${installedSha as string}.yaml`)).then(() => true, () => false),
-      'the installed default is in the store, so a plain run dispatches a stored harness',
+      await absent(path.join(store.dir, 'CURRENT')),
+      'no CURRENT file is written',
     );
-    assert.ok(
-      run.out.includes(`[maf] init: CURRENT → default (${(installedSha as string).slice(0, 8)})`),
-      `the report says which harness a plain run will use: ${run.out}`,
+    assert.deepEqual(
+      (await readdir(store.dir)).filter((name) => /^[0-9a-f]{64}\.yaml$/.test(name)),
+      [],
+      'init imports nothing into the store either; the committed default-<sha>.json is read in place',
     );
+    assert.ok(run.out.includes('A plain run uses .maf/roles.yaml as you edit it'), run.out);
+    assert.ok(run.out.includes('maf harness set-current <id|sha>'), `and how to pin one: ${run.out}`);
+    assert.ok(run.out.includes('maf harness set-current legacy-default'), `and how to hand it back: ${run.out}`);
+    assert.doesNotMatch(run.out, /CURRENT →/, run.out);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
-test('S6: init leaves a CURRENT the operator set alone, even with --force', async () => {
+test('S6 (HIGH-1): a re-run of init never redirects dispatch — a pinned CURRENT stays, and none is created', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-init-current-keep-'));
   try {
     const repo = await createDemoFixture(root);
     await runInit({ dir: repo, out: collector() });
 
+    const store = new HarnessStore(path.join(repo, '.maf'));
+    const again = await driveInit(['--dir', repo, '--force']);
+    assert.equal(again.error, undefined, again.out);
+    assert.equal(await store.current(), undefined, 'a second init creates no CURRENT either');
+
     // A harness the operator chose: the shipped default's content under their own id.
     const installed = (await shipped()).find((f) => /^harnesses\/default-[0-9a-f]{64}\.json$/.test(f)) as string;
     const shippedCfg = await loadHarnessFile(assetPath(installed));
     const mine = mintHarnessConfig({ id: 'mine', roleSet: shippedCfg.roleSet, processorBundles: [] });
-    const store = new HarnessStore(path.join(repo, '.maf'));
     await store.save(mine);
     await store.setCurrent(mine.sha);
 
