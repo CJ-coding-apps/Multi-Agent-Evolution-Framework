@@ -293,6 +293,15 @@ Run on `wp/3.15-roles` after the final edit (macOS, Node 25.6.0):
 
 **One flake, stated:** the full run's single failure is `packages/tools` "MAF exiting normally kills the runner it started (WP-3.9 G10)", at its `waitForPid` budget after 123.6 s on a machine at 97% disk and ~5.8 load. The same test passed in 1.0 s moments earlier in the same file (`SIGTERM to MAF reaches the runner it started (WP-3.9 G10)`), **no `packages/tools` file is touched by this branch**, and the package re-run is green in 19.9 s. The wall-clock-budget class belongs to WP-3.12; it is recorded here rather than hidden.
 
+**Linux:** the committed tree (`f91f6cb`) was extracted from `git archive` into a clean directory, given its own single commit, and built and tested in a `node:22` container (`pnpm install --frozen-lockfile`, then `pnpm -r build`, then `pnpm -r --no-bail test`):
+
+| Gate | Result |
+|---|---|
+| `pnpm -r build` (Linux) | exit 0 |
+| `pnpm -r --no-bail test` (Linux) | 25 packages, **1673 tests / 1671 pass / 0 fail / 2 skipped**, exit 0 (`/tmp/maf-315-r2-linux.txt`) |
+
+The G10 timeout above did not reproduce on Linux; no test failed there.
+
 ## Findings recorded, not fixed
 
 1. **`git log` history of the default harness**: the old `default-0f4a05eb….json` stays in history,
