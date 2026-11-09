@@ -25,6 +25,10 @@ import { cliOnlyAdapter, collector, driveRun, needsLcm, registryOf } from './run
 //
 // LOW-R2-2 rides here too: with nothing pinned, `goldens` and `evolve` dispatch the roles file, as
 // a plain run does — proved with a real scripted golden run whose result names the edited sha.
+//
+// LOW-R3-2: the CURRENT `goldens` records is the tracking pointer (`legacy-default`), never a
+// pinned sha. The sequence below is the one that would expose it if that changed: `init`, a real
+// `goldens run`, edit the tester, then a plain run — which must use the edit, with no notice.
 
 const REPO = path.resolve(__dirname, '../../../..');
 const MAIN = path.resolve(__dirname, '../main.js');
@@ -226,6 +230,42 @@ async function miniCorpus(root: string): Promise<string> {
     JSON.stringify({ version: scripts.version, tasks: { [first.id]: script } }), 'utf8');
   return corpus;
 }
+
+test('LOW-R3-2: goldens records a CURRENT that tracks the roles file, so a later run uses the edit', needsLcm, async () => {
+  const p = await project({ pin: false });
+  try {
+    const store = new HarnessStore(p.mafDir);
+    const mintFromFile = async () => store.mint(await harnessRoleSetFromRegistry(
+      await RoleRegistry.fromYamlOrDefault(p.rolesPath, p.mafDir, createDefaultRegistry()),
+    ), 'legacy-default');
+    const recorded = await mintFromFile();
+    const corpus = await miniCorpus(p.root);
+
+    // 1. A real `goldens run` on a project with nothing pinned. Resolution is what writes CURRENT.
+    await execFileAsync(process.execPath,
+      [MAIN, 'goldens', 'run', '--adapter', 'scripted', '--corpus', corpus, '--attempts', '1', '-d', p.root],
+      { cwd: p.root });
+    const current = await store.current();
+    assert.ok(current, 'goldens recorded a CURRENT');
+    assert.equal(current.id, 'legacy-default', 'the tracking pointer, not a pinned harness');
+    assert.equal(current.sha, recorded.sha, 'and it names the roles file as it was then');
+
+    // 2. The user edits the tester. 3. A plain run must dispatch the edit.
+    await editTester(p);
+    const edited = await mintFromFile();
+    assert.notEqual(edited.sha, recorded.sha, 'the edit changed the role set');
+
+    const lines = await runLines(p);
+    assert.ok(
+      lines.some((line) => line.includes(`harness: legacy-default (${edited.sha.slice(0, 8)}) [legacy]`)),
+      `the plain run mints the edited file, not the recorded snapshot:\n${lines.join('\n')}`,
+    );
+    assert.deepEqual(noticesIn(lines), [],
+      'and there is nothing to warn about: the CURRENT it recorded follows the file');
+  } finally {
+    await rm(path.dirname(p.root), { recursive: true, force: true });
+  }
+});
 
 test('LOW-R2-2: with nothing pinned, goldens evaluates the edited roles file and its result names that sha', needsLcm, async () => {
   const p = await project({ pin: false });
