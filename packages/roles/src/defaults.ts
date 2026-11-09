@@ -9,15 +9,15 @@ import { DEFAULT_ROLE_SET_FROM_SHIPPED } from './defaultRoleSet.generated.js';
  * A plain run uses this set only when the target has no roles file (D-08); `maf init` writes the
  * same role set as files. The two are one source: `scripts/generate-default-roles.mjs` generates
  * `defaultRoleSet.generated.ts` from `.maf/roles.yaml` and `.maf/prompts/*.md`, and
- * `defaults.test.ts` fails when the generated set and the files disagree. Before D-61 the set was
+ * `one-role-set.test.ts` fails when the generated set and the files disagree. Before D-61 the set was
  * maintained by hand beside the files and had drifted — the prompts differed, and the built-in
  * `tester` held no `fs.write` while the shipped one did (F2).
  *
- * The generated data carries what the file declares: the prompt's text (not a path, which a target
- * without `.maf/prompts/` could not read), `policyTag`, `execution`, `expectsChange`,
- * `expectsToolCalls`, limits and the allowed tools. The shipped `tester` holds `fs.write` and so is
- * a writer, `coder` is the only role that expects a change (D-32), and the three readers run
- * in-process (D-44) — all of it declared in the file, not here.
+ * The generated data carries every key the file declares — not a fixed list: a field added to a
+ * role is copied without an edit to the generator (MED-3) — plus the prompt's text (not a path,
+ * which a target without `.maf/prompts/` could not read) and the allowed tools. The shipped `tester`
+ * holds `fs.write` and so is a writer, `coder` is the only role that expects a change (D-32), and
+ * the three readers run in-process (D-44) — all of it declared in the file, not here.
  */
 export const DEFAULT_ROLE_SET: RoleSet = DEFAULT_ROLE_SET_FROM_SHIPPED;
 
