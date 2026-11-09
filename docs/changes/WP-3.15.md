@@ -241,6 +241,40 @@ The no-`CURRENT` and `legacy-default` states are unchanged: they report the role
 no disagreement to report. Tested in all three states, with the pinned case going from one stderr
 line (the `[current]` note) to two once the file moves.
 
+## Round 4 — the queued text, and what writes `CURRENT`
+
+**MED-R3-1 — two queued README sentences would ship false.** Round 3's queue *added* a sentence
+after README:196's goldens sentence instead of replacing it, so the paragraph would have said both
+"the committed default harness is what `goldens` evaluates on a fresh clone" (false since LOW-R2-2)
+and "with nothing pinned, `goldens` evaluates the roles file". README:124's comment ("Score the
+committed default harness …") was not queued at all and is false the same way. Both are now queued
+as **replacements**, above, naming what is actually evaluated and how to score the committed
+default explicitly (`--harness default`). WP-3.13 builds the 0.6.0 README from this queue.
+
+**LOW-R3-1 — the pack-check comment said why the harness is required for the wrong reason.** It
+claimed "the goldens proof below depends on this file existing inside the package (F1)". Since
+LOW-R2-2 the suite reads the roles file `init` writes, not the asset; the file is still required
+because `init` copies it out of the package, and `--harness default` resolves it there. The comment
+now says that. The same stale reason sat on `init.ts`'s harness-copy comment ("the same one the
+package falls back to"); corrected there too.
+
+**LOW-R3-2 — what writes `CURRENT`, and the test that keeps HIGH-1 shut.** `set-current` **pins** a
+harness. A plain run — and now `goldens run` and `evolve` on an unpinned project — record a
+`CURRENT` that **tracks** the roles file (`legacy-default`) and pins nothing: a CURRENT naming
+`legacy-default` is re-minted from the file on every resolution, so dispatch still follows the edit
+(the round-3 queued clause said "only `maf harness set-current` does", which was not exact; it now
+says which pointer is which).
+
+The new test in `drift-notice-e2e.test.ts` runs the exact sequence that would reopen HIGH-1 — with
+the real binary for the golden run: `init`, a real `goldens run --adapter scripted`, then edit the
+tester's tools, then a plain run. It asserts that the recorded `CURRENT` is `legacy-default` with
+the sha of the file as it was, that the edit moves that sha, that the plain run prints `harness:
+legacy-default (<edited sha>) [legacy]`, and that it prints **no** drift notice. A `goldens` that
+wrote a pinned sha (or the committed default) instead fails at the first assertion and the run's
+harness line; a CURRENT that stopped tracking fails at the edited sha. **Measured:** planting a
+`goldens` that stores the evaluated harness as `goldens-pin` and sets `CURRENT` to it turns the
+test red at "the tracking pointer, not a pinned harness" (4 pass / 1 fail); restored, 5/5 green.
+
 ## D-61 — One default role set
 
 The built-in role set is the shipped `.maf/roles.yaml` and prompts, compiled in: one source
@@ -291,18 +325,33 @@ All replacement text below is true **after** this branch, including the S6 corre
   > exists at the path, the built-in role set applies — the same set the package ships and `maf
   > init` writes (D-61, `docs/DECISIONS.md`) — and the run says so (`[maf] roles: no
   > .maf/roles.yaml — using the built-in role set (the same one maf init writes)`).
-- **`README.md` (line 196), "Which harness runs"**: after the `--harness default` sentence, add:
+- **`README.md` (line 196), "Which harness runs" — a replacement, not an addition** (MED-R3-1).
+  Replace both sentences beginning "The committed default harness in `.maf/harnesses/` is what
+  `goldens` evaluates on a fresh clone" and ending "works with nothing copied in" with:
+  > With nothing pinned, `goldens run` and `evolve` evaluate the harness a plain run would use:
+  > `legacy-default` minted from `.maf/roles.yaml`, or from the built-in set when there is no roles
+  > file; the committed `default-<sha>.json` is evaluated only when named (`--harness default`), and
+  > `maf init && maf goldens run --adapter scripted` works with nothing copied in.
+  Then add:
   > A repository that ran `maf init` has no `CURRENT`, so its plain runs mint `legacy-default` from
   > `.maf/roles.yaml` as it is now (`[legacy]`); `maf harness show current` reports that harness and
   > its sha, computed now, labelled `[roles file]`. Once `maf harness set-current <ref>` pins one,
   > plain runs use it (`[current]`) — and if the roles file then differs from it, every run prints
   > one line naming both and `maf harness set-current legacy-default`, which hands dispatch back.
   > `maf goldens run` and `maf evolve` resolve the same way when nothing is pinned, so an edit to
-  > `roles.yaml` reaches the suite they measure; `maf harness show current` prints that same one
-  > line when the pinned harness and the file disagree.
-- **`README.md` (line 330), "Run output" item 4**: still true; add one clause after "an unchanged
-  role set reuses the stored file" — "`maf init` writes no `CURRENT`; only `maf harness
-  set-current` does".
+  > `roles.yaml` reaches the suite they measure, and they record a `CURRENT` that tracks the file
+  > (`legacy-default`) rather than pinning one; `maf harness show current` prints that same one line
+  > when the pinned harness and the file disagree.
+- **`README.md` (line 124), the offline-goldens comment — a replacement** (MED-R3-1). Replace
+  "Score the committed default harness on the golden corpus offline (no model, no key)," with:
+  > `#    Score the harness a plain run would dispatch — legacy-default from .maf/roles.yaml, or`
+  > `#    the built-in set with no roles file — on the golden corpus offline (no model, no key),`
+  > `#    then compare the result with the committed baseline. Name --harness default to score`
+  > `#    the committed default explicitly.`
+- **`README.md` (line 330), "Run output" item 4** (LOW-R3-2): still true; add one clause after "an
+  unchanged role set reuses the stored file" — "`maf init` writes no `CURRENT`; a plain run,
+  `goldens run` and `evolve` record one that **tracks** the roles file (`legacy-default`), and only
+  `maf harness set-current` pins a harness".
 - **`CHANGELOG.md` (WP-3.13), 0.6.0 → Changed:** the built-in and shipped role sets are one
   (D-61); the committed default harness re-mints `0f4a05eb…` → `2b33b58e…`, and the offline goldens
   baseline moves twice on this branch — `0f4a05eb…` → `2b33b58e…` with that re-mint, then
@@ -329,14 +378,15 @@ All replacement text below is true **after** this branch, including the S6 corre
 | `.maf/prompts/{security,reviewer,analyst}.md` and `packages/cli/assets/prompts/` | `lcm.expand` added to the tool line |
 | `.maf/harnesses/default-<sha>.json` and `packages/cli/assets/harnesses/` | re-minted `0f4a05eb…` → `2b33b58e…`, old file removed, now generated |
 | `tests/goldens/baseline.json` and `packages/cli/assets/goldens/baseline.json` | regenerated by running the suite |
-| `packages/cli/src/commands/init.ts` | S6, corrected: records no harness; the epilogue names the roles file and how to pin |
+| `packages/cli/src/commands/init.ts` | S6, corrected: records no harness; the epilogue names the roles file and how to pin. LOW-R3-1: the harness-copy comment says why the copy is still required (the `--harness default` ref), not that `goldens` falls back to it |
 | `packages/cli/src/commands/harness.ts` | S6: `show current` labels `[roles file]`/`[current]`; `set-current legacy-default` mints on demand (MED-1); prints the drift notice for a pinned `CURRENT` (LOW-R2-3) |
 | `packages/cli/src/wiring.ts` | WP-3.11's file, touched line-scoped (LOW-R2-1); three hunks, nothing else: line 4 adds `canonicalJson` to the `@maf/types` import, line 21 adds `HarnessRoleSet` to the `@maf/harness-config` type import, and an appended block after `resolveRunHarness` (≈lines 436–473) holds `roleSetContent`, `HarnessDriftOptions` and `harnessDriftNotice` |
 | `packages/cli/src/commands/run.ts` | the F2 notice names the built-in set as the shipped one (line-scoped); prints the drift notice |
 | `packages/cli/src/commands/goldens.ts` | `goldens` prints the same drift notice (round 2); with nothing pinned it and `evolve` now resolve the roles file, not the committed default, and the packaged-default fallback is removed (LOW-R2-2) |
 | `packages/cli/src/commands/evolve.ts` | `--harness` help says the roles file; its base is `resolveGoldensHarness`'s answer |
 | `packages/cli/src/__tests__/{init,harness-show-current,harness-set-current,run-harness}.test.ts` | S6, corrected: no-`CURRENT` init, the three `show` states (plus LOW-R2-3's pinned-drifting state), the fresh-project way back, the `fs.write` case and the notice |
-| `packages/cli/src/__tests__/drift-notice-e2e.test.ts` | new: MED-R2-1 — the notice counted where `run`, `goldens run` and `evolve` print it; LOW-R2-2's edited-sha golden run |
+| `packages/cli/src/__tests__/drift-notice-e2e.test.ts` | new: MED-R2-1 — the notice counted where `run`, `goldens run` and `evolve` print it; LOW-R2-2's edited-sha golden run; LOW-R3-2 — `init` → real `goldens run` → edit the tester → plain run dispatches the edit, no notice |
+| `scripts/pack-check.mjs` | LOW-R3-1: the default-harness comment states what the file is required for now (`init` copies it out; `--harness default` resolves it), not the retired goldens fallback |
 | `packages/cli/src/__tests__/{eval-commands,goldens-offline}.test.ts` | LOW-R2-2: a fresh clone dispatches and reproduces the roles file; the packaged-default fallback test now covers the built-in set |
 | `scripts/stress-native-lifecycle.mjs` | LOW-R2-2: the stress clone carries `roles.yaml` and `prompts`, as a real clone does |
 | `packages/cli/src/__tests__/committed-default.test.ts` | new: MED-2, the committed default is what the source mints |
@@ -358,7 +408,7 @@ Run on `wp/3.15-roles` after the final edit (macOS, Node 25.6.0):
 | `pnpm run check:package` | 36 files packed, installed and run; `goldens solved 4/10` |
 | `node scripts/generate-default-roles.mjs --check` | up to date (also run as a test) |
 | `goldens run --adapter scripted --corpus tests/goldens -d .` then `compare-goldens` to the baseline | matches, `ranAt` ignored; solved 4/10 |
-| `pnpm -r --no-bail test` | 25 packages, **1677 tests / 1675 pass / 0 fail / 2 skipped**, exit 0 (`/tmp/maf-full-macos.log`) |
+| `pnpm -r --no-bail test` | 25 packages, **1678 tests / 1676 pass / 0 fail / 2 skipped**, exit 0 (`/tmp/maf-full-macos-r4.log`) |
 
 **One flake, stated:** the first full run of this round failed `packages/tools` "MAF exiting
 normally kills the runner it started (WP-3.9 G10)" at its `waitForPid` budget after 122.9 s, on a
@@ -366,15 +416,17 @@ machine at 97% disk and high load; the same test had passed moments earlier in t
 `SIGTERM` case, **no `packages/tools` file is touched by this branch**, and the immediate re-runs
 (`--no-bail`, then the logged full run) were green — that package **149 / 148 pass / 0 fail / 1
 skipped**. The wall-clock-budget class belongs to WP-3.12; it is recorded here rather than hidden.
+It did **not** recur in round 4's full run (also on a disk at 98%).
 
-**Linux:** the committed tree (`c5d75d2`) was extracted from `git archive` into a clean directory,
-given its own single commit, and built and tested in a `node:22` container (Node v22.23.4, pnpm
-10.34.7; `pnpm install --frozen-lockfile`, then `pnpm -r build`, then `pnpm -r --no-bail test`):
+**Linux:** the committed tree (`ab01346`, the code and comments of round 4; the commits after it are
+docs only) was extracted from `git archive` into a clean directory, given its own single commit
+(`eebd3a4` there), and built and tested in a `node:22` container (Node v22.23.4, pnpm 10.34.7;
+`pnpm install --frozen-lockfile`, then `pnpm -r build`, then `pnpm -r --no-bail test`):
 
 | Gate | Result |
 |---|---|
 | `pnpm -r build` (Linux) | exit 0 |
-| `pnpm -r --no-bail test` (Linux) | 25 packages, **1677 tests / 1675 pass / 0 fail / 2 skipped**, exit 0 (`/tmp/maf-315-r3-linux.txt`) |
+| `pnpm -r --no-bail test` (Linux) | 25 packages, **1678 tests / 1676 pass / 0 fail / 2 skipped**, exit 0 (`/tmp/maf-315-r4-linux.txt`) |
 
 The G10 timeout above did not reproduce on Linux; no test failed there.
 
