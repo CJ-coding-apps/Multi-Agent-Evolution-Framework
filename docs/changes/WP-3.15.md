@@ -367,12 +367,14 @@ machine at 97% disk and high load; the same test had passed moments earlier in t
 (`--no-bail`, then the logged full run) were green — that package **149 / 148 pass / 0 fail / 1
 skipped**. The wall-clock-budget class belongs to WP-3.12; it is recorded here rather than hidden.
 
-**Linux:** the committed tree (`f91f6cb`) was extracted from `git archive` into a clean directory, given its own single commit, and built and tested in a `node:22` container (`pnpm install --frozen-lockfile`, then `pnpm -r build`, then `pnpm -r --no-bail test`):
+**Linux:** the committed tree (`c5d75d2`) was extracted from `git archive` into a clean directory,
+given its own single commit, and built and tested in a `node:22` container (Node v22.23.4, pnpm
+10.34.7; `pnpm install --frozen-lockfile`, then `pnpm -r build`, then `pnpm -r --no-bail test`):
 
 | Gate | Result |
 |---|---|
 | `pnpm -r build` (Linux) | exit 0 |
-| `pnpm -r --no-bail test` (Linux) | 25 packages, **1673 tests / 1671 pass / 0 fail / 2 skipped**, exit 0 (`/tmp/maf-315-r2-linux.txt`) |
+| `pnpm -r --no-bail test` (Linux) | 25 packages, **1677 tests / 1675 pass / 0 fail / 2 skipped**, exit 0 (`/tmp/maf-315-r3-linux.txt`) |
 
 The G10 timeout above did not reproduce on Linux; no test failed there.
 
