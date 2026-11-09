@@ -730,10 +730,13 @@ const TWO_TASKS: GoldenSuiteResult['tasks'] = [
   { taskId: 't2', role: 'coder', passed: false, attempts: [] },
 ];
 
-/** A rejected candidate's run: the other task passes, the base's task fails. */
+/**
+ * A rejected candidate's run (R2-MED-1): a DIFFERENT score and failed set from the base, so a
+ * `Current harness:` line built from the newest row (the candidate) cannot pass by coincidence.
+ */
 const CANDIDATE_TASKS: GoldenSuiteResult['tasks'] = [
   { taskId: 't1', role: 'coder', passed: false, attempts: [] },
-  { taskId: 't2', role: 'coder', passed: true, attempts: [] },
+  { taskId: 't2', role: 'coder', passed: false, attempts: [] },
 ];
 
 // Amendment item 1: the loop paid for its own baseline golden run and digested a graph it never
@@ -909,12 +912,14 @@ test('loop (MED-3): the prompt names the harness in force and lists rejected can
         : '```json\n{"no_op":true}\n```';
     },
     runGoldens: async (h) => {
-      // The base solves t1; the candidate trades t1 for t2 — a rejection whose failed set differs.
+      // The base solves t1 (1/2, failed t2); the candidate solves nothing (0/2, failed t1 and t2).
+      // R2-MED-1: the scores must differ, or a `Current harness:` line read from the newest row —
+      // the rejected candidate — would look identical to the correct one.
       const isBase = h.sha === CURRENT.sha;
       return {
         harnessSha: h.sha, harnessId: h.id,
         tasks: isBase ? TWO_TASKS : CANDIDATE_TASKS,
-        solvedTaskIds: isBase ? ['t1'] : ['t2'], ranAt: 't0',
+        solvedTaskIds: isBase ? ['t1'] : [], ranAt: 't0',
       };
     },
   }));
@@ -927,11 +932,17 @@ test('loop (MED-3): the prompt names the harness in force and lists rejected can
 
   const currentLine = prompts[1]!.split('\n').find((l) => l.startsWith('Current harness: '));
   assert.ok(currentLine?.includes(`base (${CURRENT.sha})`), `names the base: ${currentLine ?? '(none)'}`);
-  assert.ok(currentLine?.includes('solved 1/2'), 'with the score it measured');
+  // R2-MED-1: assert the score AND the failed ids. The newest row is the candidate at 0/2 with both
+  // tasks failed, so a line taken from the newest row cannot satisfy either assertion by accident
+  // (MUTANT N6: `currentStatus` reads `goldenHistory[0]` instead of the row for the base sha).
+  assert.equal(
+    currentLine, `Current harness: base (${CURRENT.sha}): solved 1/2; failed t2`,
+    'the line names the harness in force with the score and failed set it measured',
+  );
   assert.ok(!currentLine?.includes('base-r1'), 'not the candidate it rejected');
 
-  assert.match(prompts[1]!, new RegExp(`rejected candidate base-r1 \\(${candidateSha}\\): solved 1/2; failed t1`),
-    'the rejected row is listed separately, with its own score');
+  assert.match(prompts[1]!, new RegExp(`rejected candidate base-r1 \\(${candidateSha}\\): solved 0/2; failed t1, t2`),
+    'the rejected row is listed separately, with its own score and failed set');
 
   // M3/M5: both runs are evidence, and the candidate's row is under the candidate's sha.
   const shas = golden.map((g) => String(g['harness_sha']));
