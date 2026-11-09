@@ -7,6 +7,8 @@ import path from 'node:path';
 import { Command } from 'commander';
 import type { AdapterInvokeOptions, AdapterInvokeResult, CliAdapter } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
+import { RoleRegistry, harnessRoleSetFromRegistry } from '@maf/roles';
+import { createDefaultRegistry } from '@maf/tools';
 import * as wiring from '../wiring.js';
 import * as AdapterRegistry from '../AdapterRegistry.js';
 import { HarnessStore } from '@maf/harness-config';
@@ -18,10 +20,11 @@ import { messageOf } from './runFixture.js';
 
 // ORACLE: verifier F3 and F11 — `goldens run` and `evolve` take `--allow-ungoverned` to the stack
 // they dispatch through (on an adapter that cannot run the in-process loop, every writer task is
-// refused without it, with no way to opt in); and on a fresh clone the two start from one harness,
-// the committed default, where evolve used to mint legacy-default from roles.yaml and evolve a
-// harness goldens never measured. Each command is stopped where it builds its stack, which is
-// where both answers are visible; nothing is dispatched.
+// refused without it, with no way to opt in); and on a fresh clone the two start from one harness.
+// Round 2's F11 made that harness the committed default; LOW-R2-2 (round 3) supersedes it: with
+// nothing pinned they dispatch the roles file, exactly as a plain run does, so an edit to
+// `.maf/roles.yaml` is not silently ignored by the two evaluation commands. Each command is stopped
+// where it builds its stack, which is where both answers are visible; nothing is dispatched.
 
 const REPO = path.resolve(__dirname, '../../../..');
 const SEED = path.join(REPO, 'tests/goldens');
@@ -236,15 +239,21 @@ test('maf evolve gives the gate each tool\'s registry permission: fs.write widen
   }
 });
 
-test('on a fresh clone, evolve starts from the harness goldens evaluates: the committed default', async (t) => {
-  const { root, defaultSha } = await freshClone();
+test('on a fresh clone, goldens and evolve dispatch the roles file, as a plain run does (LOW-R2-2)', async (t) => {
+  const { root } = await freshClone();
   try {
+    const mafDir = path.join(root, '.maf');
+    const store = new HarnessStore(mafDir);
+    // What a plain run mints from the file as it is now — the same harness, not a snapshot of it.
+    const expected = store.mint(await harnessRoleSetFromRegistry(
+      await RoleRegistry.fromYamlOrDefault(path.join(mafDir, 'roles.yaml'), mafDir, createDefaultRegistry()),
+    ), 'legacy-default');
     const { stacks, logs } = stopAtStack(t);
     await drive(registerGoldensCommand, goldens(root));
     await drive(registerEvolveCommand, evolve(root));
-    assert.deepEqual(stacks.map((s) => s.harnessSha), [defaultSha, defaultSha], 'one harness, not two');
-    assert.ok(logs.some((l) => l.includes(`| harness: default (${defaultSha.slice(0, 8)})`)), logs.join('\n'));
-    assert.ok(logs.some((l) => l.includes(`| base: default (${defaultSha.slice(0, 8)})`)), logs.join('\n'));
+    assert.deepEqual(stacks.map((s) => s.harnessSha), [expected.sha, expected.sha], 'one harness, not two');
+    assert.ok(logs.some((l) => l.includes(`| harness: legacy-default (${expected.sha.slice(0, 8)})`)), logs.join('\n'));
+    assert.ok(logs.some((l) => l.includes(`| base: legacy-default (${expected.sha.slice(0, 8)})`)), logs.join('\n'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -294,7 +303,12 @@ test('real evolve.ts: a flag-on sensitive candidate is stored, not current, and 
     }) as unknown as wiring.RunStack);
 
     const store = new HarnessStore(path.join(root, '.maf'));
+    // LOW-R2-2: with no CURRENT, evolve's base is the roles file, and resolving it adopts that base
+    // as CURRENT — what a plain run does. Read "before" after that write, so `CURRENT did not move`
+    // below is about the candidate the human has not approved, not about the base being adopted.
+    const { harness: base } = await resolveGoldensHarness(path.join(root, '.maf'));
     const before = (await store.current())?.sha;
+    assert.equal(before, base.sha, 'resolving the base adopted it');
 
     const program = new Command();
     program.exitOverride();
@@ -395,10 +409,15 @@ test('real evolve.ts: an unapproved sensitive candidate never becomes a later ro
     }) as unknown as wiring.RunStack);
 
     const store = new HarnessStore(path.join(root, '.maf'));
-    // A fresh clone has no CURRENT yet; evolve starts from the committed default harness, read in
-    // place — the same resolution `goldens run` takes.
+    // LOW-R2-2 (round 3): with no CURRENT, evolve starts from the roles file — not the committed
+    // default round 2's F11 made it. An edit to `.maf/roles.yaml` is what a fresh clone evolves.
     const { harness: base } = await resolveGoldensHarness(path.join(root, '.maf'));
-    assert.equal(base.sha, defaultSha, 'a fresh clone ships the default harness');
+    const fromFile = store.mint(await harnessRoleSetFromRegistry(
+      await RoleRegistry.fromYamlOrDefault(
+        path.join(root, '.maf', 'roles.yaml'), path.join(root, '.maf'), createDefaultRegistry()),
+    ), 'legacy-default');
+    assert.equal(base.sha, fromFile.sha, 'the base is the roles file, as a plain run dispatches it');
+    assert.notEqual(base.sha, defaultSha, 'and not the committed default, which `--harness default` names');
 
     const program = new Command();
     program.exitOverride();

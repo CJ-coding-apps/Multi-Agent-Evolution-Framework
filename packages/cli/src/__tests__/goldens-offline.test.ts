@@ -11,9 +11,10 @@ import type { HarnessConfig } from '@maf/harness-config';
 import { LcmEngine } from '@maf/lcm';
 import { MemoryGraph } from '@maf/memory-graph';
 import { GraphAwareInjector } from '@maf/prompt-injector';
+import { RoleRegistry, harnessRoleSetFromRegistry } from '@maf/roles';
+import { createDefaultRegistry } from '@maf/tools';
 import { ScriptedAdapter } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
-import { harnessesAssetRoot } from '../assets.js';
 import { incomparable, resolveGoldensAdapter, resolveGoldensHarness, runGoldenSuite } from '../commands/goldens.js';
 import { loadHarnessFile, loadStoredHarness } from '../commands/harness.js';
 
@@ -53,11 +54,17 @@ async function defaultHarnessFile(): Promise<string> {
   return path.join(dir, names[0] as string);
 }
 
-/** What a fresh clone gives goldens: the committed policy, default harness and corpus — no state. */
+/**
+ * What a fresh clone gives goldens: the committed policy, roles, prompts, default harness and
+ * corpus — no state. The roles file is part of that: since LOW-R2-2 a plain run with no CURRENT
+ * dispatches it, so goldens does too, and the offline run evaluates the file this checkout commits.
+ */
 async function freshClone(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-clone-'));
   await mkdir(path.join(root, '.maf/harnesses'), { recursive: true });
-  await cp(path.join(REPO, '.maf/policy.yaml'), path.join(root, '.maf/policy.yaml'));
+  for (const entry of ['policy.yaml', 'roles.yaml', 'prompts']) {
+    await cp(path.join(REPO, '.maf', entry), path.join(root, '.maf', entry), { recursive: true });
+  }
   const harness = await defaultHarnessFile();
   await cp(harness, path.join(root, '.maf/harnesses', path.basename(harness)));
   await cp(SEED, path.join(root, 'tests/goldens'), { recursive: true });
@@ -228,27 +235,33 @@ test('the scripted adapter refuses a corpus that names a prototype key (G5)', as
   }
 });
 
-test('goldens picks --harness, else CURRENT, else the committed default — and the default is honest', async () => {
+test('goldens picks --harness, else CURRENT, else the roles file — and the default still answers to its id', async () => {
   const root = await freshClone();
   try {
     const mafDir = path.join(root, '.maf');
     const committed = await defaultHarnessFile();
-    const fallback = await resolveGoldensHarness(mafDir);
-    assert.equal(path.basename(fallback.source), path.basename(committed), 'a fresh clone evaluates the committed default');
-    assert.equal(path.basename(committed), `default-${fallback.harness.sha}.json`);
-    // Produced by HarnessStore.mint: re-minting its content gives its sha.
-    assert.equal(new HarnessStore(mafDir).mint(fallback.harness.roleSet, fallback.harness.id).sha, fallback.harness.sha);
-
     const store = new HarnessStore(mafDir);
+    // LOW-R2-2: with nothing pinned, goldens evaluates the roles file — the same harness a plain
+    // run mints and adopts, not the committed default that a stale edit would leave behind.
+    const expected = store.mint(await harnessRoleSetFromRegistry(
+      await RoleRegistry.fromYamlOrDefault(path.join(mafDir, 'roles.yaml'), mafDir, createDefaultRegistry()),
+    ), 'legacy-default');
+    const fallback = await resolveGoldensHarness(mafDir);
+    assert.equal(fallback.harness.id, 'legacy-default');
+    assert.equal(fallback.harness.sha, expected.sha, 'a fresh clone evaluates the roles file as it is');
+    assert.equal(fallback.source, path.join(store.dir, `${expected.sha}.yaml`), 'minted and stored, as a plain run does');
+
     const { sha: _sha, version: _version, ...fields } = fallback.harness;
     const other: HarnessConfig = mintHarnessConfig({ ...fields, id: 'other' });
     await store.save(other);
     await store.setCurrent(other.sha);
-    assert.equal((await resolveGoldensHarness(mafDir)).harness.sha, other.sha, 'CURRENT outranks the committed default');
+    assert.equal((await resolveGoldensHarness(mafDir)).harness.sha, other.sha, 'CURRENT outranks the roles file');
     assert.equal((await resolveGoldensHarness(mafDir, other.sha.slice(0, 8))).harness.id, 'other', 'a short sha resolves');
     assert.equal((await resolveGoldensHarness(mafDir, committed)).harness.id, 'default', 'a harness file resolves in place');
+    assert.equal((await resolveGoldensHarness(mafDir, 'default')).harness.id, 'default', 'and the committed default answers to its id');
 
-    const tampered = path.join(root, `default-${fallback.harness.sha}.json`);
+    const committedSha = (await loadHarnessFile(committed)).sha;
+    const tampered = path.join(root, `default-${committedSha}.json`);
     await writeFile(tampered, (await readFile(committed, 'utf8')).replace('"maxToolIterations": 12', '"maxToolIterations": 99'), 'utf8');
     await assert.rejects(() => resolveGoldensHarness(mafDir, tampered), /content hashes to/);
   } finally {
@@ -256,20 +269,22 @@ test('goldens picks --harness, else CURRENT, else the committed default — and 
   }
 });
 
-// ORACLE (F1). The installed package has no repository to read a harness from. `goldens run` must
-// still evaluate something that exists: the default harness shipped in `assets/harnesses`, the one
-// `maf init` writes, rather than telling the user to run `maf run` first (which no longer produces a
-// harness goldens would look at).
+// ORACLE (F1, restated by LOW-R2-2 + D-61). A repository that has neither a roles file nor a harness
+// file still evaluates something that exists: the built-in role set, which since D-61 is generated
+// from the same shipped roles `maf init` writes — no file to find, no "run maf once" dead end.
 
-test('with no CURRENT and no committed default, goldens falls back to the harness the package ships', async () => {
+test('with no CURRENT, no roles file and no committed default, goldens mints the built-in role set', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-goldens-packaged-'));
   try {
     const mafDir = path.join(root, '.maf');
     await mkdir(mafDir, { recursive: true });
     const found = await resolveGoldensHarness(mafDir);
-    assert.equal(path.dirname(found.source), harnessesAssetRoot(), 'read from the packaged asset');
-    assert.equal(path.basename(found.source), `default-${found.harness.sha}.json`);
-    assert.equal(new HarnessStore(mafDir).mint(found.harness.roleSet, found.harness.id).sha, found.harness.sha);
+    assert.equal(found.harness.id, 'legacy-default');
+    const builtin = new HarnessStore(mafDir).mint(await harnessRoleSetFromRegistry(
+      await RoleRegistry.fromYamlOrDefault(path.join(mafDir, 'roles.yaml'), mafDir, createDefaultRegistry()),
+    ), 'legacy-default');
+    assert.equal(found.harness.sha, builtin.sha, 'the built-in set is what minted it');
+    assert.equal(found.source, path.join(mafDir, 'harnesses', `${builtin.sha}.yaml`), 'stored, as a plain run does');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

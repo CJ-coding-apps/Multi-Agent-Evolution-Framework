@@ -41,7 +41,7 @@ export function registerEvolveCommand(program: Command): void {
     .option('-m, --model <model>', 'Meta-agent model')
     .option('-d, --dir <path>', 'Working directory', process.cwd())
     .option('--corpus <path>', 'Golden corpus root', '.maf/goldens')
-    .option('--harness <ref>', 'Starting harness id/sha/file (default: current, else the committed default)')
+    .option('--harness <ref>', 'Starting harness id/sha/file (default: current, else the roles file)')
     .option('--rounds <n>', 'Max evolution rounds', '10')
     .option('--patience <n>', 'Consecutive no-ship rounds before stopping', '3')
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
