@@ -47,6 +47,11 @@ export interface RoleDispatcherConfig {
   /** Phase 1: the resolved harness for this run (processor bundles live here). */
   harness?:       HarnessConfig;
   /**
+   * The golden-corpus task this dispatcher evaluates, when a golden runner built it (WP-3.7a L5).
+   * Forwarded to the in-process loop so a refused tool call's `PolicyEvent` names its task.
+   */
+  goldenTaskId?:  string;
+  /**
    * `--allow-ungoverned`: let a writer role run on the cli tier — because its `execution` says
    * so, or because the adapter cannot run the in-process loop — instead of refusing it (D-01).
    */
@@ -1029,6 +1034,7 @@ export class RoleDispatcher {
         transcript: this.config.transcript,
         runId:     this.config.runId,
         taskId,
+        ...(this.config.goldenTaskId !== undefined ? { goldenTaskId: this.config.goldenTaskId } : {}),
         pipeline,
         // R2-L2: where the loop reports a surface record it could not write. Same channel as the
         // dispatcher's own warning and the ungoverned banner.

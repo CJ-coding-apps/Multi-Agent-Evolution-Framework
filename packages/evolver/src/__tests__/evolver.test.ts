@@ -14,6 +14,7 @@ import {
   assertChangeManifest, applyEdit, ManifestError,
   screenInstructionText, parsePlannerResponse,
   gateEvaluate, evolve,
+  digestEvidence, isEmptyDigest, buildPlannerUserPrompt,
 } from '../index.js';
 import type { EvolveOptions, HarnessEdit } from '../index.js';
 
@@ -729,6 +730,12 @@ const TWO_TASKS: GoldenSuiteResult['tasks'] = [
   { taskId: 't2', role: 'coder', passed: false, attempts: [] },
 ];
 
+/** A rejected candidate's run: the other task passes, the base's task fails. */
+const CANDIDATE_TASKS: GoldenSuiteResult['tasks'] = [
+  { taskId: 't1', role: 'coder', passed: false, attempts: [] },
+  { taskId: 't2', role: 'coder', passed: true, attempts: [] },
+];
+
 // Amendment item 1: the loop paid for its own baseline golden run and digested a graph it never
 // wrote to, so every round's planner prompt said `(no golden history)` and `no_op` was the only
 // answer a well-behaved planner could give. Six live rounds looked like a planner preference.
@@ -760,12 +767,14 @@ test('loop: its own baseline run is evidence for the next round (WP-3.7 amendmen
   assert.equal(golden.length, 1, 'and written through the recorder as evidence');
   assert.equal(prompts.length, 2);
 
-  assert.match(prompts[0]!, /\(no golden history\)/, 'round 1 has nothing before the baseline is run');
-  assert.match(prompts[1]!, /solved 1\/2/, 'round 2 plans from the score round 1 measured');
+  // L1: the digest is re-read after the baseline run in round 1, so the prompt it sends already
+  // carries the score. Round 1 used to plan blind from the empty digest it read before running.
+  assert.match(prompts[0]!, /solved 1\/2/, 'round 1 plans from the baseline it just measured');
+  assert.match(prompts[1]!, /solved 1\/2/, 'round 2 plans from the same evidence');
   assert.match(prompts[1]!, /; failed t2/, 'and names the task that failed');
   assert.match(prompts[1]!, new RegExp(CURRENT.sha), 'the row says which harness was scored');
 
-  assert.equal(report.rounds[0]?.note, 'no evidence to propose from');
+  assert.equal(report.rounds[0]?.note, 'planner returned no_op');
   assert.equal(report.rounds[1]?.note, 'planner returned no_op',
     'once evidence exists, no_op is the planner\'s answer, not the graph\'s emptiness');
 });
@@ -786,15 +795,19 @@ test('loop: an empty digest is said out loud, in the round and to the caller (WP
 });
 
 // The recorder is not best-effort: a loop whose evidence writes fail would keep proposing from a
-// graph it is not filling, which is the defect this amendment exists to close. It stops instead.
-test('loop: a failing evidence recorder stops the run rather than running blind', async () => {
-  await assert.rejects(
-    evolve(loopOpts({
-      maxRounds: 1,
-      recordGoldens: async () => { throw new Error('graph unavailable'); },
-    })),
-    /graph unavailable/,
-  );
+// graph it is not filling, which is the defect this amendment exists to close. It stops instead —
+// and (L2) the stop is a report the caller can write, not a bare recorder error.
+test('loop (L2): a failing evidence recorder stops with what was recorded and why', async () => {
+  const report = await evolve(loopOpts({
+    maxRounds: 3,
+    recordGoldens: async () => { throw new Error('graph unavailable'); },
+  }));
+  assert.equal(report.stopReason, 'record-failed');
+  assert.match(report.error ?? '', new RegExp(`could not record the golden result for h \\(${CURRENT.sha}\\)`));
+  assert.match(report.error ?? '', /rounds completed: 0/);
+  assert.match(report.error ?? '', /graph unavailable/);
+  assert.deepEqual(report.rounds, [], 'nothing was completed before the baseline could not be recorded');
+  assert.equal(report.ships, 0);
 });
 
 test('loop (L4): a graph recordRound failure does not abort the loop', async () => {
@@ -813,4 +826,117 @@ test('loop (L4): a graph recordRound failure does not abort the loop', async () 
   // The ship still happens; the record failure is swallowed into the round note.
   assert.equal(report.ships, 1);
   assert.match(report.rounds[0]?.note ?? '', /graph-record-failed/);
+});
+
+// ─── WP-3.7a round 2 ─────────────────────────────────────────────────────────
+
+/** A graph stub that answers only the PolicyEvent query, newest-first as the digester asks. */
+function policyGraph(rows: Array<{ label: string; properties: Record<string, unknown> }>) {
+  return {
+    run: async (query: GraphQuery) => query.cypher.includes('PolicyEvent')
+      ? rows.map((r) => ({
+        'n.label': r.label,
+        'n.properties': JSON.stringify(r.properties),
+        'n.run_id': 'run-1',
+      }))
+      : [],
+    addNode: async () => 'id',
+    addEdge: async () => 'e',
+  } as unknown as MemoryGraph;
+}
+
+const allowRow = (i: number) => ({ label: 'policy Allow fs.read', properties: { verdict: 'Allow', toolId: 'fs.read', taskId: `task-${i}` } });
+const denyRow = { label: 'policy Deny fs.write', properties: { verdict: 'Deny', toolId: 'fs.write', reason: 'secrets off-limits', ruleId: 'deny-env' } };
+
+// MED-2: an `Allow` per tool call (62 for two golden runs) filled the newest-first window the
+// digester reads, so the one Deny a proposal could act on never reached the planner. The digest
+// must read past the allows, and a graph that holds only allows carries no evidence at all.
+test('digester (MED-2): a denial older than 62 allows still reaches the planner prompt', async () => {
+  const rows = [...Array.from({ length: 62 }, (_, i) => allowRow(i)), denyRow];
+  const digest = await digestEvidence(policyGraph(rows));
+  assert.equal(digest.policyEvents.length, 1, 'the allow rows are not evidence');
+  assert.equal(digest.policyEvents[0]?.properties['verdict'], 'Deny');
+  const prompt = buildPlannerUserPrompt(digest, [], []);
+  assert.match(prompt, /"verdict": "Deny"/, 'the denial is in the prompt the planner reads');
+  assert.doesNotMatch(prompt, /"verdict": "Allow"/);
+});
+
+test('digester (MED-2): a project with only allows has no evidence to propose from', async () => {
+  const digest = await digestEvidence(policyGraph(Array.from({ length: 62 }, (_, i) => allowRow(i))));
+  assert.deepEqual(digest.policyEvents, []);
+  assert.equal(isEmptyDigest(digest), true, 'old allow rows must not resurrect an empty digest');
+});
+
+// MED-1, second layer: a graph written before the write-time mask (or by anything else) can hold a
+// raw refusal reason, and the digester's output goes into a model prompt.
+test('digester (MED-1): a raw reason from an older graph is masked on the way out, too', async () => {
+  const secretDir = 'ghp_Zq9Xr2LmN4pQ7sT1vW3yA5bC8dE0fG';
+  const raw = {
+    label: 'policy Deny fs.write',
+    properties: {
+      verdict: 'Deny', toolId: 'fs.write',
+      reason: `Path "../${secretDir}/creds.txt" is outside the project root "/sessions/me/repo": `
+        + `it resolves to "/sessions/${secretDir}/creds.txt"`,
+    },
+  };
+  const digest = await digestEvidence(policyGraph([raw]));
+  const stored = String(digest.policyEvents[0]?.properties['reason']);
+  assert.doesNotMatch(stored, /ghp_/);
+  assert.match(stored, /\[REDACTED:github-pat\]/);
+  assert.doesNotMatch(stored, /\/sessions\//, 'no absolute path survives the digest');
+
+  const prompt = buildPlannerUserPrompt(digest, [], []);
+  assert.doesNotMatch(prompt, new RegExp(secretDir));
+  assert.doesNotMatch(prompt, /\/sessions\//);
+});
+
+// MED-3: after a rejected candidate the prompt named the candidate as the harness in force. The
+// loop knows its own base; it must say that, and list the rejected rows under their own heading.
+test('loop (MED-3): the prompt names the harness in force and lists rejected candidates apart', async () => {
+  const { graph, golden } = evidenceGraph();
+  const prompts: string[] = [];
+  let plannerCalls = 0;
+  const report = await evolve(loopOpts({
+    graph,
+    maxRounds: 2,
+    patience: 5,
+    recordGoldens: (result) => new ScoreRecorder(graph, makeRunId('evolve-med3')).record(result),
+    metaGenerate: async (system: string, user: string): Promise<string> => {
+      if (system.includes('critic')) return '```json\n{"verdict":"ship","notes":"ok"}\n```';
+      prompts.push(user);
+      return plannerCalls++ === 0
+        ? manifestJson({ kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough', rationale: 'r' }, ['t2'])
+        : '```json\n{"no_op":true}\n```';
+    },
+    runGoldens: async (h) => {
+      // The base solves t1; the candidate trades t1 for t2 — a rejection whose failed set differs.
+      const isBase = h.sha === CURRENT.sha;
+      return {
+        harnessSha: h.sha, harnessId: h.id,
+        tasks: isBase ? TWO_TASKS : CANDIDATE_TASKS,
+        solvedTaskIds: isBase ? ['t1'] : ['t2'], ranAt: 't0',
+      };
+    },
+  }));
+
+  assert.equal(report.rounds[0]?.outcome, 'reject', 'the candidate regressed and was rejected');
+  const candidateSha = report.rounds[0]?.manifest
+    ? applyEdit(CURRENT, report.rounds[0].manifest.edit, 'base-r1').sha
+    : '';
+  assert.ok(candidateSha, 'the round kept its manifest');
+
+  const currentLine = prompts[1]!.split('\n').find((l) => l.startsWith('Current harness: '));
+  assert.ok(currentLine?.includes(`base (${CURRENT.sha})`), `names the base: ${currentLine ?? '(none)'}`);
+  assert.ok(currentLine?.includes('solved 1/2'), 'with the score it measured');
+  assert.ok(!currentLine?.includes('base-r1'), 'not the candidate it rejected');
+
+  assert.match(prompts[1]!, new RegExp(`rejected candidate base-r1 \\(${candidateSha}\\): solved 1/2; failed t1`),
+    'the rejected row is listed separately, with its own score');
+
+  // M3/M5: both runs are evidence, and the candidate's row is under the candidate's sha.
+  const shas = golden.map((g) => String(g['harness_sha']));
+  assert.equal(shas.length, 2, 'the baseline and the candidate were both recorded');
+  assert.ok(shas.includes(CURRENT.sha));
+  assert.ok(shas.includes(candidateSha), 'M5: not recorded under the base sha');
+  assert.notEqual(CURRENT.sha, candidateSha);
 });

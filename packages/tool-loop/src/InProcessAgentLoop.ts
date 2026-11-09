@@ -52,6 +52,11 @@ export interface InProcessLoopDeps {
   approvalGate?: ApprovalGateHandle | undefined;
   /** Where a failure to write the surface record is reported; `process.stderr` when unset. */
   stderr?: { write(text: string): unknown };
+  /**
+   * The golden-corpus task this dispatch evaluates, when a golden runner started it (WP-3.7a L5).
+   * Carried on every tool call's context so a refusal's `PolicyEvent` names the task it belongs to.
+   */
+  goldenTaskId?: string;
 }
 
 export interface InProcessLoopResult {
@@ -403,6 +408,7 @@ export class InProcessAgentLoop {
         agentRole: this.opts.role,
         policy: this.deps.policy,
         attestor: this.deps.attestor,
+        ...(this.deps.goldenTaskId !== undefined ? { goldenTaskId: this.deps.goldenTaskId } : {}),
       };
       result = await executeToolGated(tool, processed.input, ctx, this.deps);
     } catch (err) {

@@ -9,7 +9,7 @@ import type { ChangeManifest } from './edits.js';
 import {
   PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, parsePlannerResponse,
 } from './planner.js';
-import type { MetaGenerate, RoleCatalogEntry } from './planner.js';
+import type { CurrentHarnessStatus, MetaGenerate, RoleCatalogEntry } from './planner.js';
 import { gateEvaluate, gateStatic } from './gate.js';
 import type { GateDecision, GateVeto } from './gate.js';
 
@@ -96,7 +96,14 @@ export interface EvolveReport {
   rounds: EvolveRoundRecord[];
   finalHarness: HarnessConfig;
   ships: number;
-  stopReason: 'budget' | 'patience';
+  /**
+   * `record-failed` is a stop the caller must report (WP-3.7a L2): a golden run was paid for and
+   * its result could not be written as evidence. The report still carries every round up to that
+   * point; `error` says what could not be recorded and how many rounds completed.
+   */
+  stopReason: 'budget' | 'patience' | 'record-failed';
+  /** Present exactly when `stopReason` is `record-failed`. */
+  error?: string;
 }
 
 const CRITIC_SYSTEM_PROMPT = `You are the MAF harness evolution critic. Compare the change manifest against the
@@ -144,6 +151,45 @@ function baselineFromHistory(history: Digest['goldenHistory'], harness: HarnessC
   };
 }
 
+/** What the planner is told about the harness in force (MED-3): the base, never a candidate. */
+function currentStatus(
+  digest: Digest, base: HarnessConfig, baseline: GoldenSuiteResult | undefined,
+): CurrentHarnessStatus {
+  const row = digest.goldenHistory.find((h) => h.harnessSha === base.sha);
+  if (row !== undefined) {
+    return { id: base.id, sha: base.sha, solved: row.solved, total: row.total, failed: row.failed };
+  }
+  if (baseline !== undefined) {
+    return {
+      id: base.id, sha: base.sha,
+      solved: baseline.solvedTaskIds,
+      total: baseline.tasks.length,
+      // A baseline rebuilt from history carries no per-task rows; only a run this loop paid for has
+      // them, and then this is the same list the digest row would have carried.
+      failed: baseline.tasks.filter((t) => !t.passed).map((t) => t.taskId),
+    };
+  }
+  return { id: base.id, sha: base.sha, solved: [], total: 0, failed: [] };
+}
+
+/**
+ * A golden run this loop paid for whose result could not be written as evidence. It stops the run
+ * (continuing would evolve from a graph the loop is not filling) and carries the sentence the CLI
+ * prints and the report keeps.
+ */
+class RecordFailedError extends Error {}
+
+/**
+ * The partial report a `RecordFailedError` produces, or undefined for any other error (which keeps
+ * propagating). Every round already paid for is in `rounds`; the harness in force is `base`.
+ */
+function recordFailureReport(
+  err: unknown, rounds: EvolveRoundRecord[], base: HarnessConfig, ships: number,
+): EvolveReport | undefined {
+  if (!(err instanceof RecordFailedError)) return undefined;
+  return { rounds, finalHarness: base, ships, stopReason: 'record-failed', error: err.message };
+}
+
 const CRASH_OK = (e: unknown): e is Error => e instanceof Error;
 
 /** The safety-adjacent role an edit targets, or undefined when it targets none (or no role). */
@@ -177,7 +223,19 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   // the alternative is a loop that keeps proposing from an empty graph and calling that no_op.
   const evaluate = async (harness: HarnessConfig): Promise<GoldenSuiteResult> => {
     const result = await opts.runGoldens(harness);
-    if (opts.recordGoldens) await opts.recordGoldens(result);
+    if (opts.recordGoldens) {
+      try {
+        await opts.recordGoldens(result);
+      } catch (err) {
+        // L2: the run was paid for. Say which result was lost, how much of the evolution is still
+        // in the report, and why — rather than a bare graph error from inside a recorder.
+        throw new RecordFailedError(
+          `could not record the golden result for ${result.harnessId} (${result.harnessSha})`
+          + `; rounds completed: ${rounds.length}`
+          + `; ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     return result;
   };
 
@@ -222,16 +280,28 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     };
 
     // ── 1. Digester ──
-    const digest = await digestEvidence(opts.graph);
+    let digest = await digestEvidence(opts.graph);
     if (round === 0) baseline = baselineFromHistory(digest.goldenHistory, base);
-    if (!baseline) baseline = await evaluate(base);
+    if (!baseline) {
+      try {
+        baseline = await evaluate(base);
+      } catch (err) {
+        const stopped = recordFailureReport(err, rounds, base, ships);
+        if (stopped !== undefined) return stopped;
+        throw err;
+      }
+      // L1: the baseline was just paid for, so it is evidence for THIS round's planner. Without
+      // this, round 1 planned from the empty digest it read before running and burned a tick.
+      digest = await digestEvidence(opts.graph);
+    }
+    const current = currentStatus(digest, base, baseline);
 
     // ── 2. Planner ──
     let manifest: ChangeManifest | undefined;
     try {
       const response = await opts.metaGenerate(
         PLANNER_SYSTEM_PROMPT,
-        buildPlannerUserPrompt(digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])]),
+        buildPlannerUserPrompt(digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])], current),
       );
       manifest = parsePlannerResponse(response);
     } catch (err) {
@@ -298,7 +368,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     if (critic.verdict === 'revise') {
       const revised = await opts.metaGenerate(
         PLANNER_SYSTEM_PROMPT,
-        buildPlannerUserPrompt(digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])])
+        buildPlannerUserPrompt(digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])], current)
           + `\n\nCritic revision request: ${critic.notes}\nPrevious manifest: ${JSON.stringify(manifest)}`,
       );
       try {
@@ -357,7 +427,14 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     }
 
     // ── 6. Gate (mandatory, deterministic) ──
-    const candidateScores = await evaluate(finalCandidate);
+    let candidateScores: GoldenSuiteResult;
+    try {
+      candidateScores = await evaluate(finalCandidate);
+    } catch (err) {
+      const stopped = recordFailureReport(err, rounds, base, ships);
+      if (stopped !== undefined) return stopped;
+      throw err;
+    }
     const gate = gateEvaluate({
       manifest: finalManifest, candidate: finalCandidate, current: base,
       currentScores: baseline, candidateScores,

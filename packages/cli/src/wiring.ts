@@ -243,7 +243,12 @@ export interface RunStack {
    * built here, and a caller that reaches into two fields to pair them can pair them wrongly.
    */
   recordPolicyInForce(): void;
-  dispatchTask(harness: HarnessConfig, role: string, prompt: string, workDir: string, timeoutMs: number, temperature?: number): Promise<string>;
+  /**
+   * `goldenTaskId` is the golden-corpus task id when a golden runner is dispatching (WP-3.7a L5).
+   * It is not the node's task id — that is unique per attempt — and it is what a refusal's
+   * `PolicyEvent` carries so the evidence joins the score of the task it belongs to.
+   */
+  dispatchTask(harness: HarnessConfig, role: string, prompt: string, workDir: string, timeoutMs: number, temperature?: number, goldenTaskId?: string): Promise<string>;
   /** Resolves once the graph's files are released; a caller may remove `mafDir` after awaiting it. */
   close(): Promise<void>;
 }
@@ -314,7 +319,7 @@ export async function buildRunStack(cfg: {
       securityPrompt: SECURITY_REVIEW_FALLBACK_PROMPT,
       rolesFor: (harness) => RoleRegistry.fromSet(roleSetFromHarness(harness.roleSet), cfg.mafDir, baseTools),
       recordPolicyInForce: () => attestor.recordPolicyInForce(policy.inForce()),
-      async dispatchTask(harness, role, prompt, workDir, timeoutMs, temperature) {
+      async dispatchTask(harness, role, prompt, workDir, timeoutMs, temperature, goldenTaskId) {
         const taskId = makeTaskId(crypto.randomUUID());
         const roles = stack.rolesFor(harness);
         // `role` arrives as a corpus string, and this is the only place it can be checked against
@@ -350,6 +355,7 @@ export async function buildRunStack(cfg: {
           ...(cfg.allowUngoverned === true ? { allowUngoverned: true } : {}),
           ...(cfg.model ? { modelOverride: cfg.model } : {}),
           ...(temperature !== undefined ? { temperature } : {}),
+          ...(goldenTaskId !== undefined ? { goldenTaskId } : {}),
         });
         const node: DagNode = {
           id: makeNodeId(`task-${taskId}`), label: prompt, agentRole: resolvedRole.value,
