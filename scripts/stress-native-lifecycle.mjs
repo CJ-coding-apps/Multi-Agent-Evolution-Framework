@@ -54,11 +54,17 @@ async function collect() {
   for (let i = 0; i < 50; i++) readdirSync(tmpdir());
 }
 
-/** What a fresh clone gives goldens: the committed policy, default harness and corpus — no state. */
+/**
+ * What a fresh clone gives goldens: the committed roles, prompts, policy, default harness and
+ * corpus — no state. LOW-R2-2 (WP-3.15 round 3): with no CURRENT, `goldens` dispatches the roles
+ * file, so this clone must carry the file a real clone has, or it would measure the built-in set.
+ */
 async function freshClone() {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-stress-'));
   await mkdir(path.join(root, '.maf/harnesses'), { recursive: true });
-  await cp(path.join(ROOT, '.maf/policy.yaml'), path.join(root, '.maf/policy.yaml'));
+  for (const entry of ['roles.yaml', 'policy.yaml', 'prompts']) {
+    await cp(path.join(ROOT, '.maf', entry), path.join(root, '.maf', entry), { recursive: true });
+  }
   const names = (await readdir(path.join(ROOT, '.maf/harnesses'))).filter((n) => /^default-[0-9a-f]{64}\.json$/.test(n));
   assert.equal(names.length, 1, 'expected exactly one committed default harness');
   await cp(path.join(ROOT, '.maf/harnesses', names[0]), path.join(root, '.maf/harnesses', names[0]));

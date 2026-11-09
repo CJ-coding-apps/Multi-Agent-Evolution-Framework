@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
-import { makeAgentId, makeNodeId, makeTaskId } from '@maf/types';
+import { canonicalJson, makeAgentId, makeNodeId, makeTaskId } from '@maf/types';
 import type { DagNode, CliAdapter, GraphQueryRunner, RunId } from '@maf/types';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine, createAdapterSummarizer, createAdapterSubAgent } from '@maf/lcm';
@@ -18,7 +18,7 @@ import { createDefaultRegistry } from '@maf/tools';
 import type { ToolRegistry } from '@maf/tools';
 import { RoleDispatcher, RoleRegistry, harnessRoleSetFromRegistry, roleSetFromHarness } from '@maf/roles';
 import { LEGACY_DEFAULT_ID, assertPromptsCarried, resolveHarnessRef, shortSha } from '@maf/harness-config';
-import type { HarnessConfig, HarnessStore, ResolvedHarness } from '@maf/harness-config';
+import type { HarnessConfig, HarnessRoleSet, HarnessStore, ResolvedHarness } from '@maf/harness-config';
 import type { TaskDispatcher } from '@maf/eval-harness';
 import { importHarness, locateStoredHarness } from './commands/harness.js';
 import { goldensAssetRoot, readAsset } from './assets.js';
@@ -433,6 +433,45 @@ export async function resolveRunHarness(o: RunHarnessOptions): Promise<ResolvedH
   const { harness, source, persist } = await planRunHarness(o);
   await persist();
   return { harness, source };
+}
+
+/** A harness's role set as content, for "is this the same set?" — provenance paths are not content. */
+function roleSetContent(roleSet: HarnessRoleSet): string {
+  return canonicalJson({
+    ...roleSet,
+    roles: roleSet.roles.map(({ promptFile: _promptFile, ...role }) => role),
+  });
+}
+
+export interface HarnessDriftOptions extends RunHarnessOptions {
+  /** What {@link planRunHarness} resolved, so the comparison only runs for an operator-pinned CURRENT. */
+  harness: HarnessConfig;
+  source:  ResolvedHarness['source'];
+}
+
+/**
+ * HIGH-1(d): after `maf harness set-current`, plain runs use the pinned harness. The roles file
+ * keeps moving, so a pinned CURRENT and an edited file silently disagree — the trap HIGH-1 found in
+ * `init`, one step later. This returns the one line a run prints when they differ, naming both and
+ * the command that hands dispatch back; undefined when they agree, or when dispatch never consulted
+ * CURRENT (a `--harness` ref, or the roles file itself, is not in disagreement with the file).
+ *
+ * The comparison mints the roles-file harness in memory, as `harness show current` does, and compares
+ * role sets without `promptFile`: the built-in set and the committed default carry the text and no
+ * path (D-08), while a set read from the file carries both.
+ */
+export async function harnessDriftNotice(o: HarnessDriftOptions): Promise<string | undefined> {
+  if (o.source !== 'current') return undefined;
+  const fromFile = o.store.mint(
+    await harnessRoleSetFromRegistry(
+      await RoleRegistry.fromYamlOrDefault(o.rolesPath, o.mafDir, o.baseTools)),
+    LEGACY_DEFAULT_ID,
+  );
+  if (roleSetContent(fromFile.roleSet) === roleSetContent(o.harness.roleSet)) return undefined;
+  const shown = path.relative(path.dirname(o.mafDir), o.rolesPath) || o.rolesPath;
+  return `[maf] ${shown} differs from CURRENT: plain runs use ${JSON.stringify(o.harness.id)} ` +
+    `(${shortSha(o.harness.sha)}), the file would mint ${JSON.stringify(fromFile.id)} ` +
+    `(${shortSha(fromFile.sha)}). Run \`maf harness set-current ${LEGACY_DEFAULT_ID}\` to dispatch from the file again.`;
 }
 
 /**

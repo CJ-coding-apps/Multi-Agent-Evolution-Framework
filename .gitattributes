@@ -2,3 +2,11 @@
 # these files, so a line-ending conversion would change what a fresh clone measures.
 tests/goldens/** -text
 .maf/harnesses/*.json -text
+packages/cli/assets/goldens/** -text
+packages/cli/assets/harnesses/*.json -text
+# D-61 hashes the role set, prompts included: the built-in module is generated from these bytes and
+# the committed harness is minted from them, so CRLF on checkout would change a fresh clone's sha.
+.maf/roles.yaml -text
+.maf/prompts/** -text
+packages/cli/assets/roles.yaml -text
+packages/cli/assets/prompts/** -text

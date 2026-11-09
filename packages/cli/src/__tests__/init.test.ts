@@ -5,10 +5,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
 import { runIsolatedGit } from '@maf/git-ops';
+import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import { MAF_DIR_GITIGNORE } from '../ensureMafDir.js';
 import { initFiles, runInit, registerInitCommand } from '../commands/init.js';
 import type { InitDeps } from '../commands/init.js';
-import { readAsset } from '../assets.js';
+import { loadHarnessFile } from '../commands/harness.js';
+import { assetPath, readAsset } from '../assets.js';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { collector } from './runFixture.js';
 
@@ -88,6 +90,66 @@ test('a fresh repository gets every shipped .maf file, byte-identical to the pac
     assert.match(run.out, /^Next steps:$/m);
     assert.ok(run.out.includes('export MAF_SIGNING_KEY="$(openssl rand -hex 32)"'), run.out);
     assert.match(run.out, /^\s+maf run /m, 'and the command that does the work');
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+// ORACLE (S6, corrected by HIGH-1 of its verification). S6 asked `harness show current` to tell the
+// truth; pointing CURRENT at the default `init` installed made the truth a harness the operator never
+// chose, and silently stopped the `roles.yaml` edit `init` had just reported keeping from applying.
+// A fresh init therefore records no harness at all: a plain run dispatches the roles file, and only
+// `maf harness set-current` pins one.
+
+test('S6 (HIGH-1): a fresh init records no CURRENT — a plain run dispatches .maf/roles.yaml', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-current-'));
+  try {
+    const repo = await createDemoFixture(root);
+    const run = await driveInit(['--dir', repo]);
+    assert.equal(run.error, undefined, run.out);
+
+    const store = new HarnessStore(path.join(repo, '.maf'));
+    assert.equal(await store.current(), undefined, 'init does not choose a harness');
+    assert.ok(
+      await absent(path.join(store.dir, 'CURRENT')),
+      'no CURRENT file is written',
+    );
+    assert.deepEqual(
+      (await readdir(store.dir)).filter((name) => /^[0-9a-f]{64}\.yaml$/.test(name)),
+      [],
+      'init imports nothing into the store either; the committed default-<sha>.json is read in place',
+    );
+    assert.ok(run.out.includes('A plain run uses .maf/roles.yaml as you edit it'), run.out);
+    assert.ok(run.out.includes('maf harness set-current <id|sha>'), `and how to pin one: ${run.out}`);
+    assert.ok(run.out.includes('maf harness set-current legacy-default'), `and how to hand it back: ${run.out}`);
+    assert.doesNotMatch(run.out, /CURRENT →/, run.out);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('S6 (HIGH-1): a re-run of init never redirects dispatch — a pinned CURRENT stays, and none is created', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-init-current-keep-'));
+  try {
+    const repo = await createDemoFixture(root);
+    await runInit({ dir: repo, out: collector() });
+
+    const store = new HarnessStore(path.join(repo, '.maf'));
+    const again = await driveInit(['--dir', repo, '--force']);
+    assert.equal(again.error, undefined, again.out);
+    assert.equal(await store.current(), undefined, 'a second init creates no CURRENT either');
+
+    // A harness the operator chose: the shipped default's content under their own id.
+    const installed = (await shipped()).find((f) => /^harnesses\/default-[0-9a-f]{64}\.json$/.test(f)) as string;
+    const shippedCfg = await loadHarnessFile(assetPath(installed));
+    const mine = mintHarnessConfig({ id: 'mine', roleSet: shippedCfg.roleSet, processorBundles: [] });
+    await store.save(mine);
+    await store.setCurrent(mine.sha);
+
+    const forced = await driveInit(['--dir', repo, '--force']);
+    assert.equal(forced.error, undefined, forced.out);
+    assert.equal((await store.current())?.sha, mine.sha, 'CURRENT is the operator\'s, and --force does not re-point it');
+    assert.doesNotMatch(forced.out, /CURRENT →/, `init says nothing about CURRENT when it keeps it: ${forced.out}`);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

@@ -53,9 +53,10 @@ test('the default set has five roles, and analyst is the read-only one (D-43)', 
 });
 
 test("analyst's prompt carries the same closing line the other two readers carry (F7)", () => {
+  // The shipped sentence, which names the `unexpected_change` failure the guard actually produces.
   const closing =
-    "No writes — you hold no write tool, and a change you make to the tree fails this node, its " +
-    "diff recorded in the run's attestation.";
+    "No writes — you hold no write tool, and a change you make to the tree fails this node with an " +
+    "`unexpected_change`, its diff recorded in the run's attestation.";
   for (const name of ['security', 'reviewer', 'analyst']) {
     assert.ok(builtin(name).systemPrompt?.includes(closing), `${name}'s prompt carries the F7 line`);
   }
