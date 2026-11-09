@@ -382,6 +382,6 @@ The G10 timeout above did not reproduce on Linux; no test failed there.
 
 1. **`git log` history of the default harness**: the old `default-0f4a05eb….json` stays in history,
    as every earlier snapshot does; nothing in the repository references it.
-2. **The goldens baseline's `ranAt` moves with the re-mint.** It is ignored by every consumer
-   (`compare-goldens.mjs`, the offline-baseline tests) but appears in the diff; the next WP to
-   regenerate the baseline will move it again.
+2. **The goldens baseline's `ranAt` moves with each regeneration.** It is ignored by every consumer
+   (`compare-goldens.mjs`, the offline-baseline tests) but appears in the diff; it moved with the
+   re-mint and again with round 3's baseline move, and the next WP to regenerate will move it again.
