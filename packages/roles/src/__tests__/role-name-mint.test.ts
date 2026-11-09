@@ -27,6 +27,10 @@ const ROLE_SET_AUTHORS = new Set([
   MINT_DEFINITION,
   'packages/roles/src/RoleRegistry.ts',
   'packages/roles/src/defaults.ts',
+  // WP-3.15: the built-in set is generated from the shipped `roles.yaml` (D-61) and is the same
+  // kind of author as the hand-written `defaults.ts` it replaced. It is generated code, not a
+  // place a name is invented: every name it mints is one the file declared.
+  'packages/roles/src/defaultRoleSet.generated.ts',
   'packages/roles/src/harnessBridge.ts',
   'packages/roles/src/index.ts',
 ]);

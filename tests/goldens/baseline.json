@@ -1,6 +1,6 @@
 {
-  "harnessSha": "0f4a05eb939e5a2670dd0a6a54d2641e642c408d3bfd64e56994a6258d38d7f5",
-  "harnessId": "default",
+  "harnessSha": "3124b5a9d019624e7e6e6a5d9983244a442eeeb15050f2867c66fd806b618379",
+  "harnessId": "legacy-default",
   "corpusSha": "912f22db4579af646a7362769982892fec5174fd3aa323744fa8b767647989d3",
   "attempts": 2,
   "adapter": "scripted",
@@ -388,5 +388,5 @@
     "coder-clamp",
     "coder-isodd"
   ],
-  "ranAt": "2026-10-14T15:42:09.801Z"
+  "ranAt": "2026-11-09T02:04:43.113Z"
 }

@@ -215,9 +215,10 @@ test('spelling out the default path by hand is a typed path, so a missing .maf/p
   }
 });
 
-// ORACLE (F2). With no `roles.yaml`, `run` uses the built-in role set, which is not the one `init`
-// writes. The docs said otherwise; the run now says which set it used, in one line, only when that
-// is the set it used.
+// ORACLE (F2). With no `roles.yaml`, `run` uses the built-in role set. Since D-61 that is the same
+// set `init` writes — generated from the shipped files — so the line names it as such rather than
+// warning that the two differ. It is still printed only when the file is absent, which is when an
+// operator's edit to it is not taking effect.
 
 test('with no .maf/roles.yaml, run says it fell back to the built-in role set', needsLcm, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-f2-roles-line-'));
@@ -227,7 +228,7 @@ test('with no .maf/roles.yaml, run says it fell back to the built-in role set', 
       prompt: TASK, steps: [{ tool: 'fs.write', input: { path: 'sum.js', content: FIXED_SUM } }], final: 'Fixed.',
     }]), []);
     assert.equal(run.error, undefined, `${run.out}\n${run.err}`);
-    assert.match(run.out, /\[maf\] roles: no \.maf\/roles\.yaml — using the built-in role set \(maf init writes the shipped one\)/);
+    assert.match(run.out, /\[maf\] roles: no \.maf\/roles\.yaml — using the built-in role set \(the same one maf init writes\)/);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

@@ -65,18 +65,18 @@ test('the shipped .maf/roles.yaml grants lcm.expand to every role too (F8)', asy
   }
 });
 
-test('a prompt\'s "Tools available" line names exactly what its role may call (R13)', () => {
+test('a prompt\'s "You may use" line names exactly what its role may call (R13)', () => {
   // The prompt is what the model reads; `allowedTools` is what it may actually call. A prompt that
-  // omits a tool teaches the model it cannot do what it can — the reviewer's line omitted
-  // `lcm.expand` while its catalogue carried it — and one that names a tool it lacks teaches a call
-  // that is refused. Compare the two, for every role whose prompt carries the line.
-  const withLine = DEFAULT_ROLE_SET.roles.filter((r) => /Tools available:/.test(r.systemPrompt ?? ''));
+  // omits a tool teaches the model it cannot do what it can — the readers' lines omitted
+  // `lcm.expand` while their catalogues carried it — and one that names a tool it lacks teaches a
+  // call that is refused. Compare the two, for every role whose prompt carries the line.
+  const withLine = DEFAULT_ROLE_SET.roles.filter((r) => /You may use:/.test(r.systemPrompt ?? ''));
   assert.ok(withLine.length >= 3, 'the read-only prompts are here to check');
   for (const role of withLine) {
-    // The list ends at the first dot followed by whitespace — not at the dot in `fs.read`.
-    const line = /Tools available: ([^\n]+?)\.\s/.exec(role.systemPrompt ?? '')?.[1];
-    assert.ok(line, `role "${role.role}" has a malformed Tools-available line`);
-    const named = line.split(',').map((s) => s.trim()).sort();
+    // The list ends at the first dot followed by whitespace — not at the dots in `fs.read`/`git.log`.
+    const line = /You may use: ([^\n]+?)\.\s/.exec(role.systemPrompt ?? '')?.[1];
+    assert.ok(line, `role "${role.role}" has a malformed You-may-use line`);
+    const named = line.split(',').map((s) => s.trim().replace(/^`|`$/g, '')).sort();
     const allowed = role.allowedTools.map((id) => String(id)).sort();
     assert.deepEqual(
       named, allowed,

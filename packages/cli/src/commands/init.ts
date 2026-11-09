@@ -13,8 +13,16 @@ import { ensureMafDir } from '../ensureMafDir.js';
  * The files come from the package's own `assets/`, byte for byte as this repository's `.maf/` holds
  * them; the drift test beside `assets.ts` keeps the two the same. That is a statement about the
  * bytes, not about what a run uses when a file is absent: only the policy falls back to the shipped
- * file (D-49). With no `roles.yaml`, `run` uses its built-in role set, which is not the shipped
- * one (F2).
+ * file (D-49). With no `roles.yaml`, `run` uses its built-in role set, which since D-61 *is* the
+ * shipped one — `scripts/generate-default-roles.mjs` generates it from these files.
+ *
+ * S6 (WP-3.15, corrected after HIGH-1 of its verification): `init` does not record a harness. A
+ * plain run dispatches from `.maf/roles.yaml` as the operator edits it (or from the built-in set
+ * when the file is absent), and `maf harness show current` says so; only `maf harness set-current`
+ * pins one. An earlier revision pointed CURRENT at the default `init` installed, which silently
+ * replaced the file it had just written or kept — a narrowed tool allowlist stopped applying two
+ * lines below "kept .maf/roles.yaml". Recording a harness is a choice about dispatch, and `init`
+ * is not where the operator makes it.
  */
 
 /** The files `init` copies, relative to `.maf/`. Prompts and harnesses are whatever the package ships. */
@@ -24,8 +32,10 @@ export async function initFiles(): Promise<string[]> {
     .filter((entry) => entry.isFile())
     .map((entry) => path.join('prompts', entry.name))
     .sort();
-  // The default harness, so a repository that ran `init` carries the same one the package falls
-  // back to (F1). Filtered by shape: `.maf/.gitignore` whitelists exactly `default-<sha>.json`.
+  // The default harness, so a repository that ran `init` carries a copy of the one the package
+  // ships and `--harness default` names (F1). Since LOW-R2-2 `goldens` reads the roles file, not
+  // this file, but the copy is still what makes that ref resolvable on a fresh project.
+  // Filtered by shape: `.maf/.gitignore` whitelists exactly `default-<sha>.json`.
   const harnessDir = assetPath('harnesses');
   const harnesses = (await readdir(harnessDir, { withFileTypes: true }).catch(() => []))
     .filter((entry) => entry.isFile() && /^default-[0-9a-f]{64}\.json$/.test(entry.name))
@@ -95,7 +105,10 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
   out.write(
     'Next steps:\n' +
     '  export MAF_SIGNING_KEY="$(openssl rand -hex 32)"\n' +
-    '  maf run "…"\n',
+    '  maf run "…"\n' +
+    '\nA plain run uses .maf/roles.yaml as you edit it (the built-in set when the file is absent).\n' +
+    'To pin a harness instead, run `maf harness set-current <id|sha>`; every run then says when\n' +
+    'roles.yaml differs from it, and `maf harness set-current legacy-default` hands it back.\n',
   );
   return result;
 }
