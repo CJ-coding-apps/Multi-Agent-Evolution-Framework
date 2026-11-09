@@ -72,16 +72,34 @@ function scoreLine(row: { solved: readonly string[]; total: number; failed: read
 }
 
 /**
+ * What an earlier golden row is, as far as this loop knows (WP-3.7a R2-L1). The loop labels the
+ * rows it caused; anything else — a `goldens run` of another harness, a row from an earlier
+ * session — is an earlier result and is not claimed to have been rejected or shipped by anyone.
+ */
+export type HistoryLabel = 'rejected' | 'shipped' | 'needs approval' | 'previous base' | 'earlier result';
+
+const LABEL_TEXT: Record<HistoryLabel, string> = {
+  rejected: 'rejected candidate',
+  shipped: 'shipped candidate',
+  'needs approval': 'needs-approval candidate',
+  'previous base': 'previous base',
+  'earlier result': 'earlier result',
+};
+
+/**
  * The planner's user prompt: the digest, then one line naming the harness actually in force, then
- * the runs it is not using, each named a rejected candidate with its own score. `current` is what
- * the loop is evolving; when a caller does not know it (an embedder, a test), the newest row is
- * named as before.
+ * the runs it is not using — each under the label the loop knows for it, with its own score.
+ *
+ * `current` is what the loop is evolving; when a caller does not know it (an embedder, a test), the
+ * newest row is named as before. `labels` is keyed by harness sha and says what each non-current
+ * row is; a row with no label is an `earlier result` — never "rejected" by default.
  */
 export function buildPlannerUserPrompt(
   evidence: Digest,
   catalog: RoleCatalogEntry[],
   processorNames: string[],
   current?: CurrentHarnessStatus,
+  labels?: ReadonlyMap<string, HistoryLabel>,
 ): string {
   const rows = evidence.goldenHistory;
   const currentLine = current === undefined
@@ -89,9 +107,12 @@ export function buildPlannerUserPrompt(
       ? `${rows[0].harnessId} (${rows[0].harnessSha}): ${scoreLine(rows[0])}`
       : '(no golden history)')
     : `${current.id} (${current.sha}): ${current.total > 0 ? scoreLine(current) : 'not scored yet'}`;
-  const rejected = rows.filter((row) => current === undefined ? row !== rows[0] : row.harnessSha !== current.sha);
-  const rejectedLines = rejected.length > 0
-    ? rejected.map((row) => `- rejected candidate ${row.harnessId} (${row.harnessSha}): ${scoreLine(row)}`)
+  const earlier = rows.filter((row) => current === undefined ? row !== rows[0] : row.harnessSha !== current.sha);
+  const earlierLines = earlier.length > 0
+    ? earlier.map((row) => {
+      const label = LABEL_TEXT[labels?.get(row.harnessSha) ?? 'earlier result'];
+      return `- ${label} ${row.harnessId} (${row.harnessSha}): ${scoreLine(row)}`;
+    })
     : ['- (none)'];
   return [
     '## Evidence digest',
@@ -99,8 +120,8 @@ export function buildPlannerUserPrompt(
     '',
     `Current harness: ${currentLine}`,
     '',
-    '## Rejected candidates',
-    ...rejectedLines,
+    '## Earlier results',
+    ...earlierLines,
     '',
     '## Role catalog',
     JSON.stringify(catalog, null, 2),

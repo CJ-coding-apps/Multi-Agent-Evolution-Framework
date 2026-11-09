@@ -9,7 +9,7 @@ import type { ChangeManifest } from './edits.js';
 import {
   PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, parsePlannerResponse,
 } from './planner.js';
-import type { CurrentHarnessStatus, MetaGenerate, RoleCatalogEntry } from './planner.js';
+import type { CurrentHarnessStatus, HistoryLabel, MetaGenerate, RoleCatalogEntry } from './planner.js';
 import { gateEvaluate, gateStatic } from './gate.js';
 import type { GateDecision, GateVeto } from './gate.js';
 
@@ -217,6 +217,9 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   let stopReason: EvolveReport['stopReason'] = 'budget';
 
   let baseline: GoldenSuiteResult | undefined;
+  // What each golden row this loop caused actually is (R2-L1). Rows with no entry are another
+  // session's or another harness's; the prompt calls them `earlier result`, never "rejected".
+  const historyLabels = new Map<string, HistoryLabel>();
 
   // Every golden run the loop pays for is evidence for the rounds after it (WP-3.7 amendment 1).
   // Recording before returning means the next digest reads it; a throw is not swallowed, because
@@ -301,7 +304,9 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     try {
       const response = await opts.metaGenerate(
         PLANNER_SYSTEM_PROMPT,
-        buildPlannerUserPrompt(digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])], current),
+        buildPlannerUserPrompt(
+          digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])], current, historyLabels,
+        ),
       );
       manifest = parsePlannerResponse(response);
     } catch (err) {
@@ -368,7 +373,9 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     if (critic.verdict === 'revise') {
       const revised = await opts.metaGenerate(
         PLANNER_SYSTEM_PROMPT,
-        buildPlannerUserPrompt(digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])], current)
+        buildPlannerUserPrompt(
+          digest, opts.roleCatalog, [...(opts.knownProcessorNames ?? [])], current, historyLabels,
+        )
           + `\n\nCritic revision request: ${critic.notes}\nPrevious manifest: ${JSON.stringify(manifest)}`,
       );
       try {
@@ -476,11 +483,19 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       ships++;
       await opts.onShip(finalCandidate, gate.improvements);
       await record(rec({ manifest: finalManifest, gate, outcome: 'ship', note: `improves ${gate.improvements.join(', ')}` }));
+      // R2-L1: the harness that was in force is now a previous base, not a rejected candidate; the
+      // one that replaced it was shipped by this loop. A harness this loop shipped on an earlier
+      // round keeps `shipped` — it is not merely the base it started from.
+      if (!historyLabels.has(base.sha)) historyLabels.set(base.sha, 'previous base');
+      historyLabels.set(finalCandidate.sha, 'shipped');
       base = finalCandidate;
       baseline = candidateScores;
       continue;
     }
     idle++;
+    historyLabels.set(
+      finalCandidate.sha, gate.verdict === 'needs-approval' ? 'needs approval' : 'rejected',
+    );
     await record(rec({
       manifest: finalManifest, gate,
       outcome: gate.verdict === 'needs-approval' ? 'needs-approval' : 'reject',
