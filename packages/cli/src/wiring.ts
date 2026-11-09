@@ -63,8 +63,11 @@ export async function loadCommandPolicy(
     path.resolve(cwd, choice.value),
     graph,
     {
-      // WP-3.7 amendment: every decision is evidence. `run`, `goldens` and `evolve` all build this
-      // engine, so the policy events the digester reads exist wherever a governed call was made.
+      // WP-3.7 amendment: a decision that is evidence is written where the digester reads. `run`
+      // and `evolve` build this engine over the project's graph, so their refusals reach it.
+      // `goldens run` builds the same engine over its isolated evaluation graph (D-14): its policy
+      // events are written there and discarded with that directory, and only the score is copied
+      // into the project's memory. Do not say that command's calls are in the digest — they are not.
       recorder: graph,
       ...(none
         ? { none: true }
