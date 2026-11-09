@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { makeAgentId, makeNodeId, makeTaskId } from '@maf/types';
-import type { DagNode, CliAdapter, GraphQueryRunner, RunId } from '@maf/types';
+import type { DagNode, CliAdapter, RunId } from '@maf/types';
 import { BlackboardStore } from '@maf/blackboard';
 import { LcmEngine, createAdapterSummarizer, createAdapterSubAgent } from '@maf/lcm';
 import { BlackboardToLcmAdapter } from '@maf/lcm-adapter';
@@ -56,17 +56,22 @@ export interface PolicyChoice {
 export async function loadCommandPolicy(
   cwd: string,
   choice: PolicyChoice,
-  graph: GraphQueryRunner,
+  graph: MemoryGraph,
 ): Promise<PolicyEngine> {
   const none = choice.typed && choice.value === 'none';
   return PolicyLoader.loadEngine(
     path.resolve(cwd, choice.value),
     graph,
-    none
-      ? { none: true }
-      : choice.typed
-        ? { explicit: true }
-        : { builtInText: await readAsset('policy.yaml') },
+    {
+      // WP-3.7 amendment: every decision is evidence. `run`, `goldens` and `evolve` all build this
+      // engine, so the policy events the digester reads exist wherever a governed call was made.
+      recorder: graph,
+      ...(none
+        ? { none: true }
+        : choice.typed
+          ? { explicit: true }
+          : { builtInText: await readAsset('policy.yaml') }),
+    },
   );
 }
 

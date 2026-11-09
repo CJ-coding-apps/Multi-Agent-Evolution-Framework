@@ -3,7 +3,9 @@ import crypto from 'node:crypto';
 import { LineCounter, isAlias, isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, visit } from 'yaml';
 import type { GraphQueryRunner, PolicyAction, PolicyPredicate, PolicyRule } from '@maf/types';
 import { makeToolId } from '@maf/types';
-import { PolicyEngine, type PolicyEngineOptions, type PolicySource } from './PolicyEngine.js';
+import {
+  PolicyEngine, type PolicyEngineOptions, type PolicyEventRecorder, type PolicySource,
+} from './PolicyEngine.js';
 
 /** How `resolve` chooses the rules, beyond the path itself (D-49). */
 export interface PolicyLoadOptions {
@@ -27,6 +29,8 @@ export interface PolicyLoadOptions {
   caseInsensitivePaths?: boolean;
   /** The platform that default is taken from; `process.platform` unless given. */
   platform?: NodeJS.Platform;
+  /** Where the engine records each decision as a `PolicyEvent`; absent means it records none. */
+  recorder?: PolicyEventRecorder;
 }
 
 /**
@@ -148,6 +152,7 @@ export class PolicyLoader {
     const engineOptions: PolicyEngineOptions = {
       ...(options.caseInsensitivePaths === undefined ? {} : { caseInsensitivePaths: options.caseInsensitivePaths }),
       ...(options.platform === undefined ? {} : { platform: options.platform }),
+      ...(options.recorder === undefined ? {} : { recorder: options.recorder }),
     };
     const engine = new PolicyEngine(graph, engineOptions);
     const { rules, source } = await PolicyLoader.resolve(policyPath, options);

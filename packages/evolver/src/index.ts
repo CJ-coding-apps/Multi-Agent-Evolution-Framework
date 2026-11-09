@@ -2,7 +2,7 @@ export type { HarnessEdit, ChangeManifest } from './edits.js';
 export { assertChangeManifest, applyEdit, ManifestError } from './edits.js';
 export { screenInstructionText } from './screening.js';
 export type { ScreeningResult } from './screening.js';
-export { digestEvidence } from './digester.js';
+export { digestEvidence, isEmptyDigest } from './digester.js';
 export type { Digest, GoldenHistoryRow, FailureRow } from './digester.js';
 export {
   PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt, parsePlannerResponse,

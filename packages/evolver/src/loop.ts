@@ -2,7 +2,7 @@ import type { PermissionLevel, RunId } from '@maf/types';
 import type { HarnessConfig } from '@maf/harness-config';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
-import { digestEvidence } from './digester.js';
+import { digestEvidence, isEmptyDigest } from './digester.js';
 import type { Digest } from './digester.js';
 import { applyEdit, ManifestError } from './edits.js';
 import type { ChangeManifest } from './edits.js';
@@ -46,6 +46,17 @@ export interface EvolveOptions {
   graph: MemoryGraph;
   /** Full golden suite under an arbitrary harness. Injected. */
   runGoldens: (harness: HarnessConfig) => Promise<GoldenSuiteResult>;
+  /**
+   * Writes one golden run's result as evidence — the same recorder `maf goldens run` uses.
+   *
+   * WP-3.7 amendment item 1: without this the loop digests a graph it never writes to, so the
+   * planner sees `(no golden history)` in every round and `no_op` is the correct answer. It is
+   * called for the baseline and for every candidate, before the next round's digest is taken.
+   * A failure to record propagates: continuing would silently run blind, which is the defect.
+   */
+  recordGoldens?: (result: GoldenSuiteResult) => Promise<void>;
+  /** Called for every round as it is recorded, so a caller can surface what the loop did. */
+  onRound?: (round: EvolveRoundRecord) => void;
   /** One-task smoke evaluation (fail fast on crash). Injected. */
   runSmoke: (harness: HarnessConfig, taskId: string) => Promise<void>;
   /** What to do when a candidate ships (persist + setCurrent etc). */
@@ -161,10 +172,20 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
 
   let baseline: GoldenSuiteResult | undefined;
 
+  // Every golden run the loop pays for is evidence for the rounds after it (WP-3.7 amendment 1).
+  // Recording before returning means the next digest reads it; a throw is not swallowed, because
+  // the alternative is a loop that keeps proposing from an empty graph and calling that no_op.
+  const evaluate = async (harness: HarnessConfig): Promise<GoldenSuiteResult> => {
+    const result = await opts.runGoldens(harness);
+    if (opts.recordGoldens) await opts.recordGoldens(result);
+    return result;
+  };
+
   for (let round = 0; round < maxRounds; round++) {
     const rec = (r: Omit<EvolveRoundRecord, 'round'>): EvolveRoundRecord => ({ round, ...r });
     const record = async (r: EvolveRoundRecord): Promise<void> => {
       rounds.push(r);
+      opts.onRound?.(r);
       // Recording is best-effort: a graph hiccup must never abort evolution (L4).
       // The failure is surfaced in the round note rather than thrown.
       try {
@@ -203,7 +224,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     // ── 1. Digester ──
     const digest = await digestEvidence(opts.graph);
     if (round === 0) baseline = baselineFromHistory(digest.goldenHistory, base);
-    if (!baseline) baseline = await opts.runGoldens(base);
+    if (!baseline) baseline = await evaluate(base);
 
     // ── 2. Planner ──
     let manifest: ChangeManifest | undefined;
@@ -224,7 +245,12 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     }
     if (!manifest) {
       idle++;
-      await record(rec({ outcome: 'no-op', note: 'planner returned no_op' }));
+      // Amendment item 2: an empty digest is a state the operator should see named, not the
+      // silent `no_op` that made six live rounds look like a planner preference.
+      await record(rec({
+        outcome: 'no-op',
+        note: isEmptyDigest(digest) ? 'no evidence to propose from' : 'planner returned no_op',
+      }));
       if (idle >= patience) { stopReason = 'patience'; break; }
       continue;
     }
@@ -331,7 +357,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     }
 
     // ── 6. Gate (mandatory, deterministic) ──
-    const candidateScores = await opts.runGoldens(finalCandidate);
+    const candidateScores = await evaluate(finalCandidate);
     const gate = gateEvaluate({
       manifest: finalManifest, candidate: finalCandidate, current: base,
       currentScores: baseline, candidateScores,

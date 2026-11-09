@@ -6,7 +6,7 @@ import { makeRunId, refusePrototypeKey } from '@maf/types';
 import type { PermissionLevel } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
-import { GoldenRunner, describeJudge, makeLlmJudge } from '@maf/eval-harness';
+import { GoldenRunner, ScoreRecorder, describeJudge, makeLlmJudge } from '@maf/eval-harness';
 import type { GoldenSuiteResult, GoldenTask } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
 import { evolve } from '@maf/evolver';
@@ -125,7 +125,13 @@ export function registerEvolveCommand(program: Command): void {
           securityScore,
         });
 
-      const runGoldensFor = (harness: HarnessConfig) => runnerFor(harness, 2).run();
+      // WP-3.7 amendment item 1: the loop's own runs are evidence. `goldens run` already writes
+      // each score through this recorder; `evolve` paid for the same runs and threw the evidence
+      // away, so every round's digest was empty. One recorder for the run, on the graph the loop
+      // digests.
+      const scoreRecorder = new ScoreRecorder(stack.graph, runId);
+
+      const runGoldensFor = (harness: HarnessConfig): Promise<GoldenSuiteResult> => runnerFor(harness, 2).run();
 
       const runSmoke = (harness: HarnessConfig, taskId: string) => smokeCheck(runnerFor(harness, 1), taskId);
 
@@ -140,6 +146,10 @@ export function registerEvolveCommand(program: Command): void {
         metaGenerate,
         graph: stack.graph,
         runGoldens: runGoldensFor,
+        recordGoldens: (result) => scoreRecorder.record(result),
+        // Amendment item 2: the rounds were silent, and six live rounds of `no_op` looked like a
+        // planner preference. Each round now says what it did and why, including "no evidence".
+        onRound: (r) => console.log(`[maf] round ${r.round}: ${r.outcome} — ${r.note}`),
         runSmoke,
         onShip: async (candidate, improvements) => {
           await store.save(candidate);

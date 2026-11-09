@@ -56,7 +56,10 @@ export function buildPlannerUserPrompt(evidence: Digest, catalog: RoleCatalogEnt
     '## Evidence digest',
     JSON.stringify(evidence, null, 2),
     '',
-    `Current harness: ${lastGolden ? `${lastGolden.harnessId} solved ${lastGolden.solved.length}/${lastGolden.total}` : '(no golden history)'}`,
+    `Current harness: ${lastGolden
+      ? `${lastGolden.harnessId} solved ${lastGolden.solved.length}/${lastGolden.total}`
+        + (lastGolden.failed.length > 0 ? `; failed ${lastGolden.failed.join(', ')}` : '')
+      : '(no golden history)'}`,
     '',
     '## Role catalog',
     JSON.stringify(catalog, null, 2),

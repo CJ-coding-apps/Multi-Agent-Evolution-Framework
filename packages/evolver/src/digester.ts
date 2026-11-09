@@ -12,6 +12,8 @@ export interface GoldenHistoryRow {
   harnessId: string;
   harnessSha: string;
   solved: string[];
+  /** Tasks the run failed, from the recorder's per-task rows; empty for an older row without them. */
+  failed: string[];
   total: number;
   ranAt: string;
 }
@@ -50,10 +52,19 @@ export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Pro
   });
   const goldenHistory: GoldenHistoryRow[] = goldenRows.map((raw) => {
     const props = parseProps(raw);
+    // `ScoreRecorder` writes every task's verdict beside the score. The ids of the ones that did
+    // not pass are what a proposal can target, so the digest carries them rather than leaving the
+    // planner to subtract two counts.
+    const perTask = Array.isArray(props['perTask']) ? (props['perTask'] as unknown[]) : [];
+    const failed = perTask
+      .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
+      .filter((t) => t['passed'] === false)
+      .map((t) => String(t['taskId'] ?? ''));
     return {
       harnessId: String(props['harnessId'] ?? ''),
       harnessSha: String(props['harness_sha'] ?? ''),
       solved: Array.isArray(props['solved']) ? (props['solved'] as string[]) : [],
+      failed,
       total: Number(props['total'] ?? 0),
       ranAt: String(props['ranAt'] ?? ''),
     };
@@ -76,4 +87,14 @@ export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Pro
   }));
 
   return { goldenHistory, currentFailures, policyEvents, generatedAt: new Date().toISOString() };
+}
+
+/**
+ * Whether the digest carries nothing a proposal could be based on. `no_op` is the right answer to
+ * this state — the loop says so in the round note instead of leaving it silent.
+ */
+export function isEmptyDigest(digest: Digest): boolean {
+  return digest.goldenHistory.length === 0
+    && digest.currentFailures.length === 0
+    && digest.policyEvents.length === 0;
 }

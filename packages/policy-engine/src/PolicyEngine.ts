@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import type {
   PolicyEngineHandle, PolicyRule, PolicyDecision, PolicyAction,
   ToolId, ToolInput, ToolContext, ApprovalRequest, GraphQueryRunner,
-  PolicyInForce, PolicyRuleSummary, PolicyVerdictCounts, PolicySourceKind,
+  PolicyInForce, PolicyRuleSummary, PolicyVerdictCounts, PolicySourceKind, RunId,
 } from '@maf/types';
 import { resolveInside, PathEscapeError, VerdictError } from '@maf/types';
 import { bindPolicyTemplate } from './policyTemplate.js';
@@ -55,8 +55,27 @@ export class PolicyViolationError extends VerdictError {
   }
 }
 
+/**
+ * The graph writer a caller supplies so every decision becomes evidence (WP-3.7 amendment item 2).
+ * `MemoryGraph` satisfies it; a caller with only a query handle does not, and records nothing.
+ */
+export interface PolicyEventRecorder {
+  addNode(node: {
+    kind: 'PolicyEvent';
+    label: string;
+    properties: Record<string, unknown>;
+    runId: RunId;
+  }): Promise<string>;
+}
+
 /** What the engine consults besides its rules. */
 export interface PolicyEngineOptions {
+  /**
+   * Writes one `PolicyEvent` node per decision, the kind the evolver's digester reads. Absent
+   * means nothing is recorded — the engine's verdict never depends on it, and a write failure is
+   * swallowed for the same reason.
+   */
+  recorder?: PolicyEventRecorder;
   /**
    * Match the paths of **Deny and Escalate** rules without regard to case, and in NFC. Defaults to
    * the platform's filesystem convention.
@@ -90,9 +109,11 @@ export class PolicyEngine implements PolicyEngineHandle {
   private source: PolicySource | undefined;
   private readonly counts: PolicyVerdictCounts = { allow: 0, deny: 0, escalate: 0, indeterminate: 0 };
   private readonly caseInsensitivePaths: boolean;
+  private readonly recorder: PolicyEventRecorder | undefined;
 
   constructor(private readonly graph: GraphQueryRunner, options: PolicyEngineOptions = {}) {
     this.caseInsensitivePaths = options.caseInsensitivePaths ?? caseInsensitiveFilesystem(options.platform);
+    this.recorder = options.recorder;
   }
 
   // Rules from a file arrive through `PolicyLoader`, which validates them; this takes them as given.
@@ -128,7 +149,33 @@ export class PolicyEngine implements PolicyEngineHandle {
     ctx: ToolContext,
     declaredPaths: readonly string[],
   ): Promise<PolicyDecision> {
-    return this.tally(await this.decide(toolId, input, ctx, declaredPaths));
+    const decision = this.tally(await this.decide(toolId, input, ctx, declaredPaths));
+    await this.recordEvent(toolId, decision, ctx);
+    return decision;
+  }
+
+  /**
+   * The decision becomes a `PolicyEvent` node, which is what the evolver's digester reads. A
+   * recorder failure is swallowed: a graph hiccup must not change what the policy answered, and
+   * the call it is deciding is more important than the evidence about it.
+   */
+  private async recordEvent(toolId: ToolId, decision: PolicyDecision, ctx: ToolContext): Promise<void> {
+    if (this.recorder === undefined) return;
+    try {
+      await this.recorder.addNode({
+        kind: 'PolicyEvent',
+        label: `policy ${decision.verdict} ${toolId}`,
+        properties: {
+          toolId,
+          verdict: decision.verdict,
+          ...(decision.verdict === 'Allow' ? {} : { reason: decision.reason }),
+          ...('ruleId' in decision && decision.ruleId !== undefined ? { ruleId: decision.ruleId } : {}),
+          taskId: ctx.taskId,
+          ...(ctx.agentRole !== undefined ? { role: ctx.agentRole } : {}),
+        },
+        runId: ctx.runId,
+      });
+    } catch { /* the verdict stands; the evidence is best-effort */ }
   }
 
   /** Every call this engine decides is counted once, whatever the verdict — refusals included. */

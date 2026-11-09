@@ -8,6 +8,7 @@ import { makeRunId } from '@maf/types';
 import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { MemoryGraph } from '@maf/memory-graph';
+import { ScoreRecorder } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import {
   assertChangeManifest, applyEdit, ManifestError,
@@ -701,6 +702,99 @@ test('loop (L5): a critic revision is smoke-tested on the REVISED manifest, then
   }));
   assert.equal(report.ships, 1, 'revised (thorough) candidate ships');
   assert.deepEqual(smoked, ['be thorough'], 'smoke ran on the REVISED manifest, not the original');
+});
+
+// ─── WP-3.7 amendment: the evolver must see its evidence ────────────────────
+
+/** A graph that behaves like the recorder + digester pair: what is written as `GoldenResult` reads back. */
+function evidenceGraph() {
+  const golden: Array<Record<string, unknown>> = [];
+  const graph = {
+    run: async (query: GraphQuery) => {
+      if (!query.cypher.includes('GoldenResult')) return [];
+      // Newest first, the order the digester's `ORDER BY n.created_at DESC` returns.
+      return [...golden].reverse().map((props) => ({ 'n.properties': JSON.stringify(props) }));
+    },
+    addNode: async (n: { kind?: string; properties?: Record<string, unknown> }) => {
+      if (n.kind === 'GoldenResult') golden.push(n.properties ?? {});
+      return 'id';
+    },
+    addEdge: async () => 'e',
+  } as unknown as MemoryGraph;
+  return { graph, golden };
+}
+
+const TWO_TASKS: GoldenSuiteResult['tasks'] = [
+  { taskId: 't1', role: 'coder', passed: true, attempts: [] },
+  { taskId: 't2', role: 'coder', passed: false, attempts: [] },
+];
+
+// Amendment item 1: the loop paid for its own baseline golden run and digested a graph it never
+// wrote to, so every round's planner prompt said `(no golden history)` and `no_op` was the only
+// answer a well-behaved planner could give. Six live rounds looked like a planner preference.
+// MUTANT: removing the `recordGoldens` call in `evaluate()` leaves the second prompt without the
+// score, and this test fails on `solved 1/2`.
+test('loop: its own baseline run is evidence for the next round (WP-3.7 amendment 1)', async () => {
+  const { graph, golden } = evidenceGraph();
+  const prompts: string[] = [];
+  let runs = 0;
+  const report = await evolve(loopOpts({
+    graph,
+    maxRounds: 2,
+    patience: 5,
+    recordGoldens: (result) => new ScoreRecorder(graph, makeRunId('evolve-test')).record(result),
+    metaGenerate: async (system: string, user: string): Promise<string> => {
+      if (system.includes('critic')) return '```json\n{"verdict":"ship","notes":"ok"}\n```';
+      prompts.push(user);
+      return '```json\n{"no_op":true}\n```';
+    },
+    runGoldens: async (h) => {
+      runs++;
+      return {
+        harnessSha: h.sha, harnessId: h.id, tasks: TWO_TASKS, solvedTaskIds: ['t1'], ranAt: 't0',
+      };
+    },
+  }));
+
+  assert.equal(runs, 1, 'the baseline is paid for once');
+  assert.equal(golden.length, 1, 'and written through the recorder as evidence');
+  assert.equal(prompts.length, 2);
+
+  assert.match(prompts[0]!, /\(no golden history\)/, 'round 1 has nothing before the baseline is run');
+  assert.match(prompts[1]!, /solved 1\/2/, 'round 2 plans from the score round 1 measured');
+  assert.match(prompts[1]!, /; failed t2/, 'and names the task that failed');
+  assert.match(prompts[1]!, new RegExp(CURRENT.sha), 'the row says which harness was scored');
+
+  assert.equal(report.rounds[0]?.note, 'no evidence to propose from');
+  assert.equal(report.rounds[1]?.note, 'planner returned no_op',
+    'once evidence exists, no_op is the planner\'s answer, not the graph\'s emptiness');
+});
+
+// Amendment item 2: the round said nothing at all, so an empty digest and a planner that chose not
+// to act were the same line in the output. The note and the caller's hook (`onRound`, which the CLI
+// prints) must both say which one happened.
+test('loop: an empty digest is said out loud, in the round and to the caller (WP-3.7 amendment 2)', async () => {
+  const seen: string[] = [];
+  const report = await evolve(loopOpts({
+    metaGenerate: async () => '```json\n{"no_op":true}\n```',
+    maxRounds: 1,
+    onRound: (r) => seen.push(r.note),
+  }));
+  assert.equal(report.rounds[0]?.note, 'no evidence to propose from');
+  assert.deepEqual(seen, ['no evidence to propose from'],
+    'the CLI hook receives the same sentence, not a silent no_op');
+});
+
+// The recorder is not best-effort: a loop whose evidence writes fail would keep proposing from a
+// graph it is not filling, which is the defect this amendment exists to close. It stops instead.
+test('loop: a failing evidence recorder stops the run rather than running blind', async () => {
+  await assert.rejects(
+    evolve(loopOpts({
+      maxRounds: 1,
+      recordGoldens: async () => { throw new Error('graph unavailable'); },
+    })),
+    /graph unavailable/,
+  );
 });
 
 test('loop (L4): a graph recordRound failure does not abort the loop', async () => {

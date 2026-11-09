@@ -1,5 +1,5 @@
 export { PolicyEngine, PolicyViolationError, caseInsensitiveFilesystem } from './PolicyEngine.js';
-export type { PolicyEngineOptions } from './PolicyEngine.js';
+export type { PolicyEngineOptions, PolicyEventRecorder } from './PolicyEngine.js';
 export { PolicyLoader, parseYamlDocument, YamlSyntaxError } from './PolicyLoader.js';
 export type { YamlDocument } from './PolicyLoader.js';
 export { CypherEvaluator } from './CypherEvaluator.js';
