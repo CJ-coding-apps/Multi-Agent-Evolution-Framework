@@ -78,14 +78,13 @@ export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Pro
     label: String(raw['n.label'] ?? ''), properties: parseProps(raw), runId: String(raw['n.run_id'] ?? ''),
   }));
 
-  // WP-3.7a MED-2: the graph may still hold `Allow` events written before the engine stopped
-  // recording them, so the query reads a wider window and the filter happens here. The events are
-  // newest-first; the first `failureLimit` non-Allow ones are returned. The wider window is the
-  // stated cap: a graph can hold at most `failureLimit * 10` rows for one digest, and an evidence
-  // set older than that is out of view — but an Allow can no longer push a Deny out of it.
-  const policyScan = intLiteral(failureLimit * 10, 'policyScanLimit');
+  // WP-3.7a MED-2, R2-L2: the graph may still hold `Allow` events written before the engine stopped
+  // recording them. The filter is in the query — on the label, which is a column — so no number of
+  // newer Allows can starve an older refusal out of the window. The events are newest-first and the
+  // query itself caps the result at `failureLimit`. A client-side filter stays as a backstop for a
+  // row whose label was written by something other than this engine's `recordEvent`.
   const policyRows = await graph.run({
-    cypher: `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${policyScan}`,
+    cypher: `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' AND NOT n.label STARTS WITH 'policy Allow' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
     params: {},
   });
   // WP-3.7a MED-1, second layer: a row written by an older version may hold an unmasked reason,

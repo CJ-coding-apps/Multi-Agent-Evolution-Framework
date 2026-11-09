@@ -833,16 +833,25 @@ test('loop (L4): a graph recordRound failure does not abort the loop', async () 
 
 // ─── WP-3.7a round 2 ─────────────────────────────────────────────────────────
 
-/** A graph stub that answers only the PolicyEvent query, newest-first as the digester asks. */
+/**
+ * A graph stub that answers only the PolicyEvent query, newest-first as the digester asks. It
+ * applies the query's own `NOT n.label STARTS WITH …` clause and its `LIMIT`, in that order, the
+ * way the graph does — so a test can tell "filtered in the query" from "filtered after the window".
+ */
 function policyGraph(rows: Array<{ label: string; properties: Record<string, unknown> }>) {
   return {
-    run: async (query: GraphQuery) => query.cypher.includes('PolicyEvent')
-      ? rows.map((r) => ({
+    run: async (query: GraphQuery) => {
+      if (!query.cypher.includes('PolicyEvent')) return [];
+      let out = rows.map((r) => ({
         'n.label': r.label,
         'n.properties': JSON.stringify(r.properties),
         'n.run_id': 'run-1',
-      }))
-      : [],
+      }));
+      if (query.cypher.includes("NOT n.label STARTS WITH 'policy Allow'"))
+        out = out.filter((r) => !String(r['n.label']).startsWith('policy Allow'));
+      const limit = /LIMIT (\d+)/.exec(query.cypher);
+      return limit ? out.slice(0, Number(limit[1])) : out;
+    },
     addNode: async () => 'id',
     addEdge: async () => 'e',
   } as unknown as MemoryGraph;
@@ -868,6 +877,17 @@ test('digester (MED-2): a project with only allows has no evidence to propose fr
   const digest = await digestEvidence(policyGraph(Array.from({ length: 62 }, (_, i) => allowRow(i))));
   assert.deepEqual(digest.policyEvents, []);
   assert.equal(isEmptyDigest(digest), true, 'old allow rows must not resurrect an empty digest');
+});
+
+// R2-L2: the boundary. Filtering AFTER the newest-first window leaves a graph with many more older
+// allows than the window empty of evidence — the client-side filter can only remove rows, never
+// reach past them. The verdict filter has to be in the query, ahead of LIMIT.
+test('digester (R2-L2): more than failureLimit×10 allows ahead of a denial cannot starve it', async () => {
+  const rows = [...Array.from({ length: 250 }, (_, i) => allowRow(i)), denyRow];
+  const digest = await digestEvidence(policyGraph(rows), 20);
+  assert.equal(digest.policyEvents.length, 1, 'the denial survived a window 12× its own size');
+  assert.equal(digest.policyEvents[0]?.properties['verdict'], 'Deny');
+  assert.ok(digest.policyEvents.every((e) => e.properties['verdict'] !== 'Allow'));
 });
 
 // MED-1, second layer: a graph written before the write-time mask (or by anything else) can hold a
