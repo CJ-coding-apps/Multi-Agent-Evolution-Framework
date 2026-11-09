@@ -4,8 +4,10 @@ import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
-import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
+import { HarnessStore } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
+import { RoleRegistry, harnessRoleSetFromRegistry } from '@maf/roles';
+import { createDefaultRegistry } from '@maf/tools';
 import { registerHarnessCommand } from '../commands/harness.js';
 
 // ORACLE: S6 (WP-3.15, corrected after HIGH-1) — `maf harness show current` answers the question it
@@ -127,30 +129,44 @@ test('show current with CURRENT naming legacy-default reports the roles file as 
   }
 });
 
-test('show current with an operator-pinned CURRENT reports that harness, labelled [current]', async () => {
+test('show current with an operator-pinned CURRENT reports that harness, and the drift notice when the file moves (LOW-R2-3)', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-show-current-pinned-'));
   try {
     const mafDir = path.join(root, '.maf');
     await mkdir(mafDir, { recursive: true });
-    const store = new HarnessStore(mafDir);
-    const mine = mintHarnessConfig({
-      id: 'mine',
-      roleSet: {
-        version: 1,
-        defaultRole: 'solo',
-        roles: [{ role: 'solo', systemPrompt: 'Work alone.\n', allowedTools: ['fs.read'] }],
-      },
-      processorBundles: [],
+    const rolesPath = path.join(mafDir, 'roles.yaml');
+    const file = (prompt: string) => JSON.stringify({
+      version: 1,
+      defaultRole: 'solo',
+      roles: [{ role: 'solo', systemPrompt: prompt, allowedTools: ['fs.read'] }],
     });
+    await writeFile(rolesPath, file('Work alone.\n'), 'utf8');
+
+    // Pinned to the file's own content, so there is nothing to report until the file moves.
+    const store = new HarnessStore(mafDir);
+    const mine = store.mint(await harnessRoleSetFromRegistry(
+      await RoleRegistry.fromYamlOrDefault(rolesPath, mafDir, createDefaultRegistry()),
+    ), 'mine');
     await store.save(mine);
     await store.setCurrent(mine.sha);
 
-    const { out, err, error } = await maf(['harness', 'show', 'current', '-d', root]);
-    assert.equal(error, undefined);
-    assert.equal((JSON.parse(out.join('\n')) as HarnessConfig).sha, mine.sha);
-    assert.equal(err.length, 1);
-    assert.ok((err[0] as string).includes('[current]'), err[0]);
-    assert.ok(!(err[0] as string).includes('[roles file]'), err[0]);
+    const agreeing = await maf(['harness', 'show', 'current', '-d', root]);
+    assert.equal(agreeing.error, undefined);
+    assert.equal((JSON.parse(agreeing.out.join('\n')) as HarnessConfig).sha, mine.sha);
+    assert.equal(agreeing.err.length, 1, agreeing.err.join('\n'));
+    assert.ok((agreeing.err[0] as string).includes('[current]'), agreeing.err[0]);
+    assert.ok(!(agreeing.err[0] as string).includes('[roles file]'), agreeing.err[0]);
+
+    // The file moves on: the pinned harness still runs, and show says so in the same one line a run prints.
+    await writeFile(rolesPath, file('Work alone, and say why.\n'), 'utf8');
+    const drifted = await maf(['harness', 'show', 'current', '-d', root]);
+    assert.equal(drifted.err.length, 2, drifted.err.join('\n'));
+    assert.ok((drifted.err[0] as string).includes('[current]'), drifted.err[0]);
+    const notice = drifted.err[1] as string;
+    assert.ok(notice.includes('differs from CURRENT'), notice);
+    assert.ok(notice.includes('"mine"') && notice.includes(mine.sha.slice(0, 8)), `names what runs: ${notice}`);
+    assert.ok(notice.includes('"legacy-default"'), `and what the file would mint: ${notice}`);
+    assert.ok(notice.includes('maf harness set-current legacy-default'), `and the way back: ${notice}`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

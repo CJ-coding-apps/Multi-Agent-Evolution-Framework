@@ -10,6 +10,7 @@ import { refusePrototypeKey } from '@maf/types';
 import { RoleRegistry, harnessRoleSetFromRegistry, roleSetFromHarness } from '@maf/roles';
 import { createDefaultProcessorRegistry } from '@maf/processors';
 import { createDefaultRegistry } from '@maf/tools';
+import { harnessDriftNotice } from '../wiring.js';
 
 const SHA_PREFIX_RE = /^[0-9a-f]{4,64}$/;
 const SHA_RE = /^[0-9a-f]{64}$/;
@@ -219,6 +220,13 @@ export function registerHarnessCommand(program: Command): void {
           `[maf] CURRENT → ${current.id} (${shortSha(current.sha)}) [current] — ` +
           'plain runs use it until `maf harness set-current` changes it',
         );
+        // LOW-R2-3: the same one line a run prints, so asking which harness runs and being told
+        // "the pinned one" does not hide that the file it replaced has moved on.
+        const drift = await harnessDriftNotice({
+          store, harness: current, source: 'current',
+          rolesPath: path.join(mafDir, 'roles.yaml'), mafDir, baseTools: createDefaultRegistry(),
+        });
+        if (drift !== undefined) console.error(drift);
         console.log(JSON.stringify(current, null, 2));
         return;
       }
