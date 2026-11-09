@@ -98,6 +98,38 @@ test('a refusal reason is masked at write: no credential and no absolute path re
   }
 });
 
+// R2-L3: masking must not blind the planner. A refusal that names a file INSIDE the repository
+// keeps the repo-relative name, so a proposal can act on it; the machine's root goes. The engine
+// is given the project root, so this is measured at the boundary it writes from.
+test('a refusal naming an in-repo file keeps the repo-relative name and drops the root', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-policy-inroot-'));
+  try {
+    const nodes: Parameters<PolicyEventRecorder['addNode']>[0][] = [];
+    const engine = new PolicyEngine({} as never, {
+      recorder: { addNode: async (node) => { nodes.push(node); return 'n'; } },
+    });
+    engine.loadRules([{
+      id: 'deny-sum', description: '', priority: 100,
+      predicate: { toolId: [FS_WRITE] },
+      action: { kind: 'Deny', reason: `cannot write ${root}/src/sum.js` },
+    }]);
+
+    await engine.evaluate(
+      FS_WRITE, { path: path.join(root, 'src', 'sum.js') }, ctx({ projectRoot: root }),
+      [path.join(root, 'src', 'sum.js')],
+    );
+
+    const [node] = nodes as [typeof nodes[number]];
+    assert.ok(node, 'the denial was recorded');
+    const reason = String(node.properties['reason']);
+    assert.match(reason, /cannot write src\/sum\.js/, `the file is still nameable: ${reason}`);
+    assert.ok(!reason.includes(root), 'the project root does not leak');
+    assert.ok(!reason.includes('[REDACTED:path]'), 'the path was relativized, not masked away');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('an Escalate event carries the rule that escalated it (L3)', async () => {
   const escalate: PolicyRule = {
     id: 'review-lockfiles',

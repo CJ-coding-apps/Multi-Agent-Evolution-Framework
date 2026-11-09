@@ -65,29 +65,62 @@ export function redactText(text: string, extra: readonly RegExp[] = []): string 
 }
 
 /**
- * Absolute POSIX and Windows paths as they occur inside a message: the start of the text, or after
- * whitespace, a quote, an opening bracket, `=` or a backtick, and running to the next whitespace or
- * quote. A path is required to have a body, so a lone `/` in prose is left alone.
+ * Absolute POSIX, Windows-drive and UNC paths as they occur inside a message.
+ *
+ * Two shapes:
+ *  - **Quoted** — a path an author put between quotes may contain spaces, and the quotes are the
+ *    boundary: `"/Users/John Smith/proj/.env"` is one path, not a head and a leaked tail.
+ *  - **Unquoted** — from the start of the text, or after whitespace, a quote, an opening bracket,
+ *    `=`, a backtick or a colon, running to the next whitespace or quote. A path is required to
+ *    have a body. The POSIX form does not take a leading `//`, so a URL after `https:` is not read
+ *    as a path.
+ *
+ * Covered prefixes: `/…`, `C:\…`, `C:/…` and `\\server\share\…`.
  */
 const ABSOLUTE_PATH_PATTERNS: ReadonlyArray<{ label: string; re: RegExp }> = [
-  { label: 'path', re: /(?:^|(?<=[\s"'(=`]))\/(?=[^\s"'])[^\s"']*/g },
-  { label: 'path', re: /(?:^|(?<=[\s"'(=`]))[A-Za-z]:\\[^\s"']*/g },
+  { label: 'path', re: /(["'])(?:[A-Za-z]:[\\/]|\\\\|\/)[^"'\n]*\1/g },
+  { label: 'path', re: /(?:^|(?<=[\s"'(=:`]))(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^\s"']*/g },
 ];
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Replace an absolute path that is inside one of `roots` with its repo-relative tail, so the
+ * planner keeps the file name it can act on while the machine's layout goes. The root itself
+ * becomes `.`. Roots are compared literally; the caller passes the project root and, when it can,
+ * its `realpath` — the confinement refusal quotes the resolved one.
+ */
+function relativizeToRoots(text: string, roots: readonly string[]): string {
+  let out = text;
+  for (const root of roots) {
+    if (root.length <= 1) continue; // `/` would rewrite everything
+    const escaped = escapeRegExp(root);
+    // `/root/src/a.ts` → `src/a.ts`; the boundary after the root keeps `/root-other` out.
+    out = out.replace(new RegExp(`${escaped}(?=[\\\\/])[\\\\/]`, 'g'), '');
+    // The root alone, quoting or ending the sentence: `/root` → `.`
+    out = out.replace(new RegExp(`${escaped}(?=["'\\s]|$)`, 'g'), '.');
+  }
+  return out;
+}
 
 /**
  * Text that is evidence about a decision and may also be shown to a model: credential formats and
  * assignment heuristics masked (`redactText`'s tier, which is the stricter of the two), and every
- * absolute path replaced with `[REDACTED:path]`.
+ * absolute path replaced with `[REDACTED:path]` — except a path inside `repoRoots`, whose
+ * repo-relative tail is kept so the planner can still name the file.
  *
  * The policy engine writes a refusal's `reason` into the memory graph; a confinement refusal quotes
  * the path it refused and the project root it resolved against, and a refusal reason can quote tool
  * input. The evolver's digester reads that node into a planner prompt, which in WP-3.7b goes to a
  * real model. A credential-shaped path segment is a secret wherever it appears, and the machine's
- * layout is not the planner's business. Paths are masked first so a secret inside one cannot leave
- * its surroundings behind as a path fragment.
+ * layout is not the planner's business. Relativizing runs before path masking (so an in-root tail
+ * is not consumed), and path masking before credential masking (so a secret inside a path cannot
+ * leave its surroundings behind as a path fragment).
  */
-export function redactEvidenceText(text: string): string {
-  let out = text;
+export function redactEvidenceText(text: string, repoRoots: readonly string[] = []): string {
+  let out = relativizeToRoots(text, repoRoots);
   for (const p of ABSOLUTE_PATH_PATTERNS) out = out.replace(p.re, `[REDACTED:${p.label}]`);
   return redactText(out);
 }

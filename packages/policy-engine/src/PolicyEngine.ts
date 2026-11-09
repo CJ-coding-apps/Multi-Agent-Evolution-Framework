@@ -1,5 +1,6 @@
 import { minimatch } from 'minimatch';
 import crypto from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import type {
   PolicyEngineHandle, PolicyRule, PolicyDecision, PolicyAction,
   ToolId, ToolInput, ToolContext, ApprovalRequest, GraphQueryRunner,
@@ -110,6 +111,8 @@ export class PolicyEngine implements PolicyEngineHandle {
   private readonly counts: PolicyVerdictCounts = { allow: 0, deny: 0, escalate: 0, indeterminate: 0 };
   private readonly caseInsensitivePaths: boolean;
   private readonly recorder: PolicyEventRecorder | undefined;
+  /** The project root as given and as resolved, per root, for evidence masking (WP-3.7a R2-L3). */
+  private readonly evidenceRoots = new Map<string, readonly string[]>();
 
   constructor(private readonly graph: GraphQueryRunner, options: PolicyEngineOptions = {}) {
     this.caseInsensitivePaths = options.caseInsensitivePaths ?? caseInsensitiveFilesystem(options.platform);
@@ -185,16 +188,35 @@ export class PolicyEngine implements PolicyEngineHandle {
       ...(ctx.agentRole !== undefined ? { role: ctx.agentRole } : {}),
       ...(ctx.goldenTaskId !== undefined ? { goldenTaskId: ctx.goldenTaskId } : {}),
     };
+    const roots = await this.maskingRoots(ctx.projectRoot);
     try {
       await this.recorder.addNode({
         kind: 'PolicyEvent',
         label: `policy ${decision.verdict} ${toolId}`,
         properties: Object.fromEntries(Object.entries(properties).map(
-          ([key, value]) => [key, typeof value === 'string' ? redactEvidenceText(value) : value],
+          ([key, value]) => [key, typeof value === 'string' ? redactEvidenceText(value, roots) : value],
         )),
         runId: ctx.runId,
       });
     } catch { /* the verdict stands; the evidence is best-effort */ }
+  }
+
+  /**
+   * The project root as the caller gave it and as it resolves, so an in-root absolute path in a
+   * refusal reason keeps its repo-relative tail while the machine's layout goes (R2-L3). The
+   * confinement check quotes the resolved root, and on macOS a temp directory's real path is not
+   * the string the caller passed, so both are needed. Cached per root: this is per decision.
+   */
+  private async maskingRoots(projectRoot: string): Promise<readonly string[]> {
+    const cached = this.evidenceRoots.get(projectRoot);
+    if (cached !== undefined) return cached;
+    const roots = [projectRoot];
+    try {
+      const resolved = await realpath(projectRoot);
+      if (resolved !== projectRoot) roots.push(resolved);
+    } catch { /* the root need not exist yet; the literal prefix is still what was quoted */ }
+    this.evidenceRoots.set(projectRoot, roots);
+    return roots;
   }
 
   /** Every call this engine decides is counted once, whatever the verdict — refusals included. */

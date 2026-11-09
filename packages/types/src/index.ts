@@ -145,6 +145,8 @@ export interface ToolContext {
    */
   approvedPaths?: readonly string[];
 
+  // WP-3.7a — additive only: an optional member, so every caller written before this still
+  // type-checks.
   /**
    * The golden-corpus task this call belongs to, when a golden runner dispatched it (WP-3.7a L5).
    *
@@ -1897,8 +1899,13 @@ export type { ToolInputCheckOptions } from './toolInput.js';
 export {
   CREDENTIAL_PATTERNS, ASSIGNMENT_PATTERNS, DEFAULT_PATTERNS,
   redactCredentials, redactSecrets, redactText,
-  redactCredentialsRecord, redactRecord, redactEvidenceText,
+  redactCredentialsRecord, redactRecord,
 } from './redaction.js';
+
+// WP-3.7a — additive only: a new re-export; no existing export moved or changed. Evidence-grade
+// masking for text written to the memory graph and read into a model prompt: absolute paths are
+// replaced, and a path inside the caller's repo keeps its repo-relative tail.
+export { redactEvidenceText } from './redaction.js';
 
 // WP-3.9 — additive only: a new re-export; no existing export moved or changed. The child-process
 // environment helpers. Two policies, one home: backend CLIs get the user's environment minus maf's
