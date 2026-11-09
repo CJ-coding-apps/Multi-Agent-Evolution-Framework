@@ -32,8 +32,10 @@ export async function initFiles(): Promise<string[]> {
     .filter((entry) => entry.isFile())
     .map((entry) => path.join('prompts', entry.name))
     .sort();
-  // The default harness, so a repository that ran `init` carries the same one the package falls
-  // back to (F1). Filtered by shape: `.maf/.gitignore` whitelists exactly `default-<sha>.json`.
+  // The default harness, so a repository that ran `init` carries a copy of the one the package
+  // ships and `--harness default` names (F1). Since LOW-R2-2 `goldens` reads the roles file, not
+  // this file, but the copy is still what makes that ref resolvable on a fresh project.
+  // Filtered by shape: `.maf/.gitignore` whitelists exactly `default-<sha>.json`.
   const harnessDir = assetPath('harnesses');
   const harnesses = (await readdir(harnessDir, { withFileTypes: true }).catch(() => []))
     .filter((entry) => entry.isFile() && /^default-[0-9a-f]{64}\.json$/.test(entry.name))

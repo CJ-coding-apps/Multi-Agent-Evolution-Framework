@@ -108,8 +108,10 @@ export async function packCheck() {
     for (const required of ['package.json', 'README.md', 'LICENSE', 'dist/main.js']) {
       if (!shipped.includes(required)) fail(`the tarball does not ship ${required}`);
     }
-    // The goldens proof below depends on this file existing inside the package (F1); naming it here
-    // means a missing harness is reported as a packaging defect, not as a mystifying goldens error.
+    // `maf init` copies this harness out of the package, and the goldens proof below runs after
+    // init; since LOW-R2-2 the suite itself reads the roles file `init` wrote, not this asset. It
+    // is still required: a missing harness would make `init` silently install none, and naming it
+    // here reports that as a packaging defect rather than a mystifying goldens error.
     if (!shipped.some((file) => /^assets\/harnesses\/default-[0-9a-f]{64}\.json$/.test(file))) {
       fail('the tarball does not ship a default harness (assets/harnesses/default-<sha>.json)');
     }
