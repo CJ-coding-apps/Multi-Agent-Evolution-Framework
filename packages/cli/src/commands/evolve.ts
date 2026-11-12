@@ -37,6 +37,17 @@ export async function smokeCheck(runner: { run(only?: readonly string[]): Promis
   if (error) throw new Error(error);
 }
 
+/**
+ * R2-M5 (H5): the smoke run is a measurement, so its target has to be a train-split task like every
+ * other paid run. A plan is checked against the split before the critic (R2-H2), but the critic may
+ * replace it with a revision, and the revision is smoke-tested without passing that check again —
+ * so this is the last line before a held-out task would be spent on a candidate.
+ */
+export function assertSmokeTarget(taskId: string, trainTaskIds: readonly string[]): void {
+  if (!trainTaskIds.includes(taskId))
+    throw new Error(`smoke task "${taskId}" is not in the train split; the evolver may not measure a held-out task`);
+}
+
 interface EvolveCliOpts {
   adapter: string; model?: string; dir: string; corpus: string; harness?: string;
   rounds: string; patience: string; policy: string; approveSensitive: boolean; allowUngoverned?: boolean;
@@ -278,10 +289,9 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       const judgeScoredHeldOut = splits.heldOut.filter((id) => isJudgeScored(corpusById.get(id)!));
 
       const runSmoke = (harness: HarnessConfig, taskId: string) => {
-        // A smoke run is a measurement too. The planner's target tasks come from evidence in the
-        // train split, but a hallucinated id must not spend a held-out task either.
-        if (!splits.train.includes(taskId))
-          throw new Error(`smoke task "${taskId}" is not in the train split; the evolver may not measure a held-out task`);
+        // A smoke run is a measurement too. The first plan is refused earlier if it names a task
+        // outside the train split (R2-H2), but a critic revision reaches the smoke unchecked.
+        assertSmokeTarget(taskId, splits.train);
         return smokeCheck(runnerFor(harness, 1), taskId);
       };
 

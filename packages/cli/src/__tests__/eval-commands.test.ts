@@ -15,7 +15,7 @@ import * as AdapterRegistry from '../AdapterRegistry.js';
 import { HarnessStore } from '@maf/harness-config';
 import type { HarnessConfig, HarnessRoleSet } from '@maf/harness-config';
 import { registerGoldensCommand, resolveGoldensHarness } from '../commands/goldens.js';
-import { registerEvolveCommand } from '../commands/evolve.js';
+import { assertSmokeTarget, registerEvolveCommand } from '../commands/evolve.js';
 import { readApprovalRecords, writeApprovalRecord } from '../approval.js';
 import { registerHarnessCommand } from '../commands/harness.js';
 import { messageOf } from './runFixture.js';
@@ -280,6 +280,84 @@ test('R2-M4 budget: --max-tokens 2000 is exhausted by the baseline and nothing n
     assert.ok(logs.some((l) => l.includes('stop=budget')), logs.join('\n'));
   } finally {
     process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R2-M5 (H5): the smoke run is a measurement like any other, so its target must be a train-split
+// task. A first plan is refused before the critic if it names a held-out id (R2-H2), but a critic
+// revision is smoke-tested without passing that check again — the guard in `runSmoke` is the line
+// this test stands on: with it removed, the held-out id below reaches the dispatcher.
+test('smoke refuses a held-out target reached through a critic revision (R2-M5/H5)', async (t) => {
+  const HE = 'coder-fib';
+  assert.throws(() => assertSmokeTarget(HE, ['coder-sum']), /not in the train split/);
+  assert.doesNotThrow(() => assertSmokeTarget('coder-sum', ['coder-sum']));
+
+  const { root } = await freshClone();
+  try {
+    const dispatched: (string | undefined)[] = [];
+    let stacks = 0;
+    let plannerCalls = 0;
+    let criticCalls = 0;
+    t.mock.method(wiring, 'buildRunStack', async () => {
+      stacks++;
+      return {
+        adapter: {} as CliAdapter,
+        graph: { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph,
+        securityPrompt: '',
+        dispatchTask: async (
+          _harness: HarnessConfig, _role: string, _prompt: string, _workDir: string,
+          _timeoutMs: number, _temperature?: number, goldenTaskId?: string,
+        ) => {
+          dispatched.push(goldenTaskId);
+          return 'no change';
+        },
+        close: async () => {},
+      } as unknown as wiring.RunStack;
+    });
+    const manifest = (target: string) => '```json\n' + JSON.stringify({
+      edit: { kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'r' },
+      expectedImprovement: target, targetTasks: [target],
+    }) + '\n```';
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        const systemPrompt = o.systemPrompt ?? '';
+        let output: string;
+        if (systemPrompt.includes('MAF harness evolution planner')) {
+          plannerCalls++;
+          // The first plan is in the train split; the critic asks for a revision, and the revision
+          // names a held-out task.
+          output = plannerCalls === 1 ? manifest('coder-sum') : manifest(HE);
+        } else if (systemPrompt.includes('critic')) {
+          criticCalls++;
+          output = criticCalls === 1
+            ? '```json\n{"verdict":"revise","notes":"aim at a different task"}\n```'
+            : '```json\n{"verdict":"ship","notes":"ok"}\n```';
+        } else {
+          output = '```json\n{"passed":false,"rationale":"no"}\n```';
+        }
+        return { success: true, output, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+    t.mock.method(console, 'log', () => {});
+
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--rounds', '1', '--patience', '1'), { from: 'user' });
+
+    assert.equal(plannerCalls, 2, 'the revision asked for by the critic ran');
+    assert.equal(dispatched.filter((id) => id === HE).length, 0, 'the held-out task was never dispatched');
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      ships: number; rounds: { outcome: string; note: string }[];
+    };
+    assert.equal(report.ships, 0);
+    assert.equal(report.rounds[0]?.outcome, 'smoke-failed');
+    assert.match(report.rounds[0]?.note ?? '', /is not in the train split/);
+    assert.equal(stacks, 1, 'no survivor, so the held-out split was never scored');
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

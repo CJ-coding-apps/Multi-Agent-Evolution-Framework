@@ -360,6 +360,28 @@ test('loop: out-of-surface manifest is a cheap planner-error round', async () =>
   assert.equal(report.ships, 0);
 });
 
+// R2-M5 (S5a): `applyEdit` on a role the harness does not have throws a ManifestError. In the loop
+// that is a malformed candidate, not a reason to abort a paid session — the invariant stage records
+// the refusal, names the role, and the round ends without a critic call or a golden run.
+test('loop: an edit naming an unknown role is a reject, never a throw (R2-M5)', async () => {
+  let criticCalls = 0;
+  let goldensRan = 0;
+  const report = await evolve(loopOpts({
+    metaGenerate: async (system: string): Promise<string> => {
+      if (system.includes('critic')) { criticCalls++; return '```json\n{"verdict":"ship","notes":"ok"}\n```'; }
+      return manifestJson({ kind: 'edit_role_prompt', role: 'ghost', newPrompt: 'x', rationale: 'r' });
+    },
+    // The baseline run is one; a candidate must never reach a second.
+    runGoldens: async (h) => { goldensRan++; return suite(['t1'], h.sha); },
+    patience: 1,
+  }));
+  assert.equal(report.rounds[0]?.outcome, 'reject');
+  assert.match(report.rounds[0]?.note ?? '', /b-invariants: role "ghost" not in harness/);
+  assert.equal(criticCalls, 0, 'the free check answers before the critic is paid for');
+  assert.equal(goldensRan, 1, 'only the round-0 baseline was measured');
+  assert.equal(report.ships, 0);
+});
+
 test('loop: smoke crash archives the candidate and the loop continues', async () => {
   let smokes = 0;
   const opts = loopOpts({
