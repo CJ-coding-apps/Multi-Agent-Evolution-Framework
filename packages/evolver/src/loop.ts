@@ -3,6 +3,7 @@ import type { HarnessConfig, ProcessorRef } from '@maf/harness-config';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { digestEvidence, heldOutScrubber, isEmptyDigest } from './digester.js';
+import type { UsageSnapshot } from './usage.js';
 import type { Digest, EvidenceScope } from './digester.js';
 import { applyEdit, ManifestError } from './edits.js';
 import type { ChangeManifest } from './edits.js';
@@ -154,6 +155,12 @@ export interface EvolveOptions {
   evidenceScope?: EvidenceScope;
   /** D-57: the meter. The loop asks it before every round and before every step that costs money. */
   budget?: BudgetMeter;
+  /**
+   * R2-H4: the model-call meter the caller feeds. The loop only snapshots it into the report, so
+   * every figure the run spent — calls, tokens and dollars, each marked reported or estimated —
+   * travels with the report instead of living only in the terminal.
+   */
+  usage?: { snapshot(): UsageSnapshot };
 }
 
 /** D-57: what a held-out evaluation measured, and the sentence the report carries. */
@@ -192,6 +199,8 @@ export interface EvolveReport {
    * point; `error` says what could not be recorded and how many rounds completed.
    */
   stopReason: 'budget' | 'patience' | 'record-failed';
+  /** R2-H4: every model call the run made, as counted by the caller's meter. */
+  usage?: UsageSnapshot;
   /** Present exactly when `stopReason` is `record-failed`. */
   error?: string;
   /**
@@ -836,10 +845,12 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   // D-57: the held-out verdict, measured after the loop and never recorded as evidence.
   const heldOut = await evaluateHeldOut(opts, opts.baseHarness, base, ships);
   const budget = opts.budget?.snapshot();
+  const usage = opts.usage?.snapshot();
   return {
     rounds, finalHarness: base, ships, stopReason,
     ...digestErrorField(),
     ...(heldOut !== undefined ? { heldOut } : {}),
     ...(budget !== undefined ? { budget } : {}),
+    ...(usage !== undefined ? { usage } : {}),
   };
 }

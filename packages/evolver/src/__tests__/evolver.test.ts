@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { GraphQuery, PermissionLevel } from '@maf/types';
-import { makeRunId } from '@maf/types';
+import type { CliAdapter, GraphQuery, PermissionLevel, TurnAdapter } from '@maf/types';
+import { estimateTokens, isTurnAdapter, makeRunId } from '@maf/types';
 import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { MemoryGraph } from '@maf/memory-graph';
@@ -14,7 +14,7 @@ import {
   assertChangeManifest, applyEdit, ManifestError,
   screenInstructionText, parsePlannerResponse,
   gateEvaluate, gateStatic, evolve, EvolveBudget,
-  digestEvidence, isEmptyDigest, buildPlannerUserPrompt,
+  digestEvidence, isEmptyDigest, buildPlannerUserPrompt, UsageMeter, meterAdapter,
 } from '../index.js';
 import type { BudgetSnapshot, EvolveOptions, HarnessEdit } from '../index.js';
 
@@ -1720,14 +1720,25 @@ test('budget meter: limits, spend, and the first limit that trips', () => {
     { startedAt: 0, now: () => now },
   );
   assert.equal(meter.snapshot().exhausted, false);
-  assert.match(meter.snapshot().statement, /^budget: spent 0ms of 4\.0s wall-clock, 0 of 200 tokens, \$0\.00 of \$1\.00$/);
+  assert.match(
+    meter.snapshot().statement,
+    /^budget: spent 0ms of 4\.0s wall-clock, 0 of 200 tokens \(0 reported, 0 estimated\), \$0\.00 of \$1\.00 \(\$0\.00 reported, \$0\.00 estimated\)$/,
+  );
 
   meter.addTokens(150);
+  meter.addTokens(50, 'reported');
   meter.addUsd(0.5);
+  meter.addUsd(0.25, 'reported');
   // Non-positive and non-finite additions are ignored, not counted or thrown on.
   meter.addTokens(-5); meter.addTokens(Number.NaN); meter.addUsd(0); meter.addUsd(Number.POSITIVE_INFINITY);
-  assert.equal(meter.snapshot().tokens, 150);
-  assert.equal(meter.snapshot().usd, 0.5);
+  assert.equal(meter.snapshot().tokens, 200);
+  assert.equal(meter.snapshot().reportedTokens, 50);
+  assert.equal(meter.snapshot().estimatedTokens, 150);
+  assert.equal(meter.snapshot().usd, 0.75);
+  assert.equal(meter.snapshot().reportedUsd, 0.25);
+  assert.equal(meter.snapshot().estimatedUsd, 0.5);
+  assert.match(meter.snapshot().statement, /200 of 200 tokens \(50 reported, 150 estimated\)/);
+  assert.match(meter.snapshot().statement, /\$0\.75 of \$1\.00 \(\$0\.25 reported, \$0\.50 estimated\)/);
 
   now = 4000;
   const tripped = meter.snapshot();
@@ -1743,7 +1754,7 @@ test('budget meter: limits, spend, and the first limit that trips', () => {
   const sub = cents.snapshot();
   assert.equal(sub.exhausted, true);
   assert.equal(sub.reason, 'usd');
-  assert.equal(sub.statement, 'budget exhausted (usd): spent $0.02 of $0.001');
+  assert.equal(sub.statement, 'budget exhausted (usd): spent $0.02 of $0.001 ($0.00 reported, $0.02 estimated)');
 });
 
 /** A meter that lets `n` checks through, then reports exhaustion. */
@@ -1815,4 +1826,69 @@ test('D-57 budget: exhaustion after the smoke test still does not spend on the g
   assert.equal(goldens, 1, 'the candidate golden suite did not');
   assert.equal(report.stopReason, 'budget');
   assert.equal(report.rounds[report.rounds.length - 1]?.outcome, 'budget');
+});
+
+// ─── R2-H4: the model-call meter ───────────────────────────────────────────
+
+const CAPS = {
+  supportsStreaming: false, supportsToolCalling: false, supportsWorktrees: false,
+  inProcessLoop: false, maxConcurrentTasks: 1, nativePlugins: [],
+};
+
+function cliStub(answer: (o: { reportUsage?: boolean }) => Partial<{ tokensUsed: number; costUsd: number; output: string }>) {
+  return {
+    name: 'stub', capabilities: () => CAPS, isAvailable: async () => true,
+    stream: async function* () { /* unused */ },
+    invoke: async (o: { reportUsage?: boolean }) => ({
+      success: true, output: 'ok', toolCallLog: [], exitCode: 0, duration: 0, ...answer(o),
+    }),
+  } as unknown as CliAdapter;
+}
+
+test('R2-H4 usage: a reported call is labelled reported, and an unreported one estimated', async () => {
+  const meter = new UsageMeter(1_000_000); // $1 per million tokens
+  const seen: number[] = [];
+  const metered = meterAdapter(cliStub(() => ({ tokensUsed: 100, costUsd: 0.002 })), meter, (c) => seen.push(c.tokens));
+  await metered.invoke({ prompt: 'p'.repeat(400), workingDir: '.', timeoutMs: 1 });
+
+  const reported = meter.snapshot();
+  assert.equal(reported.calls, 1);
+  assert.equal(reported.reportedCalls, 1);
+  assert.equal(reported.reportedTokens, 100, 'the backend\'s figure, not the bytes estimate');
+  assert.equal(reported.estimatedTokens, 0);
+  assert.equal(reported.usd, 0.002);
+  assert.match(reported.statement, /1 model call; 100 tokens \(100 reported, 0 estimated\)/);
+  assert.deepEqual(seen, [100], 'the caller is told every call, so the budget can be fed');
+
+  // The same adapter with nothing to report: the charge is the bytes-based estimate, priced at the
+  // run's rate, and both figures say `estimated`.
+  const quiet = new UsageMeter(3); // $3 per million tokens
+  const meteredQuiet = meterAdapter(cliStub(() => ({})), quiet);
+  await meteredQuiet.invoke({ prompt: 'p'.repeat(400), systemPrompt: 's'.repeat(40), workingDir: '.', timeoutMs: 1 });
+  const estimated = quiet.snapshot();
+  assert.equal(estimated.reportedTokens, 0);
+  assert.ok(estimated.estimatedTokens >= estimateTokens('p'.repeat(400)) + estimateTokens('s'.repeat(40)));
+  assert.equal(quiet.calls[0]!.usdSource, 'estimated');
+  assert.ok(Math.abs(estimated.usd! - (estimated.tokens * 3) / 1_000_000) < 1e-12);
+  assert.match(estimated.statement, /0 reported, \d+ estimated/);
+  assert.match(estimated.statement, /\(\$[0-9.]+ reported, \$[0-9.]+ estimated\)$/);
+});
+
+test('R2-H4 usage: an in-process turn is charged once, with the history it carried', async () => {
+  const meter = new UsageMeter();
+  const inner = {
+    ...cliStub(() => ({})),
+    sendTurn: async () => ({ text: 'answer', toolCalls: [] }),
+  } as unknown as TurnAdapter;
+  const metered = meterAdapter(inner, meter);
+  assert.ok(isTurnAdapter(metered), 'the wrapper keeps the turn seam the dispatcher chooses the tier by');
+
+  await (metered as TurnAdapter).sendTurn(
+    [{ kind: 'user', text: 'u'.repeat(400) }],
+    { prompt: '', workingDir: '.', timeoutMs: 1, systemPrompt: 'role' },
+  );
+  const snap = meter.snapshot();
+  assert.equal(snap.calls, 1, 'one turn is one call, however many tool calls it carries');
+  assert.ok(snap.estimatedTokens >= estimateTokens('u'.repeat(400)), 'the history sent is charged');
+  assert.equal(snap.reportedCalls, 0, 'a CLI turn reports no usage, so it is estimated');
 });

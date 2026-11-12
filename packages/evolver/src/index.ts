@@ -17,4 +17,6 @@ export type {
   EvolveOptions, EvolveReport, EvolveRoundRecord, HeldOutReport, SensitiveEvaluation, UnrecordedGolden,
 } from './loop.js';
 export { EvolveBudget } from './budget.js';
+export { UsageMeter, meterAdapter } from './usage.js';
+export type { UsageCall, UsageSnapshot, UsageSource } from './usage.js';
 export type { BudgetMeter, BudgetSnapshot, EvolveBudgetLimits } from './budget.js';

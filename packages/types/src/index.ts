@@ -1542,12 +1542,20 @@ export interface AdapterInvokeOptions {
    * "read-only" role and an edited tree.
    */
   nativeTools?:     boolean | 'read-only';
+  /**
+   * WP-3.7b (R2-H4): ask the backend to report its own usage and cost where it can. The `claude`
+   * CLI answers JSON (`--output-format json`) with `usage` and `total_cost_usd`; an adapter with no
+   * such mode ignores this, and its calls are estimated by the caller instead. Never an error.
+   */
+  reportUsage?:    boolean;
 }
 
 export interface AdapterInvokeResult {
   success:     boolean;
   output:      string;
   tokensUsed?: number;
+  /** WP-3.7b (R2-H4): the backend's own price for this call, when it reports one. */
+  costUsd?:    number;
   toolCallLog: ToolCallRecord[];
   exitCode:    number;
   duration:    number;

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { estimateTokens, makeRunId, refusePrototypeKey } from '@maf/types';
+import { makeRunId, refusePrototypeKey } from '@maf/types';
 import type { AdapterName, CliAdapter, PermissionLevel } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -14,7 +14,7 @@ import {
 } from '@maf/eval-harness';
 import type { GoldenSuiteResult, GoldenTask, LoadedSplits } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
-import { EvolveBudget, HELD_OUT_MIN_REPEATS, evolve } from '@maf/evolver';
+import { EvolveBudget, HELD_OUT_MIN_REPEATS, UsageMeter, evolve, meterAdapter } from '@maf/evolver';
 import type { EvolveOptions, EvolveReport } from '@maf/evolver';
 import { createDefaultRegistry } from '@maf/tools';
 import { createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS } from '@maf/processors';
@@ -133,18 +133,6 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         ...(maxTokens !== undefined ? { maxTokens } : {}),
         ...(maxUsd !== undefined ? { maxUsd } : {}),
       });
-      /**
-       * Charge work to the budget. A backend that reports `tokensUsed` is trusted over the
-       * characters/4 estimate; where it reports nothing (the golden dispatcher returns text only),
-       * the estimate is what the statement at the end is describing.
-       */
-      const meterTokens = (prompt: string, output: string, measured?: number): void => {
-        const tokens = measured !== undefined && measured > 0
-          ? measured
-          : estimateTokens(prompt) + estimateTokens(output);
-        budget.addTokens(tokens);
-        if (usdPerMillionTokens !== undefined) budget.addUsd((tokens * usdPerMillionTokens) / 1_000_000);
-      };
 
       const store = new HarnessStore(mafDir);
       // The harness `goldens run` would measure, so a fresh clone evolves from the one it evaluates.
@@ -180,8 +168,18 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         adapter = new ScriptedAdapter(bundle.tasks, bundle.evolution);
       }
 
+      // R2-H4: every model call this run makes — role turns and tool-loop turns, the planner, the
+      // critic, the judge, the security gate and LCM summaries — goes through the adapter, so the
+      // meter wraps it once and the budget is fed per call. A backend that reports usage is
+      // believed; where it reports nothing the charge is a bytes-based estimate.
+      const usage = new UsageMeter(usdPerMillionTokens);
+      const meteredAdapter = meterAdapter(adapter, usage, (call) => {
+        budget.addTokens(call.tokens, call.source);
+        if (call.usd !== undefined) budget.addUsd(call.usd, call.usdSource ?? 'estimated');
+      });
+
       const stackConfig: Parameters<typeof buildRunStack>[0] = {
-        cwd, mafDir, adapter, runId,
+        cwd, mafDir, adapter: meteredAdapter, runId,
         // D-49, F7: the same resolution `run` and `goldens` take.
         policy: { value: opts.policy, typed: cmd.getOptionValueSource('policy') === 'cli' },
         harnessSha: base.sha, headless: true, ...(opts.model ? { model: opts.model } : {}),
@@ -206,15 +204,13 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       };
 
       const metaGenerate = async (systemPrompt: string, userPrompt: string): Promise<string> => {
-        const result = await adapter.invoke({
+        // The metering adapter charges the call; a second charge here would count it twice.
+        const result = await meteredAdapter.invoke({
           prompt: userPrompt, systemPrompt,
           workingDir: cwd, timeoutMs: 300_000,
           maxOutputBytes: 256 * 1024,
           ...(opts.model ? { model: opts.model } : {}),
         });
-        // D-57: the meta-agent's own spend counts against the budget. The adapter reports measured
-        // tokens when it has them; otherwise the estimate is characters/4, and the report says so.
-        meterTokens(systemPrompt + userPrompt, result.output, result.tokensUsed);
         return result.output;
       };
 
@@ -222,7 +218,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       const securityScore = async (diff: string): Promise<'none' | 'low' | 'medium' | 'high' | 'critical'> => {
         if (!diff.trim()) return 'none';
         const gate = new SecurityReviewGate({
-          adapter, projectRoot: cwd, securityPrompt: stack.securityPrompt,
+          adapter: meteredAdapter, projectRoot: cwd, securityPrompt: stack.securityPrompt,
           ...(opts.model ? { model: opts.model } : {}),
         });
         const res = await gate.reviewDiff(diff);
@@ -244,16 +240,13 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
           dispatch: async (task, workDir, { timeoutMs, temperature }) => {
             // L5: the corpus task id travels with the dispatch, so a refusal's `PolicyEvent` names
             // the task whose score it belongs to.
-            const out = await runStack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature, task.id);
-            // D-57: a role call is spend. The dispatcher returns text, so the charge is the
-            // characters/4 estimate over the role prompt and the answer.
-            const rolePrompt = harness.roleSet.roles.find((r) => r.role === task.role)?.systemPrompt ?? '';
-            meterTokens(rolePrompt + task.prompt, out);
-            return out;
+            // D-57 (R2-H4): the dispatch is charged by the metering adapter every model call it
+            // makes, tool-loop turns and injected context included — not once per task here.
+            return runStack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature, task.id);
           },
           ...agent,
           llmJudge: {
-            verdict: makeLlmJudge({ adapter, ...(opts.model ? { model: opts.model } : {}) }, cwd),
+            verdict: makeLlmJudge({ adapter: meteredAdapter, ...(opts.model ? { model: opts.model } : {}) }, cwd),
             disclosure: describeJudge(agent, agent),
           },
           securityScore,
@@ -302,6 +295,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         heldOutSplitsSha: splits.sha,
         ...(heldOutRepeats !== undefined ? { heldOutRepeats } : {}),
         budget,
+        usage,
         recordGoldens: deps.recordGoldens ?? ((result) => scoreRecorder.record(result)),
         // Amendment item 2: the rounds were silent, and six live rounds of `no_op` looked like a
         // planner preference. Each round now says what it did and why, including "no evidence".
@@ -369,6 +363,8 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       console.log(`[maf] evolve done: ships=${report.ships} stop=${report.stopReason} → ${reportPath}`);
       // D-57: what it spent and what the held-out split said, in the terminal as well as the report.
       if (report.budget !== undefined) console.log(`[maf] ${report.budget.statement}`);
+      // R2-H4: every model call the run made, and whether each figure was reported or estimated.
+      if (report.usage !== undefined) console.log(`[maf] ${report.usage.statement}`);
       if (report.heldOut !== undefined) console.log(`[maf] ${report.heldOut.statement}`);
       if (report.error !== undefined) {
         // The run did not evolve to a stopping condition; the report above is what it paid for.

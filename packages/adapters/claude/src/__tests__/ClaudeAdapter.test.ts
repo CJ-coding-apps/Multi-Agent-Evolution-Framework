@@ -66,6 +66,45 @@ test('invoke keeps a non-zero exit that wrote output as a judged failure without
   assert.equal('transportError' in out, false);
 });
 
+// R2-H4: the CLI's own report is the only honest source for spend. `--output-format json` is
+// opt-in (`reportUsage`), so every other caller keeps the plain text answer and the argv it had.
+test('invoke asks for and reads the CLI\'s reported usage and cost when reportUsage is set', async () => {
+  const report = JSON.stringify({
+    type: 'result', subtype: 'success', result: 'the answer',
+    usage: {
+      input_tokens: 120, output_tokens: 30,
+      cache_creation_input_tokens: 10, cache_read_input_tokens: 40,
+    },
+    total_cost_usd: 0.0042,
+  });
+  const { spawn, calls } = stubSpawn({ stdout: report, stderr: '', exitCode: 0, duration: 1 });
+  const out = await new ClaudeAdapter({ spawn }).invoke({ ...CALL, reportUsage: true });
+
+  assert.ok(calls[0]!.args.includes('--output-format'), 'the JSON mode is requested');
+  assert.equal(calls[0]!.args[calls[0]!.args.indexOf('--output-format') + 1], 'json');
+  assert.equal(out.output, 'the answer', 'the answer is the result field, not the JSON envelope');
+  assert.equal(out.tokensUsed, 200, 'every billed token kind is counted');
+  assert.equal(out.costUsd, 0.0042);
+});
+
+test('invoke keeps the plain answer and the old argv when reportUsage is not set', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  const out = await new ClaudeAdapter({ spawn }).invoke(CALL);
+
+  assert.equal(out.output, 'hi');
+  assert.equal('tokensUsed' in out, false);
+  assert.equal('costUsd' in out, false);
+  assert.ok(!calls[0]!.args.includes('--output-format'));
+});
+
+test('invoke falls back to the raw answer when the reported JSON does not parse', async () => {
+  const { spawn } = stubSpawn({ stdout: 'not json at all', stderr: '', exitCode: 0, duration: 1 });
+  const out = await new ClaudeAdapter({ spawn }).invoke({ ...CALL, reportUsage: true });
+
+  assert.equal(out.output, 'not json at all');
+  assert.equal('tokensUsed' in out, false, 'nothing is claimed as reported');
+});
+
 test('sendTurn throws the TransportError of a timed-out turn instead of parsing it', async () => {
   const result = timedOut();
   const { spawn } = stubSpawn(result);

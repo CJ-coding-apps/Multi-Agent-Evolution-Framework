@@ -5,6 +5,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
+import { estimateTokens } from '@maf/types';
 import type { AdapterInvokeOptions, AdapterInvokeResult, CliAdapter } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { RoleRegistry, harnessRoleSetFromRegistry } from '@maf/roles';
@@ -565,6 +566,92 @@ test('real evolve.ts: an unapproved sensitive candidate never becomes a later ro
     assert.ok(await store.tryLoad(storedSha), 'the sensitive candidate is still there for a human');
     assert.equal(logs.filter((l) => l.includes('[maf] SHIP')).length, 1, 'exactly one ship');
     assert.equal(logs.filter((l) => l.includes('[maf] STORED')).length, 1, 'exactly one store');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R2-H4: the budget used to charge one estimate per golden task, so every tool-loop turn, every
+// planner and critic call, the judge, the security gate and every injected context went uncounted —
+// the audit measured an undercount of about 60×. The metering adapter wraps the run's adapter, and
+// the report carries the count.
+test('real evolve.ts (R2-H4): every model call is counted, estimated from the bytes sent', async (t) => {
+  const MANIFEST = '```json\n' + JSON.stringify({
+    edit: { kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'r' },
+    expectedImprovement: 'x', targetTasks: ['coder-sum'],
+  }) + '\n```';
+
+  const { root } = await freshClone();
+  try {
+    const exchanges: { sent: string; received: string }[] = [];
+    const adapter = {
+      name: 'scripted',
+      capabilities: () => ({
+        supportsStreaming: false, supportsToolCalling: false, supportsWorktrees: false,
+        inProcessLoop: false, maxConcurrentTasks: 1, nativePlugins: [],
+      }),
+      isAvailable: async () => true,
+      stream: async function* () { /* unused */ },
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        const systemPrompt = o.systemPrompt ?? '';
+        let output: string;
+        if (systemPrompt.includes('MAF harness evolution planner')) {
+          output = exchanges.filter((e) => e.sent.includes('planner')).length === 0
+            ? MANIFEST : '```json\n{"no_op":true}\n```';
+        } else if (systemPrompt.includes('critic')) {
+          output = '```json\n{"verdict":"ship","notes":"ok"}\n```';
+        } else if (systemPrompt.includes('security')) {
+          output = '```json\n{"findings":[],"summary":"none","passed":true}\n```';
+        } else {
+          output = `answer for: ${o.prompt.slice(0, 40)}`;
+        }
+        exchanges.push({ sent: `${systemPrompt}\n${o.prompt}`, received: output });
+        return { success: true, output, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+
+    // Every role dispatch is one opaque model call through whatever adapter the stack was built
+    // with — which is the metered wrapper, so the turn is counted exactly as a real one would be.
+    t.mock.method(wiring, 'buildRunStack', async (cfg: StackConfig) => ({
+      adapter: cfg.adapter,
+      graph: { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph,
+      securityPrompt: 'security',
+      dispatchTask: async (
+        _h: HarnessConfig, _role: string, prompt: string, _workDir: string, _timeoutMs: number,
+      ) => (await cfg.adapter.invoke({
+        prompt, systemPrompt: 'role prompt', workingDir: root, timeoutMs: 1_000,
+      })).output,
+      close: async () => {},
+    }) as unknown as wiring.RunStack);
+
+    t.mock.method(console, 'log', () => {});
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--rounds', '1', '--patience', '1'), { from: 'user' });
+
+    const reportDir = path.join(root, '.maf', 'evolve');
+    const [file] = await readdir(reportDir);
+    const report = JSON.parse(await readFile(path.join(reportDir, file!), 'utf8')) as {
+      usage?: { calls: number; tokens: number; reportedTokens: number; estimatedTokens: number; statement: string };
+      budget?: { tokens: number };
+    };
+    const usage = report.usage;
+    assert.ok(usage, 'the report carries the usage figures');
+    assert.ok(exchanges.length > 4, 'planner, critic, security and role calls all happened');
+    assert.equal(usage!.calls, exchanges.length, 'every model call is counted, not one per task');
+
+    // What the bytes say, computed independently from what each call sent and received.
+    const bytesBased = exchanges.reduce((n, e) => n + estimateTokens(e.sent) + estimateTokens(e.received), 0);
+    assert.ok(
+      Math.abs(usage!.tokens - bytesBased) / bytesBased < 0.1,
+      `counted ${usage!.tokens} tokens against ${bytesBased} bytes-based (${exchanges.length} calls)`,
+    );
+    assert.equal(usage!.reportedTokens, 0, 'the fake adapter reports nothing, so nothing is claimed as reported');
+    assert.equal(report.budget?.tokens, usage!.tokens, 'the budget is fed from the meter, not from a second count');
+    assert.equal(usage!.estimatedTokens, usage!.tokens);
+    assert.match(usage!.statement, /estimated/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

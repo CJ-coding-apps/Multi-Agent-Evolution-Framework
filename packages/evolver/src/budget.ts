@@ -19,7 +19,12 @@ export interface BudgetSnapshot {
   limits: EvolveBudgetLimits;
   elapsedMs: number;
   tokens: number;
+  /** R2-H4: how much of `tokens` the backend reported, and how much this side estimated. */
+  reportedTokens?: number;
+  estimatedTokens?: number;
   usd?: number;
+  reportedUsd?: number;
+  estimatedUsd?: number;
   /** True when a configured limit is reached or passed. An unset limit never trips. */
   exhausted: boolean;
   /** The first limit that tripped, in the order wall-clock, tokens, dollars. */
@@ -52,6 +57,10 @@ function dollars(n: number): string {
 export class EvolveBudget implements BudgetMeter {
   tokens = 0;
   usd = 0;
+  reportedTokens = 0;
+  estimatedTokens = 0;
+  reportedUsd = 0;
+  estimatedUsd = 0;
 
   private readonly startedAt: number;
   private readonly now: () => number;
@@ -64,12 +73,19 @@ export class EvolveBudget implements BudgetMeter {
     this.startedAt = opts.startedAt ?? this.now();
   }
 
-  addTokens(n: number): void {
-    if (Number.isFinite(n) && n > 0) this.tokens += Math.round(n);
+  addTokens(n: number, source: 'reported' | 'estimated' = 'estimated'): void {
+    if (!Number.isFinite(n) || n <= 0) return;
+    const tokens = Math.round(n);
+    this.tokens += tokens;
+    if (source === 'reported') this.reportedTokens += tokens;
+    else this.estimatedTokens += tokens;
   }
 
-  addUsd(n: number): void {
-    if (Number.isFinite(n) && n > 0) this.usd += n;
+  addUsd(n: number, source: 'reported' | 'estimated' = 'estimated'): void {
+    if (!Number.isFinite(n) || n <= 0) return;
+    this.usd += n;
+    if (source === 'reported') this.reportedUsd += n;
+    else this.estimatedUsd += n;
   }
 
   snapshot(): BudgetSnapshot {
@@ -82,8 +98,12 @@ export class EvolveBudget implements BudgetMeter {
 
     const parts: string[] = [];
     if (maxWallClockMs !== undefined) parts.push(`${human(elapsedMs)} of ${human(maxWallClockMs)} wall-clock`);
-    if (maxTokens !== undefined) parts.push(`${this.tokens} of ${maxTokens} tokens`);
-    if (maxUsd !== undefined) parts.push(`${dollars(this.usd)} of ${dollars(maxUsd)}`);
+    // R2-H4: the token figure is the backend's report where it gave one and an estimate where it
+    // did not; the split says which is which, so a reader can judge the number.
+    if (maxTokens !== undefined)
+      parts.push(`${this.tokens} of ${maxTokens} tokens (${this.reportedTokens} reported, ${this.estimatedTokens} estimated)`);
+    if (maxUsd !== undefined)
+      parts.push(`${dollars(this.usd)} of ${dollars(maxUsd)} (${dollars(this.reportedUsd)} reported, ${dollars(this.estimatedUsd)} estimated)`);
     const spent = parts.length > 0 ? parts.join(', ') : 'no budget was set';
     const statement = reason === undefined
       ? `budget: spent ${spent}`
@@ -93,7 +113,11 @@ export class EvolveBudget implements BudgetMeter {
       limits: { ...this.limits },
       elapsedMs,
       tokens: this.tokens,
-      ...(maxUsd !== undefined ? { usd: this.usd } : {}),
+      reportedTokens: this.reportedTokens,
+      estimatedTokens: this.estimatedTokens,
+      ...(maxUsd !== undefined
+        ? { usd: this.usd, reportedUsd: this.reportedUsd, estimatedUsd: this.estimatedUsd }
+        : {}),
       exhausted: reason !== undefined,
       ...(reason !== undefined ? { reason } : {}),
       statement,
