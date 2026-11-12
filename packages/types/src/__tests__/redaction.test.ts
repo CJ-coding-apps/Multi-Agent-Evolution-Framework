@@ -77,3 +77,19 @@ test('an unquoted spaced path inside the repo still keeps its repo-relative tail
   assert.equal(out, 'refused secret.txt');
   assert.doesNotMatch(out, /\/Users/);
 });
+
+// R2-L2: the space-tolerant pattern continued past a space only when that word still carried a
+// separator, so a path whose LAST word carried it leaked every word before it. These are the
+// verdict's three residual shapes.
+test('an unquoted path ending in a multi-word segment is masked whole (R2-L2)', () => {
+  const out = redactEvidenceText('refused write to /Users/Mary Ann Lee/secret.txt because policy');
+  assert.equal(out, 'refused write to [REDACTED:path] because policy');
+  assert.doesNotMatch(out, /Ann Lee|secret\.txt/, 'no word of the path survives');
+});
+
+test('an unquoted path ending in a spaced filename is masked whole (R2-L2)', () => {
+  assert.equal(redactEvidenceText('refused /home/u/my secret notes.txt'),
+    'refused [REDACTED:path]');
+  assert.equal(redactEvidenceText('refused C:\\Users\\x\\my key.pem now'),
+    'refused [REDACTED:path] now');
+});

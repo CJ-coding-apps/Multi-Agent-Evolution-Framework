@@ -87,6 +87,16 @@ export function redactText(text: string, extra: readonly RegExp[] = []): string 
 const ABSOLUTE_PATH_PATTERNS: ReadonlyArray<{ label: string; re: RegExp }> = [
   { label: 'path', re: /(["'])(?:[A-Za-z]:[\\/]|\\\\|\/)[^"'\n]*\1/g },
   {
+    // R2-L2: an unquoted path whose tail is several space-separated words — `/Users/Mary Ann
+    // Lee/secret.txt`, `/home/u/my secret notes.txt`, `C:\Users\x\my key.pem`. The generic pattern
+    // below continues past a space only when the WORD ITSELF still carries a separator, so every
+    // word before the last one stayed in the text. This one reads the path to the next token that
+    // carries a separator or an extension, up to three words ahead, which are the shapes a refusal
+    // quotes; the generic pattern still handles everything with no space in it.
+    label: 'path',
+    re: /(?:^|(?<=[\s"'(=:`]))(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^\s"']*(?:[^\S\r\n]+[^\s"']+){0,3}[^\S\r\n]+[^\s"']*(?:[\\/]|\.[A-Za-z0-9]{1,8})[^\s"']*/g,
+  },
+  {
     label: 'path',
     re: /(?:^|(?<=[\s"'(=:`]))(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^\s"']*(?:[^\S\r\n]+[^\s"']*[\\/][^\s"']*)*/g,
   },
