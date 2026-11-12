@@ -1870,6 +1870,18 @@ const SHIPPING_PLAN = manifestJson({
   kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'missed t2',
 }, ['t2']);
 
+// R2-L3: a run that used its rounds up is not a run a budget stopped. The default stop reason —
+// `budget` — predates D-57 and reported a finished run as a tripped limit.
+test('R2-L3: running out of rounds is `rounds`, not `budget`', async () => {
+  const report = await evolve(loopOpts({
+    metaGenerate: mockMeta([SHIPPING_PLAN]),
+    maxRounds: 1,
+    patience: 3,
+  }));
+  assert.equal(report.ships, 1, 'the round shipped and the loop ended because maxRounds was 1');
+  assert.equal(report.stopReason, 'rounds');
+});
+
 test('R2-M4 budget: exhaustion before the round-0 baseline spends no golden run at all', async () => {
   let goldens = 0;
   let planners = 0;

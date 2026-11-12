@@ -218,8 +218,12 @@ export interface EvolveReport {
    * `record-failed` is a stop the caller must report (WP-3.7a L2): a golden run was paid for and
    * its result could not be written as evidence. The report still carries every round up to that
    * point; `error` says what could not be recorded and how many rounds completed.
+   *
+   * R2-L3: `rounds` is the ordinary end — `maxRounds` was reached with no budget set and no
+   * patience trip. It used to be reported as `budget`, which was the initialiser's value, not a
+   * measurement; with real budget flags that made a finished run look like a stopped one.
    */
-  stopReason: 'budget' | 'patience' | 'record-failed';
+  stopReason: 'rounds' | 'budget' | 'patience' | 'record-failed';
   /** R2-H4: every model call the run made, as counted by the caller's meter. */
   usage?: UsageSnapshot;
   /** Present exactly when `stopReason` is `record-failed`. */
@@ -510,7 +514,9 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   const rounds: EvolveRoundRecord[] = [];
   let idle = 0;
   let ships = 0;
-  let stopReason: EvolveReport['stopReason'] = 'budget';
+  // R2-L3: the loop's ordinary end is `rounds`; only a budget check that actually tripped says
+  // `budget`. The old initialiser made every run without a budget flag claim one.
+  let stopReason: EvolveReport['stopReason'] = 'rounds';
 
   let baseline: GoldenSuiteResult | undefined;
   // What each golden row this loop caused actually is (R2-L1). Rows with no entry are another
