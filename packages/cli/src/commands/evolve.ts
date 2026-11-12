@@ -316,6 +316,8 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         splitName: 'train',
         runHeldOut,
         heldOutSplitsSha: splits.sha,
+        // R2-M1: the loop projects each golden run's cost from its task count before starting it.
+        goldenTaskCounts: { train: splits.train.length, heldOut: splits.heldOut.length },
         ...(judgeScoredHeldOut.length > 0 ? { heldOutJudgeScored: judgeScoredHeldOut } : {}),
         ...(heldOutRepeats !== undefined ? { heldOutRepeats } : {}),
         budget,

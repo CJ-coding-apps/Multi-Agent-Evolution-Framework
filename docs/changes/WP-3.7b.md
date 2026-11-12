@@ -457,6 +457,42 @@ measured shape from both sides), false-positive at or below `alpha`, and seed re
 fragment's two numbers are the values those tests measure. The simulation is a test of the gate's
 statistics only — it is not evidence about any model, and it makes no paid call.
 
+### R3-M1 — a golden run is projected before it starts (round-2 finding R2-M1)
+
+The budget was asked before every paid step, but the question was always "have we already spent
+too much?" — which lets the run that crosses the ceiling start, because its cost is unknown until
+it ends. A golden run is a whole suite (29 train tasks in the shipped corpus, 7 held-out, 20 in
+the pool), so one overshoot is large.
+
+`projectGoldenRun` now answers "will the next run cross a limit?" before it starts:
+
+> `projected = tasks × per-task cost`, where the per-task cost is **measured** from this session's
+> earlier golden runs (tokens spent ÷ tasks run) or, when this is the first, the conservative
+> `CONSERVATIVE_GOLDEN_TOKENS_PER_TASK = 8000`.
+
+The loop calls it before **each** golden run: the round-0 baseline, each round's candidate suite,
+and each of the 5 held-out baseline and 5 held-out candidate repeats. A projected crossing is not
+started: the round records outcome `budget` with the projection in its note (or the held-out report
+carries it as `skipped`), and `stopReason` is `budget`. Nothing is spent, so the meter itself stays
+`exhausted: false` — the distinction is the point, and the tests assert both.
+
+`goldenTaskCounts: { train, heldOut }` is the caller's declaration of how many tasks each run
+measures (`maf evolve` fills it from the loaded splits); without it the projection has no size to
+multiply and the loop behaves exactly as before, taking no extra budget snapshot. Measuring a run
+only happens when the counts are declared, for the same reason.
+
+The test CJ specified is `maf evolve --max-tokens 2000` on the scripted adapter: the stop comes
+**before** the baseline, the printed note is
+`the round-0 baseline was not started: 29 tasks × 8000 tokens each (conservative estimate) projects 232000 tokens; 0 already spent against a 2000-token budget — not started`,
+and `usage.calls` is 0. The loop tests also cover the measured path (a baseline that spends 8000 on
+one task makes the next run's 8000-token projection cross a 9000-token ceiling) and the held-out
+repeats (100 tasks × 1000 measured tokens against a 20000-token ceiling skips before the first
+repeat). The fixtures make the measured cost deliberately different from the 8000-token constant,
+so forcing the estimate path is observable. Mutants: removing the pre-baseline projection check
+makes the CLI test fail on `usage.calls === 0` (the baseline then runs); always using the constant
+fails three tests — the unit test's measured assertions and both measured-path loop tests — on
+their `(measured …)` statement and per-task figure.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

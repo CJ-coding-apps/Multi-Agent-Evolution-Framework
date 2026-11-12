@@ -15,6 +15,7 @@ import {
   screenInstructionText, parsePlannerResponse,
   gateEvaluate, gateStatic, evolve, EvolveBudget,
   digestEvidence, isEmptyDigest, buildPlannerUserPrompt, UsageMeter, meterAdapter,
+  projectGoldenRun, CONSERVATIVE_GOLDEN_TOKENS_PER_TASK,
 } from '../index.js';
 import type { BudgetSnapshot, EvolveOptions, HarnessEdit } from '../index.js';
 
@@ -1980,6 +1981,118 @@ test('R2-M4 budget: every held-out repeat asks the budget, and exhaustion stops 
   assert.equal(repeats, 1, 'only the first baseline repeat started');
   assert.match(report.heldOut?.skipped ?? '', /after 1 of 5 baseline repeats; the verdict needs all 5/);
   assert.equal(report.budget?.exhausted, true);
+});
+
+// ─── R2-M1: the projected cost of a golden run ─────────────────────────────
+
+test('R2-M1 projection: no token budget means nothing to project; a first run is estimated high', () => {
+  assert.equal(projectGoldenRun({ tasks: 20, spentTokens: 0 }), undefined);
+
+  const first = projectGoldenRun({ tasks: 20, spentTokens: 0, maxTokens: 2000 })!;
+  assert.equal(first.source, 'conservative-estimate');
+  assert.equal(first.perTaskTokens, CONSERVATIVE_GOLDEN_TOKENS_PER_TASK);
+  assert.equal(first.projectedTokens, 20 * CONSERVATIVE_GOLDEN_TOKENS_PER_TASK);
+  assert.equal(first.exceeds, true);
+  assert.match(first.statement, /\(conservative estimate\) projects 160000 tokens; 0 already spent against a 2000-token budget — not started/);
+
+  const measured = projectGoldenRun({
+    tasks: 16, spentTokens: 1000, maxTokens: 100_000, measured: { tokens: 40_000, tasks: 10 },
+  })!;
+  assert.equal(measured.source, 'measured');
+  assert.equal(measured.perTaskTokens, 4000);
+  assert.equal(measured.projectedTokens, 64_000);
+  assert.equal(measured.exceeds, false);
+  assert.match(measured.statement, /16 tasks × 4000 tokens each \(measured 4000\) projects 64000 tokens; 1000 already spent/);
+
+  // A "measurement" with no tasks behind it is not a measurement.
+  assert.equal(projectGoldenRun({
+    tasks: 1, spentTokens: 0, maxTokens: 1, measured: { tokens: 10, tasks: 0 },
+  })!.source, 'conservative-estimate');
+});
+
+test('R2-M1: the projection stops the round-0 baseline before it is paid for', async () => {
+  let goldens = 0;
+  const opts = loopOpts({
+    metaGenerate: mockMeta([SHIPPING_PLAN]),
+    goldenTaskCounts: { train: 20, heldOut: 10 },
+    budget: new EvolveBudget({ maxTokens: 2000 }),
+  });
+  const inner = opts.runGoldens;
+  opts.runGoldens = async (h) => { goldens++; return inner(h); };
+
+  const report = await evolve(opts);
+  assert.equal(goldens, 0, 'the baseline was never started');
+  assert.equal(report.stopReason, 'budget');
+  assert.equal(report.rounds.length, 1);
+  assert.equal(report.rounds[0]?.outcome, 'budget');
+  assert.match(report.rounds[0]?.note ?? '',
+    /the round-0 baseline was not started: 20 tasks × 8000 tokens each \(conservative estimate\) projects 160000 tokens; 0 already spent against a 2000-token budget — not started/);
+  // Nothing was spent, so the meter itself never tripped: the projection is what stopped it.
+  assert.equal(report.budget?.exhausted, false);
+});
+
+test('R2-M1: a later run is projected from what this session already measured', async () => {
+  let tokens = 0;
+  const meter = {
+    snapshot: (): BudgetSnapshot => ({
+      limits: { maxTokens: 9000 }, elapsedMs: 0, tokens, exhausted: false,
+      statement: `budget: spent ${tokens} of 9000 tokens`,
+    }),
+  };
+  let goldens = 0;
+  const oneTask = (sha: string): GoldenSuiteResult => ({
+    ...suite(['t1'], sha),
+    tasks: [{ taskId: 't1', role: 'coder', passed: true, attempts: [] }],
+  });
+  const opts = loopOpts({
+    metaGenerate: mockMeta([SHIPPING_PLAN]),
+    goldenTaskCounts: { train: 1, heldOut: 10 },
+    budget: meter,
+    runGoldens: async (h) => {
+      goldens++;
+      tokens += 5000; // the baseline spent 5000 on one task: 5000 tokens per task, measured —
+      return oneTask(h.sha); // a figure deliberately unlike the 8000-token first-run estimate
+    },
+  });
+
+  const report = await evolve(opts);
+  assert.equal(goldens, 1, 'the baseline ran; the candidate run was projected and refused');
+  assert.equal(report.stopReason, 'budget');
+  assert.match(report.rounds[report.rounds.length - 1]?.note ?? '',
+    /the candidate golden run was not started: 1 task × 5000 tokens each \(measured 5000\) projects 5000 tokens; 5000 already spent against a 9000-token budget — not started/);
+});
+
+test('R2-M1: each held-out repeat is projected too, not just the train runs', async () => {
+  let tokens = 0;
+  const meter = {
+    snapshot: (): BudgetSnapshot => ({
+      limits: { maxTokens: 20000 }, elapsedMs: 0, tokens, exhausted: false,
+      statement: `budget: spent ${tokens} of 20000 tokens`,
+    }),
+  };
+  let repeats = 0;
+  const oneTask = (sha: string, solved: string[] = ['t1']): GoldenSuiteResult => ({
+    ...suite(solved, sha),
+    tasks: [{ taskId: 't1', role: 'coder', passed: true, attempts: [] }],
+  });
+  const opts = loopOpts({
+    metaGenerate: mockMeta([SHIPPING_PLAN]),
+    goldenTaskCounts: { train: 1, heldOut: 100 },
+    budget: meter,
+    runGoldens: async (h) => {
+      // The candidate ships only if it solves what the baseline did not, as in the default fixture.
+      const thorough = h.roleSet.roles.find((r) => r.role === 'coder')?.systemPrompt?.includes('thorough');
+      tokens += 1000;
+      return oneTask(h.sha, thorough ? ['t1', 't2'] : ['t1']);
+    },
+    runHeldOut: async (h) => { repeats++; return oneTask(h.sha); },
+  });
+
+  const report = await evolve(opts);
+  assert.equal(report.ships, 1, 'the candidate shipped, so the held-out split was next');
+  assert.equal(repeats, 0, 'no held-out repeat started');
+  assert.match(report.heldOut?.skipped ?? '',
+    /baseline repeat 1 was not started: 100 tasks × 1000 tokens each \(measured 1000\) projects 100000 tokens; 2000 already spent against a 20000-token budget — not started/);
 });
 
 // ─── R2-H4: the model-call meter ───────────────────────────────────────────

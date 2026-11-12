@@ -37,6 +37,63 @@ export interface BudgetMeter {
   snapshot(): BudgetSnapshot;
 }
 
+/**
+ * R2-M1: a golden run is the expensive step, and a budget check that only looks at what has been
+ * spent lets the run that crosses the ceiling start in the first place. Before each run the loop
+ * projects `tasks × per-task cost` — the measured per-task cost of earlier runs in this session
+ * where it has one, and this conservative figure where it does not (a real task is several role
+ * turns and a tool loop over a small repo; the number is deliberately high so a projection errs
+ * toward not starting).
+ */
+export const CONSERVATIVE_GOLDEN_TOKENS_PER_TASK = 8_000;
+
+export interface GoldenRunProjection {
+  tasks: number;
+  perTaskTokens: number;
+  source: 'measured' | 'conservative-estimate';
+  projectedTokens: number;
+  spentTokens: number;
+  maxTokens: number;
+  /** True when `spentTokens + projectedTokens` is over `maxTokens`. */
+  exceeds: boolean;
+  statement: string;
+}
+
+/** What earlier golden runs this session cost, if any: total tokens and total tasks measured. */
+export interface GoldenRunMeasurement {
+  tokens: number;
+  tasks: number;
+}
+
+/**
+ * R2-M1: project what one golden run will cost, before it starts. Returns undefined when no token
+ * budget is set — there is nothing to cross — so a caller can treat undefined as "go ahead".
+ */
+export function projectGoldenRun(input: {
+  tasks: number;
+  spentTokens: number;
+  maxTokens?: number | undefined;
+  measured?: GoldenRunMeasurement | undefined;
+}): GoldenRunProjection | undefined {
+  const { tasks, spentTokens, maxTokens, measured } = input;
+  if (maxTokens === undefined) return undefined;
+  const fromMeasurement = measured !== undefined && measured.tasks > 0;
+  const perTaskTokens = fromMeasurement
+    ? measured.tokens / measured.tasks
+    : CONSERVATIVE_GOLDEN_TOKENS_PER_TASK;
+  const projectedTokens = Math.ceil(tasks * perTaskTokens);
+  const exceeds = spentTokens + projectedTokens > maxTokens;
+  const rounded = fromMeasurement ? `measured ${Math.round(perTaskTokens)}` : 'conservative estimate';
+  return {
+    tasks, perTaskTokens, source: fromMeasurement ? 'measured' : 'conservative-estimate',
+    projectedTokens, spentTokens, maxTokens, exceeds,
+    statement:
+      `${tasks} task${tasks === 1 ? '' : 's'} × ${Math.round(perTaskTokens)} tokens each (${rounded}) `
+      + `projects ${projectedTokens} tokens; ${spentTokens} already spent against a ${maxTokens}-token budget`
+      + (exceeds ? ' — not started' : ' — inside the budget'),
+  };
+}
+
 function human(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;

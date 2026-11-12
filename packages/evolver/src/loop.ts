@@ -14,7 +14,8 @@ import {
 import type { CurrentHarnessStatus, HistoryLabel, MetaGenerate, RoleCatalogEntry } from './planner.js';
 import { gateEvaluate, gateStatic } from './gate.js';
 import type { GateDecision, GateVeto } from './gate.js';
-import type { BudgetMeter, BudgetSnapshot } from './budget.js';
+import { projectGoldenRun } from './budget.js';
+import type { BudgetMeter, BudgetSnapshot, GoldenRunMeasurement, GoldenRunProjection } from './budget.js';
 
 export interface EvolveRoundRecord {
   round: number;
@@ -165,6 +166,14 @@ export interface EvolveOptions {
   evidenceScope?: EvidenceScope;
   /** D-57: the meter. The loop asks it before every round and before every step that costs money. */
   budget?: BudgetMeter;
+  /**
+   * R2-M1: how many tasks each golden run measures. With this and a token budget the loop projects
+   * `tasks × per-task cost` before a run starts — the measured cost of this session's earlier runs,
+   * or a conservative estimate for the first — and refuses to start one that would cross the
+   * ceiling. Without it the projection has no size to multiply and the caller's budget check is the
+   * only one, which is what the pre-D-57 callers relied on.
+   */
+  goldenTaskCounts?: { train: number; heldOut: number };
   /**
    * R2-H4: the model-call meter the caller feeds. The loop only snapshots it into the report, so
    * every figure the run spent — calls, tokens and dollars, each marked reported or estimated —
@@ -392,6 +401,8 @@ function heldOutScore(run: GoldenSuiteResult, judgeScored: ReadonlySet<string>):
  */
 async function evaluateHeldOut(
   opts: EvolveOptions, base: HarnessConfig, finalHarness: HarnessConfig, ships: number,
+  projectGolden: (tasks: number | undefined) => GoldenRunProjection | undefined,
+  measureGolden: <T extends GoldenSuiteResult>(run: () => Promise<T>) => Promise<T>,
 ): Promise<HeldOutReport | undefined> {
   const runHeldOut = opts.runHeldOut;
   if (runHeldOut === undefined) return undefined;
@@ -421,17 +432,25 @@ async function evaluateHeldOut(
     opts.budget?.snapshot().exhausted === true
       ? skipped(`the budget was exhausted after ${done} of ${repeats} ${phase} repeat${repeats === 1 ? '' : 's'}; the verdict needs all ${repeats}`)
       : undefined;
+  // R2-M1: each repeat is a whole held-out suite, so its cost is projected before it starts, not
+  // discovered after it has crossed the ceiling.
+  const projectionStops = (phase: string, i: number): HeldOutReport | undefined => {
+    const projection = projectGolden(opts.goldenTaskCounts?.heldOut);
+    return projection?.exceeds === true
+      ? skipped(`${phase} repeat ${i + 1} was not started: ${projection.statement}`)
+      : undefined;
+  };
   try {
     // Baseline first, then the survivor — the same split, the same runner, N times each.
     for (let i = 0; i < repeats; i++) {
-      const stop = overBudgetAfter('baseline', i);
+      const stop = overBudgetAfter('baseline', i) ?? projectionStops('baseline', i);
       if (stop !== undefined) return stop;
-      baselineRuns.push(await runHeldOut(base));
+      baselineRuns.push(await measureGolden(() => runHeldOut(base)));
     }
     for (let i = 0; i < repeats; i++) {
-      const stop = overBudgetAfter('candidate', i);
+      const stop = overBudgetAfter('candidate', i) ?? projectionStops('candidate', i);
       if (stop !== undefined) return stop;
-      candidateRuns.push(await runHeldOut(finalHarness));
+      candidateRuns.push(await measureGolden(() => runHeldOut(finalHarness)));
     }
   } catch (err) {
     return skipped(`the held-out run failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -540,11 +559,39 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   const digestErrorField = (): Pick<EvolveReport, 'digestErrors'> =>
     digestErrors.size === 0 ? {} : { digestErrors: [...digestErrors] };
 
+  // R2-M1: a golden run is a whole suite, and the budget checks only see what has already been
+  // spent. Track what earlier runs this session cost per task, then project the next run from it —
+  // or from a conservative estimate when this is the first. A run whose projection crosses the
+  // token ceiling is never started; the report says what it would have cost.
+  const goldenMeasured: GoldenRunMeasurement = { tokens: 0, tasks: 0 };
+  const spentTokens = (): number =>
+    opts.budget?.snapshot().tokens ?? 0;
+  const projectGolden = (tasks: number | undefined): GoldenRunProjection | undefined => {
+    // A caller that gave no task counts has no projection to make; not even a snapshot is taken,
+    // so the budget is asked exactly as often as it was before this check existed.
+    if (tasks === undefined || opts.goldenTaskCounts === undefined) return undefined;
+    const maxTokens = opts.budget?.snapshot().limits.maxTokens;
+    if (maxTokens === undefined) return undefined;
+    return projectGoldenRun({
+      tasks, spentTokens: spentTokens(), maxTokens,
+      ...(goldenMeasured.tasks > 0 ? { measured: goldenMeasured } : {}),
+    });
+  };
+  /** Measure a golden run's spend and size, so the next projection uses this session's data. */
+  const measureGolden = async <T extends GoldenSuiteResult>(run: () => Promise<T>): Promise<T> => {
+    if (opts.goldenTaskCounts === undefined) return run();
+    const before = spentTokens();
+    const result = await run();
+    goldenMeasured.tokens += Math.max(0, spentTokens() - before);
+    goldenMeasured.tasks += result.tasks.length;
+    return result;
+  };
+
   // Every golden run the loop pays for is evidence for the rounds after it (WP-3.7 amendment 1).
   // Recording before returning means the next digest reads it; a throw is not swallowed, because
   // the alternative is a loop that keeps proposing from an empty graph and calling that no_op.
   const evaluate = async (harness: HarnessConfig): Promise<GoldenSuiteResult> => {
-    const result = await opts.runGoldens(harness);
+    const result = await measureGolden(() => opts.runGoldens(harness));
     if (opts.recordGoldens) {
       try {
         await opts.recordGoldens(result);
@@ -643,6 +690,16 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     if (!baseline) {
       // R2-M4: the round-0 baseline is a paid golden run of its own, not part of a round's suite.
       if (await stopIfOverBudget('the budget was exhausted before the round-0 baseline')) break;
+      // R2-M1: the check above sees what has been spent; this one sees what the run will cost.
+      const baselineProjection = projectGolden(opts.goldenTaskCounts?.train);
+      if (baselineProjection?.exceeds === true) {
+        await record(rec({
+          outcome: 'budget',
+          note: `the round-0 baseline was not started: ${baselineProjection.statement}`,
+        }));
+        stopReason = 'budget';
+        break;
+      }
       try {
         baseline = await evaluate(base);
       } catch (err) {
@@ -833,6 +890,16 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       stopReason = 'budget';
       break;
     }
+    // R2-M1: the candidate suite is a whole golden run too; project it before paying for it.
+    const candidateProjection = projectGolden(opts.goldenTaskCounts?.train);
+    if (candidateProjection?.exceeds === true) {
+      await record(rec({
+        manifest: finalManifest, outcome: 'budget',
+        note: `the candidate golden run was not started: ${candidateProjection.statement}`,
+      }));
+      stopReason = 'budget';
+      break;
+    }
     let candidateScores: GoldenSuiteResult;
     try {
       candidateScores = await evaluate(finalCandidate);
@@ -925,7 +992,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   }
 
   // D-57: the held-out verdict, measured after the loop and never recorded as evidence.
-  const heldOut = await evaluateHeldOut(opts, opts.baseHarness, base, ships);
+  const heldOut = await evaluateHeldOut(opts, opts.baseHarness, base, ships, projectGolden, measureGolden);
   const budget = opts.budget?.snapshot();
   const usage = opts.usage?.snapshot();
   return {

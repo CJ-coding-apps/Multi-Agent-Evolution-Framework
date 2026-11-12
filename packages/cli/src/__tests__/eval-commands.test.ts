@@ -246,7 +246,7 @@ test('maf evolve refuses a held-out gate resting on fewer than minHeldOut determ
   }
 });
 
-test('R2-M4 budget: --max-tokens 2000 is exhausted by the baseline and nothing new starts', async (t) => {
+test('R2-M1 budget: --max-tokens 2000 stops before the baseline, with the projection printed', async (t) => {
   const { root } = await freshClone();
   const saved = process.exitCode;
   process.exitCode = 0;
@@ -270,14 +270,18 @@ test('R2-M4 budget: --max-tokens 2000 is exhausted by the baseline and nothing n
     };
     assert.equal(report.stopReason, 'budget');
     assert.equal(report.ships, 0);
-    assert.equal(report.budget?.exhausted, true);
+    // R2-M1: nothing was spent, so the meter did not trip — the projection is what stopped the
+    // run. `stopReason` still says `budget`, because that is the limit the run could not start over.
+    assert.equal(report.budget?.exhausted, false);
+    assert.equal(report.budget?.tokens, 0);
     assert.equal(report.rounds.length, 1, 'the round that could not continue is the only one recorded');
     assert.equal(report.rounds[0]?.outcome, 'budget');
     assert.equal(report.rounds[0]?.manifest, undefined, 'no manifest exists: the planner never ran');
-    // The baseline is the first paid step, and its cost is unknown until it runs, so the stop is
-    // at the next boundary — the planner. What matters is that nothing new starts over budget.
-    assert.match(report.rounds[0]?.note ?? '', /before the planner/);
-    assert.ok((report.usage?.calls ?? 0) > 0, 'the baseline was measured; nothing after it started');
+    // R2-M1: the projection is printed before the baseline starts, so the stop is before it —
+    // not after it has already overspent. With no earlier run to measure, the estimate is used.
+    assert.match(report.rounds[0]?.note ?? '',
+      /the round-0 baseline was not started: 29 tasks × 8000 tokens each \(conservative estimate\) projects 232000 tokens; 0 already spent against a 2000-token budget — not started/);
+    assert.equal(report.usage?.calls, 0, 'nothing was dispatched: the stop happened before the baseline');
     assert.ok(logs.some((l) => l.includes('stop=budget')), logs.join('\n'));
   } finally {
     process.exitCode = saved;
