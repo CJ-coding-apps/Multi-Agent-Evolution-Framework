@@ -590,6 +590,15 @@ refusal; dropping the unattributed-row filter lets `coder-fib`'s content through
 each; the unmutated suite is 79/79). New sessions write neither shape (the held-out stack is a
 separate graph), so this is about graphs an operator already has.
 
+### R3-L5 — the candidate-id comment says what the ids are (round-2 finding R2-L5)
+
+The comment claimed candidate ids "do not collide across runs". They do: two sessions starting
+from the same base both mint `<root>-e1`, for different candidates. That is safe — `maf evolve
+approve <id>` refuses an id more than one session claims and resolves it only as
+`<session>/<id>`, and that refusal is already tested — but the comment told a reader the opposite.
+It now says the ids are short within a session's chain, names the cross-session collision, and
+points at the check that makes it safe. No behaviour change; the comment was the defect.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

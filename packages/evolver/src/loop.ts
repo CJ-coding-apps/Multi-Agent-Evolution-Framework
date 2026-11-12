@@ -543,7 +543,13 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   // becomes the candidate on a ship, so a run that shipped k times produced `default-r1-r1-r1…`,
   // longer with every round and every later run. A candidate is now `<root>-e<n>`: the root is the
   // base's id with any previous counter stripped and a hard length cap, and the counter continues
-  // from where this base left off, so ids stay short and do not collide across runs.
+  // from where this base left off, so ids stay short within a session's chain.
+  //
+  // R2-L5: they are NOT unique across sessions. Two sessions that start from the same base both
+  // mint `<root>-e1`, each for a different candidate, and both records are saved under their own
+  // run. That is safe because `maf evolve approve <id>` refuses an id more than one session claims
+  // and requires `<session>/<id>` to resolve it — the collision is the check's input, not a bug to
+  // paper over by folding a session into the id.
   const idRoot = base.id.replace(/-e\d+$/, '').slice(0, 64);
   let idSeq = Number(/-e(\d+)$/.exec(base.id)?.[1] ?? 0);
   const nextCandidateId = (): string => `${idRoot}-e${++idSeq}`;
