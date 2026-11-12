@@ -1818,33 +1818,58 @@ const SHIPPING_PLAN = manifestJson({
   kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'missed t2',
 }, ['t2']);
 
-test('D-57 budget: exhaustion before the smoke test spends neither the smoke nor the goldens', async () => {
-  let smokes = 0;
+test('R2-M4 budget: exhaustion before the round-0 baseline spends no golden run at all', async () => {
   let goldens = 0;
-  let heldOuts = 0;
+  let planners = 0;
   const opts = loopOpts({
-    metaGenerate: mockMeta([SHIPPING_PLAN]),
-    runSmoke: async () => { smokes++; },
-    runHeldOut: async (h) => { heldOuts++; return suite(['h1'], h.sha); },
-    budget: flipAfter(1),
+    metaGenerate: async (system, user) => { planners++; return mockMeta([SHIPPING_PLAN])(system, user); },
+    budget: flipAfter(1), // the round-top check passes; the pre-baseline check trips
   });
   const inner = opts.runGoldens;
   opts.runGoldens = async (h) => { goldens++; return inner(h); };
 
   const report = await evolve(opts);
-  assert.equal(smokes, 0, 'the smoke test was never run');
-  // Round 0 measures the baseline before it plans; that run is the only goldens spend.
-  assert.equal(goldens, 1, 'the candidate suite was never run');
+  assert.equal(goldens, 0, 'the baseline was never measured');
+  assert.equal(planners, 0, 'nothing was planned');
   assert.equal(report.stopReason, 'budget');
-  assert.equal(report.ships, 0);
-  const last = report.rounds[report.rounds.length - 1];
-  assert.equal(last?.outcome, 'budget');
-  assert.match(last?.note ?? '', /budget exhausted \(tokens\)/);
+  assert.equal(report.rounds.length, 1);
+  assert.equal(report.rounds[0]?.outcome, 'budget');
+  assert.match(report.rounds[0]?.note ?? '', /before the round-0 baseline/);
   assert.equal(report.budget?.exhausted, true);
-  assert.equal(heldOuts, 0, 'the held-out split is not spent on either');
-  // The loop stopped on the budget before anything shipped, so there is no survivor; the budget
-  // itself is stated in `report.budget`.
-  assert.equal(report.heldOut?.skipped, 'no candidate shipped, so there is no survivor to score on the held-out split');
+});
+
+test('R2-M4 budget: exhaustion after the baseline stops before the planner', async () => {
+  let goldens = 0;
+  let planners = 0;
+  const opts = loopOpts({
+    metaGenerate: async (system, user) => { planners++; return mockMeta([SHIPPING_PLAN])(system, user); },
+    budget: flipAfter(2), // round-top and pre-baseline pass; the baseline runs; pre-planner trips
+  });
+  const inner = opts.runGoldens;
+  opts.runGoldens = async (h) => { goldens++; return inner(h); };
+
+  const report = await evolve(opts);
+  assert.equal(goldens, 1, 'the baseline was measured');
+  assert.equal(planners, 0, 'the planner never started over budget');
+  assert.equal(report.stopReason, 'budget');
+  assert.match(report.rounds[report.rounds.length - 1]?.note ?? '', /before the planner/);
+});
+
+test('R2-M4 budget: exhaustion after the planner stops before the critic', async () => {
+  const seen: string[] = [];
+  const planning = mockMeta([SHIPPING_PLAN]);
+  const opts = loopOpts({
+    metaGenerate: async (system, user) => {
+      seen.push(system.includes('critic') ? 'critic' : 'planner');
+      return planning(system, user);
+    },
+    budget: flipAfter(3), // ... pre-planner passes, the planner runs, pre-critic trips
+  });
+
+  const report = await evolve(opts);
+  assert.deepEqual(seen, ['planner'], 'the critic never started over budget');
+  assert.equal(report.stopReason, 'budget');
+  assert.match(report.rounds[report.rounds.length - 1]?.note ?? '', /before the critic/);
 });
 
 test('D-57 budget: exhaustion after the smoke test still does not spend on the goldens', async () => {
@@ -1853,7 +1878,7 @@ test('D-57 budget: exhaustion after the smoke test still does not spend on the g
   const opts = loopOpts({
     metaGenerate: mockMeta([SHIPPING_PLAN]),
     runSmoke: async () => { smokes++; },
-    budget: flipAfter(2),
+    budget: flipAfter(5), // ... pre-critic, critic, pre-smoke pass; pre-goldens trips
   });
   const inner = opts.runGoldens;
   opts.runGoldens = async (h) => { goldens++; return inner(h); };
@@ -1863,6 +1888,28 @@ test('D-57 budget: exhaustion after the smoke test still does not spend on the g
   assert.equal(goldens, 1, 'the candidate golden suite did not');
   assert.equal(report.stopReason, 'budget');
   assert.equal(report.rounds[report.rounds.length - 1]?.outcome, 'budget');
+});
+
+test('R2-M4 budget: every held-out repeat asks the budget, and exhaustion stops the next one', async () => {
+  let exhausted = false;
+  let repeats = 0;
+  const meter = {
+    snapshot: (): BudgetSnapshot => ({
+      limits: { maxTokens: 1 }, elapsedMs: 0, tokens: exhausted ? 1 : 0, exhausted,
+      ...(exhausted ? { reason: 'tokens' as const } : {}),
+      statement: exhausted ? 'budget exhausted (tokens): spent 1 of 1 tokens' : 'budget: spent 0 of 1 tokens',
+    }),
+  };
+  const report = await evolve(loopOpts({
+    metaGenerate: mockMeta([SHIPPING_PLAN]),
+    // The first repeat is paid for; the ceiling is reached during it, so the second must not start.
+    runHeldOut: async (h) => { repeats++; exhausted = true; return suite(['h1'], h.sha); },
+    budget: meter,
+  }));
+  assert.equal(report.ships, 1);
+  assert.equal(repeats, 1, 'only the first baseline repeat started');
+  assert.match(report.heldOut?.skipped ?? '', /after 1 of 3 baseline repeats; the verdict needs all 3/);
+  assert.equal(report.budget?.exhausted, true);
 });
 
 // ─── R2-H4: the model-call meter ───────────────────────────────────────────

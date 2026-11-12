@@ -414,14 +414,27 @@ async function evaluateHeldOut(
   if (opts.budget?.snapshot().exhausted === true)
     return skipped('the budget was exhausted before the held-out evaluation');
 
-  let baselineRuns: GoldenSuiteResult[];
-  let candidateRuns: GoldenSuiteResult[];
+  const baselineRuns: GoldenSuiteResult[] = [];
+  const candidateRuns: GoldenSuiteResult[] = [];
+  // R2-M4: every repeat is a paid golden run. The budget is asked before each one, so an
+  // exhausted run does not start repeat N+1 after N blew the ceiling; what was already paid for
+  // is named in the skip reason rather than silently discarded.
+  const overBudgetAfter = (phase: string, done: number): HeldOutReport | undefined =>
+    opts.budget?.snapshot().exhausted === true
+      ? skipped(`the budget was exhausted after ${done} of ${repeats} ${phase} repeat${repeats === 1 ? '' : 's'}; the verdict needs all ${repeats}`)
+      : undefined;
   try {
     // Baseline first, then the survivor — the same split, the same runner, N times each.
-    baselineRuns = [];
-    for (let i = 0; i < repeats; i++) baselineRuns.push(await runHeldOut(base));
-    candidateRuns = [];
-    for (let i = 0; i < repeats; i++) candidateRuns.push(await runHeldOut(finalHarness));
+    for (let i = 0; i < repeats; i++) {
+      const stop = overBudgetAfter('baseline', i);
+      if (stop !== undefined) return stop;
+      baselineRuns.push(await runHeldOut(base));
+    }
+    for (let i = 0; i < repeats; i++) {
+      const stop = overBudgetAfter('candidate', i);
+      if (stop !== undefined) return stop;
+      candidateRuns.push(await runHeldOut(finalHarness));
+    }
   } catch (err) {
     return skipped(`the held-out run failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -573,6 +586,24 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       break;
     }
 
+    // R2-M4: every paid step asks the budget immediately before it starts, not once per round.
+    // The round-top check alone let a run that overspent on its own baseline (or on the planner)
+    // still start the critic, and a held-out run could start repeat N+1 after N blew the budget.
+    // Returns true when the caller must stop: the round is recorded as `budget` and the loop ends.
+    const stopIfOverBudget = async (
+      note: string, partial: { manifest?: ChangeManifest } = {},
+    ): Promise<boolean> => {
+      const spent = opts.budget?.snapshot();
+      if (spent?.exhausted !== true) return false;
+      await record(rec({
+        outcome: 'budget',
+        note: `${note}; ${spent.statement}`,
+        ...(partial.manifest !== undefined ? { manifest: partial.manifest } : {}),
+      }));
+      stopReason = 'budget';
+      return true;
+    };
+
     // Every gate stage that is free (WP-3.9 G3/G4): the candidate is built and the invariants and
     // widening rule are asked, with no model call and no evaluation. Called as soon as a manifest
     // exists and again on the final one, because a critic revision can introduce either defect.
@@ -607,6 +638,8 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     let digest = await readDigest();
     if (round === 0) baseline = baselineFromHistory(digest.goldenHistory, base, opts.splitName);
     if (!baseline) {
+      // R2-M4: the round-0 baseline is a paid golden run of its own, not part of a round's suite.
+      if (await stopIfOverBudget('the budget was exhausted before the round-0 baseline')) break;
       try {
         baseline = await evaluate(base);
       } catch (err) {
@@ -625,6 +658,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     const current = currentStatus(digest, base, baseline, opts.splitName);
 
     // ── 2. Planner ──
+    if (await stopIfOverBudget('the budget was exhausted before the planner')) break;
     let manifest: ChangeManifest | undefined;
     try {
       const response = await opts.metaGenerate(
@@ -709,11 +743,15 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
 
     // ── 4. Critic (one revision allowed) — BEFORE building/smoking a candidate,
     //       so step 5 smoke-tests the FINAL (possibly revised) manifest (L5). ──
+    // R2-M4: the critic is a model call like any other; it does not start over budget either.
+    if (await stopIfOverBudget('the budget was exhausted before the critic', { manifest })) break;
     let critic = parseCriticVerdict(await opts.metaGenerate(
       CRITIC_SYSTEM_PROMPT,
       `Evidence:\n${JSON.stringify(digest)}\n\nManifest:\n${JSON.stringify(manifest, null, 2)}`,
     ));
     if (critic.verdict === 'revise') {
+      // R2-M4: the revision is a second planner call; it also does not start over budget.
+      if (await stopIfOverBudget('the budget was exhausted before the critic revision', { manifest })) break;
       const revised = await opts.metaGenerate(
         PLANNER_SYSTEM_PROMPT,
         buildPlannerUserPrompt(

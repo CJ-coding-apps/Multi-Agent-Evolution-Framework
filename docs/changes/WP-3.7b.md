@@ -174,8 +174,12 @@ of the asset (`tests/goldens/` and `packages/cli/assets/goldens/`) are byte-iden
 4. **Wall-clock row — `--max-seconds 1`.**
    > `[maf] round 0: budget — budget exhausted (wall-clock): spent 9.3s of 1.0s wall-clock`
 
-   Rows 2–4 stop at the top of round 0, so no goldens were spent; row 1 ran to patience. Each
-   report on disk carries the same `budget` and `heldOut` blocks that the terminal printed.
+   Rows 2–4 each paid for the round-0 baseline before the ceiling was reached — the baseline is
+   the first paid golden run and its cost is unknown until it runs — so the run records the round
+   it could not continue and starts nothing after it; **no candidate goldens were spent**. (An
+   earlier version of this paragraph said "no goldens were spent", which was false: the numbers in
+   row 2 are the baseline's own spend.) Row 1 ran to patience. Each report on disk carries the
+   same `budget` and `heldOut` blocks that the terminal printed.
 
 ## Tests, and the mutants
 

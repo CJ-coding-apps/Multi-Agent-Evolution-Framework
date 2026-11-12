@@ -245,6 +245,45 @@ test('maf evolve refuses a held-out gate resting on fewer than minHeldOut determ
   }
 });
 
+test('R2-M4 budget: --max-tokens 2000 is exhausted by the baseline and nothing new starts', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    const logs: string[] = [];
+    t.mock.method(console, 'log', (...parts: unknown[]) => { logs.push(parts.map(String).join(' ')); });
+    t.mock.method(console, 'error', () => {});
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync([
+      'evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted', '--rounds', '1', '--max-tokens', '2000',
+    ], { from: 'user' });
+
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1);
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      stopReason: string; ships: number; rounds: { outcome: string; note: string; manifest?: unknown }[];
+      budget?: { exhausted: boolean; tokens: number }; usage?: { calls: number };
+    };
+    assert.equal(report.stopReason, 'budget');
+    assert.equal(report.ships, 0);
+    assert.equal(report.budget?.exhausted, true);
+    assert.equal(report.rounds.length, 1, 'the round that could not continue is the only one recorded');
+    assert.equal(report.rounds[0]?.outcome, 'budget');
+    assert.equal(report.rounds[0]?.manifest, undefined, 'no manifest exists: the planner never ran');
+    // The baseline is the first paid step, and its cost is unknown until it runs, so the stop is
+    // at the next boundary — the planner. What matters is that nothing new starts over budget.
+    assert.match(report.rounds[0]?.note ?? '', /before the planner/);
+    assert.ok((report.usage?.calls ?? 0) > 0, 'the baseline was measured; nothing after it started');
+    assert.ok(logs.some((l) => l.includes('stop=budget')), logs.join('\n'));
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // ORACLE (WP-3.9 round 2, G4): `maf evolve` hands the evolver the registry's tool ids and the
 // permission level of each. A manifest that adds a tool which is not in that registry is a
 // malformed candidate — the invariant stage refuses it, naming the tools that do exist — and it is
