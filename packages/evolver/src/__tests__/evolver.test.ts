@@ -897,6 +897,38 @@ function policyGraph(rows: Array<{ label: string; properties: Record<string, unk
   } as unknown as MemoryGraph;
 }
 
+/**
+ * R2-H2: a graph holding one row per kind, so the digest's filtering can be measured on the two
+ * paths the verifier used — a prior full-corpus `goldens run` and one session's held-out refusals.
+ */
+function scopedGraph(rows: {
+  golden?: Array<{ label: string; properties: Record<string, unknown> }>;
+  failures?: Array<{ label: string; properties: Record<string, unknown> }>;
+  policy?: Array<{ label: string; properties: Record<string, unknown> }>;
+  rounds?: Array<{ label: string; properties: Record<string, unknown> }>;
+}) {
+  return {
+    run: async (query: GraphQuery) => {
+      const cypher = query.cypher;
+      const kind = cypher.includes("'GoldenResult'") ? 'golden'
+        : cypher.includes("'PolicyEvent'") ? 'policy'
+          : cypher.includes("'EvolutionRound'") ? 'rounds' : 'failures';
+      return (rows[kind as keyof typeof rows] ?? []).map((r) => ({
+        'n.label': r.label, 'n.properties': JSON.stringify(r.properties), 'n.run_id': 'run-1',
+      }));
+    },
+    addNode: async () => 'id',
+    addEdge: async () => 'e',
+  } as unknown as MemoryGraph;
+}
+
+// The split the R2-H2 tests fence everything to: two train tasks, two held out.
+const H2_SCOPE = {
+  trainTaskIds: new Set(['coder-sum', 'coder-reverse']),
+  splitsSha: 'sha-train',
+  corpusTaskIds: new Set(['coder-sum', 'coder-reverse', 'coder-fib', 'security-sql-concat']),
+};
+
 const allowRow = (i: number) => ({ label: 'policy Allow fs.read', properties: { verdict: 'Allow', toolId: 'fs.read', taskId: `task-${i}` } });
 const denyRow = { label: 'policy Deny fs.write', properties: { verdict: 'Deny', toolId: 'fs.write', reason: 'secrets off-limits', ruleId: 'deny-env' } };
 
@@ -971,6 +1003,105 @@ test('digester (R3-L2): an unquoted spaced path in a refusal reason is masked wh
 
   const prompt = buildPlannerUserPrompt(digest, [], []);
   assert.doesNotMatch(prompt, /b\/secret\.txt/);
+});
+
+// R2-H2, path 1 — a prior `maf goldens run` writes a whole-corpus GoldenResult into the graph. Its
+// held-out half is the yardstick, so none of it may become evidence: not the row, not the solved
+// list, not the count.
+test('digester (R2-H2): a full-corpus golden row is not evidence, and a train row is counted over train only', async () => {
+  const graph = scopedGraph({
+    golden: [
+      // No `split`: a `goldens run` before the split existed, or over the whole corpus.
+      { label: 'golden whole', properties: {
+        harnessId: 'base', harness_sha: 'aaaa', solved: ['coder-sum', 'coder-fib'],
+        perTask: [{ taskId: 'coder-sum', passed: true }, { taskId: 'coder-fib', passed: false }],
+        total: 4, ranAt: 't1' } },
+      // A held-out row from a session that recorded it anyway.
+      { label: 'golden held', properties: {
+        harnessId: 'base', harness_sha: 'aaaa', split: 'held-out', splits_sha: 'sha-train',
+        solved: ['coder-fib'], perTask: [], total: 2, ranAt: 't2' } },
+      // A train row from another corpus's split.
+      { label: 'golden other', properties: {
+        harnessId: 'base', harness_sha: 'aaaa', split: 'train', splits_sha: 'other-split',
+        solved: ['coder-sum'], perTask: [{ taskId: 'coder-sum', passed: true }], total: 1, ranAt: 't3' } },
+      // The one row that is this run's evidence — with a held-out id smuggled into both lists.
+      { label: 'golden train', properties: {
+        harnessId: 'base', harness_sha: 'aaaa', split: 'train', splits_sha: 'sha-train',
+        solved: ['coder-sum', 'coder-fib'],
+        perTask: [
+          { taskId: 'coder-sum', passed: true },
+          { taskId: 'coder-reverse', passed: false },
+          { taskId: 'coder-fib', passed: true },
+        ],
+        total: 3, ranAt: 't4' } },
+    ],
+  });
+
+  const digest = await digestEvidence(graph, 20, H2_SCOPE);
+  assert.equal(digest.goldenHistory.length, 1, 'only the train row from this split survives');
+  const row = digest.goldenHistory[0]!;
+  assert.deepEqual(row.solved, ['coder-sum'], 'solved is intersected with the train ids');
+  assert.deepEqual(row.failed, ['coder-reverse'], 'failed is intersected too');
+  assert.equal(row.total, 2, 'the count is recounted over the train tasks the row measured');
+
+  const prompt = buildPlannerUserPrompt(digest, [], []);
+  assert.doesNotMatch(prompt, /coder-fib/, 'no held-out id reaches the planner prompt');
+});
+
+// R2-H2, path 2 — one session's held-out runs leave PolicyEvents (the dispatch carries the corpus
+// task id) and Failures behind. The next session's planner must not see them.
+test('digester (R2-H2): a previous session\'s held-out refusals never reach the planner', async () => {
+  const graph = scopedGraph({
+    policy: [
+      { label: 'policy Deny fs.write', properties: {
+        verdict: 'Deny', toolId: 'fs.write', reason: 'refused for task coder-fib', goldenTaskId: 'coder-fib' } },
+      { label: 'policy Deny fs.write', properties: {
+        verdict: 'Deny', toolId: 'fs.write', reason: 'refused for task coder-sum', goldenTaskId: 'coder-sum' } },
+      { label: 'policy Deny fs.write', properties: {
+        verdict: 'Deny', toolId: 'fs.write', reason: 'a refusal that names no task' } },
+    ],
+    failures: [
+      { label: 'security:node-1', properties: { goldenTaskId: 'coder-fib', summary: 'blocked coder-fib' } },
+      { label: 'security:node-2', properties: { summary: 'blocked coder-sum' } },
+    ],
+    rounds: [
+      { label: 'evolution round 0: reject', properties: {
+        round: 0, outcome: 'reject', harness_sha: 'a',
+        note: 'smoke failed on coder-fib; security-sql-concat also refused' } },
+    ],
+  });
+
+  const digest = await digestEvidence(graph, 20, H2_SCOPE);
+  assert.equal(digest.policyEvents.length, 2, 'the held-out refusal is dropped outright');
+  assert.ok(digest.policyEvents.every((e) => e.properties['goldenTaskId'] !== 'coder-fib'));
+  assert.equal(digest.currentFailures.length, 1, 'the held-out failure is dropped');
+  assert.equal(digest.evolutionRounds.length, 1);
+  assert.doesNotMatch(digest.evolutionRounds[0]!.note, /coder-fib|security-sql-concat/,
+    'free text is scrubbed of every non-train corpus id');
+  assert.match(digest.evolutionRounds[0]!.note, /\[held-out task\]/);
+
+  const prompt = buildPlannerUserPrompt(digest, [], []);
+  assert.doesNotMatch(prompt, /coder-fib|security-sql-concat/);
+});
+
+// R2-H2: the loop's own record is evidence the planner reads next round. A plan that names a
+// held-out task is refused before anything is measured, and the record does not repeat the id.
+test('loop (R2-H2): a plan targeting a held-out task is refused before it is recorded or measured', async () => {
+  let goldensRuns = 0;
+  const report = await evolve(loopOpts({
+    evidenceScope: H2_SCOPE,
+    maxRounds: 1,
+    metaGenerate: async () => manifestJson(
+      { kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough', rationale: 'r' },
+      ['coder-fib'],
+    ),
+    runGoldens: async (h: HarnessConfig) => { goldensRuns++; return suite(['coder-sum'], h.sha); },
+  }));
+
+  assert.equal(report.rounds[0]?.outcome, 'planner-error');
+  assert.equal(report.rounds[0]?.manifest, undefined, 'the held-out id is not carried into the record');
+  assert.doesNotMatch(JSON.stringify(report.rounds[0]), /coder-fib/);
+  assert.equal(goldensRuns, 1, 'only the baseline was measured; no candidate, no held-out task');
 });
 
 // MED-3: after a rejected candidate the prompt named the candidate as the harness in force. The

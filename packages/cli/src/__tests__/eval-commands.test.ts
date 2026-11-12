@@ -546,3 +546,88 @@ test('real evolve.ts: an unapproved sensitive candidate never becomes a later ro
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// R2-H2, second path: held-out scoring runs through the dispatcher, and the dispatcher's policy
+// engine and security hooks write `PolicyEvent` and `Failure` nodes into whatever graph they were
+// given. On the project graph those rows are the next session's evidence — the exact leak that lets
+// a planner aim at the yardstick. So the held-out measurement must be dispatched through a SECOND
+// stack whose graph is not the project's.
+test('real evolve.ts (R2-H2): held-out scoring is dispatched through an isolated graph', async (t) => {
+  const { root } = await freshClone();
+  try {
+    const HE = new Set(['coder-fib', 'security-sql-concat', 'review-off-by-one']);
+    const calls: StackConfig[] = [];
+    const dispatched: { stack: number; task?: string }[] = [];
+    let built = 0;
+    let plannerCalls = 0;
+    t.mock.method(wiring, 'buildRunStack', async (cfg: StackConfig) => {
+      calls.push(cfg);
+      const index = ++built;
+      return {
+        adapter: {} as CliAdapter,
+        graph: { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph,
+        securityPrompt: '',
+        dispatchTask: async (
+          harness: HarnessConfig, role: string, prompt: string, workDir: string,
+          _timeoutMs: number, _temperature?: number, goldenTaskId?: string,
+        ) => {
+          dispatched.push({ stack: index, ...(goldenTaskId !== undefined ? { task: goldenTaskId } : {}) });
+          // The coder edit's improvement is grounded in a test-script task: one candidate must ship
+          // for a survivor to exist and the held-out split to be scored at all.
+          const rolePrompt = harness.roleSet.roles.find((r) => r.role === role)?.systemPrompt ?? '';
+          if (rolePrompt.includes('thorough') && prompt.includes('Fix sum.js')) {
+            await writeFile(path.join(workDir, 'sum.js'),
+              'function sum(a,b){ return a + b; }\nmodule.exports = { sum };\n');
+            return 'fixed sum.js';
+          }
+          return 'no change';
+        },
+        close: async () => {},
+      } as unknown as wiring.RunStack;
+    });
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        const systemPrompt = o.systemPrompt ?? '';
+        let output: string;
+        if (systemPrompt.includes('MAF harness evolution planner')) {
+          plannerCalls++;
+          output = plannerCalls === 1
+            ? '```json\n' + JSON.stringify({
+              edit: { kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'r' },
+              expectedImprovement: 'coder-sum', targetTasks: ['coder-sum'],
+            }) + '\n```'
+            : '```json\n{"no_op":true}\n```';
+        } else if (systemPrompt.includes('critic')) {
+          output = '```json\n{"verdict":"ship","notes":"ok"}\n```';
+        } else {
+          output = '```json\n{"passed":false,"rationale":"no"}\n```';
+        }
+        return { success: true, output, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+    t.mock.method(console, 'log', () => {});
+
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--rounds', '2', '--patience', '1'), { from: 'user' });
+
+    assert.equal(calls.length, 2, 'a second stack is built for the held-out split');
+    const [project, heldOut] = calls;
+    assert.equal(project?.graphDir, undefined, 'the project stack keeps .maf/memory.kuzu');
+    assert.ok(heldOut?.graphDir !== undefined && heldOut.graphDir !== path.join(root, '.maf'),
+      'the held-out stack writes its graph somewhere else');
+
+    const projectTasks = dispatched.filter((d) => d.stack === 1).map((d) => d.task);
+    assert.ok(projectTasks.every((id) => id === undefined || !HE.has(id)),
+      'the project stack never dispatched a held-out task');
+    const heldTasks = dispatched.filter((d) => d.stack === 2).map((d) => d.task);
+    assert.ok(heldTasks.length > 0, 'the held-out split was actually scored');
+    assert.ok(heldTasks.every((id) => id !== undefined && HE.has(id)),
+      `every isolated dispatch is a held-out task: ${heldTasks.join(', ')}`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -2,8 +2,8 @@ import type { PermissionLevel, RunId } from '@maf/types';
 import type { HarnessConfig, ProcessorRef } from '@maf/harness-config';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
-import { digestEvidence, isEmptyDigest } from './digester.js';
-import type { Digest } from './digester.js';
+import { digestEvidence, heldOutScrubber, isEmptyDigest } from './digester.js';
+import type { Digest, EvidenceScope } from './digester.js';
 import { applyEdit, ManifestError } from './edits.js';
 import type { ChangeManifest } from './edits.js';
 import {
@@ -138,6 +138,14 @@ export interface EvolveOptions {
   runHeldOut?: (harness: HarnessConfig) => Promise<GoldenSuiteResult>;
   /** D-57: sha of the split definition the held-out runner measures, for the report. */
   heldOutSplitsSha?: string;
+  /**
+   * R2-H2: the line the evolver may not cross. With it set, the digest carries only rows that say
+   * `train`, task ids in those rows are restricted to the train split, and free text is scrubbed of
+   * every other corpus id — so a prior full-corpus `goldens run`, or a previous session's held-out
+   * refusals, cannot reach the planner. The loop also refuses a plan that targets a non-train task
+   * and scrubs its own round notes, so the record carries none either.
+   */
+  evidenceScope?: EvidenceScope;
   /** D-57: the meter. The loop asks it before every round and before every step that costs money. */
   budget?: BudgetMeter;
 }
@@ -425,8 +433,9 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
 
   // Digest reads that failed (WP-3.7 §7): collected, reported, never fatal.
   const digestErrors = new Set<string>();
+  const scrub = heldOutScrubber(opts.evidenceScope);
   const readDigest = async (): Promise<Digest> => {
-    const digest = await digestEvidence(opts.graph);
+    const digest = await digestEvidence(opts.graph, undefined, opts.evidenceScope);
     for (const e of digest.errors) digestErrors.add(e);
     return digest;
   };
@@ -458,6 +467,10 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   for (let round = 0; round < maxRounds; round++) {
     const rec = (r: Omit<EvolveRoundRecord, 'round'>): EvolveRoundRecord => ({ round, ...r });
     const record = async (r: EvolveRoundRecord): Promise<void> => {
+      // R2-H2: a note can quote a refusal, an error message or a manifest, and any of those can
+      // name a task id. The round record is evidence for the planner, so it is scrubbed before it
+      // is surfaced or stored — not after.
+      r.note = scrub(r.note);
       rounds.push(r);
       opts.onRound?.(r);
       // Recording is best-effort: a graph hiccup must never abort evolution (L4).
@@ -558,6 +571,24 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       }));
       if (idle >= patience) { stopReason = 'patience'; break; }
       continue;
+    }
+
+    // R2-H2: a plan that names a task outside the train split is refused before it is recorded or
+    // measured. The planner can only do that if a held-out id reached it — which is the defect this
+    // rule defends against — and echoing it into the round record would move the leak, not stop it.
+    // The note says what happened without repeating the id.
+    if (opts.evidenceScope !== undefined) {
+      const offSplit = manifest.targetTasks.filter((id) => !opts.evidenceScope!.trainTaskIds.has(id));
+      if (offSplit.length > 0) {
+        idle++;
+        await record(rec({
+          outcome: 'planner-error',
+          note: `plan targets ${offSplit.length} task(s) outside the train split; a held-out task is ` +
+            'not something the evolver may name or measure',
+        }));
+        if (idle >= patience) { stopReason = 'patience'; break; }
+        continue;
+      }
     }
 
     // ── 3. Pre-evaluation approval routing (§6.3: approve BEFORE evaluation spend) ──

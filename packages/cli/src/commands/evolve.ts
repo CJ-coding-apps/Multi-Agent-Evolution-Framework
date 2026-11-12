@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { estimateTokens, makeRunId, refusePrototypeKey } from '@maf/types';
@@ -20,6 +21,7 @@ import { createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS } from '@maf/proces
 import { SecurityReviewGate } from '@maf/git-ops';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
+import type { RunStack } from '../wiring.js';
 import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import { resolveGoldensHarness } from './goldens.js';
 
@@ -167,7 +169,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         adapter = new ScriptedAdapter(bundle.tasks, bundle.evolution);
       }
 
-      const stack = await buildRunStack({
+      const stackConfig: Parameters<typeof buildRunStack>[0] = {
         cwd, mafDir, adapter, runId,
         // D-49, F7: the same resolution `run` and `goldens` take.
         policy: { value: opts.policy, typed: cmd.getOptionValueSource('policy') === 'cli' },
@@ -176,7 +178,21 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         // WP-3.2 F12: the stack takes resolved settings. `evolve` reads no `maf.config`, so the
         // shipped defaults are its resolution — one object, not a second set of constants here.
         lcm: DEFAULT_MAF_CONFIG.lcm,
-      });
+      };
+      const stack = await buildRunStack(stackConfig);
+
+      // R2-H2: the held-out score must leave no trace the next digest can read. Its stack is a
+      // second one whose graph is a throwaway directory — the dispatcher, policy engine and
+      // process hooks write their GoldenResult/PolicyEvent/Failure nodes there, never into
+      // `.maf/memory.kuzu`. Roles, prompts, policy and transcripts still come from `mafDir`.
+      let heldOutStack: RunStack | undefined;
+      let heldOutGraphDir: string | undefined;
+      const stackForHeldOut = async (): Promise<RunStack> => {
+        if (heldOutStack !== undefined) return heldOutStack;
+        heldOutGraphDir = await mkdtemp(path.join(tmpdir(), 'maf-heldout-'));
+        heldOutStack = await buildRunStack({ ...stackConfig, graphDir: heldOutGraphDir });
+        return heldOutStack;
+      };
 
       const metaGenerate = async (systemPrompt: string, userPrompt: string): Promise<string> => {
         const result = await adapter.invoke({
@@ -208,6 +224,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       const agent = { adapter: adapter.name, ...(opts.model ? { model: opts.model } : {}) };
       const runnerFor = (
         harness: HarnessConfig, attempts: number, split?: { name: 'train' | 'held-out'; sha: string },
+        runStack: RunStack = stack,
       ) =>
         new GoldenRunner({
           corpusRoot, harnessSha: harness.sha, harnessId: harness.id,
@@ -216,7 +233,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
           dispatch: async (task, workDir, { timeoutMs, temperature }) => {
             // L5: the corpus task id travels with the dispatch, so a refusal's `PolicyEvent` names
             // the task whose score it belongs to.
-            const out = await stack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature, task.id);
+            const out = await runStack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature, task.id);
             // D-57: a role call is spend. The dispatcher returns text, so the charge is the
             // characters/4 estimate over the role prompt and the answer.
             const rolePrompt = harness.roleSet.roles.find((r) => r.role === task.role)?.systemPrompt ?? '';
@@ -242,8 +259,11 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       const runGoldensFor = (harness: HarnessConfig): Promise<GoldenSuiteResult> =>
         runnerFor(harness, 2, { name: 'train', sha: splits.sha }).run(splits.train);
 
-      const runHeldOut = (harness: HarnessConfig): Promise<GoldenSuiteResult> =>
-        runnerFor(harness, 2, { name: 'held-out', sha: splits.sha }).run(splits.heldOut);
+      // R2-H2: on the isolated stack, so a refusal or a gate failure during a held-out attempt
+      // writes to the throwaway graph, not to the one the next digest reads.
+      const runHeldOut = async (harness: HarnessConfig): Promise<GoldenSuiteResult> =>
+        runnerFor(harness, 2, { name: 'held-out', sha: splits.sha }, await stackForHeldOut())
+          .run(splits.heldOut);
 
       const runSmoke = (harness: HarnessConfig, taskId: string) => {
         // A smoke run is a measurement too. The planner's target tasks come from evidence in the
@@ -309,6 +329,13 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
           .filter((t) => t.verifiers.every((v) => v.kind === 'llm-judge'))
           .map((t) => t.id)),
         ...(opts.approveSensitive ? { approveSensitive: true } : {}),
+        // R2-H2: the digest is fenced to the train split — by row (`split`/`splits_sha`), by task
+        // id, and by scrubbing every corpus id outside it from free text.
+        evidenceScope: {
+          trainTaskIds: new Set(splits.train),
+          splitsSha: splits.sha,
+          corpusTaskIds: new Set(corpus.map((t) => t.id)),
+        },
       };
 
       // L2: the stack is released however the loop ends — a throw from the loop used to leave the
@@ -319,6 +346,9 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         report = await evolve(evolveOptions);
       } finally {
         await stack.close();
+        // R2-H2: the held-out stack and its throwaway graph go with the run.
+        if (heldOutStack !== undefined) await heldOutStack.close();
+        if (heldOutGraphDir !== undefined) await rm(heldOutGraphDir, { recursive: true, force: true });
       }
 
       const reportPath = path.join(mafDir, 'evolve', `${runId}.json`);

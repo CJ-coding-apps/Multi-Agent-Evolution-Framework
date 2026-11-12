@@ -39,6 +39,48 @@ export interface EvolutionRoundRow {
   harnessSha: string;
 }
 
+/**
+ * WP-3.7b R2-H2: the line between what the evolver may learn from and what it is being judged on.
+ *
+ * A held-out task is a yardstick. If any trace of one reaches the planner — its score, a policy
+ * refusal that names it, a note that quotes it — the planner can propose an edit aimed at it and
+ * the held-out gate stops measuring generalisation. The loop therefore digests NOTHING that is not
+ * provably train: rows must say `train` and carry this corpus's split sha, task ids in a row must
+ * be train ids, and free text is scrubbed of every corpus id that is not.
+ */
+export interface EvidenceScope {
+  /** Ids in the committed train split. */
+  trainTaskIds: ReadonlySet<string>;
+  /** The split definition's sha; a row stamped with another one measured another corpus. */
+  splitsSha?: string;
+  /**
+   * Every corpus id, train and held out. Free text — a note, a refusal reason, a summary — naming
+   * an id outside `trainTaskIds` is replaced before it can reach the digest.
+   */
+  corpusTaskIds?: ReadonlySet<string>;
+}
+
+const HELD_OUT_MENTION = '[held-out task]';
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * A text scrubber for the ids the evolver may not see. Longest id first, so an id that is a prefix
+ * of another (`coder-fib` and `coder-fibonacci`) is not half-replaced. Whole-token boundaries keep
+ * a short id from matching inside a longer word.
+ */
+export function heldOutScrubber(scope: EvidenceScope | undefined): (text: string) => string {
+  if (scope === undefined || scope.corpusTaskIds === undefined) return (text) => text;
+  const hidden = [...scope.corpusTaskIds]
+    .filter((id) => id.length > 0 && !scope.trainTaskIds.has(id))
+    .sort((a, b) => b.length - a.length);
+  if (hidden.length === 0) return (text) => text;
+  const pattern = new RegExp(`(?<![\\w.-])(?:${hidden.map(escapeRegExp).join('|')})(?![\\w.-])`, 'g');
+  return (text) => text.replace(pattern, HELD_OUT_MENTION);
+}
+
 export interface Digest {
   goldenHistory: GoldenHistoryRow[];
   currentFailures: FailureRow[];
@@ -80,45 +122,86 @@ async function readRows(
   }
 }
 
-export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Promise<Digest> {
+export async function digestEvidence(
+  graph: MemoryGraph, failureLimit = 20, scope?: EvidenceScope,
+): Promise<Digest> {
   // `LIMIT` is one of the two positions Cypher cannot bind, so the limit is a validated literal.
   const limit = intLiteral(failureLimit, 'failureLimit');
   const errors: string[] = [];
+  const scrub = heldOutScrubber(scope);
+  const isTrain = (id: unknown): boolean =>
+    typeof id === 'string' && (scope === undefined || scope.trainTaskIds.has(id));
 
   const goldenRows = await readRows(
     graph, 'golden history',
     'MATCH (n:MemoryNode) WHERE n.kind = \'GoldenResult\' RETURN n.label, n.properties ORDER BY n.created_at DESC LIMIT 50',
     errors,
   );
-  const goldenHistory: GoldenHistoryRow[] = goldenRows.map((raw) => {
-    const props = parseProps(raw);
-    // `ScoreRecorder` writes every task's verdict beside the score. The ids of the ones that did
-    // not pass are what a proposal can target, so the digest carries them rather than leaving the
-    // planner to subtract two counts.
-    const perTask = Array.isArray(props['perTask']) ? (props['perTask'] as unknown[]) : [];
-    const failed = perTask
-      .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
-      .filter((t) => t['passed'] === false)
-      .map((t) => String(t['taskId'] ?? ''));
-    return {
-      harnessId: String(props['harnessId'] ?? ''),
-      harnessSha: String(props['harness_sha'] ?? ''),
-      solved: Array.isArray(props['solved']) ? (props['solved'] as string[]) : [],
-      failed,
-      total: Number(props['total'] ?? 0),
-      ranAt: String(props['ranAt'] ?? ''),
-      ...(typeof props['split'] === 'string' ? { split: props['split'] } : {}),
-    };
-  });
+  const goldenHistory: GoldenHistoryRow[] = goldenRows
+    // R2-H2: a row that does not say `train` is a full-corpus run (which measured the held-out
+    // tasks too) or an older row; a row stamped with another split definition is another corpus.
+    // Neither is evidence this run may read.
+    .filter((raw) => {
+      if (scope === undefined) return true;
+      const props = parseProps(raw);
+      if (props['split'] !== 'train') return false;
+      const sha = props['splits_sha'];
+      return typeof sha !== 'string' || scope.splitsSha === undefined || sha === scope.splitsSha;
+    })
+    .map((raw) => {
+      const props = parseProps(raw);
+      // `ScoreRecorder` writes every task's verdict beside the score. The ids of the ones that did
+      // not pass are what a proposal can target, so the digest carries them rather than leaving the
+      // planner to subtract two counts.
+      const perTask = Array.isArray(props['perTask']) ? (props['perTask'] as unknown[]) : [];
+      const failed = perTask
+        .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
+        .filter((t) => t['passed'] === false)
+        .map((t) => String(t['taskId'] ?? ''))
+        .filter(isTrain);
+      // Both lists are intersected with the train set: a row that passed the split/sha check can
+      // still carry a stray id, and the counts are recounted rather than trusted.
+      const solved = (Array.isArray(props['solved']) ? (props['solved'] as string[]) : []).filter(isTrain);
+      const total = scope === undefined
+        ? Number(props['total'] ?? 0)
+        : perTask.length > 0
+          ? perTask.filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
+            .filter((t) => isTrain(t['taskId'])).length
+          : scope.trainTaskIds.size;
+      return {
+        harnessId: String(props['harnessId'] ?? ''),
+        harnessSha: String(props['harness_sha'] ?? ''),
+        solved,
+        failed,
+        total,
+        ranAt: String(props['ranAt'] ?? ''),
+        ...(typeof props['split'] === 'string' ? { split: props['split'] } : {}),
+      };
+    });
+
+  // WP-3.7a MED-1, second layer: a row written by an older version may hold an unmasked reason,
+  // and this text reaches the planner's prompt. Mask on the way out as well as on the way in.
+  // R2-H2: and scrub it of every id the evolver may not see, on every surface — a refusal's reason
+  // quotes the task it refused, a security summary quotes the file, a note quotes both.
+  const masked = (text: string): string => scrub(redactEvidenceText(text));
+  const maskProps = (props: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(Object.entries(props).map(
+      ([key, value]) => [key, typeof value === 'string' ? masked(value) : value],
+    ));
 
   const failureRows = await readRows(
     graph, 'failures',
     `MATCH (n:MemoryNode) WHERE n.kind = 'Failure' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
     errors,
   );
-  const currentFailures: FailureRow[] = failureRows.map((raw) => ({
-    label: String(raw['n.label'] ?? ''), properties: parseProps(raw), runId: String(raw['n.run_id'] ?? ''),
-  }));
+  const currentFailures: FailureRow[] = failureRows
+    .map((raw) => ({
+      label: masked(String(raw['n.label'] ?? '')),
+      properties: maskProps(parseProps(raw)),
+      runId: String(raw['n.run_id'] ?? ''),
+    }))
+    // A failure that says which golden task it belongs to is kept only for a train task.
+    .filter((row) => row.properties['goldenTaskId'] === undefined || isTrain(row.properties['goldenTaskId']));
 
   // WP-3.7a MED-2, R2-L2: the graph may still hold `Allow` events written before the engine stopped
   // recording them. The filter is in the query — on the label, which is a column — so no number of
@@ -130,13 +213,6 @@ export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Pro
     `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' AND NOT n.label STARTS WITH 'policy Allow' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
     errors,
   );
-  // WP-3.7a MED-1, second layer: a row written by an older version may hold an unmasked reason,
-  // and this text reaches the planner's prompt. Mask on the way out as well as on the way in.
-  const masked = (text: string): string => redactEvidenceText(text);
-  const maskProps = (props: Record<string, unknown>): Record<string, unknown> =>
-    Object.fromEntries(Object.entries(props).map(
-      ([key, value]) => [key, typeof value === 'string' ? masked(value) : value],
-    ));
   const policyEvents: FailureRow[] = policyRows
     .map((raw) => ({
       label: masked(String(raw['n.label'] ?? '')),
@@ -144,6 +220,9 @@ export async function digestEvidence(graph: MemoryGraph, failureLimit = 20): Pro
       runId: String(raw['n.run_id'] ?? ''),
     }))
     .filter((e) => e.properties['verdict'] !== 'Allow' && !e.label.startsWith('policy Allow '))
+    // R2-H2: a refusal that belongs to a held-out task is not evidence about the harness. It is
+    // dropped, not just scrubbed: the ids are gone, but a train-looking refusal is still a hint.
+    .filter((e) => e.properties['goldenTaskId'] === undefined || isTrain(e.properties['goldenTaskId']))
     .slice(0, failureLimit);
 
   // §7: the rounds the loop writes are read back. Without this the planner sees a rejected edit's

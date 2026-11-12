@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { canonicalJson, makeAgentId, makeNodeId, makeTaskId } from '@maf/types';
 import type { DagNode, CliAdapter, RunId } from '@maf/types';
 import { BlackboardStore } from '@maf/blackboard';
@@ -259,6 +259,14 @@ export interface RunStack {
 export async function buildRunStack(cfg: {
   cwd: string;
   mafDir: string;
+  /**
+   * Where the memory graph lives, when it is not `mafDir` (WP-3.7b R2-H2). A held-out score is a
+   * yardstick the evolver may not learn from, so it runs on a stack whose graph is somewhere the
+   * project graph is not: its `GoldenResult`, `PolicyEvent` and `Failure` nodes land in a throwaway
+   * database rather than in `.maf/memory.kuzu`, where the next session's planner would read them.
+   * Everything else — roles, prompts, policy, transcripts — still comes from `mafDir`.
+   */
+  graphDir?: string;
   /** The `--policy` flag as the command received it; resolved by {@link loadCommandPolicy}. */
   policy: PolicyChoice;
   adapter: CliAdapter;
@@ -276,7 +284,8 @@ export async function buildRunStack(cfg: {
    */
   lcm: ResolvedMafConfig['lcm'];
 }): Promise<RunStack> {
-  const graph = new MemoryGraph(path.join(cfg.mafDir, 'memory.kuzu'));
+  if (cfg.graphDir !== undefined) await mkdir(cfg.graphDir, { recursive: true });
+  const graph = new MemoryGraph(path.join(cfg.graphDir ?? cfg.mafDir, 'memory.kuzu'));
   // M1: a setup that fails after this point must not leak the handle. Kùzu keeps files open under
   // `mafDir`, and a caller that removes that directory on the way out — goldens' evaluation
   // directory — then fails with ENOTEMPTY, which would replace the error that caused the removal
