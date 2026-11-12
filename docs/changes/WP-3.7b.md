@@ -389,7 +389,8 @@ selection and rewrite paths are exercised with an injected result; no test makes
 
 The round-2 verdict compared two extreme repeats (`min(candidate) − max(baseline)` against the
 baseline's spread). A simulation of the shape the gate exists to catch — 30% base and 80% candidate
-on 3 of 10 tasks at N = 3 — detected it about 11% of the time, and one lucky repeat decided it.
+on 3 of 10 tasks at N = 3 — detected it about 11% of the time, and one lucky repeat decided it. The
+new test's measurement on the same shape at N = 5, and why it is still low, is R3-G4.
 
 The gate is now, for every deterministic held-out task `t`:
 
@@ -426,6 +427,35 @@ improvement, and H < 10 → no improvement. Mutants: (1) a two-sided p (both tai
 (1000 instead of 2^H) changes the exact values and fails the known-vector test; (3) the `S > 0`
 clause dropped leaves the decision unchanged (the theorem) but changes the all-zero report from
 "S = 0 …" to "p = 1 …", which the all-zero test asserts.
+
+### R3-G4 — the exact test's power, measured
+
+A scripted simulation checks the test against the shape it exists to catch, with no harness, no
+model and no spend: ten tasks at N = 5 runs each, three tasks truly moving from 30% to 80% and seven
+flat at 50%. A seeded PRNG (mulberry32) draws every pass, so the numbers reproduce; 1000 simulated
+sessions give:
+
+- **detection 0.193** (a second seed gives 0.181 — the measurement, not the seed, sets the figure);
+- **false-positive 0.030** with no true difference anywhere (all ten tasks at 50% both sides).
+
+The false-positive rate meets CJ's requirement that it stay at or below 5%, and it is below `alpha`
+for the right reason: a discrete exact test cannot spend more level than `alpha` has, and it spends
+less where the reachable p-values are coarse.
+
+**The detection rate is low, and that is a property of the design rather than of the measurement.**
+With only three tasks changing, the reachable sums are coarse: the smallest achievable p-value is
+`2^-3 = 0.125`, so a session must also catch a chance move on one of the seven flat tasks to reach
+`p < 0.05`. The test has power against gains that are broad — eight of ten tasks improving at the
+same size gives `p = 1/256` (asserted in R3-G3) — not against three-of-ten. A 3-of-10 improvement
+is therefore mostly not certified at `H = 10, N = 5`; a lane that expects one should either widen
+the improved set or accept that the gate will report "no improvement" and let the per-task `d_t`
+show the gain. This is recorded here rather than engineered around, because the test is
+pre-registered: changing `H`, `N` or `alpha` after seeing the number would defeat D-57.
+
+The three assertions live in `power.test.ts`: detection at least 0.15 and below 0.5 (pinning the
+measured shape from both sides), false-positive at or below `alpha`, and seed reproducibility; the
+fragment's two numbers are the values those tests measure. The simulation is a test of the gate's
+statistics only — it is not evidence about any model, and it makes no paid call.
 
 ## Verification
 
