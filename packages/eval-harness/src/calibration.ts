@@ -1,0 +1,165 @@
+import type { CorpusSplits } from './splits.js';
+
+/**
+ * Held-out calibration (WP-3.7b R3-G2, D-57). A held-out task is only worth a gate if the base
+ * harness sometimes passes it and sometimes fails it: a task the base always solves has no headroom
+ * to measure an improvement against, and a task it never solves may be unsolvable, broken, or
+ * simply beyond the base for a reason no candidate can address.
+ *
+ * `maf goldens calibrate` runs the BASE harness on each pool task a fixed number of times, writes
+ * the per-task pass counts to `calibration.json`, and moves the tasks that qualify from `pool` to
+ * `heldOut` in `splits.json`. Both files are committed together, so the yardstick is a visible,
+ * reviewed edit and its sha changes with it. The calibration counts are NOT the gate's baseline:
+ * the gate re-measures the base itself, because a calibration run and a gate run differ in their
+ * isolation, their attempt count and the day they ran.
+ */
+
+/** The committed record of a calibration run, beside `splits.json` in the corpus root. */
+export const CALIBRATION_FILE = 'calibration.json';
+
+/** Independent base runs per pool task. The selection rule below is stated for exactly this many. */
+export const CALIBRATION_RUNS = 3;
+
+/** Fewest tasks a calibrated held-out set may contain. Below this the gate has no power. */
+export const CALIBRATION_MIN_SELECTED = 10;
+
+export class CalibrationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CalibrationError';
+  }
+}
+
+/** One pool task's measurement: how many of its independent base runs passed. */
+export interface CalibrationCount {
+  taskId: string;
+  /** Passing runs, 0..attempts. */
+  passes: number;
+  /** Independent runs attempted for this task; exactly CALIBRATION_RUNS. */
+  attempts: number;
+}
+
+export interface CalibrationSelection {
+  /** Tasks that become held-out, in pool order. */
+  selected: string[];
+  /** Tasks the base solved in every run: no headroom, never selected. */
+  droppedAlwaysSolved: string[];
+  /**
+   * Tasks the base never solved, beyond what the one-third cap allows. Kept in the pool: they may
+   * still be worth a later look, but a held-out set that is mostly never-passed tasks measures
+   * whether a candidate can do the impossible, not whether it improved.
+   */
+  droppedAlwaysFailed: string[];
+  /** How many never-solved tasks the rule allowed, and how many were kept. */
+  zerosAllowed: number;
+  zerosKept: number;
+  qualified: boolean;
+  /** Why the run does not qualify, when it does not. */
+  reason?: string;
+}
+
+/**
+ * The pre-registered selection rule, verbatim (CJ's round-3 decision):
+ *
+ *   keep tasks whose base pass count is 0, 1 or 2 of 3;
+ *   at most a third of the kept set may be 0 of 3;
+ *   at least 10 must qualify.
+ *
+ * "At most a third of the kept set" is arithmetic, not a judgement call: a kept set of `p` partial
+ * tasks plus `z` never-solved tasks satisfies `z <= (p + z) / 3` exactly when `z <= floor(p / 2)`,
+ * which is the cap implemented here. When the cap binds, the never-solved tasks are kept in the
+ * order the caller supplies them (the pool order in `splits.json`), so which ones survive is
+ * reproducible and auditable, not a choice made at run time.
+ */
+export function selectCalibrated(counts: readonly CalibrationCount[]): CalibrationSelection {
+  const seen = new Set<string>();
+  for (const c of counts) {
+    if (seen.has(c.taskId)) throw new CalibrationError(`calibration counts list ${c.taskId} more than once`);
+    seen.add(c.taskId);
+    if (c.attempts !== CALIBRATION_RUNS)
+      throw new CalibrationError(
+        `calibration for ${c.taskId} ran ${c.attempts} time(s); the selection rule is pre-registered for ` +
+        `${CALIBRATION_RUNS} and is not read from the command line.`,
+      );
+    if (!Number.isInteger(c.passes) || c.passes < 0 || c.passes > c.attempts)
+      throw new CalibrationError(`calibration for ${c.taskId} has ${c.passes} passes of ${c.attempts}`);
+  }
+  const partial = counts.filter((c) => c.passes > 0 && c.passes < CALIBRATION_RUNS);
+  const zeros = counts.filter((c) => c.passes === 0);
+  const zerosAllowed = Math.floor(partial.length / 2);
+  const keptZeros = new Set(zeros.slice(0, zerosAllowed).map((c) => c.taskId));
+  const selected = counts
+    .filter((c) => (c.passes > 0 && c.passes < CALIBRATION_RUNS) || keptZeros.has(c.taskId))
+    .map((c) => c.taskId);
+  const qualified = selected.length >= CALIBRATION_MIN_SELECTED;
+  return {
+    selected,
+    droppedAlwaysSolved: counts.filter((c) => c.passes === CALIBRATION_RUNS).map((c) => c.taskId),
+    droppedAlwaysFailed: zeros.filter((c) => !keptZeros.has(c.taskId)).map((c) => c.taskId),
+    zerosAllowed,
+    zerosKept: keptZeros.size,
+    qualified,
+    ...(qualified ? {} : {
+      reason: `only ${selected.length} task${selected.length === 1 ? '' : 's'} qualified; ` +
+        `the rule needs at least ${CALIBRATION_MIN_SELECTED}.`,
+    }),
+  };
+}
+
+/**
+ * Moves the selected pool tasks into `heldOut`, preserving pool order, and leaves the rest in the
+ * pool. The train side and the declared floor are untouched: calibration may grow the yardstick,
+ * never shrink it.
+ */
+export function applyCalibration(
+  splits: CorpusSplits, selection: CalibrationSelection,
+): CorpusSplits {
+  const pool = splits.pool ?? [];
+  const notPooled = selection.selected.filter((id) => !pool.includes(id));
+  if (notPooled.length > 0)
+    throw new CalibrationError(
+      `calibration selected ${notPooled.join(', ')}, which ${notPooled.length === 1 ? 'is' : 'are'} not in the pool; ` +
+      'only pool tasks may be calibrated into the held-out set.',
+    );
+  const chosen = new Set(selection.selected);
+  return {
+    version: splits.version,
+    minHeldOut: splits.minHeldOut,
+    train: splits.train,
+    heldOut: [...splits.heldOut, ...selection.selected],
+    pool: pool.filter((id) => !chosen.has(id)),
+  };
+}
+
+/**
+ * The committed record of one calibration run. `harnessSha` and `ranAt` make it possible to say
+ * which base harness produced these counts, months later; `rule` repeats the selection rule so the
+ * file can be audited without reading this source; `selection` records the decision, including what
+ * was dropped and why, so the edit to `splits.json` can be reviewed as a consequence of a
+ * measurement rather than as a preference.
+ */
+export interface CalibrationRecord {
+  version: 1;
+  harnessId: string;
+  harnessSha: string;
+  adapter: string;
+  model?: string;
+  /** Independent base runs per task. */
+  runs: number;
+  /** ISO timestamp of the run. */
+  ranAt: string;
+  /** sha256 of the corpus these tasks were drawn from. */
+  corpusSha?: string;
+  /** `sha` of the `splits.json` this run was decided against. */
+  splitsSha: string;
+  rule: string;
+  tasks: CalibrationCount[];
+  /** Attempts that ended in an error, by task: a crash is not a measurement. */
+  errors: { taskId: string; attempt: number; error: string }[];
+  selection: CalibrationSelection;
+}
+
+export const CALIBRATION_RULE =
+  `keep tasks whose base pass count is 0, 1 or 2 of ${CALIBRATION_RUNS}; ` +
+  `at most a third of the kept set may be 0 of ${CALIBRATION_RUNS}; ` +
+  `at least ${CALIBRATION_MIN_SELECTED} must qualify`;

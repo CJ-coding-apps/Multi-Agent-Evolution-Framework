@@ -13,10 +13,14 @@ import { MemoryGraph } from '@maf/memory-graph';
 import { RoleRegistry, roleSetFromHarness } from '@maf/roles';
 import { createDefaultRegistry } from '@maf/tools';
 import {
-  GoldenRunner, ScoreRecorder, ScriptedAdapter, SCRIPTED_ADAPTER_NAME, assertGoldenCorpus,
-  describeJudge, loadScriptedTasks, makeLlmJudge, seesawDecision,
+  CALIBRATION_FILE, CALIBRATION_RULE, CALIBRATION_RUNS, GoldenRunner, ScoreRecorder, ScriptedAdapter,
+  SCRIPTED_ADAPTER_NAME, SPLITS_FILE, applyCalibration, assertGoldenCorpus, describeJudge,
+  loadScriptedTasks, loadSplits, makeLlmJudge, seesawDecision, selectCalibrated,
 } from '@maf/eval-harness';
-import type { GoldenSuiteResult } from '@maf/eval-harness';
+import type {
+  CalibrationCount, CalibrationRecord, CalibrationSelection, GoldenSuiteResult, GoldenTask,
+  LoadedSplits,
+} from '@maf/eval-harness';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { RESOLVER_REFS, buildRunStack, harnessDriftNotice, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
@@ -124,6 +128,11 @@ export interface GoldenSuiteOptions {
   runId: RunId;
   /** `--allow-ungoverned`: a writer role may run on the cli tier, outside MAF's gates (D-01). */
   allowUngoverned?: boolean;
+  /**
+   * Run only these corpus tasks (calibration measures the pool, not the corpus). Each must be in
+   * the corpus; omitting it runs everything.
+   */
+  only?: readonly string[];
 }
 
 /**
@@ -180,7 +189,7 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
           for (const f of res.findings) worstRank = Math.max(worstRank, rank[f.severity] ?? 1);
           return (['none', 'low', 'medium', 'high', 'critical'] as const)[worstRank] ?? 'critical';
         },
-      }).run();
+      }).run(o.only);
       // F6 — the policy the suite ran under, recorded before the bundle so its counts are final.
       stack.recordPolicyInForce();
       await stack.attestor.bundle(
@@ -217,6 +226,122 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
       console.warn(`[maf] warning: could not remove ${evalDir}: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
+}
+
+/** The corpus as the runner reads it: through the shared reviver, and validated. */
+async function loadCorpus(corpusRoot: string): Promise<GoldenTask[]> {
+  const corpus: unknown = JSON.parse(
+    await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'), refusePrototypeKey,
+  );
+  assertGoldenCorpus(corpus);
+  return corpus;
+}
+
+/**
+ * The tasks `--tasks` names. `pool` (the default) is the third list in `splits.json`; an explicit
+ * list may name only pool tasks, because calibration exists to decide what the yardstick becomes.
+ * A train task is already measured on every candidate, and a held-out task is already spent on the
+ * gate — re-measuring either under the base harness answers nothing the split does not already.
+ */
+export function calibrationTaskIds(spec: string, splits: LoadedSplits): string[] {
+  const pool = splits.pool ?? [];
+  const trimmed = spec.trim();
+  if (trimmed === '' || trimmed === 'pool') {
+    if (pool.length === 0) {
+      throw new Error(
+        'goldens calibrate: the split has no pool. Add candidate held-out tasks to "pool" in ' +
+        `${path.basename(SPLITS_FILE)} and run calibration again.`,
+      );
+    }
+    return [...pool];
+  }
+  const ids = [...new Set(trimmed.split(',').map((id) => id.trim()).filter((id) => id !== ''))];
+  const notPooled = ids.filter((id) => !pool.includes(id));
+  if (notPooled.length > 0) {
+    throw new Error(
+      `goldens calibrate: ${notPooled.join(', ')} ${notPooled.length === 1 ? 'is' : 'are'} not in the pool ` +
+      `(${pool.length} task${pool.length === 1 ? '' : 's'}: ${pool.join(', ') || 'none'}). Only pool tasks ` +
+      'can be calibrated into the held-out set.',
+    );
+  }
+  return ids;
+}
+
+export interface CalibrationOptions {
+  corpusRoot: string;
+  /** The split this run is decided against; `sha` is recorded with the counts. */
+  splits: LoadedSplits;
+  /** The pool task ids to measure; every one must be in `splits.pool`. */
+  taskIds: readonly string[];
+  /** Who produced the measurement, as recorded in `calibration.json`. */
+  harness: { id: string; sha: string };
+  adapter: { name: string };
+  model?: string;
+  /**
+   * Runs the base harness on these tasks. The command wires it to `runGoldenSuite` with `only`,
+   * so the calibration sessions get a gate run's isolation (H2): their memory, LCM and transcripts
+   * live in a temporary directory and the graph is emptied before every attempt. Tests inject a
+   * deterministic result instead of paying for one.
+   */
+  execute: (only: readonly string[]) => Promise<GoldenSuiteResult>;
+}
+
+export interface CalibrationOutcome {
+  /** Where the measurement was written. */
+  path: string;
+  record: CalibrationRecord;
+  /** Where the split was rewritten, when the run qualified. */
+  splitsPath?: string;
+  selection: CalibrationSelection;
+}
+
+/**
+ * Measures the BASE harness on each pool task, `CALIBRATION_RUNS` independent times, and (R3-G2)
+ * decides the held-out set from the counts. Both files are written into the corpus root, which is
+ * what a maintainer commits: the measurement and the yardstick it produced, side by side.
+ *
+ * A calibration score is never a gate baseline: it is not written to `.maf/goldens/results`, it is
+ * not recorded in the evolver's score graph, and the gate re-measures the base itself.
+ */
+export async function runCalibration(o: CalibrationOptions): Promise<CalibrationOutcome> {
+  const result = await o.execute(o.taskIds);
+
+  const counts: CalibrationCount[] = result.tasks.map((t) => ({
+    taskId: t.taskId,
+    passes: t.attempts.filter((a) => a.passed).length,
+    attempts: t.attempts.length,
+  }));
+  const errors = result.tasks.flatMap((t) => t.attempts
+    .filter((a) => a.error !== undefined)
+    .map((a) => ({ taskId: t.taskId, attempt: a.attempt, error: a.error as string })));
+  const measured = selectCalibrated(counts);
+  // A crashed attempt is not a measurement: the base may not have run at all. Selecting on it would
+  // turn an infrastructure failure into "the base cannot solve this", which is the opposite of what
+  // the pool is for — so the run reports and stops rather than qualifying on partial evidence.
+  const selection: CalibrationSelection = errors.length > 0
+    ? {
+      ...measured, qualified: false,
+      reason: `${errors.length} attempt${errors.length === 1 ? '' : 's'} ended in an error ` +
+        `(${[...new Set(errors.map((e) => e.taskId))].join(', ')}); a crashed attempt is not a measurement, ` +
+        'so nothing was selected.',
+    }
+    : measured;
+
+  const record: CalibrationRecord = {
+    version: 1, harnessId: o.harness.id, harnessSha: o.harness.sha, adapter: o.adapter.name,
+    ...(o.model !== undefined ? { model: o.model } : {}),
+    runs: CALIBRATION_RUNS, ranAt: result.ranAt,
+    ...(result.corpusSha !== undefined ? { corpusSha: result.corpusSha } : {}),
+    splitsSha: o.splits.sha, rule: CALIBRATION_RULE, tasks: counts, errors, selection,
+  };
+  const calibrationPath = path.join(o.corpusRoot, CALIBRATION_FILE);
+  await writeFile(calibrationPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+  if (!selection.qualified) return { path: calibrationPath, record, selection };
+
+  const splits = applyCalibration(o.splits, selection);
+  const splitsPath = path.join(o.corpusRoot, SPLITS_FILE);
+  await writeFile(splitsPath, `${JSON.stringify(splits, null, 2)}\n`, 'utf8');
+  return { path: calibrationPath, record, selection, splitsPath };
 }
 
 /** Why two results cannot be seesaw-compared, or undefined when they can (D-38). */
@@ -289,6 +414,12 @@ interface GoldenOpts {
   dir: string; corpus: string; harness?: string; attempts: string; policy: string; allowUngoverned?: boolean;
 }
 
+interface CalibrationOpts {
+  adapter: string; model?: string; judgeAdapter?: string; judgeModel?: string;
+  dir: string; corpus: string; harness?: string; runs: string; tasks: string;
+  policy: string; allowUngoverned?: boolean;
+}
+
 export function registerGoldensCommand(program: Command): void {
   const cmd = program.command('goldens').description('Golden-suite evaluation for harness versions');
 
@@ -346,6 +477,93 @@ export function registerGoldensCommand(program: Command): void {
       if (result.judge && !result.judge.distinct) console.log(`[maf] judge: ${result.judge.note ?? ''}`);
       console.log(`[maf] goldens: solved ${result.solvedTaskIds.length}/${result.tasks.length} (corpus ${shortSha(result.corpusSha ?? '')}) → ${resultPath}`);
       console.log(`[maf] bundle: ${bundlePath}`);
+    });
+
+  cmd
+    .command('calibrate')
+    .option('-a, --adapter <name>', 'CLI adapter, or "scripted" for the corpus\'s deterministic offline model', 'claude')
+    .option('-m, --model <model>', 'Model name')
+    .option('--judge-adapter <name>', 'Adapter for llm-judge verifiers (default: the agent\'s own)')
+    .option('--judge-model <model>', 'Model for llm-judge verifiers')
+    .option('-d, --dir <path>', 'Working directory', process.cwd())
+    .option('--corpus <path>', 'Golden corpus root', '.maf/goldens')
+    .option('--harness <ref>', 'Base harness to calibrate against (default: current, else the roles file)')
+    .option('--runs <n>', `base runs per task (pinned to ${CALIBRATION_RUNS}: the selection rule is pre-registered for that many)`, String(CALIBRATION_RUNS))
+    .option('--tasks <ids>', 'Pool task ids to measure, comma-separated (default: the whole pool)', 'pool')
+    .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
+    .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
+    .description('Measure the base harness on the held-out task pool, then select the tasks that have headroom into heldOut (writes calibration.json and splits.json; exits 1 when fewer than 10 qualify)')
+    .action(async (opts: CalibrationOpts, cmd: Command) => {
+      const cwd = path.resolve(opts.dir);
+      const mafDir = await ensureMafDir(path.join(cwd, '.maf'));
+      const corpusRoot = await resolveCorpusRoot(cwd, opts.corpus);
+      const corpus = await loadCorpus(corpusRoot);
+      const splits = await loadSplits(corpusRoot, corpus);
+
+      // The rule is pre-registered, not a parameter: a different number of runs is a different rule,
+      // and it must not be introduced by a flag on the paid command.
+      const runs = Number(opts.runs);
+      if (runs !== CALIBRATION_RUNS) {
+        console.error(
+          `[maf] goldens calibrate: --runs ${JSON.stringify(opts.runs)} is not ${CALIBRATION_RUNS}. ` +
+          `The selection rule is pre-registered for ${CALIBRATION_RUNS} base runs per task; nothing was run.`,
+        );
+        process.exitCode = 2;
+        return;
+      }
+      const taskIds = calibrationTaskIds(opts.tasks, splits);
+
+      const { harness, source } = await resolveGoldensHarness(mafDir, opts.harness);
+      console.log(
+        `[maf] goldens calibrate | harness: ${harness.id} (${shortSha(harness.sha)}) from ${source} | ` +
+        `${taskIds.length} pool task${taskIds.length === 1 ? '' : 's'} × ${CALIBRATION_RUNS} runs | rule: ${CALIBRATION_RULE}`,
+      );
+
+      const agent = await resolveGoldensAdapter(opts.adapter, corpusRoot);
+      const judgeAdapter = opts.judgeAdapter && opts.judgeAdapter !== opts.adapter
+        ? await resolveGoldensAdapter(opts.judgeAdapter, corpusRoot)
+        : agent;
+      const judgeModel = opts.judgeModel ?? (judgeAdapter === agent ? opts.model : undefined);
+      const outcome = await runCalibration({
+        corpusRoot, splits, taskIds, harness: { id: harness.id, sha: harness.sha },
+        adapter: { name: agent.name }, ...(opts.model ? { model: opts.model } : {}),
+        // The paid path: the base harness, isolated exactly as a gate run is (H2).
+        execute: async (only) => (await runGoldenSuite({
+          cwd, corpusRoot, harness, harnessSource: source, agent, only,
+          ...(opts.model ? { model: opts.model } : {}),
+          judge: { adapter: judgeAdapter, ...(judgeModel ? { model: judgeModel } : {}) },
+          attempts: CALIBRATION_RUNS, runId: makeRunId(crypto.randomUUID()),
+          policy: { value: opts.policy, typed: cmd.getOptionValueSource('policy') === 'cli' },
+          ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
+        })).result,
+      });
+
+      const { record, selection } = outcome;
+      const zeros = record.tasks.filter((t) => t.passes === 0).length;
+      const partial = record.tasks.length - zeros - selection.droppedAlwaysSolved.length;
+      console.log(
+        `[maf] calibration: ${record.tasks.length} pool task${record.tasks.length === 1 ? '' : 's'} — ` +
+        `${zeros} never solved in ${CALIBRATION_RUNS}, ${selection.droppedAlwaysSolved.length} solved every run ` +
+        `(no headroom), ${partial} partial; the cap allows ${selection.zerosAllowed} never-solved and ` +
+        `${selection.zerosKept} ${selection.zerosKept === 1 ? 'was' : 'were'} kept`,
+      );
+      for (const e of record.errors) console.error(`[maf] calibration: ${e.taskId} attempt ${e.attempt + 1} failed: ${e.error}`);
+      console.log(`[maf] calibration: wrote ${outcome.path}`);
+      if (outcome.splitsPath === undefined) {
+        console.error(
+          `[maf] calibration: nothing was selected — ${selection.reason} ` +
+          `${splits.heldOut.length} held-out task${splits.heldOut.length === 1 ? '' : 's'} stay as they are; ` +
+          `${SPLITS_FILE} is unchanged. Redesign the pool and calibrate again.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        `[maf] calibration: selected ${selection.selected.length}: held-out ${splits.heldOut.length} → ` +
+        `${splits.heldOut.length + selection.selected.length} in ${outcome.splitsPath}`,
+      );
+      if (selection.droppedAlwaysFailed.length > 0)
+        console.log(`[maf] calibration: left in the pool (never solved, beyond the cap): ${selection.droppedAlwaysFailed.join(', ')}`);
     });
 
   cmd

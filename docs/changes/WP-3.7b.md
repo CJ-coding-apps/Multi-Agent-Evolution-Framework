@@ -353,6 +353,38 @@ the calibration step, one commit per item.
   train tasks). Every pool script is a plausible but incorrect fix, so the base fails all 20 by
   construction; the committed baseline records that.
 
+### R3-G2 — calibration: the pool becomes the yardstick
+
+`maf goldens calibrate --adapter claude --runs 3 --tasks pool` measures the **base** harness on every
+pool task, three independent times, and writes `calibration.json` into the corpus root beside
+`splits.json`. The suite runs through the golden suite's own isolation (`only` set to the pool): the
+graph, LCM and transcripts live in a temporary directory and the graph is emptied before every
+attempt (H2). The counts are never a gate baseline — the results directory and the evolver's score
+graph are untouched, and the gate re-measures the base.
+
+The selection rule, fixed in code and repeated verbatim in both files:
+
+> keep tasks whose base pass count is 0, 1 or 2 of 3; at most a third of the kept set may be 0 of 3;
+> at least 10 must qualify.
+
+"A third" is arithmetic: a kept set of `p` partial tasks and `z` never-solved tasks satisfies
+`z ≤ (p + z)/3` exactly when `z ≤ floor(p/2)`, which is the cap; when it binds, the never-solved
+tasks are kept in pool order, so the choice is reproducible. A task the base solves every time has
+no headroom; a task it never solves may be broken, and a held-out set mostly made of them measures
+the impossible rather than an improvement.
+
+`--runs` is pinned to 3: a different run count is a different rule, and it cannot be introduced by a
+flag on the paid command (that exits 2 before dispatching). An attempt that ends in an **error** is
+not a measurement — the run reports and stops rather than selecting on partial evidence. Below ten
+qualifying tasks the command still writes the counts, prints why, and leaves `splits.json`
+byte-identical (exit 1). When it qualifies, the selected ids move from `pool` to `heldOut` in
+`splits.json` (in pool order; train and `minHeldOut` untouched), the file is written in the same
+2-space form, and `computeSplitsSha` changes because the pool is part of the identity.
+
+Offline, with the scripted adapter, the committed pool has no headroom — every pool script is a
+wrong fix — so the end-to-end run measures 20 × 3 = 60 failures and reports without selecting. The
+selection and rewrite paths are exercised with an injected result; no test makes a paid call.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
