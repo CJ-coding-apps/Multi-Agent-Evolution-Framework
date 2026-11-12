@@ -35,7 +35,13 @@ test('the scripted model reproduces the committed baseline from the committed co
 
   assert.deepEqual(stable(result), stable(baseline));
   // What the baseline says, spelled out, so a regenerated baseline cannot quietly lose it.
-  assert.deepEqual(result.solvedTaskIds, ['coder-sum', 'coder-reverse', 'coder-clamp', 'coder-isodd']);
+  // R2-M2 grew the corpus: nine train tasks and seven held-out (five deterministic, two judge).
+  // The scripted model solves every coder task it answers correctly — coder-fib's plain script is a
+  // wrong fix — and neither judge task, because the scripted judge fails closed.
+  assert.deepEqual(result.solvedTaskIds, [
+    'coder-sum', 'coder-reverse', 'coder-clamp', 'coder-isodd', 'coder-repeat', 'coder-contains',
+    'coder-max', 'coder-unique', 'coder-flatten', 'coder-pad',
+  ]);
   const capitalize = result.tasks.find((t) => t.taskId === 'coder-capitalize')?.attempts[0]?.outcomes;
   assert.deepEqual(capitalize?.map((o) => [o.kind, o.passed]), [['must-not-modify', false], ['test-script', true]],
     'the scripted coder that rewrites test.js passes its test and must still fail');

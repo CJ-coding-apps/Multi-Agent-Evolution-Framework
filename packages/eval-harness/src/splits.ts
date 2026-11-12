@@ -18,14 +18,41 @@ import type { GoldenTask } from './GoldenTask.js';
 
 export const SPLITS_FILE = 'splits.json';
 
+/**
+ * The fewest deterministically scored held-out tasks a gate may rest on (R2-M2). Below this a
+ * "held-out score" is a coin toss dressed as a measurement: one flipped task moves it by 20
+ * percentage points and there is no way to tell a real improvement from a lucky one. The floor is
+ * a constant, not a default — a split file may raise `minHeldOut` but never lower it below this.
+ */
+export const MIN_HELD_OUT = 5;
+
 export type SplitName = 'train' | 'held-out';
 
 export interface CorpusSplits {
   version: 1;
+  /**
+   * Fewest deterministically scored held-out tasks this gate requires (>= MIN_HELD_OUT). Declared
+   * in the committed file so that shrinking the yardstick is a visible edit to `splits.json`,
+   * not a quiet change of what the corpus happens to contain (R2-M2).
+   */
+  minHeldOut: number;
   /** Task ids the evolver may see and be scored on. */
   train: string[];
   /** Task ids it may not: scored only on the final harness, never recorded as evidence. */
   heldOut: string[];
+}
+
+/**
+ * Whether a task's verdict is a deterministic measurement — every verifier is a script, a gate or
+ * a diff match — rather than a model's opinion. An `llm-judge` verifier makes the whole task
+ * judge-scored: a task is only as deterministic as its least deterministic verifier (R2-M2/M3).
+ */
+export function isJudgeScored(task: GoldenTask): boolean {
+  return task.verifiers.some((v) => v.kind === 'llm-judge');
+}
+
+export function isDeterministicTask(task: GoldenTask): boolean {
+  return !isJudgeScored(task);
 }
 
 export interface LoadedSplits extends CorpusSplits {
@@ -43,7 +70,9 @@ export class SplitsError extends Error {
 /** sha256 over the canonical split definition, independent of key order and whitespace. */
 export function computeSplitsSha(splits: CorpusSplits): string {
   return crypto.createHash('sha256')
-    .update(canonicalJson({ version: splits.version, train: splits.train, heldOut: splits.heldOut }), 'utf8')
+    .update(canonicalJson({
+      version: splits.version, minHeldOut: splits.minHeldOut, train: splits.train, heldOut: splits.heldOut,
+    }), 'utf8')
     .digest('hex');
 }
 
@@ -75,6 +104,13 @@ export async function loadSplits(
   const o = parsed !== null && typeof parsed === 'object' ? parsed as Record<string, unknown> : undefined;
   if (o === undefined || o['version'] !== 1)
     throw new SplitsError(`${file}: version must be 1`);
+  const minHeldOut = o['minHeldOut'];
+  if (typeof minHeldOut !== 'number' || !Number.isInteger(minHeldOut) || minHeldOut < MIN_HELD_OUT)
+    throw new SplitsError(
+      `${file}: minHeldOut must be an integer of at least ${MIN_HELD_OUT} ` +
+      `(got ${JSON.stringify(minHeldOut)}). A held-out gate below ${MIN_HELD_OUT} deterministically ` +
+      'scored tasks cannot tell an improvement from a coin toss.',
+    );
   const known = new Set(corpus.map((t) => t.id));
   const lists: { train: string[]; 'held-out': string[] } = { train: [], 'held-out': [] };
   for (const [key, value] of [['train', o['train']], ['heldOut', o['heldOut']]] as const) {
@@ -100,6 +136,23 @@ export async function loadSplits(
   if (lists.train.length === 0 || lists['held-out'].length === 0)
     throw new SplitsError(`${file}: both sides need at least one task (train ${lists.train.length}, held-out ${lists['held-out'].length})`);
 
-  const splits: CorpusSplits = { version: 1, train: lists.train, heldOut: lists['held-out'] };
+  // R2-M2: the declared floor is enforced on the corpus, not just recorded. Judge-scored held-out
+  // tasks are reported beside a gate, never counted toward it — a model's opinion is not a measure.
+  const byId = new Map(corpus.map((t) => [t.id, t]));
+  const deterministic = lists['held-out'].filter((id) => isDeterministicTask(byId.get(id)!));
+  const judgeOnly = lists['held-out'].filter((id) => !deterministic.includes(id));
+  if (deterministic.length < minHeldOut) {
+    throw new SplitsError(
+      `${file}: the held-out split has ${deterministic.length} deterministically scored ` +
+      `task${deterministic.length === 1 ? '' : 's'} (${deterministic.join(', ') || 'none'}); ` +
+      `minHeldOut is ${minHeldOut}. ` +
+      (judgeOnly.length > 0
+        ? `${judgeOnly.join(', ')} ${judgeOnly.length === 1 ? 'is' : 'are'} judge-scored and do not count. `
+        : '') +
+      'Add deterministic held-out tasks or move them from train; do not lower minHeldOut.',
+    );
+  }
+
+  const splits: CorpusSplits = { version: 1, minHeldOut, train: lists.train, heldOut: lists['held-out'] };
   return { ...splits, sha: computeSplitsSha(splits) };
 }

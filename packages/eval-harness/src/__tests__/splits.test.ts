@@ -14,7 +14,11 @@ const task = (id: string): GoldenTask => ({
   provenance: { source: 'human-decision', ref: 'split test fixture' },
 });
 
-const CORPUS = [task('a'), task('b'), task('c')];
+// Eight tasks so a five-task held-out side can also leave a train set (R2-M2's floor).
+const CORPUS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map(task);
+const IDS = CORPUS.map((t) => t.id);
+const five = IDS.slice(0, 5);
+const rest = IDS.slice(5);
 
 async function withSplits(file: unknown, fn: (root: string) => Promise<void>): Promise<void> {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-splits-'));
@@ -28,33 +32,64 @@ async function withSplits(file: unknown, fn: (root: string) => Promise<void>): P
   }
 }
 
-test('splits: a valid partition loads, and its sha covers the lists', async () => {
-  const splits: CorpusSplits = { version: 1, train: ['a', 'b'], heldOut: ['c'] };
+test('splits: a valid partition loads, and its sha covers the lists and the floor', async () => {
+  const splits: CorpusSplits = { version: 1, minHeldOut: 5, train: rest, heldOut: five };
   await withSplits(splits, async (root) => {
     const loaded = await loadSplits(root, CORPUS);
-    assert.deepEqual(loaded.train, ['a', 'b']);
-    assert.deepEqual(loaded.heldOut, ['c']);
+    assert.deepEqual(loaded.train, rest);
+    assert.deepEqual(loaded.heldOut, five);
+    assert.equal(loaded.minHeldOut, 5);
     assert.equal(loaded.sha, computeSplitsSha(splits));
     assert.match(loaded.sha, /^[0-9a-f]{64}$/);
   });
-  // A different partition is a different yardstick.
-  assert.notEqual(
-    computeSplitsSha(splits),
-    computeSplitsSha({ version: 1, train: ['a'], heldOut: ['b', 'c'] }),
-  );
+  // A different partition is a different yardstick, and so is a different declared floor.
+  assert.notEqual(computeSplitsSha(splits), computeSplitsSha({ ...splits, train: ['a', 'b', 'c'], heldOut: ['d', 'e', 'f', 'g', 'h'] }));
+  assert.notEqual(computeSplitsSha(splits), computeSplitsSha({ ...splits, minHeldOut: 6 }));
+});
+
+test('splits: a gate resting on fewer than minHeldOut deterministic held-out tasks is refused (R2-M2)', async () => {
+  // A judge-scored task does not count: it is a model's opinion, not a measurement.
+  const judge = (id: string): GoldenTask => ({
+    id, repoFixture: `fixtures/${id}`, prompt: `do ${id}`, role: 'reviewer',
+    verifiers: [{ kind: 'llm-judge', rubricFile: 'rubrics/r.md' }],
+    provenance: { source: 'human-decision', ref: 'split test fixture' },
+  });
+  const corpus = [...CORPUS, judge('j1'), judge('j2')];
+  const file = { version: 1, minHeldOut: 5, train: [...rest, five[4]!], heldOut: [...five.slice(0, 4), 'j1', 'j2'] };
+  await withSplits(file, async (root) => {
+    await assert.rejects(() => loadSplits(root, corpus), (err: unknown) => {
+      assert.ok(err instanceof SplitsError, String(err));
+      assert.match(err.message, /4 deterministically scored tasks/);
+      assert.match(err.message, /minHeldOut is 5/);
+      assert.match(err.message, /j1, j2 are judge-scored and do not count/);
+      return true;
+    });
+  });
+  // The declared floor itself cannot be lowered below the constant, even if the corpus is large.
+  await withSplits({ ...file, minHeldOut: 4, heldOut: five }, async (root) => {
+    await assert.rejects(() => loadSplits(root, corpus), /minHeldOut must be an integer of at least 5/);
+  });
+  await withSplits({ version: 1, train: rest, heldOut: five }, async (root) => {
+    await assert.rejects(() => loadSplits(root, CORPUS), /minHeldOut must be an integer of at least 5/);
+  });
+  // And a split claiming more than it has is refused with the count it does have.
+  await withSplits({ version: 1, minHeldOut: 6, train: rest, heldOut: five }, async (root) => {
+    await assert.rejects(() => loadSplits(root, CORPUS), /has 5 deterministically scored tasks/);
+  });
 });
 
 test('splits: every way a split can fail to be a partition is refused', async () => {
   const cases: Array<[unknown, RegExp]> = [
     [undefined, /no splits\.json/],
     ['{nope', /not readable JSON/],
-    [{ version: 2, train: ['a'], heldOut: ['b', 'c'] }, /version must be 1/],
-    [{ version: 1, train: 'a', heldOut: ['b', 'c'] }, /train must be an array/],
-    [{ version: 1, train: ['a', 'ghost'], heldOut: ['b', 'c'] }, /"ghost", which is not in the corpus/],
-    [{ version: 1, train: ['a', 'b', 'c'], heldOut: ['b'] }, /on both sides/],
-    [{ version: 1, train: ['a', 'a'], heldOut: ['b', 'c'] }, /more than once/],
-    [{ version: 1, train: ['a'], heldOut: ['b'] }, /c is in neither split/],
-    [{ version: 1, train: [], heldOut: ['a', 'b', 'c'] }, /both sides need at least one task/],
+    [{ version: 2, minHeldOut: 5, train: ['a'], heldOut: ['b', 'c'] }, /version must be 1/],
+    [{ version: 1, minHeldOut: 5, train: 'a', heldOut: ['b', 'c'] }, /train must be an array/],
+    [{ version: 1, minHeldOut: 5, train: ['a', 'ghost'], heldOut: ['b', 'c'] }, /"ghost", which is not in the corpus/],
+    [{ version: 1, minHeldOut: 5, train: ['a', 'b', 'c'], heldOut: ['b'] }, /on both sides/],
+    [{ version: 1, minHeldOut: 5, train: ['a', 'a'], heldOut: ['b', 'c'] }, /more than once/],
+    [{ version: 1, minHeldOut: 5, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'] }, /g, h are in neither split/],
+    [{ version: 1, minHeldOut: 1, train: ['a'], heldOut: ['b'] }, /minHeldOut must be an integer of at least 5/],
+    [{ version: 1, minHeldOut: 5, train: [], heldOut: IDS }, /both sides need at least one task/],
   ];
   for (const [file, re] of cases) {
     await withSplits(file, async (root) => {

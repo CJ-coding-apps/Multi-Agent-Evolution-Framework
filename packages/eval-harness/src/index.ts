@@ -10,7 +10,7 @@ export { GoldenRunner, seesawDecision } from './GoldenRunner.js';
 export { ScoreRecorder } from './ScoreRecorder.js';
 export { computeCorpusSha } from './corpusSha.js';
 export type { CorpusSplits, LoadedSplits, SplitName } from './splits.js';
-export { SPLITS_FILE, SplitsError, computeSplitsSha, loadSplits } from './splits.js';
+export { SPLITS_FILE, MIN_HELD_OUT, SplitsError, computeSplitsSha, isDeterministicTask, isJudgeScored, loadSplits } from './splits.js';
 export type { JudgeVerdict, JudgeDisclosure, ModelRef } from './judge.js';
 export {
   JUDGE_SYSTEM_PROMPT, judgePrompt, formatJudgeVerdict, parseJudgeVerdict, describeJudge, makeLlmJudge,

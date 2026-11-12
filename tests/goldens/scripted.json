@@ -206,6 +206,120 @@
         }
       ],
       "final": "loop.js, sumFirst: the loop runs while i<=n, so it adds n+1 elements and reads arr[n], which is past the first n and out of bounds when n equals arr.length. Corrected line: for(let i=0;i<n;i++) s+=arr[i];"
+    },
+    "coder-max": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "max.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "max.js",
+            "content": "function max(a,b){ return Math.max(a,b); }\nmodule.exports = { max };\n"
+          }
+        }
+      ],
+      "final": "Fixed max.js: it returned the smaller of the two values; it now returns the larger."
+    },
+    "coder-unique": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "unique.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "unique.js",
+            "content": "function unique(xs){ return [...new Set(xs)]; }\nmodule.exports = { unique };\n"
+          }
+        }
+      ],
+      "final": "Fixed unique.js: it returned its input; it now removes duplicates in first-seen order."
+    },
+    "coder-flatten": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "flatten.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "flatten.js",
+            "content": "function flatten(xs){ return xs.flat(); }\nmodule.exports = { flatten };\n"
+          }
+        }
+      ],
+      "final": "Fixed flatten.js: it returned the nested array; it now flattens one level."
+    },
+    "coder-pad": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "pad.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "pad.js",
+            "content": "function pad(s,n){ return String(s).padStart(n,'0'); }\nmodule.exports = { pad };\n"
+          }
+        }
+      ],
+      "final": "Fixed pad.js: it never padded; it now left-pads with zeros to the requested width."
+    },
+    "coder-repeat": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "repeat.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "repeat.js",
+            "content": "function repeat(s,n){ return String(s).repeat(n); }\nmodule.exports = { repeat };\n"
+          }
+        }
+      ],
+      "final": "Fixed repeat.js: it returned the string once; it now repeats it n times."
+    },
+    "coder-contains": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "contains.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "contains.js",
+            "content": "function contains(xs,x){ return xs.indexOf(x) !== -1; }\nmodule.exports = { contains };\n"
+          }
+        }
+      ],
+      "final": "Fixed contains.js: indexOf returns 0 for the first element; it now tests !== -1."
     }
   },
   "evolution": {

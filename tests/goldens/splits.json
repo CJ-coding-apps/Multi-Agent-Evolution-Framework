@@ -1,16 +1,23 @@
 {
   "version": 1,
+  "minHeldOut": 5,
   "train": [
     "coder-sum",
     "coder-reverse",
     "coder-clamp",
     "coder-isodd",
     "coder-capitalize",
+    "coder-repeat",
+    "coder-contains",
     "security-eval-endpoint",
     "security-path-traversal"
   ],
   "heldOut": [
     "coder-fib",
+    "coder-max",
+    "coder-unique",
+    "coder-flatten",
+    "coder-pad",
     "security-sql-concat",
     "review-off-by-one"
   ]

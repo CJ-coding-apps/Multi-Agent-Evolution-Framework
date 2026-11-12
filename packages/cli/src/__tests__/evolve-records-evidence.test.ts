@@ -64,11 +64,12 @@ interface Project {
 }
 
 /**
- * A demo project with two golden tasks: the measured `coder-sum`, whose script reads `sum.js` and
+ * A demo project with six golden tasks: the measured `coder-sum`, whose script reads `sum.js` and
  * then tries to write `.env` (which the built-in policy denies, so the run leaves a `PolicyEvent`
- * behind and the task is unsolved), and a `coder-heldout` twin that D-57 puts on the other side of
- * the split. The held-out one is never dispatched here — no candidate ships on identical scores —
- * but the split must be a partition, so it has to exist. The score is incidental; the records are
+ * behind and the task is unsolved), and five `coder-heldout-*` twins that D-57 puts on the other
+ * side of the split. Five is not decoration: R2-M2 refuses a gate resting on fewer deterministically
+ * scored held-out tasks. The held-out ones are never dispatched here — no candidate ships on
+ * identical scores — but the split must be a partition. The score is incidental; the records are
  * the point.
  */
 async function project(): Promise<Project> {
@@ -78,7 +79,8 @@ async function project(): Promise<Project> {
 
   const corpus = path.join(root, 'corpus');
   await mkdir(path.join(corpus, 'fixtures'), { recursive: true });
-  for (const fixture of ['coder-sum', 'coder-heldout']) {
+  const heldOutIds = [1, 2, 3, 4, 5].map((n) => `coder-heldout-${n}`);
+  for (const fixture of ['coder-sum', ...heldOutIds]) {
     await mkdir(path.join(corpus, 'fixtures', fixture), { recursive: true });
     for (const file of ['sum.js', 'test.js']) {
       await writeFile(
@@ -91,17 +93,18 @@ async function project(): Promise<Project> {
   const corpusJson = JSON.parse(await readFile(path.join(SEED, 'corpus.json'), 'utf8')) as Array<Record<string, unknown>>;
   const task = corpusJson.find((t) => t['id'] === 'coder-sum');
   assert.ok(task, 'the seed corpus has coder-sum');
-  const heldOut = {
+  const heldOut = heldOutIds.map((id) => ({
     ...task,
-    id: 'coder-heldout',
-    prompt: 'Fix sum.js so test.js passes (the held-out check).',
-    repoFixture: 'fixtures/coder-heldout',
-  };
-  await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([task, heldOut]), 'utf8');
-  // D-57: the evolver refuses to start without a committed partition.
+    id,
+    prompt: `Fix sum.js so test.js passes (the held-out check ${id}).`,
+    repoFixture: `fixtures/${id}`,
+  }));
+  await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([task, ...heldOut]), 'utf8');
+  // D-57: the evolver refuses to start without a committed partition, and R2-M2 refuses one whose
+  // held-out side cannot carry a gate.
   await writeFile(
     path.join(corpus, 'splits.json'),
-    JSON.stringify({ version: 1, train: ['coder-sum'], heldOut: ['coder-heldout'] }),
+    JSON.stringify({ version: 1, minHeldOut: 5, train: ['coder-sum'], heldOut: heldOutIds }),
     'utf8',
   );
 

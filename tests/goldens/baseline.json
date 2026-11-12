@@ -1,7 +1,7 @@
 {
   "harnessSha": "3124b5a9d019624e7e6e6a5d9983244a442eeeb15050f2867c66fd806b618379",
   "harnessId": "legacy-default",
-  "corpusSha": "912f22db4579af646a7362769982892fec5174fd3aa323744fa8b767647989d3",
+  "corpusSha": "62e29e960d4583a3b5e17c33e281cbb46ebbc72ef913b01445998a8653a2dcf7",
   "attempts": 2,
   "adapter": "scripted",
   "judge": {
@@ -217,6 +217,88 @@
       ]
     },
     {
+      "taskId": "coder-repeat",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed repeat.js: it returned the string once; it now repeats it n times.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed repeat.js: it returned the string once; it now repeats it n times.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-contains",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed contains.js: indexOf returns 0 for the first element; it now tests !== -1.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed contains.js: indexOf returns 0 for the first element; it now tests !== -1.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
       "taskId": "coder-fib",
       "role": "coder",
       "passed": false,
@@ -254,6 +336,170 @@
             }
           ],
           "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "coder-max",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed max.js: it returned the smaller of the two values; it now returns the larger.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed max.js: it returned the smaller of the two values; it now returns the larger.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-unique",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed unique.js: it returned its input; it now removes duplicates in first-seen order.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed unique.js: it returned its input; it now removes duplicates in first-seen order.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-flatten",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed flatten.js: it returned the nested array; it now flattens one level.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed flatten.js: it returned the nested array; it now flattens one level.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-pad",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed pad.js: it never padded; it now left-pads with zeros to the requested width.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed pad.js: it never padded; it now left-pads with zeros to the requested width.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
         }
       ]
     },
@@ -386,7 +632,13 @@
     "coder-sum",
     "coder-reverse",
     "coder-clamp",
-    "coder-isodd"
+    "coder-isodd",
+    "coder-repeat",
+    "coder-contains",
+    "coder-max",
+    "coder-unique",
+    "coder-flatten",
+    "coder-pad"
   ],
-  "ranAt": "2026-11-09T02:04:43.113Z"
+  "ranAt": "2026-11-12T07:49:39.905Z"
 }

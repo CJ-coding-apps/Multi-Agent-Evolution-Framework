@@ -211,6 +211,40 @@ test('maf evolve refuses --held-out-repeats below three before anything is spent
   }
 });
 
+test('maf evolve refuses a held-out gate resting on fewer than minHeldOut deterministic tasks (R2-M2)', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    // A split whose held-out side is one task: a gate that cannot tell an improvement from a coin
+    // toss. The floor is declared in the file, so this is a visible edit a reviewer can see.
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    const corpusJson = JSON.parse(await readFile(path.join(corpus, 'corpus.json'), 'utf8')) as { id: string }[];
+    await writeFile(path.join(corpus, 'splits.json'), JSON.stringify({
+      version: 1, minHeldOut: 5,
+      train: corpusJson.map((t) => t.id).filter((id) => id !== 'coder-fib'),
+      heldOut: ['coder-fib'],
+    }), 'utf8');
+
+    const { stacks } = stopAtStack(t);
+    const errors: string[] = [];
+    t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted'], { from: 'user' });
+    assert.equal(process.exitCode, 2, 'an unmeasurable yardstick is refused, non-zero');
+    assert.ok(
+      errors.some((l) => l.includes('1 deterministically scored task') && l.includes('minHeldOut is 5')),
+      errors.join('\n'),
+    );
+    assert.deepEqual(stacks, [], 'no stack, no round, no money');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // ORACLE (WP-3.9 round 2, G4): `maf evolve` hands the evolver the registry's tool ids and the
 // permission level of each. A manifest that adds a tool which is not in that registry is a
 // malformed candidate — the invariant stage refuses it, naming the tools that do exist — and it is
@@ -712,7 +746,10 @@ test('real evolve.ts (R2-H4): every model call is counted, estimated from the by
 test('real evolve.ts (R2-H2): held-out scoring is dispatched through an isolated graph', async (t) => {
   const { root } = await freshClone();
   try {
-    const HE = new Set(['coder-fib', 'security-sql-concat', 'review-off-by-one']);
+    // The committed split, not a copy of it: the corpus grows, the rule does not (R2-M2).
+    const HE = new Set<string>(
+      (JSON.parse(await readFile(path.join(REPO, 'tests/goldens/splits.json'), 'utf8')) as { heldOut: string[] }).heldOut,
+    );
     const calls: StackConfig[] = [];
     const dispatched: { stack: number; task?: string }[] = [];
     let built = 0;
