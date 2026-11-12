@@ -554,6 +554,24 @@ naming two held-out ids, and asserts the report's round note holds neither and s
 `[held-out task]` in their place. **Mutant D6 is measured red** (76 pass, 1 fail; the unmutated
 tree is 77/77).
 
+### R3-L2 — the path mask stops at the path (round-2 finding R2-L2)
+
+The space-tolerant path rule ran to the last filename-looking word in the sentence, so a refusal
+that quoted one path and named a file in prose — `policy denied /etc/passwd for coder see
+policy.yaml` — masked the prose too. The continuation is now a bounded walk from the head:
+
+- at most three whitespace-separated words are crossed, and the run ends at the first word that is
+  itself path-shaped (carries a separator or a file extension), which is masked through;
+- a head that already names a file (`/home/u/x.js:3`) continues only if a later word carries a
+  separator, so `error at /home/u/x.js:3 in test.js` keeps `in test.js`;
+- everything still masks as before: `/Users/Mary Ann Lee/secret.txt`, `/home/u/my secret
+  notes.txt`, `C:\Users\x\my key.pem now` and the repo-relative tail.
+
+The residual is stated rather than papered over: a path followed by at most two prose words and
+then a filename is still masked. The direction is over-masking, never a leaked path. **Two mutants
+are measured red:** raising the word cap to four re-eats `for coder see policy.yaml`; dropping the
+file-head guard re-eats `in test.js` (13 pass, 1 fail each; the unmutated suite is 14/14).
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

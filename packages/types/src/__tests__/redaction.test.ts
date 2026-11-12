@@ -93,3 +93,13 @@ test('an unquoted path ending in a spaced filename is masked whole (R2-L2)', () 
   assert.equal(redactEvidenceText('refused C:\\Users\\x\\my key.pem now'),
     'refused [REDACTED:path] now');
 });
+
+// R2-L2: the spaced continuation reached to the last filename-looking word in the sentence, so a
+// refusal that quoted one path and named a file in prose masked the prose as well. It now crosses
+// at most three words and ends at the first path-shaped word.
+test('prose after an unquoted path is left alone (R2-L2)', () => {
+  assert.equal(redactEvidenceText('policy denied /etc/passwd for coder see policy.yaml'),
+    'policy denied [REDACTED:path] for coder see policy.yaml');
+  assert.equal(redactEvidenceText('error at /home/u/x.js:3 in test.js'),
+    'error at [REDACTED:path] in test.js');
+});
