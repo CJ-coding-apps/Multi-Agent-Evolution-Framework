@@ -545,6 +545,15 @@ verifier's five ordinary coder sentences. Every leak is refused; every benign se
 **A mutant restoring the round-2 `.{0,60}` pattern is measured red** — the five coder sentences are
 refused again and the test fails (75 pass, 1 fail), while the unmutated tree is 76/76.
 
+### R3-L1 — the loop's round-note scrub has a test (round-2 finding R2-L1)
+
+The digest scrubbed held-out ids on read and had a test; the loop's own copy — the round note in
+`report.rounds` and on stdout — was scrubbed by the same run and was not tested, so the verifier's
+mutant D6 (delete the scrub line) survived. A test now drives a critic that rejects with notes
+naming two held-out ids, and asserts the report's round note holds neither and says
+`[held-out task]` in their place. **Mutant D6 is measured red** (76 pass, 1 fail; the unmutated
+tree is 77/77).
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

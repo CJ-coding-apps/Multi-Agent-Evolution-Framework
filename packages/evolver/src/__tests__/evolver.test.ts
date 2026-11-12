@@ -1171,6 +1171,26 @@ test('loop (R2-H2): a plan targeting a held-out task is refused before it is rec
   assert.equal(goldensRuns, 1, 'only the baseline was measured; no candidate, no held-out task');
 });
 
+// R2-L1: the digest's held-out scrubbing is tested, but the loop's own copy — the round note in
+// `report.rounds` and on stdout — is written by the same run and was not. A critic (or a planner
+// error) quoting a held-out id must be scrubbed there too; removing the loop's scrub line has to
+// be visible to the suite.
+test('loop (R2-L1): a round note naming a held-out id is scrubbed in the report, not only in the digest', async () => {
+  const report = await evolve(loopOpts({
+    evidenceScope: H2_SCOPE,
+    maxRounds: 1,
+    metaGenerate: async (system: string): Promise<string> => (
+      system.includes('critic')
+        ? '```json\n{"verdict":"reject","notes":"the coder regressed on coder-fib; security-sql-concat too"}\n```'
+        : manifestJson({ kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough', rationale: 'r' }, ['coder-sum'])
+    ),
+  }));
+
+  assert.equal(report.rounds[0]?.outcome, 'critic-reject');
+  assert.doesNotMatch(report.rounds[0]?.note ?? '', /coder-fib|security-sql-concat/, 'the report carries no held-out id');
+  assert.match(report.rounds[0]?.note ?? '', /\[held-out task\]/, 'the id is replaced, not silently dropped');
+});
+
 // MED-3: after a rejected candidate the prompt named the candidate as the harness in force. The
 // loop knows its own base; it must say that, and list the rejected rows under their own heading.
 test('loop (MED-3): the prompt names the harness in force and lists rejected candidates apart', async () => {
