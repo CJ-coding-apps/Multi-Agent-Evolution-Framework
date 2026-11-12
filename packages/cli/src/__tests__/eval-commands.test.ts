@@ -13,9 +13,10 @@ import { createDefaultRegistry } from '@maf/tools';
 import * as wiring from '../wiring.js';
 import * as AdapterRegistry from '../AdapterRegistry.js';
 import { HarnessStore } from '@maf/harness-config';
-import type { HarnessConfig } from '@maf/harness-config';
+import type { HarnessConfig, HarnessRoleSet } from '@maf/harness-config';
 import { registerGoldensCommand, resolveGoldensHarness } from '../commands/goldens.js';
 import { registerEvolveCommand } from '../commands/evolve.js';
+import { readApprovalRecords, writeApprovalRecord } from '../approval.js';
 import { registerHarnessCommand } from '../commands/harness.js';
 import { messageOf } from './runFixture.js';
 
@@ -93,8 +94,9 @@ test('goldens run and evolve take --allow-ungoverned to the stack they dispatch 
 // it. Approve is a real subcommand — a positional to plain `evolve` is still refused (M1b) so a
 // typo cannot buy a round — and approving spends nothing: no adapter is built and no run starts.
 // An intact stored candidate becomes CURRENT through the same write `maf harness set-current` makes;
-// an unknown name is refused and moves nothing.
-test('maf evolve approve applies a stored candidate and refuses an unknown one without a run (M1)', async (t) => {
+// an unknown name is refused and moves nothing; R2-M1: only a stored needs-approval candidate is
+// applied, an id two sessions claim is refused, and a candidate whose base has moved is refused.
+test('maf evolve approve applies only a stored needs-approval candidate (R2-M1)', async (t) => {
   const resolved: string[] = [];
   t.mock.method(AdapterRegistry, 'resolveAdapter', async (name: string) => {
     resolved.push(name);
@@ -119,28 +121,66 @@ test('maf evolve approve applies a stored candidate and refuses an unknown one w
     }
     assert.equal((excess as { code?: string } | undefined)?.code, 'commander.excessArguments');
 
-    // Minted and saved, but not current: exactly the state `maf evolve` leaves a needs-approval
-    // candidate in.
     const store = new HarnessStore(path.join(root, '.maf'));
-    const candidate = store.mint(
-      { version: 1, defaultRole: 'coder', roles: [{ role: 'coder', systemPrompt: 'improved', allowedTools: ['fs.read'] }] },
-      'legacy-default-e1',
+    const roles = (prompt: string): HarnessRoleSet => ({
+      version: 1, defaultRole: 'coder', roles: [{ role: 'coder', systemPrompt: prompt, allowedTools: ['fs.read'] }],
+    });
+    // CURRENT: the base two sessions both evolved from.
+    const base = store.mint(roles('base'), 'legacy-default');
+    await store.save(base);
+    await store.setCurrent(base.sha);
+    assert.equal((await store.current())?.sha, base.sha);
+
+    const approve = async (ref: string): Promise<void> => {
+      process.exitCode = 0;
+      const program = new Command().exitOverride();
+      registerEvolveCommand(program);
+      await program.parseAsync(['evolve', 'approve', ref, '-d', root], { from: 'user' });
+    };
+
+    // Saved but never held for approval: `maf harness set-current` is the way to apply it.
+    const plain = store.mint(roles('plain edit'), 'legacy-default-e1');
+    await store.save(plain);
+    await approve(plain.id);
+    assert.equal(process.exitCode, 2, 'a harness that was not held for approval is refused');
+    assert.ok(errors.some((l) => l.includes('was not held for approval')), errors.join('\n'));
+    assert.equal((await store.current())?.sha, base.sha, 'a refused approval moves nothing');
+
+    // Two sessions, same id, different candidates.
+    const one = store.mint(roles('session one edit'), 'legacy-default-e1');
+    const two = store.mint(roles('session two edit'), 'legacy-default-e1');
+    await store.save(one);
+    await store.save(two);
+    await writeApprovalRecord(store.dir, { id: one.id, sha: one.sha, baseSha: base.sha, session: 'run-1' });
+    await writeApprovalRecord(store.dir, { id: two.id, sha: two.sha, baseSha: base.sha, session: 'run-2' });
+    await approve(one.id);
+    assert.equal(process.exitCode, 2, 'an id two sessions claim is refused');
+    assert.ok(errors.some((l) => l.includes('ambiguous') && l.includes('run-1/legacy-default-e1') && l.includes('run-2/legacy-default-e1')), errors.join('\n'));
+    assert.equal((await store.current())?.sha, base.sha);
+
+    // A qualified name resolves it; the approval is exactly a set-current of that sha.
+    await approve(`run-2/${two.id}`);
+    assert.equal((await store.current())?.sha, two.sha, 'CURRENT names the approved candidate');
+    assert.ok(logs.some((l) => l.includes(`[maf] APPROVED ${two.id}`)), logs.join('\n'));
+
+    // CURRENT has moved since that candidate was measured: applying it would ship an improvement
+    // measured against another harness.
+    await approve(`run-1/${one.id}`);
+    assert.equal(process.exitCode, 2, 'a candidate whose base has moved is refused');
+    assert.ok(
+      errors.some((l) => l.includes(`measured against base ${base.sha.slice(0, 8)}`) && l.includes(`CURRENT is ${two.id}`)),
+      errors.join('\n'),
     );
-    await store.save(candidate);
-    assert.equal(await store.current(), undefined, 'a stored candidate is not current');
+    assert.equal((await store.current())?.sha, two.sha, 'a refused approval moves nothing');
 
-    const program = new Command().exitOverride();
-    registerEvolveCommand(program);
-    await program.parseAsync(['evolve', 'approve', candidate.id, '-d', root], { from: 'user' });
-    assert.equal((await store.current())?.sha, candidate.sha, 'CURRENT names the approved candidate');
-    assert.ok(logs.some((l) => l.includes(`[maf] APPROVED ${candidate.id}`)), logs.join('\n'));
+    // An unknown name, and an unknown sha, are refusals too.
+    await approve('no-such-candidate');
+    assert.equal(process.exitCode, 2);
+    assert.ok(errors.some((l) => l.includes('no stored needs-approval candidate no-such-candidate')), errors.join('\n'));
+    await approve('f'.repeat(64));
+    assert.equal(process.exitCode, 2);
+    assert.ok(errors.some((l) => l.includes(`no harness ${'f'.repeat(64)} is stored`)), errors.join('\n'));
 
-    const unknown = new Command().exitOverride();
-    registerEvolveCommand(unknown);
-    await unknown.parseAsync(['evolve', 'approve', 'no-such-candidate', '-d', root], { from: 'user' });
-    assert.equal(process.exitCode, 2, 'an unknown candidate is refused, non-zero');
-    assert.ok(errors.some((l) => l.includes('no stored harness named no-such-candidate')), errors.join('\n'));
-    assert.equal((await store.current())?.sha, candidate.sha, 'a refused approval moves nothing');
     assert.deepEqual(resolved, [], 'approving builds no adapter and starts no run');
   } finally {
     process.exitCode = saved;
@@ -447,8 +487,15 @@ test('real evolve.ts: a flag-on sensitive candidate is stored, not current, and 
     assert.ok(await store.tryLoad(sha), 'candidate is in the harness store');
     assert.equal((await store.current())?.sha, before, 'CURRENT did not move');
     assert.notEqual((await store.current())?.sha, sha);
-    assert.ok(logs.some((l) => l.includes('[maf] STORED') && l.includes(`maf harness set-current ${sha}`)),
-      'STORED line names set-current');
+    // R2-M1: the line names the approval path that now exists — the qualified id — beside the
+    // raw set-current escape, which never was the approval rule.
+    const records = await readApprovalRecords(store.dir);
+    assert.equal(records.length, 1, 'storing wrote one approval record');
+    assert.equal(records[0]!.sha, sha);
+    assert.equal(records[0]!.baseSha, before, 'the record remembers the base it was measured against');
+    assert.ok(logs.some((l) => l.includes('[maf] STORED') && l.includes(`maf evolve approve ${records[0]!.session}/${records[0]!.id}`)),
+      'STORED line names the qualified approval');
+    assert.ok(logs.some((l) => l.includes(`maf harness set-current ${sha}`)), 'STORED line still names set-current');
     assert.ok(!logs.some((l) => l.includes('[maf] SHIP')), 'no SHIP line');
 
     const harnessProgram = new Command();

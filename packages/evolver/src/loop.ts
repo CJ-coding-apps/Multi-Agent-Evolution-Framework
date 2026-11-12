@@ -86,7 +86,9 @@ export interface EvolveOptions {
    * `maf harness set-current <candidateSha>`; applying it is the human's act, so this callback must
    * not move CURRENT. Absent (tests, embedders) means nothing is stored.
    */
-  storeCandidate?: (candidate: HarnessConfig, evaluation: SensitiveEvaluation) => Promise<void>;
+  storeCandidate?: (
+    candidate: HarnessConfig, evaluation: SensitiveEvaluation, base: HarnessConfig,
+  ) => Promise<void>;
   roleCatalog: RoleCatalogEntry[];
   knownToolIds: ReadonlySet<string>;
   /**
@@ -808,7 +810,9 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     let storeNote = '';
     if (evaluation !== undefined && opts.storeCandidate !== undefined) {
       try {
-        await opts.storeCandidate(finalCandidate, evaluation);
+        // R2-M1: the base the candidate was measured against rides along, so a human's later
+        // approval can refuse a candidate whose comparison base has since moved.
+        await opts.storeCandidate(finalCandidate, evaluation, base);
         storeNote = `; candidate ${finalCandidate.sha} stored, not current — apply it with \`maf harness set-current ${finalCandidate.sha}\``;
       } catch (err) {
         storeNote = `; candidate ${finalCandidate.sha} could not be stored: ${err instanceof Error ? err.message : String(err)}`;

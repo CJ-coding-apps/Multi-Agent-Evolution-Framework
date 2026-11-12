@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { makeRunId, refusePrototypeKey } from '@maf/types';
+import { readApprovalRecords, writeApprovalRecord } from '../approval.js';
+import type { ApprovalRecord } from '../approval.js';
 import type { AdapterName, CliAdapter, PermissionLevel } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -306,11 +308,18 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
           await store.setCurrent(candidate.sha);
           console.log(`[maf] SHIP ${candidate.id} (${shortSha(candidate.sha)}) — improves ${improvements.join(', ')}`);
         },
-        // M1: a candidate a human has to apply is saved but not made current. The evaluation is in
-        // the round record; CURRENT moves only when the human runs `maf harness set-current`.
-        storeCandidate: async (candidate) => {
+        // M1 (R2-M1): a candidate a human has to apply is saved but not made current, and the
+        // store records what an approval needs to check — the session that minted it and the base
+        // it was measured against. CURRENT moves only when a human approves or set-currents it.
+        storeCandidate: async (candidate, _evaluation, base) => {
           await store.save(candidate);
-          console.log(`[maf] STORED ${candidate.id} (${shortSha(candidate.sha)}) — not current; apply it with \`maf evolve approve ${candidate.id}\` or \`maf harness set-current ${candidate.sha}\``);
+          await writeApprovalRecord(store.dir, {
+            id: candidate.id, sha: candidate.sha, baseSha: base.sha, session: String(runId),
+          });
+          console.log(
+            `[maf] STORED ${candidate.id} (${shortSha(candidate.sha)}) — not current; apply it with ` +
+            `\`maf evolve approve ${String(runId)}/${candidate.id}\` or \`maf harness set-current ${candidate.sha}\``,
+          );
         },
         // §7: which tier each role actually runs on under this adapter, so the gate can refuse an
         // edit that could not reach it (`maxToolIterations` on a cli-tier role changes nothing).
@@ -373,6 +382,73 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       }
     });
 
+
+type ApprovalResolution =
+  | { ok: true; id: string; sha: string }
+  | { ok: false; refusal: string };
+
+/**
+ * R2-M1: resolve what `evolve approve <candidate>` may apply. It accepts a 64-hex sha, or
+ * `<session>/<id>`, or an id that exactly one session claims — and only for a candidate the store
+ * recorded as held for approval. A candidate is applied only while CURRENT still names the harness
+ * it was measured against; the refusal names both shas.
+ */
+async function resolveApproval(store: HarnessStore, requested: string): Promise<ApprovalResolution> {
+  const records = await readApprovalRecords(store.dir);
+  const current = await store.current();
+  const qualified = (r: ApprovalRecord) => `${r.session}/${r.id}`;
+
+  let record: ApprovalRecord | undefined;
+  if (/^[0-9a-f]{64}$/.test(requested)) {
+    record = records.find((r) => r.sha === requested);
+    if (record === undefined) {
+      const stored = await store.tryLoad(requested).catch(() => undefined);
+      return {
+        ok: false,
+        refusal: stored === undefined
+          ? `no harness ${requested} is stored. Candidates are stored by \`maf evolve\` under .maf/harnesses; list them with \`maf harness list\`.`
+          : `harness ${shortSha(requested)} (${stored.id}) is stored but was not held for approval: it was not measured as a sensitive candidate, so apply it with \`maf harness set-current ${requested}\` if you mean it.`,
+      };
+    }
+  } else {
+    const slash = requested.indexOf('/');
+    const [session, id] = slash === -1 ? [undefined, requested] : [requested.slice(0, slash), requested.slice(slash + 1)];
+    const matches = records.filter((r) => r.id === id && (session === undefined || r.session === session));
+    if (matches.length === 0) {
+      const stored = session === undefined ? await store.tryLoad(id).catch(() => undefined) : undefined;
+      return {
+        ok: false,
+        refusal: stored !== undefined
+          ? `harness ${id} is stored but was not held for approval: it was not measured as a sensitive candidate, so apply it with \`maf harness set-current ${stored.sha}\` if you mean it.`
+          : `no stored needs-approval candidate ${requested}. Candidates are written by \`maf evolve\` and named \`<session>/<id>\`; \`maf harness list\` shows what is stored.`,
+      };
+    }
+    // Two sessions evolving from the same base mint the same id. An id that names more than one
+    // stored candidate is refused, with every qualified name, rather than applying one of them.
+    if (matches.length > 1)
+      return {
+        ok: false,
+        refusal: `candidate id "${id}" is ambiguous: ${matches.map(qualified).join(', ')}. ` +
+          'Give `<session>/<id>` or the sha.',
+      };
+    record = matches[0];
+  }
+
+  // Every branch above either returns a refusal or sets `record`; this satisfies the compiler
+  // (and would fail closed if a later branch forgot to).
+  if (record === undefined) return { ok: false, refusal: `no stored needs-approval candidate ${requested}` };
+
+  if (current?.sha !== record.baseSha)
+    return {
+      ok: false,
+      refusal: `candidate ${record.id} was measured against base ${shortSha(record.baseSha)}, but ` +
+        `CURRENT is ${current === undefined ? 'nothing (no harness is current)' : `${current.id} (${shortSha(current.sha)})`}. ` +
+        'Applying it would ship a harness whose improvement was measured against another base; ' +
+        `re-run the evolution, or pin the base with \`maf harness set-current ${record.baseSha}\` first.`,
+    };
+  return { ok: true, id: record.id, sha: record.sha };
+}
+
   // §7: "sensitive candidates are stored and `maf evolve approve <id>` ships one." The loop stores
   // a needs-approval candidate and deliberately leaves CURRENT alone (M1); this is the human half.
   // It makes the same single write `maf harness set-current <sha>` makes, so a candidate applied
@@ -382,25 +458,24 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
   // well never receives the value: its default is what `opts().dir` shows. One declaration, one value.
   evolveCommand
     .command('approve <candidate>')
-    .description('Apply a stored candidate harness (id or sha) by making it CURRENT. Spends nothing and starts no run')
+    .description('Apply a stored needs-approval candidate (session/id or sha) by making it CURRENT. Spends nothing and starts no run')
     .action(async (candidate: string, _opts: unknown, cmd: Command) => {
       const dir = (cmd.optsWithGlobals() as { dir?: string }).dir ?? process.cwd();
       const store = new HarnessStore(path.join(path.resolve(dir), '.maf'));
       try {
-        const found = await store.tryLoad(candidate);
-        if (found === undefined) {
-          console.error(
-            `[maf] evolve approve: no stored harness named ${candidate}. Candidates are stored by ` +
-            '`maf evolve` under .maf/harnesses; list them with `maf harness list`.',
-          );
+        const resolved = await resolveApproval(store, candidate);
+        if (!resolved.ok) {
+          console.error(`[maf] evolve approve: ${resolved.refusal}`);
           process.exitCode = 2;
           return;
         }
-        await store.setCurrent(found.sha);
-        console.log(`[maf] APPROVED ${found.id} (${shortSha(found.sha)}) — now current for this project`);
+        // Exactly `set-current <sha>`: one write, the same one `maf harness set-current` makes.
+        await store.setCurrent(resolved.sha);
+        console.log(`[maf] APPROVED ${resolved.id} (${shortSha(resolved.sha)}) — now current for this project`);
       } catch (err) {
         // A refused snapshot (an older legacy-default that the next plain run would re-mint over),
-        // a tampered file or a corrupt CURRENT: say so and fail, never half-apply.
+        // a tampered file, an unreadable approval record or a corrupt CURRENT: say so and fail,
+        // never half-apply.
         console.error(`[maf] evolve approve: ${err instanceof Error ? err.message : String(err)}`);
         process.exitCode = 1;
       }
