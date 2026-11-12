@@ -105,6 +105,38 @@ test('invoke falls back to the raw answer when the reported JSON does not parse'
   assert.equal('tokensUsed' in out, false, 'nothing is claimed as reported');
 });
 
+// R2-M2: a governed turn is a model call too. `reportUsage` reaches it, the CLI's JSON envelope
+// is unwrapped, the wire protocol is parsed out of `result`, and the turn carries the reported
+// token count — so a tool-loop turn is metered from the backend's figure, not an estimate.
+test('sendTurn asks for and reads the CLI\'s reported usage on a role turn', async () => {
+  const report = JSON.stringify({
+    type: 'result', subtype: 'success',
+    result: 'the answer\n```tool_call\n{"toolName":"read","input":{"path":"a"}}\n```',
+    usage: {
+      input_tokens: 100, output_tokens: 20,
+      cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+    },
+    total_cost_usd: 0.001,
+  });
+  const { spawn, calls } = stubSpawn({ stdout: report, stderr: '', exitCode: 0, duration: 1 });
+  const turn = await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, { ...CALL, reportUsage: true });
+
+  assert.ok(calls[0]!.args.includes('--output-format'), 'the JSON mode is requested on the turn');
+  assert.equal(calls[0]!.args[calls[0]!.args.indexOf('--output-format') + 1], 'json');
+  assert.equal(turn.tokensUsed, 120, 'every billed token kind is counted');
+  assert.match(turn.text, /the answer/, 'the envelope\'s result is the answer, not the JSON');
+  assert.deepEqual(turn.toolCalls.map((c) => c.toolName), ['read'],
+    'the wire protocol is parsed out of the unwrapped result');
+});
+
+test('sendTurn keeps the plain argv and claims no usage when reportUsage is not set', async () => {
+  const { spawn, calls } = stubSpawn({ stdout: 'hi', stderr: '', exitCode: 0, duration: 1 });
+  const turn = await new ClaudeAdapter({ spawn }).sendTurn(HISTORY, CALL);
+
+  assert.ok(!calls[0]!.args.includes('--output-format'));
+  assert.equal('tokensUsed' in turn, false);
+});
+
 test('sendTurn throws the TransportError of a timed-out turn instead of parsing it', async () => {
   const result = timedOut();
   const { spawn } = stubSpawn(result);

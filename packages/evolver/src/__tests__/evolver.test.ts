@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { CliAdapter, GraphQuery, PermissionLevel, TurnAdapter } from '@maf/types';
+import type {
+  AdapterInvokeOptions, CliAdapter, GraphQuery, PermissionLevel, TurnAdapter, TurnMessage,
+} from '@maf/types';
 import { estimateTokens, isTurnAdapter, makeRunId } from '@maf/types';
 import { HarnessStore, mintHarnessConfig } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
@@ -2158,4 +2160,32 @@ test('R2-H4 usage: an in-process turn is charged once, with the history it carri
   assert.equal(snap.calls, 1, 'one turn is one call, however many tool calls it carries');
   assert.ok(snap.estimatedTokens >= estimateTokens('u'.repeat(400)), 'the history sent is charged');
   assert.equal(snap.reportedCalls, 0, 'a CLI turn reports no usage, so it is estimated');
+});
+
+// R2-M2: "estimated only when the field is truly absent" starts with asking for the field. The
+// meter wrapped `invoke` with `reportUsage: true` but left `sendTurn` alone, so every role turn in
+// an evolution run was charged an estimate even from a backend that reports its usage.
+test('R2-M2 usage: a role turn requests the backend\'s reported usage, and reports it', async () => {
+  const seen: AdapterInvokeOptions[] = [];
+  const inner = {
+    ...cliStub(() => ({})),
+    sendTurn: async (_history: TurnMessage[], o: AdapterInvokeOptions) => {
+      seen.push(o);
+      return o.reportUsage === true
+        ? { text: 'answer', toolCalls: [], tokensUsed: 250 }
+        : { text: 'answer', toolCalls: [] };
+    },
+  } as unknown as TurnAdapter;
+  const meter = new UsageMeter();
+  const metered = meterAdapter(inner, meter) as TurnAdapter;
+
+  await metered.sendTurn(
+    [{ kind: 'user', text: 'u' }],
+    { prompt: '', workingDir: '.', timeoutMs: 1, systemPrompt: 'role' },
+  );
+  assert.equal(seen[0]?.reportUsage, true, 'the turn asked the backend for usage');
+  const snap = meter.snapshot();
+  assert.equal(snap.reportedCalls, 1, 'the turn is reported, not estimated');
+  assert.equal(snap.reportedTokens, 250);
+  assert.equal(snap.estimatedTokens, 0);
 });

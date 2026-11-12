@@ -493,6 +493,29 @@ makes the CLI test fail on `usage.calls === 0` (the baseline then runs); always 
 fails three tests — the unit test's measured assertions and both measured-path loop tests — on
 their `(measured …)` statement and per-task figure.
 
+### R3-M2 — role turns report the backend's usage too (round-2 finding R2-M2)
+
+`invoke` asked for the CLI's own usage (`reportUsage` → `--output-format json`, reading `usage`
+and `total_cost_usd`), but the metering wrapper left `sendTurn` untouched — and in an evolution
+run every role turn is a `sendTurn`. So the planner and judge were reported while every role turn
+was charged an estimate over its bytes, which is precisely backwards from "estimated only when the
+field is truly absent".
+
+Two changes: `MeteringTurnAdapter.sendTurn` now passes `reportUsage: true` like `invoke` does (an
+adapter that cannot report usage ignores the flag, per the adapter contract), and
+`ClaudeAdapter.sendTurn` unwraps the envelope: the report's `result` is what `parseTurn` reads — so
+the tool-call wire protocol survives — and the `usage` block is summed into `tokensUsed`. A report
+that does not exist or does not parse falls back to the raw stdout exactly as before, and the turn
+stays an estimate. `AssistantTurn` carries no cost field, so the turn reports tokens only; the
+CLI's `total_cost_usd` remains on the `invoke` path.
+
+The tests: the adapter's `sendTurn` with `reportUsage` sends `--output-format json`, returns the
+unwrapped answer with its tool call, and reports 120 tokens; without the flag the argv and the
+turn are unchanged (`tokensUsed` absent, not undefined). The meter's test drives a turn adapter
+that only reports when asked, and asserts the flag arrives and the call is `reported (250)` rather
+than estimated. Mutants, both observed red: dropping the flag from the meter's `sendTurn` (the
+verifier's U3) fails the meter test; ignoring the report in the adapter fails the adapter test.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

@@ -161,7 +161,9 @@ class MeteringCliAdapter implements CliAdapter {
 /** The metering seam for an adapter the in-process tool loop can drive: one charge per turn. */
 class MeteringTurnAdapter extends MeteringCliAdapter implements TurnAdapter {
   async sendTurn(history: TurnMessage[], options: AdapterInvokeOptions): Promise<AssistantTurn> {
-    const result = await (this.inner as TurnAdapter).sendTurn(history, options);
+    // R2-M2: like `invoke`, a role turn asks for the backend's own usage. An adapter that cannot
+    // report one ignores the flag (the adapter contract) and the call stays an estimate.
+    const result = await (this.inner as TurnAdapter).sendTurn(history, { ...options, reportUsage: true });
     this.charge(
       turnText(history, options),
       `${result.text}\n${JSON.stringify(result.toolCalls)}${result.raw ?? ''}`,

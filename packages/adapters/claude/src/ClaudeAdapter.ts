@@ -148,7 +148,19 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       // The turn fails in two places — the spawn rejects when the binary cannot run, and `turnStdout`
       // throws when it ran and did not finish cleanly — so both are inside the `try`: a record of a
       // failed turn is the one a reader most wants, and it must not depend on which way it failed.
-      return { ...parseTurn(turnStdout(this.name, result)), modelSurface: surface };
+      const stdout = turnStdout(this.name, result);
+      // R2-M2: a governed turn is a model call like any other, so `reportUsage` asks it for the
+      // CLI's own per-turn usage. `--output-format json` wraps the protocol text in a report
+      // envelope; the envelope's `result` is what the wire-protocol parser must read, and the
+      // usage block is the turn's reported token count. A report that does not parse (an older
+      // build) falls back to the raw stdout exactly as before.
+      const reported = opts.reportUsage === true ? parseReportedUsage(stdout) : undefined;
+      const turn = parseTurn(reported?.text ?? stdout);
+      return {
+        ...turn,
+        ...(reported?.tokensUsed !== undefined ? { tokensUsed: reported.tokensUsed } : {}),
+        modelSurface: surface,
+      };
     } catch (err: unknown) {
       throw attach(err, surface, sent);
     }
