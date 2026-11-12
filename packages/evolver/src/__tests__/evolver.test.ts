@@ -980,9 +980,16 @@ function scopedGraph(rows: {
       const kind = cypher.includes("'GoldenResult'") ? 'golden'
         : cypher.includes("'PolicyEvent'") ? 'policy'
           : cypher.includes("'EvolutionRound'") ? 'rounds' : 'failures';
-      return (rows[kind as keyof typeof rows] ?? []).map((r) => ({
+      let out = (rows[kind as keyof typeof rows] ?? []).map((r) => ({
         'n.label': r.label, 'n.properties': JSON.stringify(r.properties), 'n.run_id': 'run-1',
       }));
+      // Apply the query's own clause and LIMIT, in that order, as the graph does — so a test can
+      // tell "filtered in the query" from "filtered after the window" (R2-L4).
+      if (cypher.includes("NOT n.label STARTS WITH 'policy Allow'")) {
+        out = out.filter((r) => !String(r['n.label']).startsWith('policy Allow'));
+      }
+      const limit = /LIMIT (\d+)/.exec(cypher);
+      return limit ? out.slice(0, Number(limit[1])) : out;
     },
     addNode: async () => 'id',
     addEdge: async () => 'e',
@@ -1149,6 +1156,44 @@ test('digester (R2-H2): a previous session\'s held-out refusals never reach the 
 
   const prompt = buildPlannerUserPrompt(digest, [], []);
   assert.doesNotMatch(prompt, /coder-fib|security-sql-concat/);
+});
+
+// R2-L4: a pre-fix graph can hold more held-out rows than the read window, and they are dropped
+// after the read — so the window has to be wider than the digest. A train refusal older than a
+// full window of held-out refusals must still reach the planner.
+test('digester (R2-L4): held-out rows newer than the window cannot starve a train refusal out of it', async () => {
+  const heldOut = Array.from({ length: 25 }, (_, i) => ({
+    label: 'policy Deny fs.write',
+    properties: { verdict: 'Deny', toolId: 'fs.write', goldenTaskId: 'coder-fib', reason: `refused ${i}` },
+  }));
+  const train = {
+    label: 'policy Deny fs.read',
+    properties: { verdict: 'Deny', toolId: 'fs.read', goldenTaskId: 'coder-sum', reason: 'refused the train task' },
+  };
+  const digest = await digestEvidence(scopedGraph({ policy: [...heldOut, train] }), 20, H2_SCOPE);
+  assert.ok(digest.policyEvents.some((e) => e.properties['goldenTaskId'] === 'coder-sum'),
+    'the train refusal survived a window that the held-out rows filled');
+  assert.ok(digest.policyEvents.every((e) => e.properties['goldenTaskId'] !== 'coder-fib'));
+});
+
+// R2-L4: an older graph may hold a row that never stamped `goldenTaskId`. Scrubbing the id keeps
+// the rest of the sentence, which is the held-out task's content; the row is dropped whole.
+test('digester (R2-L4): an unattributed row that names a held-out task is dropped, not just scrubbed', async () => {
+  const digest = await digestEvidence(scopedGraph({
+    failures: [
+      { label: 'security:node-1', properties: { summary: 'blocked coder-fib on the pad-input check' } },
+      { label: 'security:node-2', properties: { summary: 'blocked coder-sum on the clamp check' } },
+    ],
+    policy: [
+      { label: 'policy Deny fs.write', properties: { verdict: 'Deny', reason: 'coder-fib wrote outside its tree' } },
+      { label: 'policy Deny fs.write', properties: { verdict: 'Deny', reason: 'coder-sum wrote outside its tree' } },
+    ],
+  }), 20, H2_SCOPE);
+
+  assert.equal(digest.currentFailures.length, 1, 'only the train failure is evidence');
+  assert.match(digest.currentFailures[0]!.properties['summary'] as string, /coder-sum/);
+  assert.equal(digest.policyEvents.length, 1, 'only the train refusal is evidence');
+  assert.match(digest.policyEvents[0]!.properties['reason'] as string, /coder-sum/);
 });
 
 // R2-H2: the loop's own record is evidence the planner reads next round. A plan that names a

@@ -572,6 +572,24 @@ then a filename is still masked. The direction is over-masking, never a leaked p
 are measured red:** raising the word cap to four re-eats `for coder see policy.yaml`; dropping the
 file-head guard re-eats `in test.js` (13 pass, 1 fail each; the unmutated suite is 14/14).
 
+### R3-L4 — an old graph's held-out rows cannot starve or leak (round-2 finding R2-L4)
+
+Two paths in a graph written before the isolation existed:
+
+- **Window starvation.** The `Failure` and `PolicyEvent` reads applied `LIMIT` before the held-out
+  rows were dropped, so a graph full of held-out refusals could fill the 20-row window and leave
+  the planner with no train evidence. Both reads now over-fetch ten times the window and the
+  result is sliced back after the filter; a train refusal behind 25 held-out refusals reaches the
+  digest. (The `Allow` filter was already in the query — that path is unchanged.)
+- **Unattributed free text.** A row with no `goldenTaskId` that named a held-out task in its text
+  was scrubbed id-only, which left the rest of the sentence — the task's content — in the planner's
+  evidence. Such a row is now dropped whole, using the same id pattern as the scrubber.
+
+**Two mutants are measured red:** reverting the read to the digest's own window starves the train
+refusal; dropping the unattributed-row filter lets `coder-fib`'s content through (78 pass, 1 fail
+each; the unmutated suite is 79/79). New sessions write neither shape (the held-out stack is a
+separate graph), so this is about graphs an operator already has.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

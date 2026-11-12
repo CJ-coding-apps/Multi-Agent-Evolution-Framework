@@ -67,18 +67,41 @@ function escapeRegExp(text: string): string {
 }
 
 /**
- * A text scrubber for the ids the evolver may not see. Longest id first, so an id that is a prefix
+ * The ids the evolver may not see, as one alternation. Longest id first, so an id that is a prefix
  * of another (`coder-fib` and `coder-fibonacci`) is not half-replaced. Whole-token boundaries keep
- * a short id from matching inside a longer word.
+ * a short id from matching inside a longer word. `global` for replacing; a caller that only wants
+ * to ask a yes/no question builds a non-global copy so a stateful `lastIndex` cannot leak.
  */
-export function heldOutScrubber(scope: EvidenceScope | undefined): (text: string) => string {
-  if (scope === undefined || scope.corpusTaskIds === undefined) return (text) => text;
+function heldOutIdPattern(scope: EvidenceScope | undefined, global: boolean): RegExp | undefined {
+  if (scope === undefined || scope.corpusTaskIds === undefined) return undefined;
   const hidden = [...scope.corpusTaskIds]
     .filter((id) => id.length > 0 && !scope.trainTaskIds.has(id))
     .sort((a, b) => b.length - a.length);
-  if (hidden.length === 0) return (text) => text;
-  const pattern = new RegExp(`(?<![\\w.-])(?:${hidden.map(escapeRegExp).join('|')})(?![\\w.-])`, 'g');
-  return (text) => text.replace(pattern, HELD_OUT_MENTION);
+  if (hidden.length === 0) return undefined;
+  return new RegExp(`(?<![\\w.-])(?:${hidden.map(escapeRegExp).join('|')})(?![\\w.-])`, global ? 'g' : '');
+}
+
+/** A text scrubber for the ids the evolver may not see. */
+export function heldOutScrubber(scope: EvidenceScope | undefined): (text: string) => string {
+  const pattern = heldOutIdPattern(scope, true);
+  return pattern === undefined ? (text) => text : (text) => text.replace(pattern, HELD_OUT_MENTION);
+}
+
+/**
+ * R2-L4: does a raw graph row name a held-out task anywhere in its text? An older graph can hold a
+ * row that never stamped `goldenTaskId`; scrubbing the id would leave the rest of the sentence —
+ * the held-out task's content — in the planner's evidence, so the row itself is dropped.
+ */
+function heldOutMention(scope: EvidenceScope | undefined): (raw: Record<string, unknown>) => boolean {
+  const pattern = heldOutIdPattern(scope, false);
+  if (pattern === undefined) return () => false;
+  return (raw) => {
+    const texts = [String(raw['n.label'] ?? '')];
+    for (const value of Object.values(parseProps(raw))) {
+      if (typeof value === 'string') texts.push(value);
+    }
+    return texts.some((text) => pattern.test(text));
+  };
 }
 
 export interface Digest {
@@ -127,8 +150,13 @@ export async function digestEvidence(
 ): Promise<Digest> {
   // `LIMIT` is one of the two positions Cypher cannot bind, so the limit is a validated literal.
   const limit = intLiteral(failureLimit, 'failureLimit');
+  // R2-L4: the held-out rows are dropped after the read, so the window must be wider than the
+  // digest needs — otherwise a pre-fix graph full of held-out rows starves the train evidence out
+  // of it. The read is capped at ten times the requested window and the result is sliced back.
+  const readLimit = intLiteral(failureLimit * 10, 'failureLimit * 10');
   const errors: string[] = [];
   const scrub = heldOutScrubber(scope);
+  const mentionsHeldOut = heldOutMention(scope);
   const isTrain = (id: unknown): boolean =>
     typeof id === 'string' && (scope === undefined || scope.trainTaskIds.has(id));
 
@@ -191,17 +219,23 @@ export async function digestEvidence(
 
   const failureRows = await readRows(
     graph, 'failures',
-    `MATCH (n:MemoryNode) WHERE n.kind = 'Failure' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
+    `MATCH (n:MemoryNode) WHERE n.kind = 'Failure' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${readLimit}`,
     errors,
   );
   const currentFailures: FailureRow[] = failureRows
+    // R2-L4: a failure that says which golden task it belongs to is kept only for a train task;
+    // one with no id that still names a held-out task in its text is dropped whole. Scrubbing the
+    // id would keep the rest of the sentence, which is the held-out task's content.
+    .filter((raw) => {
+      const id = parseProps(raw)['goldenTaskId'];
+      return id === undefined ? !mentionsHeldOut(raw) : isTrain(id);
+    })
     .map((raw) => ({
       label: masked(String(raw['n.label'] ?? '')),
       properties: maskProps(parseProps(raw)),
       runId: String(raw['n.run_id'] ?? ''),
     }))
-    // A failure that says which golden task it belongs to is kept only for a train task.
-    .filter((row) => row.properties['goldenTaskId'] === undefined || isTrain(row.properties['goldenTaskId']));
+    .slice(0, failureLimit);
 
   // WP-3.7a MED-2, R2-L2: the graph may still hold `Allow` events written before the engine stopped
   // recording them. The filter is in the query — on the label, which is a column — so no number of
@@ -210,19 +244,24 @@ export async function digestEvidence(
   // row whose label was written by something other than this engine's `recordEvent`.
   const policyRows = await readRows(
     graph, 'policy events',
-    `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' AND NOT n.label STARTS WITH 'policy Allow' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${limit}`,
+    `MATCH (n:MemoryNode) WHERE n.kind = 'PolicyEvent' AND NOT n.label STARTS WITH 'policy Allow' RETURN n.label, n.properties, n.run_id ORDER BY n.created_at DESC LIMIT ${readLimit}`,
     errors,
   );
   const policyEvents: FailureRow[] = policyRows
+    // R2-H2: a refusal that belongs to a held-out task is not evidence about the harness. It is
+    // dropped, not just scrubbed: the ids are gone, but a train-looking refusal is still a hint.
+    // R2-L4: and a row with no id that names a held-out task in its text is dropped whole, for the
+    // same reason the id alone is not enough to keep it.
+    .filter((raw) => {
+      const id = parseProps(raw)['goldenTaskId'];
+      return id === undefined ? !mentionsHeldOut(raw) : isTrain(id);
+    })
     .map((raw) => ({
       label: masked(String(raw['n.label'] ?? '')),
       properties: maskProps(parseProps(raw)),
       runId: String(raw['n.run_id'] ?? ''),
     }))
     .filter((e) => e.properties['verdict'] !== 'Allow' && !e.label.startsWith('policy Allow '))
-    // R2-H2: a refusal that belongs to a held-out task is not evidence about the harness. It is
-    // dropped, not just scrubbed: the ids are gone, but a train-looking refusal is still a hint.
-    .filter((e) => e.properties['goldenTaskId'] === undefined || isTrain(e.properties['goldenTaskId']))
     .slice(0, failureLimit);
 
   // §7: the rounds the loop writes are read back. Without this the planner sees a rejected edit's
