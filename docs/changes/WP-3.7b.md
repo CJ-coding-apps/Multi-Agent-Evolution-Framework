@@ -385,6 +385,48 @@ Offline, with the scripted adapter, the committed pool has no headroom — every
 wrong fix — so the end-to-end run measures 20 × 3 = 60 failures and reports without selecting. The
 selection and rewrite paths are exercised with an injected result; no test makes a paid call.
 
+### R3-G3 — the pre-registered exact test replaces min − max
+
+The round-2 verdict compared two extreme repeats (`min(candidate) − max(baseline)` against the
+baseline's spread). A simulation of the shape the gate exists to catch — 30% base and 80% candidate
+on 3 of 10 tasks at N = 3 — detected it about 11% of the time, and one lucky repeat decided it.
+
+The gate is now, for every deterministic held-out task `t`:
+
+> `d_t` = (candidate passes) − (base passes) over N independent runs of each harness;
+> `S` = `Σ_t d_t`;
+> `p` = the fraction of all 2^H sign assignments of the observed `d_t` whose sum `S*` is at least `S`.
+
+It is an **improvement iff `H ≥ 10`, `S > 0` and `p < alpha = 0.05`** — a one-sided exact sign-flip
+permutation test: under "no effect" each `d_t` is as likely negative as positive, so flipping signs
+gives the null distribution with no normal approximation and no model of the score. The p-value is
+counted, not sampled: a subset-sum table over the achievable sums holds the exact number of
+assignments (BigInt, because 2^H leaves the exact-integer range of a double around H = 53).
+
+The rule — test name, `runs: 5`, `alpha: 0.05`, `minTasks: 10`, and the decision sentence — is
+committed in `tests/goldens/splits.json` and `packages/cli/assets/goldens/splits.json` under `gate`,
+and it is part of `computeSplitsSha`. `loadSplits` refuses a split with no `gate` or one whose rule
+differs from the built `HELD_OUT_RULE`, field by field, naming each difference (`alpha is 0.1, the
+code implements 0.05`). That is the pre-registration: a session cannot quietly run a different test,
+and `--held-out-repeats` is pinned to 5 (any other value exits 2 before a harness is built).
+
+The report carries `gate`: every `d_t` (task, base passes, candidate passes, delta), `H`, `S`, the
+exact `p`, `improved`, and the first failing clause as `reason`, and the one-line statement repeats
+per-task counts for both harnesses, `S` and `p`. Judge-scored held-out tasks stay beside the gate:
+they are still run and reported, and they are subtracted before the counts are formed.
+
+The `S > 0` clause is decision-redundant with `p < 0.05`: for `S ≤ 0` the observed sum is one of the
+2^H assignments, so at least the half of assignments that mirror it reach `S`, giving `p ≥ 1/2`. It
+is kept because it is what makes the report say "the candidate did not gain overall" instead of
+quoting a p-value, and a property test checks the theorem rather than assuming it. The tests assert
+exact p-values for known vectors (5 × +1 among 10 → 0.03125; 10 × +1 → 1/1024; all zero → 1), an
+independent brute-force enumeration for mixed vectors, all-zero and single-large-`d_t` → no
+improvement, and H < 10 → no improvement. Mutants: (1) a two-sided p (both tails counted) turns the
+5-of-10 vector from 0.03125 to 0.0625 and fails the broad-gain test; (2) a subsampled denominator
+(1000 instead of 2^H) changes the exact values and fails the known-vector test; (3) the `S > 0`
+clause dropped leaves the decision unchanged (the theorem) but changes the all-zero report from
+"S = 0 …" to "p = 1 …", which the all-zero test asserts.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

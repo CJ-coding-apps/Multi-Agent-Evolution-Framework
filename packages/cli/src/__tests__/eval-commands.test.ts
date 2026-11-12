@@ -5,6 +5,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
+import { HELD_OUT_RULE } from '@maf/eval-harness';
 import { estimateTokens } from '@maf/types';
 import type { AdapterInvokeOptions, AdapterInvokeResult, CliAdapter } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
@@ -188,7 +189,7 @@ test('maf evolve approve applies only a stored needs-approval candidate (R2-M1)'
   }
 });
 
-test('maf evolve refuses --held-out-repeats below three before anything is spent (R2-H3)', async (t) => {
+test('maf evolve refuses a --held-out-repeats the test was not pre-registered for, before anything is spent (R3-G3)', async (t) => {
   const { root } = await freshClone();
   const saved = process.exitCode;
   process.exitCode = 0;
@@ -198,10 +199,10 @@ test('maf evolve refuses --held-out-repeats below three before anything is spent
     t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
     const program = new Command().exitOverride();
     registerEvolveCommand(program);
-    await program.parseAsync(evolve(root, '--held-out-repeats', '2'), { from: 'user' });
-    assert.equal(process.exitCode, 2, 'a count that cannot measure noise is refused, non-zero');
+    await program.parseAsync(evolve(root, '--held-out-repeats', '3'), { from: 'user' });
+    assert.equal(process.exitCode, 2, 'a count the test was not pre-registered for is refused, non-zero');
     assert.ok(
-      errors.some((l) => l.includes('--held-out-repeats must be an integer of at least 3')),
+      errors.some((l) => l.includes('--held-out-repeats must be 5')),
       errors.join('\n'),
     );
     assert.deepEqual(stacks, [], 'no stack, no round, no money');
@@ -222,7 +223,7 @@ test('maf evolve refuses a held-out gate resting on fewer than minHeldOut determ
     await cp(SEED, corpus, { recursive: true });
     const corpusJson = JSON.parse(await readFile(path.join(corpus, 'corpus.json'), 'utf8')) as { id: string }[];
     await writeFile(path.join(corpus, 'splits.json'), JSON.stringify({
-      version: 1, minHeldOut: 5,
+      version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
       train: corpusJson.map((t) => t.id).filter((id) => id !== 'coder-fib'),
       heldOut: ['coder-fib'],
     }), 'utf8');
@@ -947,7 +948,7 @@ test('real evolve.ts (R2-H2): held-out scoring is dispatched through an isolated
     };
     assert.ok(report.heldOut, 'the report carries a held-out verdict');
     assert.deepEqual(report.heldOut.judgeScored?.taskIds, ['review-off-by-one', 'security-sql-concat']);
-    assert.equal(report.heldOut.baselineScores.length, 3, 'each harness is scored three times');
+    assert.equal(report.heldOut.baselineScores.length, 5, 'each harness is scored five times (R3-G3)');
     assert.match(report.heldOut.statement, /never counted \(review-off-by-one, security-sql-concat\)/);
   } finally {
     await rm(root, { recursive: true, force: true });

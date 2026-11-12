@@ -12,7 +12,7 @@ export {
 export type { MetaGenerate, RoleCatalogEntry, CurrentHarnessStatus } from './planner.js';
 export { gateEvaluate, gateStatic, gateWidening } from './gate.js';
 export type { GateDecision, GateContext, GateStaticContext, GateVeto } from './gate.js';
-export { evolve, HELD_OUT_MIN_REPEATS } from './loop.js';
+export { evolve, HELD_OUT_REPEATS } from './loop.js';
 export type {
   EvolveOptions, EvolveReport, EvolveRoundRecord, HeldOutReport, JudgeScoredHeldOut, SensitiveEvaluation, UnrecordedGolden,
 } from './loop.js';

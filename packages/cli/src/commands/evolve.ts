@@ -16,7 +16,7 @@ import {
 } from '@maf/eval-harness';
 import type { GoldenSuiteResult, GoldenTask, LoadedSplits } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
-import { EvolveBudget, HELD_OUT_MIN_REPEATS, UsageMeter, evolve, meterAdapter } from '@maf/evolver';
+import { EvolveBudget, HELD_OUT_REPEATS, UsageMeter, evolve, meterAdapter } from '@maf/evolver';
 import type { EvolveOptions, EvolveReport } from '@maf/evolver';
 import { createDefaultRegistry } from '@maf/tools';
 import { createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS } from '@maf/processors';
@@ -102,7 +102,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
     .option('--max-tokens <n>', 'Token budget for the whole evolution run; spend is estimated from characters (D-57)')
     .option('--max-usd <n>', 'Dollar budget; requires --usd-per-million-tokens so spend can be priced (D-57)')
     .option('--usd-per-million-tokens <n>', 'Price used to turn the token estimate into dollars (D-57)')
-    .option('--held-out-repeats <n>', 'Times each harness is scored on the held-out split (default 3, minimum 3; D-57)')
+    .option('--held-out-repeats <n>', `Times each harness is scored on the held-out split (pre-registered at ${HELD_OUT_REPEATS}; D-57)`)
     // A positional here is a typo, not an intent: commander would otherwise start a whole evolution
     // run and spend money on it (M1). `approve` is a real subcommand now — see below — not an excess
     // argument.
@@ -132,8 +132,12 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         // the first round, rather than paying for a run that cannot state a verdict.
         if (opts.heldOutRepeats !== undefined) {
           const n = Number(opts.heldOutRepeats);
-          if (!Number.isInteger(n) || n < HELD_OUT_MIN_REPEATS)
-            throw new Error(`--held-out-repeats must be an integer of at least ${HELD_OUT_MIN_REPEATS} (got "${opts.heldOutRepeats}")`);
+          if (n !== HELD_OUT_REPEATS)
+            throw new Error(
+              `--held-out-repeats must be ${HELD_OUT_REPEATS}: the run count is part of the pre-registered ` +
+              `held-out test (alpha, the minimum task count and the decision live in splits.json), so a ` +
+              `different count is a different test (got "${opts.heldOutRepeats}")`,
+            );
           heldOutRepeats = n;
         }
       } catch (err) {

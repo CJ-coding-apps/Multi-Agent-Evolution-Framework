@@ -1,6 +1,13 @@
 {
   "version": 1,
   "minHeldOut": 5,
+  "gate": {
+    "test": "one-sided-sign-flip-permutation",
+    "runs": 5,
+    "alpha": 0.05,
+    "minTasks": 10,
+    "decision": "improvement iff S > 0 and p < alpha, where d_t = candidate passes − base passes for held-out task t over `runs` independent runs of each harness, S = Σ_t d_t, and p is the exact one-sided sign-flip permutation p-value: the fraction of all 2^H sign assignments of the observed d_t whose sum S* is at least S, with H the number of held-out tasks."
+  },
   "train": [
     "coder-sum",
     "coder-reverse",

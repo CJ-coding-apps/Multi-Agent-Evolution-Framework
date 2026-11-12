@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CALIBRATION_MIN_SELECTED, CALIBRATION_RULE, CALIBRATION_RUNS, CalibrationError,
-  applyCalibration, selectCalibrated,
+  HELD_OUT_RULE, applyCalibration, selectCalibrated,
 } from '../index.js';
 import type { CalibrationCount, CorpusSplits } from '../index.js';
 
@@ -79,7 +79,7 @@ test('calibration: the committed rule text states the rule the code implements',
 
 test('calibration: applying it moves only the selected pool tasks, in pool order, and leaves train alone', () => {
   const splits: CorpusSplits = {
-    version: 1, minHeldOut: 5,
+    version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
     train: ['t1', 't2'],
     heldOut: ['h1', 'h2', 'h3', 'h4', 'h5'],
     pool: ['p1', 'p2', 'p3', 'p4'],

@@ -1,6 +1,7 @@
 import type { PermissionLevel, RunId } from '@maf/types';
 import type { HarnessConfig, ProcessorRef } from '@maf/harness-config';
-import type { GoldenSuiteResult } from '@maf/eval-harness';
+import { HELD_OUT_RULE, signFlipGate } from '@maf/eval-harness';
+import type { GoldenSuiteResult, HeldOutGateVerdict, HeldOutTaskPasses } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { digestEvidence, heldOutScrubber, isEmptyDigest } from './digester.js';
 import type { UsageSnapshot } from './usage.js';
@@ -142,9 +143,9 @@ export interface EvolveOptions {
   /** D-57: sha of the split definition the held-out runner measures, for the report. */
   heldOutSplitsSha?: string;
   /**
-   * R2-H3: how many times each harness is scored on the held-out split. One run cannot separate an
-   * improvement from run-to-run noise, so the default is 3 and anything below that is refused rather
-   * than clamped. The noise floor is the baseline's own spread; see `evaluateHeldOut`.
+   * R3-G3: how many times each harness is scored on the held-out split. The run count is part of the
+   * pre-registered test (`splits.json`), so it defaults to that count and any other value is
+   * refused rather than clamped. See `evaluateHeldOut`.
    */
   heldOutRepeats?: number;
   /**
@@ -188,16 +189,11 @@ export interface HeldOutReport {
    * scores above. Present only when the split has any.
    */
   judgeScored?: JudgeScoredHeldOut;
-  /** R2-H3: `max(baseline) − min(baseline)` — the baseline's own spread. */
-  noiseFloor: number;
   /**
-   * R2-H3: `min(candidate) − max(baseline)` — the candidate's worst repeat against the baseline's
-   * best. An improvement is claimed only when this exceeds `noiseFloor`; otherwise it is reported
-   * as no improvement.
+   * R3-G3: the pre-registered test's verdict — every d_t, S, the exact one-sided sign-flip p-value
+   * and the decision. Absent when the split was not scored (see `skipped`).
    */
-  delta: number;
-  /** The gate CJ set for 0.6.0: an improvement that clears the noise floor. */
-  aboveNoiseFloor: boolean;
+  gate?: HeldOutGateVerdict;
   statement: string;
   /** Present when the split was not scored, with the reason. */
   skipped?: string;
@@ -370,8 +366,8 @@ function sensitiveRoleOf(
     : undefined;
 }
 
-/** R2-H3: the held-out split is a repeated measurement; three runs is the floor. */
-export const HELD_OUT_MIN_REPEATS = 3;
+/** R3-G3: the held-out run count is pre-registered in `splits.json`, not chosen per session. */
+export const HELD_OUT_REPEATS = HELD_OUT_RULE.runs;
 
 /**
  * R2-H3: the solved-task count a single held-out run measures. The verdict is computed from these
@@ -382,10 +378,11 @@ function heldOutScore(run: GoldenSuiteResult, judgeScored: ReadonlySet<string>):
 }
 
 /**
- * D-57 (R2-H3): score the harness that survived on the held-out split, N times each, and state the
- * verdict — min(candidate) − max(baseline) > max(baseline) − min(baseline). The baseline is scored
- * the same number of times as the candidate, because the noise floor is the baseline's own spread;
- * a later bad repeat on the candidate counts, so a lucky early run cannot carry the verdict.
+ * D-57 (R3-G3): score the harness that survived on the held-out split, N = the pre-registered run
+ * count times each, count how many runs each harness passed each task, and hand the per-task counts
+ * to the exact one-sided sign-flip test. Replacing min−max with this test is what gives the gate
+ * power: the old rule compared two extreme repeats, so a real gain on a few of ten tasks was
+ * detected about 11% of the time and one lucky repeat could carry the verdict.
  *
  * Returns undefined when the caller wired no held-out runner; every other reason for not scoring is
  * carried in `skipped` so the report says why rather than staying silent.
@@ -399,16 +396,13 @@ async function evaluateHeldOut(
   const runHeldOut = opts.runHeldOut;
   if (runHeldOut === undefined) return undefined;
 
-  const repeats = opts.heldOutRepeats ?? HELD_OUT_MIN_REPEATS;
+  const repeats = opts.heldOutRepeats ?? HELD_OUT_REPEATS;
   const judgeScored = new Set(opts.heldOutJudgeScored ?? []);
   const skipped = (reason: string): HeldOutReport => ({
     ...(opts.heldOutSplitsSha !== undefined ? { splitsSha: opts.heldOutSplitsSha } : {}),
     repeats,
     baseline: [],
     baselineScores: [],
-    noiseFloor: 0,
-    delta: 0,
-    aboveNoiseFloor: false,
     statement: `held-out: not scored — ${reason}`,
     skipped: reason,
   });
@@ -451,10 +445,16 @@ async function evaluateHeldOut(
   // runner so they can be reported beside it, and are subtracted before anything is compared.
   const baselineScores = baselineRuns.map((r) => heldOutScore(r, judgeScored));
   const candidateScores = candidateRuns.map((r) => heldOutScore(r, judgeScored));
-  const noiseFloor = Math.max(...baselineScores) - Math.min(...baselineScores);
-  const delta = Math.min(...candidateScores) - Math.max(...baselineScores);
-  const aboveNoiseFloor = delta > noiseFloor;
-  const total = baselineRuns[0]!.tasks.filter((t) => !judgeScored.has(t.taskId)).length;
+  // The test's unit is the task, not the run: for every deterministic held-out task, how many of the
+  // N runs each harness passed it. `solvedTaskIds` is the same "solved" the rest of the harness uses.
+  const deterministicIds = baselineRuns[0]!.tasks
+    .map((t) => t.taskId).filter((id) => !judgeScored.has(id)).sort();
+  const passes = (runs: GoldenSuiteResult[], id: string): number =>
+    runs.filter((r) => r.solvedTaskIds.includes(id)).length;
+  const perTask: HeldOutTaskPasses[] = deterministicIds.map((taskId) => ({
+    taskId, base: passes(baselineRuns, taskId), candidate: passes(candidateRuns, taskId),
+  }));
+  const gate = signFlipGate(perTask, HELD_OUT_RULE);
   const judgeIds = [...judgeScored].filter((id) => baselineRuns[0]!.tasks.some((t) => t.taskId === id)).sort();
   const judgeScoredReport: JudgeScoredHeldOut | undefined = judgeIds.length === 0
     ? undefined
@@ -469,7 +469,11 @@ async function evaluateHeldOut(
       `baseline solved ${judgeScoredReport.baselineScores.map((n) => `${n}/${judgeScoredReport.taskIds.length}`).join(', ')}, ` +
       `candidate solved ${(judgeScoredReport.candidateScores ?? []).map((n) => `${n}/${judgeScoredReport.taskIds.length}`).join(', ')}`;
   const splitsSha = opts.heldOutSplitsSha ?? candidateRuns[0]!.splitsSha ?? baselineRuns[0]!.splitsSha;
-  const scores = (xs: number[]): string => xs.map((n) => `${n}/${total}`).join(', ');
+  // Every figure the decision used is in the sentence: per-task pass counts for both harnesses,
+  // their deltas, S, and the exact p-value.
+  const perTaskText = gate.deltas
+    .map((d) => `${d.taskId} ${d.base}/${repeats}→${d.candidate}/${repeats} (${d.d >= 0 ? '+' : ''}${d.d})`)
+    .join(', ');
   return {
     ...(splitsSha !== undefined ? { splitsSha } : {}),
     repeats,
@@ -478,17 +482,11 @@ async function evaluateHeldOut(
     baselineScores,
     candidateScores,
     ...(judgeScoredReport !== undefined ? { judgeScored: judgeScoredReport } : {}),
-    noiseFloor,
-    delta,
-    aboveNoiseFloor,
+    gate,
     statement:
-      `held-out: baseline solved ${scores(baselineScores)}; candidate solved ${scores(candidateScores)} ` +
-      `(each harness scored ${repeats} times); min(candidate) − max(baseline) = ` +
-      `${delta >= 0 ? '+' : ''}${delta} against a noise floor of ${noiseFloor} ` +
-      `(max(baseline) − min(baseline)) — ` +
-      (aboveNoiseFloor
-        ? 'above the noise floor'
-        : 'no improvement found: the improvement does not exceed the noise floor') +
+      `held-out: ${gate.H} deterministic task${gate.H === 1 ? '' : 's'} × ${repeats} runs each — ${perTaskText}; ` +
+      `S = ${gate.S}; p = ${gate.p} (exact one-sided sign-flip over 2^${gate.H} assignments); ` +
+      (gate.improved ? 'improvement' : `no improvement — ${gate.reason}`) +
       judgePart,
   };
 }
@@ -499,12 +497,11 @@ async function evaluateHeldOut(
  * cheaply; only gate-approved candidates ever reach onShip.
  */
 export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
-  // R2-H3: refuse a repetition count that cannot measure noise, before anything is spent.
-  if (opts.heldOutRepeats !== undefined
-    && (!Number.isInteger(opts.heldOutRepeats) || opts.heldOutRepeats < HELD_OUT_MIN_REPEATS))
+  // R3-G3: the run count is part of the pre-registered test, so a different one is a different test.
+  if (opts.heldOutRepeats !== undefined && opts.heldOutRepeats !== HELD_OUT_REPEATS)
     throw new Error(
-      `held-out repeats must be an integer of at least ${HELD_OUT_MIN_REPEATS}: a single run cannot ` +
-      `separate an improvement from run-to-run noise (got ${opts.heldOutRepeats})`,
+      `held-out repeats are pre-registered at ${HELD_OUT_REPEATS} (D-57): a different count changes ` +
+      `the test the p-value is computed for, not just its precision (got ${opts.heldOutRepeats})`,
     );
 
   let base = opts.baseHarness;

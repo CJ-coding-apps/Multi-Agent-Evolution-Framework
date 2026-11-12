@@ -4,6 +4,8 @@ import path from 'node:path';
 import { canonicalJson } from '@maf/harness-config';
 import { refusePrototypeKey } from '@maf/types';
 import type { GoldenTask } from './GoldenTask.js';
+import { HELD_OUT_RULE } from './significance.js';
+import type { HeldOutTestRule } from './significance.js';
 
 /**
  * The corpus split (D-57). The evolver may see the `train` tasks — they are what it measures every
@@ -36,6 +38,12 @@ export interface CorpusSplits {
    * not a quiet change of what the corpus happens to contain (R2-M2).
    */
   minHeldOut: number;
+  /**
+   * R3-G3: the pre-registered held-out test — its runs, alpha and minimum task count. A split file
+   * that names a rule this build does not implement is refused, so no session can silently run a
+   * different test than the one the repository committed.
+   */
+  gate: HeldOutTestRule;
   /** Task ids the evolver may see and be scored on. */
   train: string[];
   /** Task ids it may not: scored only on the final harness, never recorded as evidence. */
@@ -78,7 +86,7 @@ export class SplitsError extends Error {
 export function computeSplitsSha(splits: CorpusSplits): string {
   return crypto.createHash('sha256')
     .update(canonicalJson({
-      version: splits.version, minHeldOut: splits.minHeldOut,
+      version: splits.version, minHeldOut: splits.minHeldOut, gate: splits.gate,
       train: splits.train, heldOut: splits.heldOut, pool: splits.pool ?? [],
     }), 'utf8')
     .digest('hex');
@@ -119,6 +127,27 @@ export async function loadSplits(
       `(got ${JSON.stringify(minHeldOut)}). A held-out gate below ${MIN_HELD_OUT} deterministically ` +
       'scored tasks cannot tell an improvement from a coin toss.',
     );
+  // R3-G3: the pre-registration. The committed rule must be the one this build implements, field
+  // for field; a session that ran a different test would report a p-value nobody pre-registered.
+  const committedGate = o['gate'];
+  if (committedGate === undefined)
+    throw new SplitsError(
+      `${file}: no "gate". D-57 fixes the held-out test before any run, so the split must commit ` +
+      'the rule (test, runs, alpha, minTasks, decision); without it an "improvement" has no ' +
+      'pre-registered meaning.',
+    );
+  if (canonicalJson(committedGate) !== canonicalJson(HELD_OUT_RULE)) {
+    const at = (v: unknown, k: string): unknown =>
+      v !== null && typeof v === 'object' ? (v as Record<string, unknown>)[k] : undefined;
+    const differs = (Object.keys(HELD_OUT_RULE) as (keyof HeldOutTestRule)[])
+      .filter((k) => JSON.stringify(at(committedGate, k)) !== JSON.stringify(HELD_OUT_RULE[k]))
+      .map((k) => `${k} is ${JSON.stringify(at(committedGate, k))}, the code implements ${JSON.stringify(HELD_OUT_RULE[k])}`);
+    throw new SplitsError(
+      `${file}: the committed gate rule is not the one this build implements (${differs.join('; ')}). ` +
+      'The held-out test is pre-registered: changing it is a reviewed edit to this file and to the ' +
+      'code together, never a run-time choice.',
+    );
+  }
   const known = new Set(corpus.map((t) => t.id));
   const lists: { train: string[]; 'held-out': string[]; pool: string[] } = { train: [], 'held-out': [], pool: [] };
   // `pool` is optional (a corpus that has not run calibration has none); train and heldOut are not.
@@ -175,7 +204,7 @@ export async function loadSplits(
   }
 
   const splits: CorpusSplits = {
-    version: 1, minHeldOut,
+    version: 1, minHeldOut, gate: HELD_OUT_RULE,
     train: lists.train, heldOut: lists['held-out'], pool: lists.pool,
   };
   return { ...splits, sha: computeSplitsSha(splits) };

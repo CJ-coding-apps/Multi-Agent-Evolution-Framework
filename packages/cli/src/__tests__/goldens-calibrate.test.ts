@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { LcmEngine } from '@maf/lcm';
-import { CALIBRATION_MIN_SELECTED, loadSplits } from '@maf/eval-harness';
+import { CALIBRATION_MIN_SELECTED, HELD_OUT_RULE, loadSplits } from '@maf/eval-harness';
 import type { GoldenSuiteResult, GoldenTask } from '@maf/eval-harness';
 import { calibrationTaskIds, runCalibration } from '../commands/goldens.js';
 
@@ -135,7 +135,7 @@ async function corpusRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-calibrate-corpus-'));
   await writeFile(path.join(root, 'corpus.json'), JSON.stringify(CORPUS, null, 2), 'utf8');
   await writeFile(path.join(root, 'splits.json'), JSON.stringify({
-    version: 1, minHeldOut: 5, train: ['train-1'], heldOut: HELD_OUT, pool: POOL,
+    version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['train-1'], heldOut: HELD_OUT, pool: POOL,
   }, null, 2), 'utf8');
   return root;
 }

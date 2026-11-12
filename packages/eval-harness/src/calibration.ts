@@ -125,6 +125,7 @@ export function applyCalibration(
   return {
     version: splits.version,
     minHeldOut: splits.minHeldOut,
+    gate: splits.gate,
     train: splits.train,
     heldOut: [...splits.heldOut, ...selection.selected],
     pool: pool.filter((id) => !chosen.has(id)),
