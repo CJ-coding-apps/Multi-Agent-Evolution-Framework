@@ -821,6 +821,17 @@ test('real evolve.ts (R2-H2): held-out scoring is dispatched through an isolated
     assert.ok(heldTasks.length > 0, 'the held-out split was actually scored');
     assert.ok(heldTasks.every((id) => id !== undefined && HE.has(id)),
       `every isolated dispatch is a held-out task: ${heldTasks.join(', ')}`);
+
+    // R2-M3: the two judge-scored held-out tasks ran, and the report says they are beside the
+    // gate, never in it — the deterministic denominator is five.
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      heldOut?: { statement: string; baselineScores: number[]; judgeScored?: { taskIds: string[] } };
+    };
+    assert.ok(report.heldOut, 'the report carries a held-out verdict');
+    assert.deepEqual(report.heldOut.judgeScored?.taskIds, ['review-off-by-one', 'security-sql-concat']);
+    assert.equal(report.heldOut.baselineScores.length, 3, 'each harness is scored three times');
+    assert.match(report.heldOut.statement, /never counted \(review-off-by-one, security-sql-concat\)/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

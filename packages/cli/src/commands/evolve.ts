@@ -12,7 +12,7 @@ import type { HarnessConfig } from '@maf/harness-config';
 import { effectiveTier, roleSetFromHarness } from '@maf/roles';
 import {
   GoldenRunner, SCRIPTED_ADAPTER_NAME, ScoreRecorder, ScriptedAdapter, describeJudge,
-  loadScriptedBundle, loadSplits, makeLlmJudge,
+  isJudgeScored, loadScriptedBundle, loadSplits, makeLlmJudge,
 } from '@maf/eval-harness';
 import type { GoldenSuiteResult, GoldenTask, LoadedSplits } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
@@ -271,6 +271,12 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         runnerFor(harness, 2, { name: 'held-out', sha: splits.sha }, await stackForHeldOut())
           .run(splits.heldOut);
 
+      // R2-M3: a held-out task with an llm-judge verifier is a model's opinion. It is still run,
+      // so the report can show it beside the gate, but it is subtracted before anything is
+      // compared — a candidate that improves only where a judge said so has not improved.
+      const corpusById = new Map(corpus.map((t) => [t.id, t]));
+      const judgeScoredHeldOut = splits.heldOut.filter((id) => isJudgeScored(corpusById.get(id)!));
+
       const runSmoke = (harness: HarnessConfig, taskId: string) => {
         // A smoke run is a measurement too. The planner's target tasks come from evidence in the
         // train split, but a hallucinated id must not spend a held-out task either.
@@ -291,10 +297,12 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         graph: stack.graph,
         runGoldens: runGoldensFor,
         // D-57: the evolver plans from the train split only, and the survivor is scored against
-        // the held-out split — twice each — with the delta and noise floor in the report.
+        // the held-out split N times each — with the delta and noise floor in the report. Judge-
+        // scored held-out tasks are named so the loop can report them beside, never in, the gate.
         splitName: 'train',
         runHeldOut,
         heldOutSplitsSha: splits.sha,
+        ...(judgeScoredHeldOut.length > 0 ? { heldOutJudgeScored: judgeScoredHeldOut } : {}),
         ...(heldOutRepeats !== undefined ? { heldOutRepeats } : {}),
         budget,
         usage,

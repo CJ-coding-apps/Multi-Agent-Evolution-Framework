@@ -1681,6 +1681,43 @@ test('D-57 held-out: the repetition count is configurable, and below the floor i
   );
 });
 
+test('R2-M3 held-out: a candidate that improves only where a judge said so gives no improvement', async () => {
+  // A fresh planner per run: `mockMeta` consumes its answers.
+  const manifest = () => mockMeta([manifestJson({
+    kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'missed t2',
+  }, ['t2'])]);
+  const verdicts = {
+    base: [['h1', 'j1'], ['h1', 'j1'], ['h1', 'j1']],
+    // The candidate solves one more judge-scored task and nothing else.
+    candidate: [['h1', 'j1', 'j2'], ['h1', 'j1', 'j2'], ['h1', 'j1', 'j2']],
+  };
+  const ids = ['x', 'y', 'z', 'w', 'v', 'j1', 'j2'];
+
+  // Control: counted, those two judge tasks would look like +1. This is the rule R2-M3 removes.
+  const counted = await evolve(loopOpts({
+    metaGenerate: manifest(), runHeldOut: heldOutRunner(CURRENT, verdicts, ids), heldOutSplitsSha: SPLITS_SHA,
+  }));
+  assert.deepEqual(counted.heldOut!.candidateScores, [3, 3, 3]);
+  assert.equal(counted.heldOut!.aboveNoiseFloor, true);
+
+  // Marked as judge-scored, they are reported beside the gate and never counted.
+  const report = await evolve(loopOpts({
+    metaGenerate: manifest(), runHeldOut: heldOutRunner(CURRENT, verdicts, ids),
+    heldOutJudgeScored: ['j1', 'j2'], heldOutSplitsSha: SPLITS_SHA,
+  }));
+  const held = report.heldOut!;
+  assert.deepEqual(held.baselineScores, [1, 1, 1], 'only the deterministic tasks are counted');
+  assert.deepEqual(held.candidateScores, [1, 1, 1], 'the extra judge verdict does not move the score');
+  assert.equal(held.delta, 0);
+  assert.equal(held.aboveNoiseFloor, false, 'a judge-only improvement is no improvement');
+  assert.match(held.statement, /baseline solved 1\/5/);
+  assert.match(held.statement, /no improvement found/);
+  assert.match(held.statement, /judge-scored held-out reported beside, never counted \(j1, j2\)/);
+  assert.deepEqual(held.judgeScored?.taskIds, ['j1', 'j2']);
+  assert.deepEqual(held.judgeScored?.baselineScores, [1, 1, 1]);
+  assert.deepEqual(held.judgeScored?.candidateScores, [2, 2, 2], 'the judge tasks are still reported');
+});
+
 test('D-57 held-out: every reason for not scoring is stated, never silent', async () => {
   // No ship.
   const none = await evolve(loopOpts({

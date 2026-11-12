@@ -14,7 +14,7 @@ export { gateEvaluate, gateStatic, gateWidening } from './gate.js';
 export type { GateDecision, GateContext, GateStaticContext, GateVeto } from './gate.js';
 export { evolve, HELD_OUT_MIN_REPEATS } from './loop.js';
 export type {
-  EvolveOptions, EvolveReport, EvolveRoundRecord, HeldOutReport, SensitiveEvaluation, UnrecordedGolden,
+  EvolveOptions, EvolveReport, EvolveRoundRecord, HeldOutReport, JudgeScoredHeldOut, SensitiveEvaluation, UnrecordedGolden,
 } from './loop.js';
 export { EvolveBudget } from './budget.js';
 export { UsageMeter, meterAdapter } from './usage.js';

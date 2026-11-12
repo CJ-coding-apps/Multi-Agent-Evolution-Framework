@@ -148,6 +148,13 @@ export interface EvolveOptions {
    */
   heldOutRepeats?: number;
   /**
+   * R2-M3: held-out task ids whose verdict comes from a model (`llm-judge`). They run with the
+   * rest of the split so their results are reported beside the gate, but they are never counted
+   * toward it: a model's opinion is not a measurement, and a candidate that improves only where a
+   * judge said so has not improved the yardstick.
+   */
+  heldOutJudgeScored?: string[];
+  /**
    * R2-H2: the line the evolver may not cross. With it set, the digest carries only rows that say
    * `train`, task ids in those rows are restricted to the train split, and free text is scrubbed of
    * every other corpus id — so a prior full-corpus `goldens run`, or a previous session's held-out
@@ -176,6 +183,11 @@ export interface HeldOutReport {
   baselineScores: number[];
   /** Solved-task count per candidate repeat, in order. */
   candidateScores?: number[];
+  /**
+   * R2-M3: the judge-scored held-out tasks, reported beside the gate and never counted in the
+   * scores above. Present only when the split has any.
+   */
+  judgeScored?: JudgeScoredHeldOut;
   /** R2-H3: `max(baseline) − min(baseline)` — the baseline's own spread. */
   noiseFloor: number;
   /**
@@ -189,6 +201,13 @@ export interface HeldOutReport {
   statement: string;
   /** Present when the split was not scored, with the reason. */
   skipped?: string;
+}
+
+export interface JudgeScoredHeldOut {
+  taskIds: string[];
+  /** Solved judge-scored tasks per baseline repeat, in order — beside the gate, not in it. */
+  baselineScores: number[];
+  candidateScores?: number[];
 }
 
 export interface EvolveReport {
@@ -354,8 +373,8 @@ export const HELD_OUT_MIN_REPEATS = 3;
  * R2-H3: the solved-task count a single held-out run measures. The verdict is computed from these
  * counts (see `evaluateHeldOut`), so what counts as "solved" is decided in exactly one place.
  */
-function heldOutScore(run: GoldenSuiteResult): number {
-  return run.solvedTaskIds.length;
+function heldOutScore(run: GoldenSuiteResult, judgeScored: ReadonlySet<string>): number {
+  return run.solvedTaskIds.filter((id) => !judgeScored.has(id)).length;
 }
 
 /**
@@ -377,6 +396,7 @@ async function evaluateHeldOut(
   if (runHeldOut === undefined) return undefined;
 
   const repeats = opts.heldOutRepeats ?? HELD_OUT_MIN_REPEATS;
+  const judgeScored = new Set(opts.heldOutJudgeScored ?? []);
   const skipped = (reason: string): HeldOutReport => ({
     ...(opts.heldOutSplitsSha !== undefined ? { splitsSha: opts.heldOutSplitsSha } : {}),
     repeats,
@@ -410,12 +430,27 @@ async function evaluateHeldOut(
   if (wrongSplit !== undefined)
     return skipped(`the held-out runner measured split "${wrongSplit.split}", not "held-out"`);
 
-  const baselineScores = baselineRuns.map(heldOutScore);
-  const candidateScores = candidateRuns.map(heldOutScore);
+  // R2-M3: the gate counts deterministic verdicts only. Judge-scored tasks are scored by the same
+  // runner so they can be reported beside it, and are subtracted before anything is compared.
+  const baselineScores = baselineRuns.map((r) => heldOutScore(r, judgeScored));
+  const candidateScores = candidateRuns.map((r) => heldOutScore(r, judgeScored));
   const noiseFloor = Math.max(...baselineScores) - Math.min(...baselineScores);
   const delta = Math.min(...candidateScores) - Math.max(...baselineScores);
   const aboveNoiseFloor = delta > noiseFloor;
-  const total = baselineRuns[0]!.tasks.length;
+  const total = baselineRuns[0]!.tasks.filter((t) => !judgeScored.has(t.taskId)).length;
+  const judgeIds = [...judgeScored].filter((id) => baselineRuns[0]!.tasks.some((t) => t.taskId === id)).sort();
+  const judgeScoredReport: JudgeScoredHeldOut | undefined = judgeIds.length === 0
+    ? undefined
+    : {
+      taskIds: judgeIds,
+      baselineScores: baselineRuns.map((r) => r.solvedTaskIds.filter((id) => judgeScored.has(id)).length),
+      candidateScores: candidateRuns.map((r) => r.solvedTaskIds.filter((id) => judgeScored.has(id)).length),
+    };
+  const judgePart = judgeScoredReport === undefined
+    ? ''
+    : `; judge-scored held-out reported beside, never counted (${judgeScoredReport.taskIds.join(', ')}) — ` +
+      `baseline solved ${judgeScoredReport.baselineScores.map((n) => `${n}/${judgeScoredReport.taskIds.length}`).join(', ')}, ` +
+      `candidate solved ${(judgeScoredReport.candidateScores ?? []).map((n) => `${n}/${judgeScoredReport.taskIds.length}`).join(', ')}`;
   const splitsSha = opts.heldOutSplitsSha ?? candidateRuns[0]!.splitsSha ?? baselineRuns[0]!.splitsSha;
   const scores = (xs: number[]): string => xs.map((n) => `${n}/${total}`).join(', ');
   return {
@@ -425,6 +460,7 @@ async function evaluateHeldOut(
     candidate: candidateRuns,
     baselineScores,
     candidateScores,
+    ...(judgeScoredReport !== undefined ? { judgeScored: judgeScoredReport } : {}),
     noiseFloor,
     delta,
     aboveNoiseFloor,
@@ -435,7 +471,8 @@ async function evaluateHeldOut(
       `(max(baseline) − min(baseline)) — ` +
       (aboveNoiseFloor
         ? 'above the noise floor'
-        : 'no improvement found: the improvement does not exceed the noise floor'),
+        : 'no improvement found: the improvement does not exceed the noise floor') +
+      judgePart,
   };
 }
 
