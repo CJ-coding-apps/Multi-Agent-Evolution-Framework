@@ -599,6 +599,21 @@ approve <id>` refuses an id more than one session claims and resolves it only as
 It now says the ids are short within a session's chain, names the cross-session collision, and
 points at the check that makes it safe. No behaviour change; the comment was the defect.
 
+### R3-tests — the corpus-sized budgets scale with the corpus (found while running the suite)
+
+G1 grew the corpus from 16 tasks to 56, and two CLI tests run the whole corpus through a real
+stack. Their timeouts were sized for the old corpus, so they passed or failed on host load rather
+than on behaviour:
+
+- `goldens-offline` — "a fresh clone reproduces the committed baseline" measured **117 s against a
+  120 s cap** under suite load (88 s alone, 118 s in the final run). Raised to 300 s.
+- `native-lifecycle` — five stress iterations measured **425 s alone and 525 s in the serial suite
+  against a 240 s cap**, on both the `node:test` option and the `execFile` call (188 s in the
+  Linux container). Raised to 900 s. The cap is a hang backstop and keeps room for a slower host.
+
+Neither test's body changed and no assertion was relaxed; the cap is a backstop for a hung
+process, not the thing being measured. Both pass at the new cap.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

@@ -25,11 +25,14 @@ function lcmLoads(): boolean {
   }
 }
 
+// R3-G1 grew the corpus from 16 tasks to 56, so each iteration now runs ~86 s and five of them no
+// longer fit the old 240 s budget: 425 s alone and 525 s in the serial suite on the recording host
+// (188 s in the Linux container). The cap is a hang backstop, so it keeps room for a slower host.
 test('five goldens stacks built, run and torn down in one process each reproduce the baseline, and the process lives', {
   skip: lcmLoads() || process.env['CI'] ? false : 'better-sqlite3 does not load on this host (CI runs this)',
-  timeout: 240_000,
+  timeout: 900_000,
 }, async () => {
-  const { stdout } = await execFileAsync(process.execPath, [SCRIPT, '--iterations', '5'], { cwd: REPO, timeout: 240_000 }).catch(
+  const { stdout } = await execFileAsync(process.execPath, [SCRIPT, '--iterations', '5'], { cwd: REPO, timeout: 900_000 }).catch(
     (e: { code?: number; signal?: string; stdout?: string; stderr?: string }) => assert.fail(
       `the stress process failed (${e.signal ?? `exit ${String(e.code)}`}): ${e.stdout ?? ''}${e.stderr ?? ''}`,
     ),

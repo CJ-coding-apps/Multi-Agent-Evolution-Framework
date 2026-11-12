@@ -42,7 +42,9 @@ function lcmLoads(): boolean {
 }
 const needsLcm = {
   skip: lcmLoads() || process.env['CI'] ? false : 'better-sqlite3 does not load on this host (CI runs this)',
-  timeout: 120_000,
+  // R3-G1 grew the corpus from 16 tasks to 56; this test runs all of it through a real stack. It
+  // measured 117 s on the recording host, so 120 s was no longer a budget — it was a coin toss.
+  timeout: 300_000,
 };
 
 const stable = ({ ranAt: _ranAt, ...rest }: GoldenSuiteResult) => rest;
