@@ -139,6 +139,12 @@ export interface EvolveOptions {
   /** D-57: sha of the split definition the held-out runner measures, for the report. */
   heldOutSplitsSha?: string;
   /**
+   * R2-H3: how many times each harness is scored on the held-out split. One run cannot separate an
+   * improvement from run-to-run noise, so the default is 3 and anything below that is refused rather
+   * than clamped. The noise floor is the baseline's own spread; see `evaluateHeldOut`.
+   */
+  heldOutRepeats?: number;
+  /**
    * R2-H2: the line the evolver may not cross. With it set, the digest carries only rows that say
    * `train`, task ids in those rows are restricted to the train split, and free text is scrubbed of
    * every other corpus id — so a prior full-corpus `goldens run`, or a previous session's held-out
@@ -153,13 +159,21 @@ export interface EvolveOptions {
 /** D-57: what a held-out evaluation measured, and the sentence the report carries. */
 export interface HeldOutReport {
   splitsSha?: string;
-  /** The same harness scored twice — that is what makes the noise floor measurable. */
+  /** How many times each harness was scored — the repetition is what makes noise measurable. */
   repeats: number;
   baseline: GoldenSuiteResult[];
   candidate?: GoldenSuiteResult[];
-  /** Tasks on which the two runs of the SAME harness disagreed. */
+  /** Solved-task count per baseline repeat, in order — the figures the verdict used. */
+  baselineScores: number[];
+  /** Solved-task count per candidate repeat, in order. */
+  candidateScores?: number[];
+  /** R2-H3: `max(baseline) − min(baseline)` — the baseline's own spread. */
   noiseFloor: number;
-  /** Held-out tasks the candidate solved that the baseline did not, minus the reverse. */
+  /**
+   * R2-H3: `min(candidate) − max(baseline)` — the candidate's worst repeat against the baseline's
+   * best. An improvement is claimed only when this exceeds `noiseFloor`; otherwise it is reported
+   * as no improvement.
+   */
   delta: number;
   /** The gate CJ set for 0.6.0: an improvement that clears the noise floor. */
   aboveNoiseFloor: boolean;
@@ -322,23 +336,25 @@ function sensitiveRoleOf(
     : undefined;
 }
 
-const HELD_OUT_REPEATS = 2;
+/** R2-H3: the held-out split is a repeated measurement; three runs is the floor. */
+export const HELD_OUT_MIN_REPEATS = 3;
 
-/** How many task ids two runs disagree about. */
-function symDiff(a: readonly string[], b: readonly string[]): number {
-  const A = new Set(a);
-  const B = new Set(b);
-  let n = 0;
-  for (const id of A) if (!B.has(id)) n++;
-  for (const id of B) if (!A.has(id)) n++;
-  return n;
+/**
+ * R2-H3: the solved-task count a single held-out run measures. The verdict is computed from these
+ * counts (see `evaluateHeldOut`), so what counts as "solved" is decided in exactly one place.
+ */
+function heldOutScore(run: GoldenSuiteResult): number {
+  return run.solvedTaskIds.length;
 }
 
 /**
- * D-57: score the harness that survived on the held-out split, twice, and state the delta against
- * the noise floor — the same harness scored twice. Returns undefined when the caller wired no
- * held-out runner; every other reason for not scoring is carried in `skipped` so the report says
- * why rather than staying silent.
+ * D-57 (R2-H3): score the harness that survived on the held-out split, N times each, and state the
+ * verdict — min(candidate) − max(baseline) > max(baseline) − min(baseline). The baseline is scored
+ * the same number of times as the candidate, because the noise floor is the baseline's own spread;
+ * a later bad repeat on the candidate counts, so a lucky early run cannot carry the verdict.
+ *
+ * Returns undefined when the caller wired no held-out runner; every other reason for not scoring is
+ * carried in `skipped` so the report says why rather than staying silent.
  *
  * These runs are deliberately NOT passed to `recordGoldens`: a held-out task in the evidence graph
  * is a held-out task the next round's planner reads, and then it is not held out.
@@ -349,10 +365,12 @@ async function evaluateHeldOut(
   const runHeldOut = opts.runHeldOut;
   if (runHeldOut === undefined) return undefined;
 
+  const repeats = opts.heldOutRepeats ?? HELD_OUT_MIN_REPEATS;
   const skipped = (reason: string): HeldOutReport => ({
     ...(opts.heldOutSplitsSha !== undefined ? { splitsSha: opts.heldOutSplitsSha } : {}),
-    repeats: HELD_OUT_REPEATS,
+    repeats,
     baseline: [],
+    baselineScores: [],
     noiseFloor: 0,
     delta: 0,
     aboveNoiseFloor: false,
@@ -365,40 +383,48 @@ async function evaluateHeldOut(
   if (opts.budget?.snapshot().exhausted === true)
     return skipped('the budget was exhausted before the held-out evaluation');
 
-  let runs: GoldenSuiteResult[];
+  let baselineRuns: GoldenSuiteResult[];
+  let candidateRuns: GoldenSuiteResult[];
   try {
-    // Baseline first, then the survivor — the same split, the same runner, twice each.
-    runs = [
-      await runHeldOut(base), await runHeldOut(base),
-      await runHeldOut(finalHarness), await runHeldOut(finalHarness),
-    ];
+    // Baseline first, then the survivor — the same split, the same runner, N times each.
+    baselineRuns = [];
+    for (let i = 0; i < repeats; i++) baselineRuns.push(await runHeldOut(base));
+    candidateRuns = [];
+    for (let i = 0; i < repeats; i++) candidateRuns.push(await runHeldOut(finalHarness));
   } catch (err) {
     return skipped(`the held-out run failed: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const wrongSplit = runs.find((r) => r.split !== undefined && r.split !== 'held-out');
+  const wrongSplit = [...baselineRuns, ...candidateRuns]
+    .find((r) => r.split !== undefined && r.split !== 'held-out');
   if (wrongSplit !== undefined)
     return skipped(`the held-out runner measured split "${wrongSplit.split}", not "held-out"`);
 
-  const [b1, b2, c1, c2] = runs as [GoldenSuiteResult, GoldenSuiteResult, GoldenSuiteResult, GoldenSuiteResult];
-  const noiseFloor = Math.max(symDiff(b1.solvedTaskIds, b2.solvedTaskIds), symDiff(c1.solvedTaskIds, c2.solvedTaskIds));
-  const delta = c1.solvedTaskIds.length - b1.solvedTaskIds.length;
+  const baselineScores = baselineRuns.map(heldOutScore);
+  const candidateScores = candidateRuns.map(heldOutScore);
+  const noiseFloor = Math.max(...baselineScores) - Math.min(...baselineScores);
+  const delta = Math.min(...candidateScores) - Math.max(...baselineScores);
   const aboveNoiseFloor = delta > noiseFloor;
-  const total = b1.tasks.length;
-  const splitsSha = opts.heldOutSplitsSha ?? c1.splitsSha ?? b1.splitsSha;
+  const total = baselineRuns[0]!.tasks.length;
+  const splitsSha = opts.heldOutSplitsSha ?? candidateRuns[0]!.splitsSha ?? baselineRuns[0]!.splitsSha;
+  const scores = (xs: number[]): string => xs.map((n) => `${n}/${total}`).join(', ');
   return {
     ...(splitsSha !== undefined ? { splitsSha } : {}),
-    repeats: HELD_OUT_REPEATS,
-    baseline: [b1, b2],
-    candidate: [c1, c2],
+    repeats,
+    baseline: baselineRuns,
+    candidate: candidateRuns,
+    baselineScores,
+    candidateScores,
     noiseFloor,
     delta,
     aboveNoiseFloor,
     statement:
-      `held-out: baseline solved ${b1.solvedTaskIds.length}/${total} then ${b2.solvedTaskIds.length}/${total}; ` +
-      `candidate solved ${c1.solvedTaskIds.length}/${total} then ${c2.solvedTaskIds.length}/${total}; ` +
-      `delta ${delta >= 0 ? '+' : ''}${delta} against a noise floor of ${noiseFloor} ` +
-      `(each harness scored ${HELD_OUT_REPEATS} times) — ` +
-      (aboveNoiseFloor ? 'above the noise floor' : 'NOT above the noise floor'),
+      `held-out: baseline solved ${scores(baselineScores)}; candidate solved ${scores(candidateScores)} ` +
+      `(each harness scored ${repeats} times); min(candidate) − max(baseline) = ` +
+      `${delta >= 0 ? '+' : ''}${delta} against a noise floor of ${noiseFloor} ` +
+      `(max(baseline) − min(baseline)) — ` +
+      (aboveNoiseFloor
+        ? 'above the noise floor'
+        : 'no improvement found: the improvement does not exceed the noise floor'),
   };
 }
 
@@ -408,6 +434,14 @@ async function evaluateHeldOut(
  * cheaply; only gate-approved candidates ever reach onShip.
  */
 export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
+  // R2-H3: refuse a repetition count that cannot measure noise, before anything is spent.
+  if (opts.heldOutRepeats !== undefined
+    && (!Number.isInteger(opts.heldOutRepeats) || opts.heldOutRepeats < HELD_OUT_MIN_REPEATS))
+    throw new Error(
+      `held-out repeats must be an integer of at least ${HELD_OUT_MIN_REPEATS}: a single run cannot ` +
+      `separate an improvement from run-to-run noise (got ${opts.heldOutRepeats})`,
+    );
+
   let base = opts.baseHarness;
   const maxRounds = opts.maxRounds ?? 10;
   const patience = opts.patience ?? 3;

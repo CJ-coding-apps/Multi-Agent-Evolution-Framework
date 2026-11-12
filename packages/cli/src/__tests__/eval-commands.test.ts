@@ -147,6 +147,29 @@ test('maf evolve approve applies a stored candidate and refuses an unknown one w
   }
 });
 
+test('maf evolve refuses --held-out-repeats below three before anything is spent (R2-H3)', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const { stacks } = stopAtStack(t);
+    const errors: string[] = [];
+    t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--held-out-repeats', '2'), { from: 'user' });
+    assert.equal(process.exitCode, 2, 'a count that cannot measure noise is refused, non-zero');
+    assert.ok(
+      errors.some((l) => l.includes('--held-out-repeats must be an integer of at least 3')),
+      errors.join('\n'),
+    );
+    assert.deepEqual(stacks, [], 'no stack, no round, no money');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // ORACLE (WP-3.9 round 2, G4): `maf evolve` hands the evolver the registry's tool ids and the
 // permission level of each. A manifest that adds a tool which is not in that registry is a
 // malformed candidate — the invariant stage refuses it, naming the tools that do exist — and it is
