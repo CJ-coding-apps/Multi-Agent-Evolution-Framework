@@ -96,15 +96,15 @@ test('applyEdit keeps the parent\'s review requirement: no edit kind drops it, n
       id: 'base', roleSet: CURRENT.roleSet, processorBundles: [], reviewGate: { required },
     });
     for (const edit of EVERY_EDIT_KIND) {
-      const child = applyEdit(parent, edit, 'c');
+      const child = applyEdit(parent, edit, 'c', { defaultBundleRefs: DEFAULT_REFS });
       assert.deepEqual(child.reviewGate, { required }, `${edit.kind} on a parent with required: ${required}`);
       // Hashed with the rest, so the child's sha says what its parent's did.
-      assert.notEqual(child.sha, applyEdit(CURRENT, edit, 'c').sha, edit.kind);
+      assert.notEqual(child.sha, applyEdit(CURRENT, edit, 'c', { defaultBundleRefs: DEFAULT_REFS }).sha, edit.kind);
     }
   }
   // A parent that says nothing has children that say nothing: their shas are what they were.
   for (const edit of EVERY_EDIT_KIND) {
-    assert.equal('reviewGate' in applyEdit(CURRENT, edit, 'c'), false, edit.kind);
+    assert.equal('reviewGate' in applyEdit(CURRENT, edit, 'c', { defaultBundleRefs: DEFAULT_REFS }), false, edit.kind);
   }
   // Nor can a manifest carry it in: the field is outside the mutation surface.
   assert.throws(() => assertChangeManifest({
@@ -123,10 +123,18 @@ test('screening: injection patterns rejected; honest prompts pass', () => {
 
 // ─── gate (deterministic stages) ───────────────────────────────────────────
 
+// R2-H1: the default bundle is supplied by the caller (the CLI, which depends on
+// `@maf/processors`) — the evolver takes no dependency for it. This is the same list.
+const DEFAULT_REFS = [
+  { name: 'policy-audit' }, { name: 'secret-redact' },
+  { name: 'transcript' }, { name: 'security-gate' },
+] as const;
+
 const gateBase = {
   knownToolIds: KNOWN_TOOLS, knownProcessorNames: KNOWN_PROCESSORS,
   // Required since WP-3.9 F7: there is no "gate without the widening rule" any more.
   toolPermissions: TOOL_LEVELS,
+  defaultBundleRefs: DEFAULT_REFS,
 };
 
 test('gate: injection payload in evolved prompt rejected at b2 without evaluation', () => {
@@ -254,7 +262,7 @@ test('gate: toolPermissions is required (WP-3.9 F7) — a caller cannot skip the
   const d = gateEvaluate({
     manifest, candidate: applyEdit(CURRENT, manifest.edit, 'c'), current: CURRENT,
     currentScores: suite(['t1']), candidateScores: suite(['t1', 't2']),
-    knownToolIds: KNOWN_TOOLS, knownProcessorNames: KNOWN_PROCESSORS,
+    knownToolIds: KNOWN_TOOLS, knownProcessorNames: KNOWN_PROCESSORS, defaultBundleRefs: DEFAULT_REFS,
   });
   assert.equal(d.verdict, 'ship');
 });
@@ -312,6 +320,9 @@ function loopOpts(overrides: Partial<EvolveOptions> = {}): EvolveOptions {
     knownToolIds: KNOWN_TOOLS,
     toolPermissions: TOOL_LEVELS,
     knownProcessorNames: KNOWN_PROCESSORS,
+    // R2-H1: production passes the refs from `@maf/processors`; the loop must be given them
+    // because its base fixture is bundle-less.
+    defaultBundleRefs: DEFAULT_REFS,
     ...overrides,
   };
 }
@@ -1198,8 +1209,15 @@ test('§7 add_processor on a bundle-less harness starts from the default bundle'
   // RoleDispatcher reads an EMPTY list as "use the defaults", so appending to [] would replace
   // policy-audit/secret-redact/transcript/security-gate with the one processor the edit names.
   assert.equal(CURRENT.processorBundles.length, 0, 'the fixture dispatches the default bundle');
+  // R2-H1: with no default bundle supplied the evolver cannot know what dispatch would use, so
+  // the edit is refused rather than seeded from a guess.
+  assert.throws(
+    () => applyEdit(CURRENT, { kind: 'add_processor', bundle: { name: 'transcript' } }, 'c'),
+    ManifestError,
+  );
   const withConfig = applyEdit(
     CURRENT, { kind: 'add_processor', bundle: { name: 'transcript', config: { keep: 5 } } }, 'c',
+    { defaultBundleRefs: DEFAULT_REFS },
   );
   assert.deepEqual(withConfig.processorBundles.map((b) => b.name),
     ['policy-audit', 'secret-redact', 'transcript', 'security-gate', 'transcript']);
@@ -1245,6 +1263,13 @@ test('§7 a writer role without security-gate or secret-redact is rejected at b-
   // The defaults satisfy it: an empty list means the default bundle, which has both.
   const emptyList = (id: string) => mintHarnessConfig({ id, roleSet: writerRoles.roleSet, processorBundles: [] });
   assert.equal(gateStatic({ ...base, candidate: emptyList('w-d'), current: writerRoles }), undefined);
+  // R2-H1: only the caller knows what the defaults are. Without them the writer rule cannot be
+  // shown to hold, so the candidate is refused — never assumed safe.
+  const { defaultBundleRefs: _defaults, ...withoutDefaults } = gateBase;
+  const baseNoDefaults = { ...withoutDefaults, manifest: base.manifest };
+  const noDefaults = gateStatic({ ...baseNoDefaults, candidate: emptyList('w-e'), current: writerRoles });
+  assert.equal(noDefaults?.verdict, 'reject');
+  assert.match((noDefaults as { reason: string }).reason, /did not supply the default bundle/);
   // And a harness with no writer role may drop either one.
   const readersOnly = mintHarnessConfig({
     id: 'r', roleSet: CURRENT.roleSet, processorBundles: [{ name: 'transcript' }],

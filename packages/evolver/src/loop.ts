@@ -1,5 +1,5 @@
 import type { PermissionLevel, RunId } from '@maf/types';
-import type { HarnessConfig } from '@maf/harness-config';
+import type { HarnessConfig, ProcessorRef } from '@maf/harness-config';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { digestEvidence, isEmptyDigest } from './digester.js';
@@ -96,6 +96,13 @@ export interface EvolveOptions {
    */
   toolPermissions: ReadonlyMap<string, PermissionLevel>;
   knownProcessorNames: ReadonlySet<string>;
+  /**
+   * The bundle dispatch uses for a harness with an empty `processorBundles` (R2-H1). The caller
+   * that depends on `@maf/processors` supplies it, so the evolver does not need that link; absent,
+   * `add_processor` on such a harness is refused and a writer candidate it cannot prove keeps
+   * security-gate/secret-redact is rejected rather than assumed safe.
+   */
+  defaultBundleRefs?: readonly ProcessorRef[];
   knownModels?: ReadonlySet<string>;
   safetyAdjacentRoles?: ReadonlySet<string>;
   judgeOnlyTaskIds?: ReadonlySet<string>;
@@ -477,7 +484,8 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     const freeCheck = (m: ChangeManifest): { candidate: HarnessConfig } | { veto: GateVeto } => {
       let candidate: HarnessConfig;
       try {
-        candidate = applyEdit(base, m.edit, nextCandidateId());
+        candidate = applyEdit(base, m.edit, nextCandidateId(),
+          opts.defaultBundleRefs !== undefined ? { defaultBundleRefs: opts.defaultBundleRefs } : {});
       } catch (err) {
         // An edit the harness cannot express is a malformed candidate, not a reason to abort the
         // loop; the invariant stage is where a refusal belongs, and it names what it refused.
@@ -490,6 +498,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
         knownToolIds: opts.knownToolIds,
         toolPermissions: opts.toolPermissions,
         knownProcessorNames: opts.knownProcessorNames,
+        ...(opts.defaultBundleRefs !== undefined ? { defaultBundleRefs: opts.defaultBundleRefs } : {}),
         safetyAdjacentRoles: safetyAdjacent,
         approveSensitive: opts.approveSensitive === true,
         ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
@@ -699,6 +708,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       knownToolIds: opts.knownToolIds,
       toolPermissions: opts.toolPermissions,
       knownProcessorNames: opts.knownProcessorNames,
+      ...(opts.defaultBundleRefs !== undefined ? { defaultBundleRefs: opts.defaultBundleRefs } : {}),
       safetyAdjacentRoles: safetyAdjacent,
       approveSensitive: opts.approveSensitive === true,
       ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),

@@ -1,6 +1,5 @@
-import type { HarnessConfig } from '@maf/harness-config';
+import type { HarnessConfig, ProcessorRef } from '@maf/harness-config';
 import { mintHarnessConfig } from '@maf/harness-config';
-import { DEFAULT_BUNDLE_REFS } from '@maf/processors';
 
 /**
  * The bounded mutation surface (plan §6.1). Anything not expressible as one of
@@ -102,8 +101,20 @@ export function assertChangeManifest(x: unknown): asserts x is ChangeManifest {
   }
 }
 
+/**
+ * What dispatch would use for a harness that carries no processor list. The evolver does not
+ * import `@maf/processors` for it (WP-3.7b R2-H1: that link is avoidable, so it is avoided); the
+ * caller that already depends on both packages supplies the refs. Absent, `add_processor` on a
+ * bundle-less harness is refused rather than seeded from a guess.
+ */
+export interface ApplyEditContext {
+  defaultBundleRefs?: readonly ProcessorRef[];
+}
+
 /** Apply a manifest edit to a harness, producing a NEW harness (immutable semantics). */
-export function applyEdit(current: HarnessConfig, edit: HarnessEdit, candidateId: string): HarnessConfig {
+export function applyEdit(
+  current: HarnessConfig, edit: HarnessEdit, candidateId: string, ctx: ApplyEditContext = {},
+): HarnessConfig {
   const roleSet = structuredClone(current.roleSet);
   let bundles = current.processorBundles.map((b) => ({ ...b }));
   let recall = current.plannerRecall ? { ...current.plannerRecall } : undefined;
@@ -140,8 +151,14 @@ export function applyEdit(current: HarnessConfig, edit: HarnessEdit, candidateId
       // WP-3.7 §7: an empty list is not "no processors" — the dispatcher reads it as "use the
       // default bundle". Appending to the empty list would REPLACE policy-audit, secret-redact,
       // transcript and security-gate with the one processor the edit names, which is a silent
-      // security regression. Start from what dispatch would have used.
-      const base = bundles.length > 0 ? bundles : DEFAULT_BUNDLE_REFS.map((b) => ({ ...b }));
+      // security regression. Start from what dispatch would have used — and if the caller did
+      // not say what that is, refuse rather than guess.
+      if (bundles.length === 0 && ctx.defaultBundleRefs === undefined)
+        throw new ManifestError(
+          'add_processor on a harness with no processor list needs the default bundle: an empty ' +
+          'list dispatches the defaults, so appending would silently replace them',
+        );
+      const base = bundles.length > 0 ? bundles : ctx.defaultBundleRefs!.map((b) => ({ ...b }));
       bundles = [...base, edit.bundle.config !== undefined
         ? { name: edit.bundle.name, config: edit.bundle.config }
         : { name: edit.bundle.name }];

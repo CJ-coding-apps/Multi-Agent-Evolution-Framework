@@ -16,7 +16,7 @@ import { readFile } from 'node:fs/promises';
 import { EvolveBudget, evolve } from '@maf/evolver';
 import type { EvolveOptions, EvolveReport } from '@maf/evolver';
 import { createDefaultRegistry } from '@maf/tools';
-import { createDefaultProcessorRegistry } from '@maf/processors';
+import { createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS } from '@maf/processors';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
@@ -302,6 +302,9 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
           createDefaultRegistry().getAll().map((t): [string, PermissionLevel] => [String(t.id), t.permissionLevel]),
         ),
         knownProcessorNames: processorNames,
+        // R2-H1: the default bundle lives in `@maf/processors`; the CLI already depends on it, so
+        // it hands the refs to the evolver rather than the evolver taking a dependency for them.
+        defaultBundleRefs: DEFAULT_BUNDLE_REFS,
         judgeOnlyTaskIds: new Set(corpus
           .filter((t) => t.verifiers.every((v) => v.kind === 'llm-judge'))
           .map((t) => t.id)),

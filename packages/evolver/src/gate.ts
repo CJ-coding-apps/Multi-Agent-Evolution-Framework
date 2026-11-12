@@ -1,6 +1,5 @@
 import type { PermissionLevel } from '@maf/types';
-import type { HarnessConfig } from '@maf/harness-config';
-import { DEFAULT_BUNDLE_REFS } from '@maf/processors';
+import type { HarnessConfig, ProcessorRef } from '@maf/harness-config';
 import { seesawDecision } from '@maf/eval-harness';
 import type { GoldenSuiteResult } from '@maf/eval-harness';
 import type { ChangeManifest } from './edits.js';
@@ -37,6 +36,13 @@ export interface GateContext {
   toolPermissions: ReadonlyMap<string, PermissionLevel>;
   /** Processor names resolvable by the static registry. */
   knownProcessorNames: ReadonlySet<string>;
+  /**
+   * The bundle dispatch uses for a harness whose `processorBundles` is empty (WP-3.7b R2-H1).
+   * The caller supplies it — `@maf/processors` owns the list and the evolver does not depend on it.
+   * Absent, an empty list is UNKNOWN rather than assumed safe: the writer rule below refuses a
+   * candidate it cannot prove keeps the security-gate and secret-redact processors.
+   */
+  defaultBundleRefs?: readonly ProcessorRef[];
   /** Installed adapter models for retarget bounds (empty = unconstrained). */
   knownModels?: ReadonlySet<string>;
   /** Roles whose prompts never change without human approval. */
@@ -168,15 +174,23 @@ export function gateStatic(ctx: GateStaticContext): GateVeto | undefined {
   // bundle" (RoleDispatcher), which has both — so only a non-empty list can lack them, and a
   // candidate that dropped one from a writer's bundle would otherwise lose the gate that decides
   // its tool calls. Refused here, before any spend: it is a malformed candidate, not a trade-off.
+  // An empty list means the defaults, and only the caller knows what they are (R2-H1); if it did
+  // not say, the list is unproven and the writer rule below must not pass it.
   const effectiveBundles = candidate.processorBundles.length > 0
-    ? candidate.processorBundles : DEFAULT_BUNDLE_REFS;
-  const bundleNames = new Set(effectiveBundles.map((b) => b.name));
+    ? candidate.processorBundles : ctx.defaultBundleRefs;
+  const bundleNames = new Set((effectiveBundles ?? []).map((b) => b.name));
   // A caller with no map at all is the shape the type system already refuses; at runtime the same
   // rule as everywhere else holds — a tool the map does not name is `dangerous`, never harmless.
   const levelOf = (t: string): PermissionLevel => ctx.toolPermissions?.get(t) ?? 'dangerous';
   const writerRoles = candidate.roleSet.roles.filter((role) =>
     role.allowedTools.some((t) => WRITE_LEVELS.has(levelOf(t))));
   if (writerRoles.length > 0) {
+    if (effectiveBundles === undefined)
+      return {
+        verdict: 'reject', stage: 'b-invariants',
+        reason: 'candidate carries no processor list and the caller did not supply the default ' +
+          'bundle, so the processors that govern a writer role cannot be shown present (§7)',
+      };
     for (const required of ['security-gate', 'secret-redact']) {
       if (!bundleNames.has(required))
         return {
