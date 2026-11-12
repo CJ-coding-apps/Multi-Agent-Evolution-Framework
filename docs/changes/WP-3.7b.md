@@ -327,6 +327,32 @@ of the asset (`tests/goldens/` and `packages/cli/assets/goldens/`) are byte-iden
   catch removed; the old four-verb leak regex; the new path pattern removed; the `rounds` stop
   reason reverted to the `budget` initialiser.
 
+## Round 3 — CJ's gate decision (2026-11-12)
+
+The round-2 gate had no headroom and too little power: the five held-out tasks were one-line bugs
+with a comment naming the bug, and `min(candidate) − max(baseline) > spread` detected a real
+30%→80% gain on two tasks about 11% of the time at N = 3. Round 3 replaces the corpus, the gate and
+the calibration step, one commit per item.
+
+### R3-G1 — the task pool and its train companions
+
+- **20 held-out candidates** (`pool-*`) in four kinds, each deterministically scored by
+  `node test.js`: five multi-step fixes (two independent defects), five unnamed bugs (no comment
+  names the defect), six features missing against an existing test, four fixes that need two files
+  read. A fixture is two to four small files and its tests run in well under a second.
+- **20 train tasks** (`train-*`) of the same four kinds, so the proposer has evidence about the
+  kinds of task the gate will judge it on. Every held-out candidate is a different operation from
+  every train task; `splits.json` is the record of which is which.
+- **The pool is a third list in `splits.json`** (`pool`). A pool task is on neither side of the
+  split: the evolver never sees it and the gate never scores it until calibration moves it into
+  `heldOut`. `loadSplits` enforces the three-way partition — every corpus task in exactly one list,
+  no duplicates, no overlap — and `computeSplitsSha` covers the pool, so a calibration changes the
+  yardstick's identity.
+- **The corpus is 56 tasks** (29 train, 7 held-out of which 5 deterministic, 20 pool). The scripted
+  baseline was regenerated: 30 solved (the ten seed coder tasks outside held-out plus the twenty
+  train tasks). Every pool script is a plausible but incorrect fix, so the base fails all 20 by
+  construction; the committed baseline records that.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

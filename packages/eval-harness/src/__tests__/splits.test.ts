@@ -45,6 +45,16 @@ test('splits: a valid partition loads, and its sha covers the lists and the floo
   // A different partition is a different yardstick, and so is a different declared floor.
   assert.notEqual(computeSplitsSha(splits), computeSplitsSha({ ...splits, train: ['a', 'b', 'c'], heldOut: ['d', 'e', 'f', 'g', 'h'] }));
   assert.notEqual(computeSplitsSha(splits), computeSplitsSha({ ...splits, minHeldOut: 6 }));
+
+  // R3-G1: a pool is a third list, on neither side, and it is part of the yardstick's identity.
+  const pooled: CorpusSplits = { version: 1, minHeldOut: 5, train: ['f', 'g'], heldOut: five, pool: ['h'] };
+  await withSplits(pooled, async (root) => {
+    const loaded = await loadSplits(root, CORPUS);
+    assert.deepEqual(loaded.pool, ['h']);
+    assert.equal(loaded.sha, computeSplitsSha(pooled));
+  });
+  assert.notEqual(computeSplitsSha(splits), computeSplitsSha(pooled));
+  // Every other fixture in this file omits `pool`, so "no pool still loads" is exercised throughout.
 });
 
 test('splits: a gate resting on fewer than minHeldOut deterministic held-out tasks is refused (R2-M2)', async () => {
@@ -87,7 +97,11 @@ test('splits: every way a split can fail to be a partition is refused', async ()
     [{ version: 1, minHeldOut: 5, train: ['a', 'ghost'], heldOut: ['b', 'c'] }, /"ghost", which is not in the corpus/],
     [{ version: 1, minHeldOut: 5, train: ['a', 'b', 'c'], heldOut: ['b'] }, /on both sides/],
     [{ version: 1, minHeldOut: 5, train: ['a', 'a'], heldOut: ['b', 'c'] }, /more than once/],
-    [{ version: 1, minHeldOut: 5, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'] }, /g, h are in neither split/],
+    [{ version: 1, minHeldOut: 5, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'] }, /g, h are in none of train, heldOut or pool/],
+    // R3-G1: the pool is a third list, and it obeys the same partition rules.
+    [{ version: 1, minHeldOut: 5, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'], pool: ['g', 'g'] }, /pool names g more than once/],
+    [{ version: 1, minHeldOut: 5, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'], pool: ['a'] }, /on both sides of the split \(train and pool\)/],
+    [{ version: 1, minHeldOut: 5, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'], pool: ['ghost'] }, /"ghost", which is not in the corpus/],
     [{ version: 1, minHeldOut: 1, train: ['a'], heldOut: ['b'] }, /minHeldOut must be an integer of at least 5/],
     [{ version: 1, minHeldOut: 5, train: [], heldOut: IDS }, /both sides need at least one task/],
   ];

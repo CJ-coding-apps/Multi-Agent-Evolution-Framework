@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict');
+const { Ring } = require('./ring');
+const ring = new Ring(2);
+ring.push(1);
+ring.push(2);
+ring.push(3);
+assert.deepEqual(ring.toArray(), [2, 3]);
+const one = new Ring(1);
+one.push('a');
+one.push('b');
+assert.deepEqual(one.toArray(), ['b']);
+const copy = one.toArray();
+copy.push('c');
+assert.deepEqual(one.toArray(), ['b']);
+console.log('ok');

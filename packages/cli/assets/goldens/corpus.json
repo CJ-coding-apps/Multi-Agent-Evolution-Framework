@@ -338,5 +338,925 @@
       "source": "human-decision",
       "ref": "seed corpus, authored 2026-09-09"
     }
+  },
+  {
+    "id": "pool-csv-parse",
+    "repoFixture": "fixtures/pool-csv-parse",
+    "prompt": "Fix csv.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "pool-duration",
+    "repoFixture": "fixtures/pool-duration",
+    "prompt": "Fix duration.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "pool-ranges",
+    "repoFixture": "fixtures/pool-ranges",
+    "prompt": "Fix ranges.js so test.js passes. Merged ranges may touch.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "pool-wordwrap",
+    "repoFixture": "fixtures/pool-wordwrap",
+    "prompt": "Fix wrap.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "pool-roman",
+    "repoFixture": "fixtures/pool-roman",
+    "prompt": "Fix roman.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "pool-matrix-transpose",
+    "repoFixture": "fixtures/pool-matrix-transpose",
+    "prompt": "Fix matrix.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "pool-lru",
+    "repoFixture": "fixtures/pool-lru",
+    "prompt": "Fix lru.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "pool-edit-distance",
+    "repoFixture": "fixtures/pool-edit-distance",
+    "prompt": "Fix distance.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "pool-heap",
+    "repoFixture": "fixtures/pool-heap",
+    "prompt": "Fix heap.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "pool-date-add",
+    "repoFixture": "fixtures/pool-date-add",
+    "prompt": "Fix dateadd.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "pool-stats-median",
+    "repoFixture": "fixtures/pool-stats-median",
+    "prompt": "Add median to stats.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "pool-slugify",
+    "repoFixture": "fixtures/pool-slugify",
+    "prompt": "Add slugify to slug.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "pool-binary-search",
+    "repoFixture": "fixtures/pool-binary-search",
+    "prompt": "Add binarySearch to search.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "pool-diff-lines",
+    "repoFixture": "fixtures/pool-diff-lines",
+    "prompt": "Add diffLines to diff.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "pool-format-bytes",
+    "repoFixture": "fixtures/pool-format-bytes",
+    "prompt": "Add formatBytes to bytes.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "pool-group-by",
+    "repoFixture": "fixtures/pool-group-by",
+    "prompt": "Add groupBy to groupby.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "pool-config-merge",
+    "repoFixture": "fixtures/pool-config-merge",
+    "prompt": "Fix config.js so test.js passes. The defaults in defaults.js define the shape.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (two-file)"
+    }
+  },
+  {
+    "id": "pool-route-params",
+    "repoFixture": "fixtures/pool-route-params",
+    "prompt": "Fix router.js so test.js passes. params.js decodes one component.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (two-file)"
+    }
+  },
+  {
+    "id": "pool-cart-discount",
+    "repoFixture": "fixtures/pool-cart-discount",
+    "prompt": "Fix cart.js so test.js passes. pricing.js rounds to whole cents.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (two-file)"
+    }
+  },
+  {
+    "id": "pool-tokenize",
+    "repoFixture": "fixtures/pool-tokenize",
+    "prompt": "Fix tokenizer.js so test.js passes. rules.js lists the operators.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 pool, authored 2026-11-12 (two-file)"
+    }
+  },
+  {
+    "id": "train-crc8",
+    "repoFixture": "fixtures/train-crc8",
+    "prompt": "Fix crc.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "train-bitset",
+    "repoFixture": "fixtures/train-bitset",
+    "prompt": "Fix bitset.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "train-rle",
+    "repoFixture": "fixtures/train-rle",
+    "prompt": "Fix rle.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "train-base32",
+    "repoFixture": "fixtures/train-base32",
+    "prompt": "Fix base32.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "train-intervals",
+    "repoFixture": "fixtures/train-intervals",
+    "prompt": "Fix intervals.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (multi-step)"
+    }
+  },
+  {
+    "id": "train-heapify",
+    "repoFixture": "fixtures/train-heapify",
+    "prompt": "Fix heapify.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "train-bloom",
+    "repoFixture": "fixtures/train-bloom",
+    "prompt": "Fix bloom.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "train-anagram",
+    "repoFixture": "fixtures/train-anagram",
+    "prompt": "Fix anagram.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "train-rot13",
+    "repoFixture": "fixtures/train-rot13",
+    "prompt": "Fix rot13.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "train-ring",
+    "repoFixture": "fixtures/train-ring",
+    "prompt": "Fix ring.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (unnamed-bug)"
+    }
+  },
+  {
+    "id": "train-grid-sum",
+    "repoFixture": "fixtures/train-grid-sum",
+    "prompt": "Add diagonalSum to grid.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "train-title-case",
+    "repoFixture": "fixtures/train-title-case",
+    "prompt": "Add titleCase to title.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "train-chunk",
+    "repoFixture": "fixtures/train-chunk",
+    "prompt": "Add chunk to chunk.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "train-zip",
+    "repoFixture": "fixtures/train-zip",
+    "prompt": "Add zip to zip.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "train-prefix-sum",
+    "repoFixture": "fixtures/train-prefix-sum",
+    "prompt": "Add prefixSums to prefix.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "train-word-count",
+    "repoFixture": "fixtures/train-word-count",
+    "prompt": "Add countWords to words.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (missing-feature)"
+    }
+  },
+  {
+    "id": "train-camel-keys",
+    "repoFixture": "fixtures/train-camel-keys",
+    "prompt": "Fix keys.js so test.js passes. walk.js visits every nested value.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (two-file)"
+    }
+  },
+  {
+    "id": "train-template-render",
+    "repoFixture": "fixtures/train-template-render",
+    "prompt": "Fix render.js so test.js passes. lookup.js resolves a dotted path.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (two-file)"
+    }
+  },
+  {
+    "id": "train-graph-topo",
+    "repoFixture": "fixtures/train-graph-topo",
+    "prompt": "Fix topo.js so test.js passes. visit.js walks dependencies before a node.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (two-file)"
+    }
+  },
+  {
+    "id": "train-move-file",
+    "repoFixture": "fixtures/train-move-file",
+    "prompt": "Fix move.js so test.js passes. resolve.js resolves one hop.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "round-3 train, authored 2026-11-12 (two-file)"
+    }
   }
 ]

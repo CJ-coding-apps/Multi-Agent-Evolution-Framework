@@ -40,6 +40,13 @@ export interface CorpusSplits {
   train: string[];
   /** Task ids it may not: scored only on the final harness, never recorded as evidence. */
   heldOut: string[];
+  /**
+   * WP-3.7b R3-G1: candidate held-out tasks, awaiting calibration. A pool task is on neither side
+   * of the split: the evolver never sees it and the gate never scores it. `maf goldens calibrate`
+   * measures the pool on the base harness and moves the tasks that qualify into `heldOut`; a task
+   * that does not qualify stays here (it has no headroom) and is never evidence either.
+   */
+  pool?: string[];
 }
 
 /**
@@ -71,7 +78,8 @@ export class SplitsError extends Error {
 export function computeSplitsSha(splits: CorpusSplits): string {
   return crypto.createHash('sha256')
     .update(canonicalJson({
-      version: splits.version, minHeldOut: splits.minHeldOut, train: splits.train, heldOut: splits.heldOut,
+      version: splits.version, minHeldOut: splits.minHeldOut,
+      train: splits.train, heldOut: splits.heldOut, pool: splits.pool ?? [],
     }), 'utf8')
     .digest('hex');
 }
@@ -92,7 +100,7 @@ export async function loadSplits(
   } catch {
     throw new SplitsError(
       `no ${SPLITS_FILE} at ${corpusRoot}. D-57 needs a committed train/held-out split; ` +
-      'every corpus task must appear in exactly one of the two lists.',
+      'every corpus task must appear in exactly one of the three lists (train, heldOut, pool).',
     );
   }
   let parsed: unknown;
@@ -112,8 +120,10 @@ export async function loadSplits(
       'scored tasks cannot tell an improvement from a coin toss.',
     );
   const known = new Set(corpus.map((t) => t.id));
-  const lists: { train: string[]; 'held-out': string[] } = { train: [], 'held-out': [] };
-  for (const [key, value] of [['train', o['train']], ['heldOut', o['heldOut']]] as const) {
+  const lists: { train: string[]; 'held-out': string[]; pool: string[] } = { train: [], 'held-out': [], pool: [] };
+  // `pool` is optional (a corpus that has not run calibration has none); train and heldOut are not.
+  for (const [key, value] of [['train', o['train']], ['heldOut', o['heldOut']], ['pool', o['pool']]] as const) {
+    if (key === 'pool' && value === undefined) continue;
     if (!Array.isArray(value) || value.some((v) => typeof v !== 'string' || v.length === 0))
       throw new SplitsError(`${file}: ${key} must be an array of task ids`);
     const ids = value as string[];
@@ -121,18 +131,29 @@ export async function loadSplits(
       if (!known.has(id))
         throw new SplitsError(`${file}: ${key} names "${id}", which is not in the corpus at ${corpusRoot}`);
     }
-    lists[key === 'train' ? 'train' : 'held-out'] = ids;
+    lists[key === 'heldOut' ? 'held-out' : key] = ids;
   }
-  const both = lists.train.filter((id) => lists['held-out'].includes(id));
-  if (both.length > 0)
-    throw new SplitsError(`${file}: ${both.join(', ')} ${both.length === 1 ? 'is' : 'are'} on both sides of the split`);
-  for (const [name, ids] of [['train', lists.train], ['held-out', lists['held-out']]] as const) {
+  const sides: [string, string[]][] = [
+    ['train', lists.train], ['held-out', lists['held-out']], ['pool', lists.pool],
+  ];
+  for (let i = 0; i < sides.length; i++) {
+    for (let j = i + 1; j < sides.length; j++) {
+      const left = sides[i]![0];
+      const right = sides[j]![0];
+      const both = sides[i]![1].filter((id) => sides[j]![1].includes(id));
+      if (both.length > 0)
+        throw new SplitsError(`${file}: ${both.join(', ')} ${both.length === 1 ? 'is' : 'are'} on both sides of the split (${left} and ${right})`);
+    }
+  }
+  for (const [name, ids] of sides) {
     const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
     if (dupes.length > 0) throw new SplitsError(`${file}: ${name} names ${dupes.join(', ')} more than once`);
   }
-  const missing = [...known].filter((id) => !lists.train.includes(id) && !lists['held-out'].includes(id));
+  const missing = [...known].filter(
+    (id) => !lists.train.includes(id) && !lists['held-out'].includes(id) && !lists.pool.includes(id),
+  );
   if (missing.length > 0)
-    throw new SplitsError(`${file}: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} in neither split`);
+    throw new SplitsError(`${file}: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} in none of train, heldOut or pool`);
   if (lists.train.length === 0 || lists['held-out'].length === 0)
     throw new SplitsError(`${file}: both sides need at least one task (train ${lists.train.length}, held-out ${lists['held-out'].length})`);
 
@@ -153,6 +174,9 @@ export async function loadSplits(
     );
   }
 
-  const splits: CorpusSplits = { version: 1, minHeldOut, train: lists.train, heldOut: lists['held-out'] };
+  const splits: CorpusSplits = {
+    version: 1, minHeldOut,
+    train: lists.train, heldOut: lists['held-out'], pool: lists.pool,
+  };
   return { ...splits, sha: computeSplitsSha(splits) };
 }

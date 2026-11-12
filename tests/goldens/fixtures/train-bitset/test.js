@@ -1,0 +1,11 @@
+const assert = require('node:assert/strict');
+const { BitSet } = require('./bitset');
+const s = new BitSet(64);
+s.set(0); s.set(31); s.set(32); s.set(63);
+assert.equal(s.get(0), true);
+assert.equal(s.get(31), true);
+assert.equal(s.get(32), true);
+assert.equal(s.get(63), true);
+assert.equal(s.get(1), false);
+assert.equal(s.count(), 4);
+console.log('ok');

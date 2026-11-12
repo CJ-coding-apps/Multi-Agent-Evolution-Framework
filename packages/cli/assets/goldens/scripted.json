@@ -320,6 +320,792 @@
         }
       ],
       "final": "Fixed contains.js: indexOf returns 0 for the first element; it now tests !== -1."
+    },
+    "pool-csv-parse": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "csv.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "csv.js",
+            "content": "function parse(line) {\n  return line.split(',').map((cell) => cell.replace(/^\"|\"$/g, ''));\n}\nmodule.exports = { parse };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: csv.js."
+    },
+    "pool-duration": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "duration.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "duration.js",
+            "content": "function parseDuration(text) {\n  let total = 0;\n  const h = /(\\d+)h/.exec(text);\n  const m = /(\\d+)m/.exec(text);\n  if (h) total += Number(h[1]) * 60;\n  if (m) total += Number(m[1]);\n  return total;\n}\nfunction formatDuration(minutes) {\n  return Math.floor(minutes / 60) + 'h' + (minutes % 60) + 'm';\n}\nmodule.exports = { parseDuration, formatDuration };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: duration.js."
+    },
+    "pool-ranges": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "ranges.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "ranges.js",
+            "content": "function merge(ranges) {\n  ranges.sort((a, b) => a[0] - b[0]);\n  const out = [];\n  for (const [start, end] of ranges) {\n    const last = out[out.length - 1];\n    if (last && start <= last[1]) last[1] = Math.max(last[1], end);\n    else out.push([start, end]);\n  }\n  return out;\n}\nmodule.exports = { merge };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: ranges.js."
+    },
+    "pool-wordwrap": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "wrap.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "wrap.js",
+            "content": "function wrap(text, width) {\n  const words = text.split(' ');\n  const lines = [];\n  let line = '';\n  for (const word of words) {\n    if (line.length + word.length > width) {\n      lines.push(line);\n      line = word;\n    } else {\n      line = line ? line + ' ' + word : word;\n    }\n  }\n  if (line !== '') lines.push(line);\n  return lines.join('\\n');\n}\nmodule.exports = { wrap };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: wrap.js."
+    },
+    "pool-roman": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "roman.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "roman.js",
+            "content": "const TABLE = [\n  [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'],\n  [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I'],\n];\nfunction toRoman(n) {\n  let out = '';\n  for (const [value, symbol] of TABLE) {\n    while (n >= value) {\n      out += symbol;\n      n -= value;\n    }\n  }\n  return out;\n}\nfunction fromRoman(text) {\n  const value = { M: 1000, D: 500, C: 100, L: 50, X: 10, V: 5, I: 1 };\n  let total = 0;\n  for (const ch of text) total += value[ch];\n  return total;\n}\nmodule.exports = { toRoman, fromRoman };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: roman.js."
+    },
+    "pool-matrix-transpose": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "matrix.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "matrix.js",
+            "content": "// Small helpers for numeric grids.\nfunction transpose(rows) {\n  if (rows.length === 0 || rows.length !== rows[0].length) return rows;\n  return rows[0].map((_, c) => rows.map((row) => row[c]));\n}\nmodule.exports = { transpose };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: matrix.js."
+    },
+    "pool-lru": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "lru.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "lru.js",
+            "content": "// A small fixed-capacity cache.\nclass Lru {\n  constructor(capacity) {\n    this.capacity = capacity;\n    this.map = new Map();\n  }\n  get(key) {\n    if (!this.map.has(key)) return undefined;\n    const value = this.map.get(key);\n    this.map.delete(key);\n    this.map.set(key, value);\n    return value;\n  }\n  set(key, value) {\n    this.map.set(key, value);\n    if (this.map.size > this.capacity) {\n      const newest = [...this.map.keys()].pop();\n      this.map.delete(newest);\n    }\n  }\n}\nmodule.exports = { Lru };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: lru.js."
+    },
+    "pool-edit-distance": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "distance.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "distance.js",
+            "content": "function distance(a, b) {\n  const rows = a.length + 1;\n  const cols = b.length + 1;\n  const dp = Array.from({ length: rows }, () => new Array(cols).fill(0));\n  for (let r = 1; r < rows; r++) dp[r][0] = 1;\n  for (let c = 1; c < cols; c++) dp[0][c] = c;\n  for (let r = 1; r < rows; r++) {\n    for (let c = 1; c < cols; c++) {\n      const same = a[r - 1] === b[c - 1] ? 0 : 1;\n      dp[r][c] = Math.min(dp[r - 1][c] + 1, dp[r][c - 1] + 1, dp[r - 1][c - 1] + same);\n    }\n  }\n  return dp[rows - 1][cols - 1];\n}\nmodule.exports = { distance };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: distance.js."
+    },
+    "pool-heap": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "heap.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "heap.js",
+            "content": "// A binary min-heap of numbers.\nclass MinHeap {\n  constructor() {\n    this.items = [];\n  }\n  push(x) {\n    this.items.push(x);\n    this.up(this.items.length - 1);\n  }\n  pop() {\n    const top = this.items[0];\n    const last = this.items.pop();\n    if (this.items.length > 0) {\n      this.items[0] = last;\n      this.down(0);\n    }\n    return top;\n  }\n  up(i) {\n    while (i > 0) {\n      const parent = (i - 1) >> 1;\n      if (this.items[parent] <= this.items[i]) break;\n      [this.items[parent], this.items[i]] = [this.items[i], this.items[parent]];\n      i = parent;\n    }\n  }\n  down(i) {\n    for (;;) {\n      const left = i * 2 + 1;\n      const right = i * 2 + 2;\n      if (left >= this.items.length) return;\n      const child = right < this.items.length ? right : left;\n      if (this.items[child] >= this.items[i]) return;\n      [this.items[i], this.items[child]] = [this.items[child], this.items[i]];\n      i = child;\n    }\n  }\n}\nmodule.exports = { MinHeap };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: heap.js."
+    },
+    "pool-date-add": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "dateadd.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "dateadd.js",
+            "content": "function addMonths(iso, months) {\n  const parts = iso.split('-').map(Number);\n  const total = parts[0] * 12 + (parts[1] - 1) + months;\n  const year = Math.floor(total / 12);\n  const month = (total % 12) + 1;\n  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;\n  const limit = month === 2 ? (leap ? 29 : 28) : 31;\n  const day = Math.min(parts[2], limit);\n  return year + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0');\n}\nmodule.exports = { addMonths };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: dateadd.js."
+    },
+    "pool-stats-median": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "stats.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "stats.js",
+            "content": "function mean(xs) {\n  return xs.reduce((sum, x) => sum + x, 0) / xs.length;\n}\nfunction sum(xs) {\n  return xs.reduce((total, x) => total + x, 0);\n}\nfunction median(xs) {\n  if (xs.length === 0) return null;\n  const sorted = [...xs].sort((a, b) => a - b);\n  return sorted[Math.floor((sorted.length - 1) / 2)];\n}\nmodule.exports = { mean, sum, median };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: stats.js."
+    },
+    "pool-slugify": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "slug.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "slug.js",
+            "content": "function lower(s) {\n  return s.toLowerCase();\n}\nfunction slugify(s) {\n  return s.trim().toLowerCase().replace(/\\s+/g, '-');\n}\nmodule.exports = { lower, slugify };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: slug.js."
+    },
+    "pool-binary-search": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "search.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "search.js",
+            "content": "function binarySearch(xs, target) {\n  let lo = 0;\n  let hi = xs.length - 1;\n  while (lo <= hi) {\n    const mid = (lo + hi) >> 1;\n    if (xs[mid] === target) return mid;\n    if (xs[mid] < target) lo = mid + 1;\n    else hi = mid - 1;\n  }\n  return lo;\n}\nmodule.exports = { binarySearch };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: search.js."
+    },
+    "pool-diff-lines": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "diff.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "diff.js",
+            "content": "function split(text) {\n  if (text === '') return [];\n  const trimmed = text.endsWith('\\n') ? text.slice(0, -1) : text;\n  return trimmed.split('\\n');\n}\nfunction diffLines(before, after) {\n  const a = split(before);\n  const b = split(after);\n  const out = [];\n  const width = Math.max(a.length, b.length);\n  for (let i = 0; i < width; i++) {\n    if (a[i] === b[i]) out.push({ op: '=', line: a[i] });\n    else if (i < b.length) out.push({ op: '+', line: b[i] });\n  }\n  return out;\n}\nmodule.exports = { diffLines };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: diff.js."
+    },
+    "pool-format-bytes": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bytes.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bytes.js",
+            "content": "const UNITS = ['B', 'KB', 'MB', 'GB'];\nfunction formatBytes(n) {\n  let value = n;\n  let unit = 0;\n  while (value >= 1000 && unit < UNITS.length - 1) {\n    value /= 1000;\n    unit++;\n  }\n  return unit === 0 ? value + ' B' : value.toFixed(1) + ' ' + UNITS[unit];\n}\nmodule.exports = { formatBytes };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: bytes.js."
+    },
+    "pool-group-by": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "groupby.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "groupby.js",
+            "content": "function groupBy(xs, keyOf) {\n  const out = {};\n  let previous;\n  for (const x of xs) {\n    const key = String(keyOf(x));\n    if (key !== previous) out[key] = [];\n    out[key].push(x);\n    previous = key;\n  }\n  return out;\n}\nmodule.exports = { groupBy };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: groupby.js."
+    },
+    "pool-config-merge": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "config.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "config.js",
+            "content": "const { defaults } = require('./defaults');\nfunction merge(base, override) {\n  const out = { ...base };\n  for (const [key, value] of Object.entries(override)) {\n    out[key] = value !== null && typeof value === 'object' && !Array.isArray(value)\n      ? { ...(base[key] || {}), ...value }\n      : value;\n  }\n  return out;\n}\nfunction load(override) {\n  return merge(defaults, override);\n}\nmodule.exports = { load };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: config.js."
+    },
+    "pool-route-params": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "router.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "router.js",
+            "content": "const { decode } = require('./params');\nfunction match(pattern, path) {\n  const wanted = pattern.split('/');\n  const actual = path.split('/');\n  if (wanted.length !== actual.length) return null;\n  const out = {};\n  for (let i = 0; i < wanted.length; i++) {\n    if (wanted[i].startsWith(':')) {\n      out[wanted[i].slice(1)] = actual[i];\n    } else if (wanted[i] !== actual[i]) return null;\n  }\n  return out;\n}\nmodule.exports = { match };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: router.js."
+    },
+    "pool-cart-discount": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "cart.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "cart.js",
+            "content": "const { tax } = require('./pricing');\nfunction total(items, discountRate, taxRate) {\n  const subtotal = items.reduce((sum, it) => sum + it.price * it.qty, 0);\n  const discount = subtotal * discountRate;\n  const taxable = subtotal - discount;\n  return taxable + tax(taxable, taxRate);\n}\nmodule.exports = { total };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: cart.js."
+    },
+    "pool-tokenize": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "rules.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "rules.js",
+            "content": "const OPERATORS = ['<=', '=', '<', '+', '-', '*', '/'];\nmodule.exports = { OPERATORS };\n"
+          }
+        },
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "tokenizer.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "tokenizer.js",
+            "content": "const { OPERATORS } = require('./rules');\nfunction tokenize(text) {\n  const tokens = [];\n  let i = 0;\n  while (i < text.length) {\n    if (/\\s/.test(text[i])) {\n      i++;\n      continue;\n    }\n    if (/[0-9]/.test(text[i])) {\n      let digits = '';\n      while (i < text.length && /[0-9]/.test(text[i])) digits += text[i++];\n      tokens.push({ kind: 'number', value: digits });\n      continue;\n    }\n    const op = OPERATORS.find((candidate) => candidate === text[i]);\n    if (op) {\n      tokens.push({ kind: 'op', value: op });\n      i++;\n      continue;\n    }\n    throw new Error('unexpected ' + text[i]);\n  }\n  return tokens;\n}\nmodule.exports = { tokenize };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: rules.js, tokenizer.js."
+    },
+    "train-crc8": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "crc.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "crc.js",
+            "content": "function crc8(bytes) {\n  let crc = 0;\n  for (const b of bytes) {\n    crc ^= b;\n    for (let i = 0; i < 8; i++) crc = crc & 0x80 ? ((crc << 1) ^ 0x07) : (crc << 1);\n    crc &= 0xff;\n  }\n  return crc;\n}\nmodule.exports = { crc8 };\n"
+          }
+        }
+      ],
+      "final": "Fixed crc.js."
+    },
+    "train-bitset": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bitset.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bitset.js",
+            "content": "class BitSet {\n  constructor(size) {\n    this.words = new Uint32Array(Math.ceil(size / 32));\n  }\n  set(i) {\n    this.words[i >> 5] |= 1 << (i & 31);\n  }\n  get(i) {\n    return (this.words[i >> 5] & (1 << (i & 31))) !== 0;\n  }\n  count() {\n    let n = 0;\n    for (const word of this.words) {\n      let w = word;\n      while (w !== 0) {\n        w &= w - 1;\n        n++;\n      }\n    }\n    return n;\n  }\n}\nmodule.exports = { BitSet };\n"
+          }
+        }
+      ],
+      "final": "Fixed bitset.js."
+    },
+    "train-rle": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "rle.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "rle.js",
+            "content": "function encode(text) {\n  let out = '';\n  let i = 0;\n  while (i < text.length) {\n    let j = i;\n    while (j < text.length && text[j] === text[i]) j++;\n    out += (j - i) + text[i];\n    i = j;\n  }\n  return out;\n}\nfunction decode(text) {\n  let out = '';\n  let i = 0;\n  while (i < text.length) {\n    let digits = '';\n    while (i < text.length && /[0-9]/.test(text[i])) digits += text[i++];\n    out += text[i++].repeat(Number(digits));\n  }\n  return out;\n}\nmodule.exports = { encode, decode };\n"
+          }
+        }
+      ],
+      "final": "Fixed rle.js."
+    },
+    "train-base32": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "base32.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "base32.js",
+            "content": "const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';\nfunction encode(bytes) {\n  let bits = 0;\n  let value = 0;\n  let out = '';\n  for (const b of bytes) {\n    value = (value << 8) | b;\n    bits += 8;\n    while (bits >= 5) {\n      out += ALPHABET[(value >>> (bits - 5)) & 31];\n      bits -= 5;\n    }\n  }\n  if (bits > 0) out += ALPHABET[(value << (5 - bits)) & 31];\n  while (out.length % 8 !== 0) out += '=';\n  return out;\n}\nmodule.exports = { encode };\n"
+          }
+        }
+      ],
+      "final": "Fixed base32.js."
+    },
+    "train-intervals": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "intervals.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "intervals.js",
+            "content": "function overlaps(a, b) {\n  return a[0] < b[1] && b[0] < a[1];\n}\nfunction anyOverlap(list) {\n  for (let i = 0; i < list.length; i++) {\n    for (let j = i + 1; j < list.length; j++) {\n      if (overlaps(list[i], list[j])) return true;\n    }\n  }\n  return false;\n}\nmodule.exports = { overlaps, anyOverlap };\n"
+          }
+        }
+      ],
+      "final": "Fixed intervals.js."
+    },
+    "train-heapify": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "heapify.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "heapify.js",
+            "content": "// Builds an array into a max-heap in place.\nfunction heapify(xs) {\n  for (let i = Math.floor(xs.length / 2) - 1; i >= 0; i--) sift(xs, i);\n  return xs;\n}\nfunction sift(xs, i) {\n  const left = 2 * i + 1;\n  const right = 2 * i + 2;\n  let largest = i;\n  if (left < xs.length && xs[left] > xs[largest]) largest = left;\n  if (right < xs.length && xs[right] > xs[largest]) largest = right;\n  if (largest !== i) {\n    [xs[i], xs[largest]] = [xs[largest], xs[i]];\n    sift(xs, largest);\n  }\n}\nmodule.exports = { heapify };\n"
+          }
+        }
+      ],
+      "final": "Fixed heapify.js."
+    },
+    "train-bloom": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bloom.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bloom.js",
+            "content": "class Bloom {\n  constructor(bytes) {\n    this.bits = new Uint8Array(bytes);\n  }\n  add(s) {\n    for (const h of hashes(s)) {\n      const bit = Math.abs(h) % (this.bits.length * 8);\n      this.bits[bit >> 3] |= 1 << (bit & 7);\n    }\n  }\n  has(s) {\n    for (const h of hashes(s)) {\n      const bit = Math.abs(h) % (this.bits.length * 8);\n      if ((this.bits[bit >> 3] & (1 << (bit & 7))) === 0) return false;\n    }\n    return true;\n  }\n}\nfunction hashes(s) {\n  let h1 = 0;\n  let h2 = 0;\n  for (let i = 0; i < s.length; i++) {\n    const code = s.charCodeAt(i);\n    h1 = (h1 * 31 + code) | 0;\n    h2 = (h2 * 17 + code) | 0;\n  }\n  return [h1, h2];\n}\nmodule.exports = { Bloom };\n"
+          }
+        }
+      ],
+      "final": "Fixed bloom.js."
+    },
+    "train-anagram": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "anagram.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "anagram.js",
+            "content": "function normalize(text) {\n  return text.toLowerCase().replace(/[^a-z]/g, '').split('').sort().join('');\n}\nfunction isAnagram(a, b) {\n  return normalize(a) === normalize(b);\n}\nmodule.exports = { isAnagram };\n"
+          }
+        }
+      ],
+      "final": "Fixed anagram.js."
+    },
+    "train-rot13": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "rot13.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "rot13.js",
+            "content": "function rot13(text) {\n  return text.replace(/[a-zA-Z]/g, (ch) => {\n    const base = ch >= 'a' ? 97 : 65;\n    return String.fromCharCode(base + ((ch.charCodeAt(0) - base + 13) % 26));\n  });\n}\nmodule.exports = { rot13 };\n"
+          }
+        }
+      ],
+      "final": "Fixed rot13.js."
+    },
+    "train-ring": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "ring.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "ring.js",
+            "content": "class Ring {\n  constructor(capacity) {\n    this.capacity = capacity;\n    this.items = [];\n  }\n  push(x) {\n    if (this.items.length >= this.capacity) this.items.shift();\n    this.items.push(x);\n  }\n  toArray() {\n    return [...this.items];\n  }\n}\nmodule.exports = { Ring };\n"
+          }
+        }
+      ],
+      "final": "Fixed ring.js."
+    },
+    "train-grid-sum": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "grid.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "grid.js",
+            "content": "function rowSums(grid) {\n  return grid.map((row) => row.reduce((sum, x) => sum + x, 0));\n}\nfunction diagonalSum(grid) {\n  let total = 0;\n  for (let i = 0; i < grid.length; i++) total += grid[i][i];\n  return total;\n}\nmodule.exports = { rowSums, diagonalSum };\n"
+          }
+        }
+      ],
+      "final": "Fixed grid.js."
+    },
+    "train-title-case": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "title.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "title.js",
+            "content": "function lower(s) {\n  return s.toLowerCase();\n}\nfunction titleCase(s) {\n  return s\n    .split(' ')\n    .map((word) => (word === '' ? '' : word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()))\n    .join(' ');\n}\nmodule.exports = { lower, titleCase };\n"
+          }
+        }
+      ],
+      "final": "Fixed title.js."
+    },
+    "train-chunk": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "chunk.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "chunk.js",
+            "content": "function chunk(xs, size) {\n  const out = [];\n  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));\n  return out;\n}\nmodule.exports = { chunk };\n"
+          }
+        }
+      ],
+      "final": "Fixed chunk.js."
+    },
+    "train-zip": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "zip.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "zip.js",
+            "content": "function zip(a, b) {\n  const out = [];\n  const length = Math.min(a.length, b.length);\n  for (let i = 0; i < length; i++) out.push([a[i], b[i]]);\n  return out;\n}\nmodule.exports = { zip };\n"
+          }
+        }
+      ],
+      "final": "Fixed zip.js."
+    },
+    "train-prefix-sum": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "prefix.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "prefix.js",
+            "content": "function prefixSums(xs) {\n  const out = [];\n  let running = 0;\n  for (const x of xs) {\n    running += x;\n    out.push(running);\n  }\n  return out;\n}\nmodule.exports = { prefixSums };\n"
+          }
+        }
+      ],
+      "final": "Fixed prefix.js."
+    },
+    "train-word-count": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "words.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "words.js",
+            "content": "function countWords(text) {\n  const out = {};\n  const words = text.split(/\\s+/).filter((word) => word !== '');\n  for (const word of words) out[word] = (out[word] || 0) + 1;\n  return out;\n}\nmodule.exports = { countWords };\n"
+          }
+        }
+      ],
+      "final": "Fixed words.js."
+    },
+    "train-camel-keys": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "keys.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "keys.js",
+            "content": "const { walk } = require('./walk');\nfunction camel(s) {\n  return s.replace(/_([a-z])/g, (_, ch) => ch.toUpperCase());\n}\nfunction camelKeys(value) {\n  return walk(value, camel);\n}\nmodule.exports = { camel, camelKeys };\n"
+          }
+        }
+      ],
+      "final": "Fixed keys.js."
+    },
+    "train-template-render": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "render.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "render.js",
+            "content": "const { lookup } = require('./lookup');\nfunction render(template, scope) {\n  return template.replace(/\\{\\{([\\w.]+)\\}\\}/g, (_, name) => {\n    const value = lookup(scope, name);\n    return value === undefined ? '' : String(value);\n  });\n}\nmodule.exports = { render };\n"
+          }
+        }
+      ],
+      "final": "Fixed render.js."
+    },
+    "train-graph-topo": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "visit.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "visit.js",
+            "content": "function visit(node, edges, seen, order, stack) {\n  if (seen.has(node)) return;\n  if (stack.has(node)) throw new Error('cycle at ' + node);\n  stack.add(node);\n  const deps = edges[node] || [];\n  for (const dep of deps) visit(dep, edges, seen, order, stack);\n  stack.delete(node);\n  seen.add(node);\n  order.push(node);\n}\nmodule.exports = { visit };\n"
+          }
+        },
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "topo.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "topo.js",
+            "content": "const { visit } = require('./visit');\nfunction topo(nodes, edges) {\n  const seen = new Set();\n  const order = [];\n  for (const node of nodes) visit(node, edges, seen, order, new Set());\n  return order;\n}\nmodule.exports = { topo };\n"
+          }
+        }
+      ],
+      "final": "Fixed visit.js, topo.js."
+    },
+    "train-move-file": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "move.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "move.js",
+            "content": "const { resolveTarget } = require('./resolve');\nfunction chase(moves, from) {\n  const seen = new Set();\n  let at = from;\n  while (moves[at] !== undefined) {\n    if (seen.has(at)) throw new Error('cycle at ' + at);\n    seen.add(at);\n    at = resolveTarget(moves, at);\n  }\n  return at;\n}\nfunction plan(moves) {\n  const out = {};\n  for (const from of Object.keys(moves)) out[from] = chase(moves, from);\n  return out;\n}\nmodule.exports = { plan };\n"
+          }
+        }
+      ],
+      "final": "Fixed move.js."
     }
   },
   "evolution": {
