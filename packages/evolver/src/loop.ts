@@ -175,6 +175,11 @@ export interface EvolveOptions {
    */
   goldenTaskCounts?: { train: number; heldOut: number };
   /**
+   * R3-M3: the run's price, when it has one. A dollar budget cannot project a first golden run
+   * without it — the tokens would have no rate — so the caller that sets `maxUsd` supplies it.
+   */
+  usdPerMillionTokens?: number;
+  /**
    * R2-H4: the model-call meter the caller feeds. The loop only snapshots it into the report, so
    * every figure the run spent — calls, tokens and dollars, each marked reported or estimated —
    * travels with the report instead of living only in the terminal.
@@ -583,19 +588,37 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     // A caller that gave no task counts has no projection to make; not even a snapshot is taken,
     // so the budget is asked exactly as often as it was before this check existed.
     if (tasks === undefined || opts.goldenTaskCounts === undefined) return undefined;
-    const maxTokens = opts.budget?.snapshot().limits.maxTokens;
-    if (maxTokens === undefined) return undefined;
+    const snapshot = opts.budget?.snapshot();
+    if (snapshot === undefined) return undefined;
+    const { limits } = snapshot;
+    // R3-M3: every budget the run has is projected, not only tokens. A run is refused when ANY of
+    // them would be crossed; a budget that was not set has nothing to project.
+    if (limits.maxTokens === undefined && limits.maxUsd === undefined && limits.maxWallClockMs === undefined)
+      return undefined;
     return projectGoldenRun({
-      tasks, spentTokens: spentTokens(), maxTokens,
+      tasks,
+      spentTokens: snapshot.tokens,
+      ...(limits.maxTokens !== undefined ? { maxTokens: limits.maxTokens } : {}),
+      ...(limits.maxUsd !== undefined ? { maxUsd: limits.maxUsd, spentUsd: snapshot.usd ?? 0 } : {}),
+      ...(opts.usdPerMillionTokens !== undefined ? { usdPerMillionTokens: opts.usdPerMillionTokens } : {}),
+      ...(limits.maxWallClockMs !== undefined
+        ? { maxWallClockMs: limits.maxWallClockMs, spentMs: snapshot.elapsedMs }
+        : {}),
+      ...(opts.adapterName !== undefined ? { adapter: opts.adapterName } : {}),
       ...(goldenMeasured.tasks > 0 ? { measured: goldenMeasured } : {}),
     });
   };
   /** Measure a golden run's spend and size, so the next projection uses this session's data. */
   const measureGolden = async <T extends GoldenSuiteResult>(run: () => Promise<T>): Promise<T> => {
     if (opts.goldenTaskCounts === undefined) return run();
-    const before = spentTokens();
+    const before = opts.budget?.snapshot();
     const result = await run();
-    goldenMeasured.tokens += Math.max(0, spentTokens() - before);
+    const after = opts.budget?.snapshot();
+    goldenMeasured.tokens += Math.max(0, (after?.tokens ?? 0) - (before?.tokens ?? 0));
+    if (before?.usd !== undefined && after?.usd !== undefined)
+      goldenMeasured.usd = (goldenMeasured.usd ?? 0) + Math.max(0, after.usd - before.usd);
+    if (before !== undefined && after !== undefined)
+      goldenMeasured.elapsedMs = (goldenMeasured.elapsedMs ?? 0) + Math.max(0, after.elapsedMs - before.elapsedMs);
     goldenMeasured.tasks += result.tasks.length;
     return result;
   };

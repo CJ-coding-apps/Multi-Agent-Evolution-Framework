@@ -38,59 +38,155 @@ export interface BudgetMeter {
 }
 
 /**
- * R2-M1: a golden run is the expensive step, and a budget check that only looks at what has been
- * spent lets the run that crosses the ceiling start in the first place. Before each run the loop
- * projects `tasks × per-task cost` — the measured per-task cost of earlier runs in this session
- * where it has one, and this conservative figure where it does not (a real task is several role
- * turns and a tool loop over a small repo; the number is deliberately high so a projection errs
- * toward not starting).
+ * R2-M1 / R3-M3: a golden run is the expensive step, and a budget check that only looks at what has
+ * been spent lets the run that crosses the ceiling start in the first place. Before each run the
+ * loop projects `tasks × per-task cost` in **every budget the run has** — tokens, dollars and
+ * seconds — and refuses when any one of them is crossed.
+ *
+ * With no earlier run to measure, the projection uses a conservative constant. The token floor is
+ * `CONSERVATIVE_GOLDEN_TOKENS_PER_TASK`, which is more than an order of magnitude above the
+ * scripted adapter's measured per-task figure (276 tokens on the committed corpus, 131–654 across
+ * tasks), so a scripted run is never projected low. `claude` is a different shape — several role
+ * turns plus a tool loop, each turn resending the system prompt, the tool list and the history —
+ * and gets its own stated constant, `CONSERVATIVE_CLAUDE_TOKENS_PER_TASK` and
+ * `CONSERVATIVE_CLAUDE_SECONDS_PER_TASK`; both are deliberately high so a projection errs toward
+ * not starting (the justification is in `docs/changes/WP-3.7b.md`, R3-M3).
  */
 export const CONSERVATIVE_GOLDEN_TOKENS_PER_TASK = 8_000;
+export const CONSERVATIVE_CLAUDE_TOKENS_PER_TASK = 30_000;
+/** A scripted task measures about 1.4 s (the 86-task baseline runs in about 117 s); 5 s is ~3.5×. */
+export const CONSERVATIVE_GOLDEN_SECONDS_PER_TASK = 5;
+/** A live task is a coder turn, a verifier and a tool loop; two minutes over-estimates a small repo. */
+export const CONSERVATIVE_CLAUDE_SECONDS_PER_TASK = 120;
+
+/** The conservative first-run figures for the adapter this run uses. An unknown adapter is generic. */
+export function conservativePerTask(adapter: string | undefined): { tokens: number; ms: number } {
+  return adapter === 'claude'
+    ? { tokens: CONSERVATIVE_CLAUDE_TOKENS_PER_TASK, ms: CONSERVATIVE_CLAUDE_SECONDS_PER_TASK * 1000 }
+    : { tokens: CONSERVATIVE_GOLDEN_TOKENS_PER_TASK, ms: CONSERVATIVE_GOLDEN_SECONDS_PER_TASK * 1000 };
+}
 
 export interface GoldenRunProjection {
   tasks: number;
   perTaskTokens: number;
+  /** Where the per-task figures came from: this session's runs, or the stated constants. */
   source: 'measured' | 'conservative-estimate';
   projectedTokens: number;
   spentTokens: number;
-  maxTokens: number;
-  /** True when `spentTokens + projectedTokens` is over `maxTokens`. */
+  /** Present only when the run has a token budget. */
+  maxTokens?: number;
+  /** Dollar projection, present only when the run has a dollar budget. */
+  perTaskUsd?: number;
+  projectedUsd?: number;
+  spentUsd?: number;
+  maxUsd?: number;
+  /** Wall-clock projection, present only when the run has a wall-clock budget. */
+  perTaskMs?: number;
+  projectedMs?: number;
+  spentMs?: number;
+  maxWallClockMs?: number;
+  /** True when ANY configured budget would be crossed by `spent + projected`. */
   exceeds: boolean;
+  /** The first budget that would be crossed, in the order wall-clock, tokens, dollars. */
+  reason?: 'wall-clock' | 'tokens' | 'usd';
   statement: string;
 }
 
-/** What earlier golden runs this session cost, if any: total tokens and total tasks measured. */
+/** What earlier golden runs this session cost, if any: the totals and the tasks they measured. */
 export interface GoldenRunMeasurement {
   tokens: number;
   tasks: number;
+  /** Dollars charged by those runs, when the adapter reported or priced them. */
+  usd?: number;
+  /** Wall-clock those runs took. */
+  elapsedMs?: number;
 }
 
 /**
- * R2-M1: project what one golden run will cost, before it starts. Returns undefined when no token
+ * R2-M1 / R3-M3: project what one golden run will cost, before it starts. Returns undefined when no
  * budget is set — there is nothing to cross — so a caller can treat undefined as "go ahead".
+ *
+ * A dollar budget needs a price: either a measured dollar figure from earlier runs, or
+ * `usdPerMillionTokens`. Without one the projection cannot be made, and the function throws rather
+ * than silently starting a run whose dollar cost is unknown.
  */
 export function projectGoldenRun(input: {
   tasks: number;
-  spentTokens: number;
+  spentTokens?: number | undefined;
   maxTokens?: number | undefined;
+  spentUsd?: number | undefined;
+  maxUsd?: number | undefined;
+  usdPerMillionTokens?: number | undefined;
+  spentMs?: number | undefined;
+  maxWallClockMs?: number | undefined;
   measured?: GoldenRunMeasurement | undefined;
+  /** The adapter's name, so the conservative first-run constants match its shape. */
+  adapter?: string | undefined;
 }): GoldenRunProjection | undefined {
-  const { tasks, spentTokens, maxTokens, measured } = input;
-  if (maxTokens === undefined) return undefined;
+  const {
+    tasks, maxTokens, maxUsd, maxWallClockMs, measured,
+    spentTokens = 0, spentUsd = 0, spentMs = 0,
+  } = input;
+  if (maxTokens === undefined && maxUsd === undefined && maxWallClockMs === undefined) return undefined;
+
   const fromMeasurement = measured !== undefined && measured.tasks > 0;
-  const perTaskTokens = fromMeasurement
-    ? measured.tokens / measured.tasks
-    : CONSERVATIVE_GOLDEN_TOKENS_PER_TASK;
+  const conservative = conservativePerTask(input.adapter);
+  const perTaskTokens = fromMeasurement ? measured.tokens / measured.tasks : conservative.tokens;
+  const perTaskMs = fromMeasurement && measured.elapsedMs !== undefined && measured.elapsedMs > 0
+    ? measured.elapsedMs / measured.tasks
+    : conservative.ms;
   const projectedTokens = Math.ceil(tasks * perTaskTokens);
-  const exceeds = spentTokens + projectedTokens > maxTokens;
-  const rounded = fromMeasurement ? `measured ${Math.round(perTaskTokens)}` : 'conservative estimate';
+  const projectedMs = Math.ceil(tasks * perTaskMs);
+
+  // Dollars: a measured charge beats a price, because it is what the backend actually took.
+  const perTaskUsd = fromMeasurement && measured.usd !== undefined
+    ? measured.usd / measured.tasks
+    : input.usdPerMillionTokens !== undefined
+      ? (perTaskTokens * input.usdPerMillionTokens) / 1_000_000
+      : undefined;
+  if (maxUsd !== undefined && perTaskUsd === undefined)
+    throw new Error(
+      'a dollar budget was set, but a golden run cannot be projected in dollars without a price: ' +
+      'pass --usd-per-million-tokens (or a measured dollar figure from an earlier run)',
+    );
+  const projectedUsd = perTaskUsd === undefined ? undefined : tasks * perTaskUsd;
+
+  const overTokens = maxTokens !== undefined && spentTokens + projectedTokens > maxTokens;
+  const overUsd = maxUsd !== undefined && projectedUsd !== undefined && spentUsd + projectedUsd > maxUsd;
+  const overMs = maxWallClockMs !== undefined && spentMs + projectedMs > maxWallClockMs;
+  const exceeds = overTokens || overUsd || overMs;
+  const reason: GoldenRunProjection['reason'] =
+    overMs ? 'wall-clock' : overTokens ? 'tokens' : overUsd ? 'usd' : undefined;
+
+  const rounded = (v: number): string => fromMeasurement ? `measured ${Math.round(v)}` : 'conservative estimate';
+  const clauses: string[] = [];
+  if (maxWallClockMs !== undefined)
+    clauses.push(
+      `${tasks} task${tasks === 1 ? '' : 's'} × ${Math.round(perTaskMs)} ms each (${rounded(perTaskMs)}) `
+      + `projects ${human(projectedMs)}; ${human(spentMs)} of ${human(maxWallClockMs)} wall-clock used`,
+    );
+  if (maxTokens !== undefined)
+    clauses.push(
+      `${tasks} task${tasks === 1 ? '' : 's'} × ${Math.round(perTaskTokens)} tokens each (${rounded(perTaskTokens)}) `
+      + `projects ${projectedTokens} tokens; ${spentTokens} already spent against a ${maxTokens}-token budget`,
+    );
+  if (maxUsd !== undefined && projectedUsd !== undefined && perTaskUsd !== undefined)
+    clauses.push(
+      `${tasks} task${tasks === 1 ? '' : 's'} × ${dollars(perTaskUsd)} each (${fromMeasurement && measured.usd !== undefined ? 'measured' : 'priced'}) `
+      + `projects ${dollars(projectedUsd)}; ${dollars(spentUsd)} already spent against a ${dollars(maxUsd)} budget`,
+    );
+
   return {
     tasks, perTaskTokens, source: fromMeasurement ? 'measured' : 'conservative-estimate',
-    projectedTokens, spentTokens, maxTokens, exceeds,
-    statement:
-      `${tasks} task${tasks === 1 ? '' : 's'} × ${Math.round(perTaskTokens)} tokens each (${rounded}) `
-      + `projects ${projectedTokens} tokens; ${spentTokens} already spent against a ${maxTokens}-token budget`
-      + (exceeds ? ' — not started' : ' — inside the budget'),
+    projectedTokens, spentTokens,
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(projectedUsd !== undefined && perTaskUsd !== undefined
+      ? { perTaskUsd, projectedUsd, spentUsd, ...(maxUsd !== undefined ? { maxUsd } : {}) }
+      : {}),
+    ...(maxWallClockMs !== undefined ? { perTaskMs, projectedMs, spentMs, maxWallClockMs } : {}),
+    exceeds,
+    ...(reason !== undefined ? { reason } : {}),
+    statement: clauses.join('; ') + (exceeds ? ' — not started' : ' — inside the budget'),
   };
 }
 

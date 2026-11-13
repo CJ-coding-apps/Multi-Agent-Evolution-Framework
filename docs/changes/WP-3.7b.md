@@ -787,6 +787,40 @@ per-task counts in the report show the gain either way.
 the first, a measured band on the second, the alpha ceiling on the third, and seed reproducibility
 with a second-seed agreement within 0.03.
 
+### R3-M3 — the projection checks dollars and seconds too (round-3 MED)
+
+R2-M1 projected only tokens, so `--max-usd` and `--max-seconds` could be crossed by a run that the
+projection had called inside the budget. `projectGoldenRun` now projects **every budget the run
+has** — tokens, dollars and seconds — and `exceeds` is true when **any** of them would be crossed.
+Every stop site (the round-0 baseline, the candidate suite, each held-out repeat) already branches on
+`exceeds`, so all of them cover the new kinds without a second check. `reason` names the first
+crossed, in the order wall-clock, tokens, dollars.
+
+With no earlier run to measure, the first-run constants are:
+
+- **tokens, 8000/task** (unchanged). Measured on the committed corpus, the scripted adapter spends
+  **276 tokens/task on average (131–654 across the 86 tasks)**, so the floor is more than an order
+  of magnitude high.
+- **`claude`, 30 000 tokens/task and 120 s/task** (a stated constant, not a measurement). A live
+  task is not one completion: it is several role turns plus a tool loop over a small repository,
+  and every turn resends the system prompt, the tool list and the history, so the scripted figure
+  says nothing about it. Both numbers are deliberately high — the projection errs toward not
+  starting a run it cannot afford.
+- **scripted/generic, 5 s/task.** The 86-task baseline runs in about 117 s (~1.36 s/task), so the
+  floor is about 3.5×.
+
+Dollars need a price. A measured charge per task (what the backend actually took, when it reports
+one) wins; otherwise the projection uses the run's `--usd-per-million-tokens` rate, the same number
+the usage meter prices with, so the meter and the projection cannot disagree. A dollar budget with
+neither is **refused** with a sentence saying why, rather than starting a run whose dollar cost is
+unknown. Measured figures from earlier runs in the session replace the constants in all three
+dimensions at once.
+
+Tests: the unit projection covers each kind inside and over, the measured-over-constant rule, the
+`claude` constants and the no-price refusal; two loop tests drive a dollar budget and a wall-clock
+budget and assert the round-0 baseline is **not started** in each case, with the projection sentence
+in the round note.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

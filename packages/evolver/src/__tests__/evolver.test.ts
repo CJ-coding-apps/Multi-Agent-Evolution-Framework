@@ -19,7 +19,7 @@ import {
   digestEvidence, isEmptyDigest, buildPlannerUserPrompt, UsageMeter, meterAdapter,
   projectGoldenRun, CONSERVATIVE_GOLDEN_TOKENS_PER_TASK,
 } from '../index.js';
-import type { BudgetSnapshot, EvolveOptions, HarnessEdit } from '../index.js';
+import type { BudgetMeter, BudgetSnapshot, EvolveOptions, HarnessEdit } from '../index.js';
 
 // ORACLE: the evolver's manifest screening and deterministic acceptance gate.
 
@@ -2173,6 +2173,89 @@ test('R2-M1: each held-out repeat is projected too, not just the train runs', as
   assert.equal(repeats, 0, 'no held-out repeat started');
   assert.match(report.heldOut?.skipped ?? '',
     /baseline repeat 1 was not started: 100 tasks × 1000 tokens each \(measured 1000\) projects 100000 tokens; 2000 already spent against a 20000-token budget — not started/);
+});
+
+// ─── R3-M3: every budget is projected, not only tokens ────────────────────
+
+test('R3-M3 projection: dollars and seconds are projected from the same figures, and any crossing refuses', () => {
+  const priced = projectGoldenRun({ tasks: 20, maxUsd: 1, spentUsd: 0, usdPerMillionTokens: 3 })!;
+  assert.equal(priced.projectedTokens, 20 * CONSERVATIVE_GOLDEN_TOKENS_PER_TASK);
+  assert.ok(Math.abs((priced.projectedUsd ?? 0) - 0.48) < 1e-12, `projected ${priced.projectedUsd}`);
+  assert.equal(priced.exceeds, false);
+  assert.match(priced.statement, /projects \$0\.48/);
+
+  const overUsd = projectGoldenRun({ tasks: 20, maxUsd: 0.25, spentUsd: 0, usdPerMillionTokens: 3 })!;
+  assert.equal(overUsd.exceeds, true);
+  assert.equal(overUsd.reason, 'usd');
+  assert.match(overUsd.statement, /projects \$0\.48; \$0\.00 already spent against a \$0\.25 budget — not started/);
+
+  const overSeconds = projectGoldenRun({ tasks: 20, maxWallClockMs: 60_000, spentMs: 0 })!;
+  assert.equal(overSeconds.projectedMs, 20 * 5000);
+  assert.equal(overSeconds.exceeds, true);
+  assert.equal(overSeconds.reason, 'wall-clock');
+
+  // A `claude` run is projected from its own stated constant, not the scripted floor.
+  const claude = projectGoldenRun({ tasks: 1, maxTokens: 1_000_000, maxWallClockMs: 1_000_000, adapter: 'claude' })!;
+  assert.equal(claude.perTaskTokens, 30_000);
+  assert.equal(claude.perTaskMs, 120_000);
+
+  // Measured figures win over the constants in all three dimensions.
+  const measured = projectGoldenRun({
+    tasks: 10, maxTokens: 1_000_000, maxUsd: 1, spentUsd: 0, maxWallClockMs: 1_000_000,
+    measured: { tokens: 500, tasks: 5, usd: 0.01, elapsedMs: 2000 },
+  })!;
+  assert.equal(measured.source, 'measured');
+  assert.equal(measured.perTaskTokens, 100);
+  assert.equal(measured.perTaskUsd, 0.002);
+  assert.equal(measured.perTaskMs, 400);
+  assert.equal(measured.exceeds, false);
+
+  // A dollar budget without a price cannot be projected, so it is refused rather than ignored.
+  assert.throws(() => projectGoldenRun({ tasks: 1, maxUsd: 1 }), /without a price/);
+});
+
+/** A meter that reports the budget kinds the test sets, with nothing spent yet. */
+function kindMeter(limits: { maxUsd?: number; maxWallClockMs?: number }): BudgetMeter {
+  return {
+    snapshot: (): BudgetSnapshot => ({
+      limits, elapsedMs: 0, tokens: 0, usd: 0, exhausted: false, statement: 'budget: spent nothing',
+    }),
+  };
+}
+
+test('R3-M3: a dollar budget stops the round-0 baseline before it is paid for', async () => {
+  let goldens = 0;
+  const opts = loopOpts({
+    metaGenerate: mockMeta([SHIPPING_PLAN]),
+    goldenTaskCounts: { train: 20, heldOut: 10 },
+    budget: kindMeter({ maxUsd: 0.25 }),
+    usdPerMillionTokens: 3,
+  });
+  const inner = opts.runGoldens;
+  opts.runGoldens = async (h) => { goldens++; return inner(h); };
+
+  const report = await evolve(opts);
+  assert.equal(goldens, 0, 'the baseline was never started');
+  assert.equal(report.stopReason, 'budget');
+  assert.match(report.rounds[0]?.note ?? '',
+    /the round-0 baseline was not started: 20 tasks × \$0\.02 each \(priced\) projects \$0\.48; \$0\.00 already spent against a \$0\.25 budget — not started/);
+});
+
+test('R3-M3: a wall-clock budget stops the round-0 baseline before it is paid for', async () => {
+  let goldens = 0;
+  const opts = loopOpts({
+    metaGenerate: mockMeta([SHIPPING_PLAN]),
+    goldenTaskCounts: { train: 20, heldOut: 10 },
+    budget: kindMeter({ maxWallClockMs: 60_000 }),
+  });
+  const inner = opts.runGoldens;
+  opts.runGoldens = async (h) => { goldens++; return inner(h); };
+
+  const report = await evolve(opts);
+  assert.equal(goldens, 0, 'the baseline was never started');
+  assert.equal(report.stopReason, 'budget');
+  assert.match(report.rounds[0]?.note ?? '',
+    /20 tasks × 5000 ms each \(conservative estimate\) projects 1\.7m; 0ms of 1\.0m wall-clock used — not started/);
 });
 
 // ─── R2-H4: the model-call meter ───────────────────────────────────────────
