@@ -840,6 +840,25 @@ Two tests now pin it, one at each level:
 Killing mutant U3 — `reportUsage: true` removed from `MeteringCliAdapter.invoke` — turns both red on
 the assertion that the request was made, not merely on a count.
 
+### R3-L2 — a turn's reported cost is charged, marked `reported` (round-3 finding)
+
+R2-M2 carried `tokensUsed` off a governed turn and dropped the same envelope's `costUsd`:
+`parseReportedUsage` read it, `ClaudeAdapter.sendTurn` did not spread it, `AssistantTurn` had no
+field for it, and `MeteringTurnAdapter` passed `undefined` to the charge. A priced role turn was
+therefore charged the run's per-million rate as an **estimate** even when the backend had said what
+it cost — the opposite of "estimated only when the field is truly absent".
+
+`AssistantTurn` gains `costUsd?: number` **additively**, under a `// WP-3.7b` header; no existing
+declaration changes shape. `sendTurn` spreads `reported.costUsd` beside `tokensUsed`, and the meter
+passes `result.costUsd` to `UsageMeter.record`, which already prefers a supplied cost over the rate
+and labels it `reported`. The CLI's per-call hook feeds `budget.addUsd(call.usd, call.usdSource)`,
+so the dollar budget reads the reported figure as reported.
+
+Tests: the claude adapter's turn test asserts `turn.costUsd === 0.001` and that an unreported turn
+claims neither figure; the evolver test runs a turn at a `$1/M` rate that would price an estimate at
+about `$0.0004`, and asserts `usd === reportedUsd === 0.001`, `estimatedUsd === 0`, and
+`usdSource === 'reported'`.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

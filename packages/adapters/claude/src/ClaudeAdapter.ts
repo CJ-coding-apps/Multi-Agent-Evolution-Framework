@@ -159,6 +159,8 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       return {
         ...turn,
         ...(reported?.tokensUsed !== undefined ? { tokensUsed: reported.tokensUsed } : {}),
+        // R3-L2: the same envelope carries a cost; a caller metering dollars reads it off the turn.
+        ...(reported?.costUsd !== undefined ? { costUsd: reported.costUsd } : {}),
         modelSurface: surface,
       };
     } catch (err: unknown) {

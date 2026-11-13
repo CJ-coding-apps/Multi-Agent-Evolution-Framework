@@ -1676,6 +1676,11 @@ export interface AssistantTurn {
   text:         string;
   toolCalls:    ToolCallRequest[];
   tokensUsed?:  number;
+  // WP-3.7b — additive only: an optional member, so every adapter and caller written before this
+  // still type-checks. A turn that was priced by the backend reports it here, so the dollar budget
+  // can charge the turn's own figure instead of estimating one (R3-L2).
+  /** Total dollars the backend reported for this turn, when it reported a cost. */
+  costUsd?:     number;
   /** Raw backend output for diagnostics/attestation (not shown to other processors). */
   raw?:         string;
   /**

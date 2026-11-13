@@ -167,7 +167,9 @@ class MeteringTurnAdapter extends MeteringCliAdapter implements TurnAdapter {
     this.charge(
       turnText(history, options),
       `${result.text}\n${JSON.stringify(result.toolCalls)}${result.raw ?? ''}`,
-      result.tokensUsed, undefined,
+      // R3-L2: a turn that reports a cost is charged that cost, marked `reported`, the same way a
+      // single `invoke` call is; only a turn with no figure falls back to the run's price.
+      result.tokensUsed, result.costUsd,
     );
     return result;
   }

@@ -2381,3 +2381,29 @@ test('R3-M4 usage: a single call asks the backend for its usage and is charged w
   assert.equal(snap.estimatedUsd, 0);
   assert.equal(snap.usd, 0.002);
 });
+
+// R3-L2: R2-M2 spread `tokensUsed` off a turn but dropped `costUsd`, so a priced role turn was
+// charged an estimate even when the backend said what it cost. The reported figure must win, and
+// the split must say so — the dollar budget reads `usdSource` to label the number.
+test('R3-L2 usage: a turn that reports a cost is charged that figure, marked reported', async () => {
+  const inner = {
+    ...cliStub(() => ({})),
+    sendTurn: async (_history: TurnMessage[], o: AdapterInvokeOptions) =>
+      o.reportUsage === true
+        ? { text: 'answer', toolCalls: [], tokensUsed: 120, costUsd: 0.001 }
+        : { text: 'answer', toolCalls: [] },
+  } as unknown as TurnAdapter;
+  const meter = new UsageMeter(1_000_000); // $1 per million: an estimate would be ~$0.0004
+  const metered = meterAdapter(inner, meter) as TurnAdapter;
+
+  await metered.sendTurn(
+    [{ kind: 'user', text: 'u'.repeat(400) }],
+    { prompt: '', workingDir: '.', timeoutMs: 1, systemPrompt: 'role' },
+  );
+
+  const snap = meter.snapshot();
+  assert.equal(snap.usd, 0.001, 'the backend\'s cost wins over the run\'s priced estimate');
+  assert.equal(snap.reportedUsd, 0.001, 'the dollar budget reads this figure as reported');
+  assert.equal(snap.estimatedUsd, 0);
+  assert.equal(meter.calls[0]!.usdSource, 'reported');
+});

@@ -124,6 +124,8 @@ test('sendTurn asks for and reads the CLI\'s reported usage on a role turn', asy
   assert.ok(calls[0]!.args.includes('--output-format'), 'the JSON mode is requested on the turn');
   assert.equal(calls[0]!.args[calls[0]!.args.indexOf('--output-format') + 1], 'json');
   assert.equal(turn.tokensUsed, 120, 'every billed token kind is counted');
+  // R3-L2: the same envelope is priced, and a caller metering dollars needs the turn's own figure.
+  assert.equal(turn.costUsd, 0.001, 'the reported cost rides the turn, not just the invoke result');
   assert.match(turn.text, /the answer/, 'the envelope\'s result is the answer, not the JSON');
   assert.deepEqual(turn.toolCalls.map((c) => c.toolName), ['read'],
     'the wire protocol is parsed out of the unwrapped result');
@@ -135,6 +137,7 @@ test('sendTurn keeps the plain argv and claims no usage when reportUsage is not 
 
   assert.ok(!calls[0]!.args.includes('--output-format'));
   assert.equal('tokensUsed' in turn, false);
+  assert.equal('costUsd' in turn, false, 'and no cost is claimed either');
 });
 
 test('sendTurn throws the TransportError of a timed-out turn instead of parsing it', async () => {
