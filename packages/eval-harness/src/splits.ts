@@ -51,8 +51,9 @@ export interface CorpusSplits {
   /**
    * WP-3.7b R3-G1: candidate held-out tasks, awaiting calibration. A pool task is on neither side
    * of the split: the evolver never sees it and the gate never scores it. `maf goldens calibrate`
-   * measures the pool on the base harness and moves the tasks that qualify into `heldOut`; a task
-   * that does not qualify stays here (it has no headroom) and is never evidence either.
+   * measures the pool on the base harness and makes the qualifiers the new `heldOut` set, replacing
+   * the old one (R4-A3); a task that does not qualify stays here (it has no headroom) and is never
+   * evidence either.
    */
   pool?: string[];
 }

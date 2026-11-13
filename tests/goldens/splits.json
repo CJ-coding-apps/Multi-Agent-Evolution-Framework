@@ -6,7 +6,7 @@
     "runs": 10,
     "alpha": 0.05,
     "minTasks": 20,
-    "decision": "improvement iff S > 0 and p < alpha, where for every held-out task t the base and the candidate each run `runs` single attempts, S = Σ_t (candidate passes_t − base passes_t), and p is the exact one-sided stratified permutation p-value: with k_t = base passes_t + candidate passes_t, the candidate's `runs` labels among the task's 2·runs attempts are exchangeable, so candidate passes_t ~ Hypergeometric(2·runs, k_t, runs) independently across the H tasks, and p is the probability that the convolution of those H distributions reaches at least the observed S. The test needs at least `minTasks` held-out tasks."
+    "decision": "improvement iff S > 0 and p < alpha, where for every held-out task t the base and the candidate each run `runs` single attempts, S = \u03a3_t (candidate passes_t \u2212 base passes_t), and p is the exact one-sided stratified permutation p-value: with k_t = base passes_t + candidate passes_t, the candidate's `runs` labels among the task's 2\u00b7runs attempts are exchangeable, so candidate passes_t ~ Hypergeometric(2\u00b7runs, k_t, runs) independently across the H tasks, and p is the probability that the convolution of those H distributions reaches at least the observed S. The test needs at least `minTasks` held-out tasks."
   },
   "train": [
     "coder-sum",
@@ -37,7 +37,22 @@
     "train-camel-keys",
     "train-template-render",
     "train-graph-topo",
-    "train-move-file"
+    "train-move-file",
+    "train-max-subarray",
+    "train-factorial",
+    "train-prime-sieve",
+    "train-rotate-array",
+    "train-parse-binary",
+    "train-isbn-check",
+    "train-parse-bool",
+    "train-merge-sorted",
+    "train-matrix-diagonal",
+    "train-hyphenate",
+    "train-calc-eval",
+    "train-dedupe",
+    "train-truncate",
+    "train-split-path",
+    "train-mode"
   ],
   "heldOut": [
     "coder-fib",
@@ -68,6 +83,21 @@
     "pool-config-merge",
     "pool-route-params",
     "pool-cart-discount",
-    "pool-tokenize"
+    "pool-tokenize",
+    "pool-semver-compare",
+    "pool-debounce",
+    "pool-matrix-multiply",
+    "pool-parse-args",
+    "pool-pluralize",
+    "pool-time-diff",
+    "pool-tree-flatten",
+    "pool-query-string",
+    "pool-checksum",
+    "pool-queue-batch",
+    "pool-gcd-lcm",
+    "pool-bowling",
+    "pool-caesar-wrap",
+    "pool-token-bucket",
+    "pool-round-sig"
   ]
 }

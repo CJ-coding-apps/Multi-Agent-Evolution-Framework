@@ -27,7 +27,8 @@ function lcmLoads(): boolean {
 
 // R3-G1 grew the corpus from 16 tasks to 56, so each iteration now runs ~86 s and five of them no
 // longer fit the old 240 s budget: 425 s alone and 525 s in the serial suite on the recording host
-// (188 s in the Linux container). The cap is a hang backstop, so it keeps room for a slower host.
+// (188 s in the Linux container). R4-A3 grew it again, to 86 tasks, so those figures are a floor,
+// not a measurement; the 900 s cap below is a hang backstop and stays until the run is re-timed.
 test('five goldens stacks built, run and torn down in one process each reproduce the baseline, and the process lives', {
   skip: lcmLoads() || process.env['CI'] ? false : 'better-sqlite3 does not load on this host (CI runs this)',
   timeout: 900_000,

@@ -800,6 +800,351 @@
     }
   },
   {
+    "id": "pool-semver-compare",
+    "repoFixture": "fixtures/pool-semver-compare",
+    "prompt": "Fix semver.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-debounce",
+    "repoFixture": "fixtures/pool-debounce",
+    "prompt": "Fix debounce.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-matrix-multiply",
+    "repoFixture": "fixtures/pool-matrix-multiply",
+    "prompt": "Fix multiply.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-parse-args",
+    "repoFixture": "fixtures/pool-parse-args",
+    "prompt": "Fix parseArgs.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-pluralize",
+    "repoFixture": "fixtures/pool-pluralize",
+    "prompt": "Fix pluralize.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-time-diff",
+    "repoFixture": "fixtures/pool-time-diff",
+    "prompt": "Fix time.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-tree-flatten",
+    "repoFixture": "fixtures/pool-tree-flatten",
+    "prompt": "Fix flattenKeys.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-query-string",
+    "repoFixture": "fixtures/pool-query-string",
+    "prompt": "Fix query.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-checksum",
+    "repoFixture": "fixtures/pool-checksum",
+    "prompt": "Fix checksum.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-queue-batch",
+    "repoFixture": "fixtures/pool-queue-batch",
+    "prompt": "Fix batch.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-gcd-lcm",
+    "repoFixture": "fixtures/pool-gcd-lcm",
+    "prompt": "Fix lcm.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-bowling",
+    "repoFixture": "fixtures/pool-bowling",
+    "prompt": "Fix bowling.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-caesar-wrap",
+    "repoFixture": "fixtures/pool-caesar-wrap",
+    "prompt": "Fix caesar.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-token-bucket",
+    "repoFixture": "fixtures/pool-token-bucket",
+    "prompt": "Fix bucket.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-round-sig",
+    "repoFixture": "fixtures/pool-round-sig",
+    "prompt": "Fix round.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
     "id": "train-crc8",
     "repoFixture": "fixtures/train-crc8",
     "prompt": "Fix crc.js so test.js passes.",
@@ -1257,6 +1602,351 @@
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 train, authored 2026-11-12 (two-file)"
+    }
+  },
+  {
+    "id": "train-max-subarray",
+    "repoFixture": "fixtures/train-max-subarray",
+    "prompt": "Fix maxSubarray.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-factorial",
+    "repoFixture": "fixtures/train-factorial",
+    "prompt": "Fix factorial.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-prime-sieve",
+    "repoFixture": "fixtures/train-prime-sieve",
+    "prompt": "Fix sieve.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-rotate-array",
+    "repoFixture": "fixtures/train-rotate-array",
+    "prompt": "Fix rotate.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-parse-binary",
+    "repoFixture": "fixtures/train-parse-binary",
+    "prompt": "Fix binary.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-isbn-check",
+    "repoFixture": "fixtures/train-isbn-check",
+    "prompt": "Fix isbn.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-parse-bool",
+    "repoFixture": "fixtures/train-parse-bool",
+    "prompt": "Fix parseBool.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-merge-sorted",
+    "repoFixture": "fixtures/train-merge-sorted",
+    "prompt": "Fix merge.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-matrix-diagonal",
+    "repoFixture": "fixtures/train-matrix-diagonal",
+    "prompt": "Fix diagonal.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-hyphenate",
+    "repoFixture": "fixtures/train-hyphenate",
+    "prompt": "Fix hyphenate.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-calc-eval",
+    "repoFixture": "fixtures/train-calc-eval",
+    "prompt": "Fix evaluate.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-dedupe",
+    "repoFixture": "fixtures/train-dedupe",
+    "prompt": "Fix dedupe.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-truncate",
+    "repoFixture": "fixtures/train-truncate",
+    "prompt": "Fix truncate.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-split-path",
+    "repoFixture": "fixtures/train-split-path",
+    "prompt": "Fix paths.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-mode",
+    "repoFixture": "fixtures/train-mode",
+    "prompt": "Fix mode.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
     }
   }
 ]

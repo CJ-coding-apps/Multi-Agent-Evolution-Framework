@@ -1106,6 +1106,576 @@
         }
       ],
       "final": "Fixed move.js."
+    },
+    "pool-semver-compare": {
+      "note": "A plausible but incomplete fix: the components are parsed as numbers, but only the major and minor versions are compared.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "semver.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "semver.js",
+            "content": "function compareSemver(a, b) {\n  const pa = a.split('.').map(Number);\n  const pb = b.split('.').map(Number);\n  for (let i = 0; i < 2; i++) {\n    if (pa[i] > pb[i]) return 1;\n    if (pa[i] < pb[i]) return -1;\n  }\n  return 0;\n}\nmodule.exports = { compareSemver };\n"
+          }
+        }
+      ],
+      "final": "Rewrote semver.js, but the tests still fail."
+    },
+    "pool-debounce": {
+      "note": "A plausible but incomplete fix: it waits, but every call schedules its own timer, so the calls are not coalesced.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "debounce.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "debounce.js",
+            "content": "function debounce(fn, ms) {\n  return function (...args) {\n    setTimeout(() => fn.apply(this, args), ms);\n  };\n}\nmodule.exports = { debounce };\n"
+          }
+        }
+      ],
+      "final": "Rewrote debounce.js, but the tests still fail."
+    },
+    "pool-matrix-multiply": {
+      "note": "A plausible but incomplete fix: it transposes the first matrix instead of the second.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "multiply.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "multiply.js",
+            "content": "function multiply(a, b) {\n  const out = [[0, 0], [0, 0]];\n  const t = [[a[0][0], a[1][0]], [a[0][1], a[1][1]]];\n  for (let i = 0; i < 2; i++)\n    for (let j = 0; j < 2; j++)\n      for (let k = 0; k < 2; k++) out[i][j] += t[i][k] * b[k][j];\n  return out;\n}\nmodule.exports = { multiply };\n"
+          }
+        }
+      ],
+      "final": "Rewrote multiply.js, but the tests still fail."
+    },
+    "pool-parse-args": {
+      "note": "A plausible but incomplete fix: it takes the next token as the value even when that token is the next flag.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "args.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "args.js",
+            "content": "function parseArgs(argv) {\n  const out = {};\n  for (let i = 0; i < argv.length; i++) {\n    const a = argv[i];\n    if (!a.startsWith('--')) continue;\n    const [k, v] = a.slice(2).split('=');\n    out[k] = v === undefined ? argv[i + 1] : v;\n  }\n  return out;\n}\nmodule.exports = { parseArgs };\n"
+          }
+        }
+      ],
+      "final": "Rewrote args.js, but the tests still fail."
+    },
+    "pool-pluralize": {
+      "note": "A plausible but incomplete fix: the consonant-plus-y rule is right, but the sibilant endings (s, x, ch, sh) are not handled.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "plural.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "plural.js",
+            "content": "function pluralize(word) {\n  if (/[^aeiou]y$/.test(word)) return word.slice(0, -1) + 'ies';\n  return word + 's';\n}\nmodule.exports = { pluralize };\n"
+          }
+        }
+      ],
+      "final": "Rewrote plural.js, but the tests still fail."
+    },
+    "pool-time-diff": {
+      "note": "A plausible but incomplete fix: the two times are converted to minutes, but the midnight wrap is not handled and the result can be negative.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "time.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "time.js",
+            "content": "function minutesBetween(a, b) {\n  const [ah, am] = a.split(':').map(Number);\n  const [bh, bm] = b.split(':').map(Number);\n  return (bh * 60 + bm) - (ah * 60 + am);\n}\nmodule.exports = { minutesBetween };\n"
+          }
+        }
+      ],
+      "final": "Rewrote time.js, but the tests still fail."
+    },
+    "pool-tree-flatten": {
+      "note": "A plausible but incomplete fix: the leading dot is dropped at the root, but the separator is dropped one level down too.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "flatten-keys.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "flatten-keys.js",
+            "content": "function flatten(obj, prefix = '') {\n  const out = {};\n  for (const [k, v] of Object.entries(obj)) {\n    const key = prefix === '' ? k : prefix + k;\n    if (v !== null && typeof v === 'object') Object.assign(out, flatten(v, key));\n    else out[key] = v;\n  }\n  return out;\n}\nmodule.exports = { flatten };\n"
+          }
+        }
+      ],
+      "final": "Rewrote flatten-keys.js, but the tests still fail."
+    },
+    "pool-query-string": {
+      "note": "A plausible but incomplete fix: repeated keys are collected, but a key seen once is also returned as an array.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "query.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "query.js",
+            "content": "function parseQuery(q) {\n  const out = {};\n  for (const pair of q.replace(/^\\?/, '').split('&')) {\n    if (pair === '') continue;\n    const [k, v] = pair.split('=');\n    const key = decodeURIComponent(k);\n    const value = decodeURIComponent(v ?? '');\n    out[key] = Array.isArray(out[key]) ? [...out[key], value] : [value];\n  }\n  return out;\n}\nmodule.exports = { parseQuery };\n"
+          }
+        }
+      ],
+      "final": "Rewrote query.js, but the tests still fail."
+    },
+    "pool-checksum": {
+      "note": "A plausible but incomplete fix: the length is included, but added to the XOR instead of XORed into it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "checksum.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "checksum.js",
+            "content": "function checksum(bytes) {\n  let c = 0;\n  for (const b of bytes) c ^= b;\n  return c + bytes.length;\n}\nmodule.exports = { checksum };\n"
+          }
+        }
+      ],
+      "final": "Rewrote checksum.js, but the tests still fail."
+    },
+    "pool-queue-batch": {
+      "note": "A plausible but incomplete fix: the remainder is kept, but the last batch is padded to the full size.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "batch.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "batch.js",
+            "content": "function batch(items, size) {\n  const out = [];\n  for (let i = 0; i < items.length; i += size) {\n    const slice = items.slice(i, i + size);\n    while (slice.length < size) slice.push(undefined);\n    out.push(slice);\n  }\n  return out;\n}\nmodule.exports = { batch };\n"
+          }
+        }
+      ],
+      "final": "Rewrote batch.js, but the tests still fail."
+    },
+    "pool-gcd-lcm": {
+      "note": "A plausible but incomplete fix: it divides the product, but by the larger operand rather than by the greatest common divisor.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "lcm.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "lcm.js",
+            "content": "function lcm(a, b) {\n  return (a * b) / Math.max(a, b);\n}\nmodule.exports = { lcm };\n"
+          }
+        }
+      ],
+      "final": "Rewrote lcm.js, but the tests still fail."
+    },
+    "pool-bowling": {
+      "note": "A plausible but incomplete fix: strikes are counted, but no bonus rolls are added to the score.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bowling.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bowling.js",
+            "content": "function total(rolls) {\n  let score = 0;\n  let strike = 0;\n  for (const r of rolls) {\n    score += r;\n    if (r === 10) strike++;\n  }\n  return score;\n}\nmodule.exports = { total };\n"
+          }
+        }
+      ],
+      "final": "Rewrote bowling.js, but the tests still fail."
+    },
+    "pool-caesar-wrap": {
+      "note": "A plausible but incomplete fix: the wrap is right, but lowercase and uppercase are not both mapped \u2014 the uppercase branch is added and the lowercase one is lost.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "caesar.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "caesar.js",
+            "content": "function caesar(text, shift) {\n  const wrap = (code, base) => base + ((((code - base + shift) % 26) + 26) % 26);\n  return text.split('').map((ch) => {\n    const code = ch.charCodeAt(0);\n    if (code >= 65 && code <= 90) return String.fromCharCode(wrap(code, 65));\n    return ch;\n  }).join('');\n}\nmodule.exports = { caesar };\n"
+          }
+        }
+      ],
+      "final": "Rewrote caesar.js, but the tests still fail."
+    },
+    "pool-token-bucket": {
+      "note": "A plausible but incomplete fix: the bucket refills, but capping it at capacity also spends the token that was just allowed.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bucket.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bucket.js",
+            "content": "function allow(tokens, capacity, ratePerMs, elapsedMs) {\n  const refilled = tokens + elapsedMs * ratePerMs;\n  if (refilled > capacity) return { allowed: true, tokens: capacity - 1 };\n  if (refilled < 1) return { allowed: false, tokens: refilled };\n  return { allowed: true, tokens: refilled - 1 };\n}\nmodule.exports = { allow };\n"
+          }
+        }
+      ],
+      "final": "Rewrote bucket.js, but the tests still fail."
+    },
+    "pool-round-sig": {
+      "note": "A plausible but incomplete fix: the decade is rounded up instead of down, so most numbers are left unscaled.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "round.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "round.js",
+            "content": "function roundSig(x, digits) {\n  if (x === 0) return 0;\n  const magnitude = Math.ceil(Math.log10(Math.abs(x)));\n  const factor = 10 ** (digits - 1 - magnitude);\n  return Math.round(x * factor) / factor;\n}\nmodule.exports = { roundSig };\n"
+          }
+        }
+      ],
+      "final": "Rewrote round.js, but the tests still fail."
+    },
+    "train-max-subarray": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "maxSubarray.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "maxSubarray.js",
+            "content": "function maxSubarray(nums) {\n  let best = -Infinity;\n  let cur = 0;\n  for (const n of nums) {\n    cur = cur > 0 ? cur + n : n;\n    best = Math.max(best, cur);\n  }\n  return best;\n}\nmodule.exports = { maxSubarray };\n"
+          }
+        }
+      ],
+      "final": "Rewrote maxSubarray.js."
+    },
+    "train-factorial": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "factorial.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "factorial.js",
+            "content": "function factorial(n) {\n  if (n < 0) throw new RangeError('factorial of a negative number');\n  let out = 1;\n  for (let i = 2; i <= n; i++) out *= i;\n  return out;\n}\nmodule.exports = { factorial };\n"
+          }
+        }
+      ],
+      "final": "Rewrote factorial.js."
+    },
+    "train-prime-sieve": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "sieve.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "sieve.js",
+            "content": "function sieve(n) {\n  const composite = new Array(n + 1).fill(false);\n  for (let i = 2; i * i <= n; i++) {\n    if (composite[i]) continue;\n    for (let j = i * i; j <= n; j += i) composite[j] = true;\n  }\n  const out = [];\n  for (let i = 2; i <= n; i++) if (!composite[i]) out.push(i);\n  return out;\n}\nmodule.exports = { sieve };\n"
+          }
+        }
+      ],
+      "final": "Rewrote sieve.js."
+    },
+    "train-rotate-array": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "rotate.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "rotate.js",
+            "content": "function rotate(nums, k) {\n  const n = nums.length;\n  const s = ((k % n) + n) % n;\n  return nums.slice(n - s).concat(nums.slice(0, n - s));\n}\nmodule.exports = { rotate };\n"
+          }
+        }
+      ],
+      "final": "Rewrote rotate.js."
+    },
+    "train-parse-binary": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "binary.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "binary.js",
+            "content": "function toDecimal(text) {\n  return parseInt(text.replace(/^0b/i, ''), 2);\n}\nmodule.exports = { toDecimal };\n"
+          }
+        }
+      ],
+      "final": "Rewrote binary.js."
+    },
+    "train-isbn-check": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "isbn.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "isbn.js",
+            "content": "function validIsbn10(text) {\n  const digits = text.replace(/-/g, '').split('');\n  if (digits.length !== 10) return false;\n  let sum = 0;\n  for (let i = 0; i < 10; i++) {\n    const value = digits[i].toUpperCase() === 'X' ? 10 : Number(digits[i]);\n    if (!Number.isInteger(value)) return false;\n    sum += value * (10 - i);\n  }\n  return sum % 11 === 0;\n}\nmodule.exports = { validIsbn10 };\n"
+          }
+        }
+      ],
+      "final": "Rewrote isbn.js."
+    },
+    "train-parse-bool": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "parseBool.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "parseBool.js",
+            "content": "const YES = new Set(['true', 'yes', '1', 'on']);\nconst NO = new Set(['false', 'no', '0', 'off']);\nfunction parseBool(text) {\n  const t = String(text).trim().toLowerCase();\n  if (YES.has(t)) return true;\n  if (NO.has(t)) return false;\n  throw new Error('cannot read a boolean from ' + JSON.stringify(text));\n}\nmodule.exports = { parseBool };\n"
+          }
+        }
+      ],
+      "final": "Rewrote parseBool.js."
+    },
+    "train-merge-sorted": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "merge.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "merge.js",
+            "content": "function merge(a, b) {\n  const out = [];\n  let i = 0;\n  let j = 0;\n  while (i < a.length && j < b.length) out.push(a[i] <= b[j] ? a[i++] : b[j++]);\n  return out.concat(a.slice(i), b.slice(j));\n}\nmodule.exports = { merge };\n"
+          }
+        }
+      ],
+      "final": "Rewrote merge.js."
+    },
+    "train-matrix-diagonal": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "diagonal.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "diagonal.js",
+            "content": "function diagonalSum(matrix) {\n  let sum = 0;\n  for (let i = 0; i < matrix.length; i++) sum += matrix[i][i];\n  return sum;\n}\nmodule.exports = { diagonalSum };\n"
+          }
+        }
+      ],
+      "final": "Rewrote diagonal.js."
+    },
+    "train-hyphenate": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "hyphenate.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "hyphenate.js",
+            "content": "const { splitWords } = require('./words');\nfunction hyphenate(text) {\n  return splitWords(text).join('-');\n}\nmodule.exports = { hyphenate };\n"
+          }
+        }
+      ],
+      "final": "Rewrote hyphenate.js."
+    },
+    "train-calc-eval": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "evaluate.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "evaluate.js",
+            "content": "function evaluate(expr) {\n  const parts = expr.split(' ').filter((p) => p.length > 0);\n  let total = Number(parts[0]);\n  for (let i = 1; i < parts.length; i += 2) {\n    const value = Number(parts[i + 1]);\n    if (parts[i] === '+') total += value;\n    else if (parts[i] === '-') total -= value;\n    else if (parts[i] === '*') total *= value;\n    else if (parts[i] === '/') total /= value;\n  }\n  return total;\n}\nmodule.exports = { evaluate };\n"
+          }
+        }
+      ],
+      "final": "Rewrote evaluate.js."
+    },
+    "train-dedupe": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "dedupe.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "dedupe.js",
+            "content": "function dedupe(items) {\n  const seen = new Set();\n  const out = [];\n  for (const item of items) {\n    if (seen.has(item)) continue;\n    seen.add(item);\n    out.push(item);\n  }\n  return out;\n}\nmodule.exports = { dedupe };\n"
+          }
+        }
+      ],
+      "final": "Rewrote dedupe.js."
+    },
+    "train-truncate": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "truncate.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "truncate.js",
+            "content": "function truncate(text, max) {\n  if (text.length <= max) return text;\n  const cut = text.slice(0, max);\n  const atBreak = cut.includes(' ') ? cut.slice(0, cut.lastIndexOf(' ')) : cut;\n  return atBreak + '\\u2026';\n}\nmodule.exports = { truncate };\n"
+          }
+        }
+      ],
+      "final": "Rewrote truncate.js."
+    },
+    "train-split-path": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "paths.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "paths.js",
+            "content": "const { stem } = require('./stem');\nfunction parts(p) {\n  const name = stem(p);\n  const dot = name.lastIndexOf('.');\n  if (dot <= 0) return { name, ext: '' };\n  return { name: name.slice(0, dot), ext: name.slice(dot + 1) };\n}\nmodule.exports = { parts };\n"
+          }
+        }
+      ],
+      "final": "Rewrote paths.js."
+    },
+    "train-mode": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "mode.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "mode.js",
+            "content": "function mode(nums) {\n  const counts = new Map();\n  for (const n of nums) counts.set(n, (counts.get(n) ?? 0) + 1);\n  let best = nums[0];\n  for (const [n, c] of counts) {\n    const bc = counts.get(best) ?? 0;\n    if (c > bc || (c === bc && n < best)) best = n;\n  }\n  return best;\n}\nmodule.exports = { mode };\n"
+          }
+        }
+      ],
+      "final": "Rewrote mode.js."
     }
   },
   "evolution": {

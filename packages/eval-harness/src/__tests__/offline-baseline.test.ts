@@ -35,9 +35,9 @@ test('the scripted model reproduces the committed baseline from the committed co
 
   assert.deepEqual(stable(result), stable(baseline));
   // What the baseline says, spelled out, so a regenerated baseline cannot quietly lose it.
-  // R3-G1 grew the corpus to 56 tasks: 29 train, seven held-out (five deterministic, two judge) and
-  // 20 pool candidates awaiting calibration. The scripted model solves exactly the tasks it answers
-  // correctly — the twenty new train tasks and the ten seed coder tasks outside held-out. It fails
+  // R4-A3 grew the corpus to 86 tasks: 44 train, seven held-out (five deterministic, two judge) and
+  // 35 pool candidates awaiting calibration. The scripted model solves exactly the tasks it answers
+  // correctly — the thirty-five train tasks and the ten seed coder tasks outside held-out. It fails
   // coder-fib (its plain script is a wrong fix), every pool task (each pool script is a plausible
   // but wrong fix, so the base has no headroom there by construction), and both judge tasks,
   // because the scripted judge fails closed.
@@ -48,6 +48,10 @@ test('the scripted model reproduces the committed baseline from the committed co
     'train-bloom', 'train-anagram', 'train-rot13', 'train-ring', 'train-grid-sum', 'train-title-case',
     'train-chunk', 'train-zip', 'train-prefix-sum', 'train-word-count', 'train-camel-keys',
     'train-template-render', 'train-graph-topo', 'train-move-file',
+    'train-max-subarray', 'train-factorial', 'train-prime-sieve', 'train-rotate-array',
+    'train-parse-binary', 'train-isbn-check', 'train-parse-bool', 'train-merge-sorted',
+    'train-matrix-diagonal', 'train-hyphenate', 'train-calc-eval', 'train-dedupe', 'train-truncate',
+    'train-split-path', 'train-mode',
   ]);
   const capitalize = result.tasks.find((t) => t.taskId === 'coder-capitalize')?.attempts[0]?.outcomes;
   assert.deepEqual(capitalize?.map((o) => [o.kind, o.passed]), [['must-not-modify', false], ['test-script', true]],
