@@ -310,6 +310,7 @@ test('smoke refuses a held-out target reached through a critic revision (R2-M5/H
   const { root } = await freshClone();
   try {
     const dispatched: (string | undefined)[] = [];
+    const usageRequests: (boolean | undefined)[] = [];
     let stacks = 0;
     let plannerCalls = 0;
     let criticCalls = 0;
@@ -336,6 +337,9 @@ test('smoke refuses a held-out target reached through a critic revision (R2-M5/H
     const adapter = {
       name: 'scripted',
       invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        // R3-M4: the planner and the critic are single `invoke` calls; the metered wrapper must
+        // ask the backend for its usage on each, exactly as it does on a role turn.
+        usageRequests.push(o.reportUsage);
         const systemPrompt = o.systemPrompt ?? '';
         let output: string;
         if (systemPrompt.includes('MAF harness evolution planner')) {
@@ -362,6 +366,9 @@ test('smoke refuses a held-out target reached through a critic revision (R2-M5/H
     await program.parseAsync(evolve(root, '--rounds', '1', '--patience', '1'), { from: 'user' });
 
     assert.equal(plannerCalls, 2, 'the revision asked for by the critic ran');
+    assert.ok(usageRequests.length >= 4, 'the planner and the critic reached the metered adapter');
+    assert.deepEqual(usageRequests, usageRequests.map(() => true),
+      'R3-M4: each single call asked the backend for its usage');
     assert.equal(dispatched.filter((id) => id === HE).length, 0, 'the held-out task was never dispatched');
     const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
     const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {

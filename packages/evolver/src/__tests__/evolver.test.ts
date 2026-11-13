@@ -2350,3 +2350,34 @@ test('R2-M2 usage: a role turn requests the backend\'s reported usage, and repor
   assert.equal(snap.reportedTokens, 250);
   assert.equal(snap.estimatedTokens, 0);
 });
+
+// R3-M4: R2-M2 asked for the field on role turns but left the single calls unasked. The planner,
+// the critic, the judge and the security gate are one `invoke` each on the metered adapter, so the
+// defect this kills is a meter that wraps `invoke` without forwarding `reportUsage`: the backend
+// never answers with a figure and every budget is fed an estimate that could have been a report.
+test('R3-M4 usage: a single call asks the backend for its usage and is charged what it reports', async () => {
+  const seen: AdapterInvokeOptions[] = [];
+  const inner = {
+    ...cliStub(() => ({})),
+    invoke: async (o: AdapterInvokeOptions) => {
+      seen.push(o);
+      return {
+        success: true, output: 'ok', toolCallLog: [], exitCode: 0, duration: 0,
+        ...(o.reportUsage === true ? { tokensUsed: 100, costUsd: 0.002 } : {}),
+      };
+    },
+  } as unknown as CliAdapter;
+  const meter = new UsageMeter(1_000_000); // a run price, so a priced estimate would be visible
+  const metered = meterAdapter(inner, meter);
+
+  await metered.invoke({ prompt: 'plan the next edit', workingDir: '.', timeoutMs: 1 });
+
+  assert.equal(seen[0]?.reportUsage, true, 'the single call asked the backend for its usage');
+  const snap = meter.snapshot();
+  assert.equal(snap.reportedCalls, 1, 'the call is reported, not estimated');
+  assert.equal(snap.reportedTokens, 100, 'the backend\'s figure, not the bytes estimate');
+  assert.equal(snap.estimatedTokens, 0);
+  assert.equal(snap.reportedUsd, 0.002, 'the reported cost is marked reported');
+  assert.equal(snap.estimatedUsd, 0);
+  assert.equal(snap.usd, 0.002);
+});

@@ -821,6 +821,25 @@ Tests: the unit projection covers each kind inside and over, the measured-over-c
 budget and assert the round-0 baseline is **not started** in each case, with the projection sentence
 in the round note.
 
+### R3-M4 — every single call asks for the backend's usage (round-3 finding U3)
+
+R2-M2 fixed the role turn and left the single calls unasked. The planner, the critic, the judge and
+the security gate are one `invoke` each through the metered adapter, and no test asserted that the
+wrapper forwards `reportUsage` on that seam: the R2-H4 test's stub returned usage unconditionally,
+so deleting the flag left the suite green and every single call silently estimated.
+
+Two tests now pin it, one at each level:
+
+- `evolver.test.ts` drives `metered.invoke` with a stub that answers only when
+  `reportUsage === true`; it asserts the option arrived and that the returned 100 tokens and
+  `$0.002` are recorded as `reported` (with a priced meter, so an estimate would also be visible).
+- `eval-commands.test.ts` drives `maf evolve` end to end on a real metered adapter and records
+  `reportUsage` on every call the adapter sees. The planner and the critic both run (four or more
+  calls in that scenario) and **every** recorded value is `true`.
+
+Killing mutant U3 — `reportUsage: true` removed from `MeteringCliAdapter.invoke` — turns both red on
+the assertion that the request was made, not merely on a count.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
