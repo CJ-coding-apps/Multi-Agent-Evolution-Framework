@@ -277,13 +277,20 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
 
       // D-57: everything the evolver measures is the train split. The held-out split is measured
       // only by `runHeldOut`, only at the end, and never recorded as evidence.
+      // R4-A2 states the unit: train scoring is pass@2 (a task counts if either of two attempts
+      // passes), which is the evolver's own yardstick for choosing candidates, not the gate's
+      // measurement. The gate's unit is the single attempt, below.
       const runGoldensFor = (harness: HarnessConfig): Promise<GoldenSuiteResult> =>
         runnerFor(harness, 2, { name: 'train', sha: splits.sha }).run(splits.train);
 
       // R2-H2: on the isolated stack, so a refusal or a gate failure during a held-out attempt
       // writes to the throwaway graph, not to the one the next digest reads.
+      // R4-A2: one attempt per task per repeat. `heldOutRepeats` (10) repeats are therefore ten
+      // single attempts, and `evaluateHeldOut` counts how many of them passed — the same unit
+      // calibration measures, so a task is never "harder" in one stage than in the other because
+      // one gave it two tries and the other one.
       const runHeldOut = async (harness: HarnessConfig): Promise<GoldenSuiteResult> =>
-        runnerFor(harness, 2, { name: 'held-out', sha: splits.sha }, await stackForHeldOut())
+        runnerFor(harness, 1, { name: 'held-out', sha: splits.sha }, await stackForHeldOut())
           .run(splits.heldOut);
 
       // R2-M3: a held-out task with an llm-judge verifier is a model's opinion. It is still run,

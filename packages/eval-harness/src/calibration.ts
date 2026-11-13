@@ -11,7 +11,11 @@ import type { CorpusSplits } from './splits.js';
  * `heldOut` in `splits.json`. Both files are committed together, so the yardstick is a visible,
  * reviewed edit and its sha changes with it. The calibration counts are NOT the gate's baseline:
  * the gate re-measures the base itself, because a calibration run and a gate run differ in their
- * isolation, their attempt count and the day they ran.
+ * isolation and the day they ran.
+ *
+ * R4-A2: the unit is the single attempt, in both places. A calibration count is "how many of
+ * `CALIBRATION_RUNS` single attempts passed"; a gate count is "how many of the ten single attempts
+ * passed". Neither stage gives a task two tries that count as one.
  */
 
 /** The committed record of a calibration run, beside `splits.json` in the corpus root. */

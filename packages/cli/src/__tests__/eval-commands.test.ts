@@ -943,6 +943,10 @@ test('real evolve.ts (R2-H2): held-out scoring is dispatched through an isolated
     assert.ok(heldTasks.length > 0, 'the held-out split was actually scored');
     assert.ok(heldTasks.every((id) => id !== undefined && HE.has(id)),
       `every isolated dispatch is a held-out task: ${heldTasks.join(', ')}`);
+    // R4-A2: one attempt per task per repeat, so the gate's unit is the single attempt — ten
+    // repeats of every held-out task for each harness, not two attempts apiece.
+    assert.equal(heldTasks.length, HE.size * 10 * 2,
+      'ten single attempts per held-out task per harness (base and candidate), not pass@2');
 
     // R2-M3: the two judge-scored held-out tasks ran, and the report says they are beside the
     // gate, never in it — the deterministic denominator is five.
