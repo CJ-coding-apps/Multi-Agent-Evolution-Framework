@@ -11,7 +11,7 @@ import type {
 import { HarnessStore } from '@maf/harness-config';
 import { MemoryGraph } from '@maf/memory-graph';
 import { PLANNER_SYSTEM_PROMPT } from '@maf/evolver';
-import { HELD_OUT_RULE, ScriptedAdapter } from '@maf/eval-harness';
+import { CALIBRATION_RULE, HELD_OUT_RULE, ScriptedAdapter } from '@maf/eval-harness';
 import type { ScriptedTask } from '@maf/eval-harness';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { registerEvolveCommand } from '../commands/evolve.js';
@@ -104,7 +104,11 @@ async function project(): Promise<Project> {
   // held-out side cannot carry a gate.
   await writeFile(
     path.join(corpus, 'splits.json'),
-    JSON.stringify({ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['coder-sum'], heldOut: heldOutIds }),
+    JSON.stringify({
+      version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
+      preRegistration: { attempts: 'single', selection: CALIBRATION_RULE, calibrationSha: null },
+      train: ['coder-sum'], heldOut: heldOutIds,
+    }),
     'utf8',
   );
 

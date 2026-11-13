@@ -6,6 +6,7 @@ import { refusePrototypeKey } from '@maf/types';
 import type { GoldenTask } from './GoldenTask.js';
 import { HELD_OUT_RULE } from './significance.js';
 import type { HeldOutTestRule } from './significance.js';
+import { CALIBRATION_FILE, CALIBRATION_RULE } from './calibration.js';
 
 /**
  * The corpus split (D-57). The evolver may see the `train` tasks — they are what it measures every
@@ -30,6 +31,24 @@ export const MIN_HELD_OUT = 5;
 
 export type SplitName = 'train' | 'held-out';
 
+/**
+ * R4-A4: everything about the measurement that must be fixed in writing before any run. `gate`
+ * commits the test itself; this commits its unit, the rule that chose the yardstick, and the
+ * measurement the yardstick was chosen from. A session that does not match all three refuses to
+ * start rather than produce a p-value nobody pre-registered.
+ */
+export interface PreRegistration {
+  /** One attempt per task per repeat, in calibration and in the gate (R4-A2). */
+  attempts: 'single';
+  /** The selection rule, verbatim: the string the code implements. */
+  selection: string;
+  /**
+   * sha256 of the `calibration.json` the held-out set was chosen from, or null before the first
+   * calibrated run. A committed set with no calibration file behind it has no measurement to show.
+   */
+  calibrationSha: string | null;
+}
+
 export interface CorpusSplits {
   version: 1;
   /**
@@ -44,6 +63,8 @@ export interface CorpusSplits {
    * different test than the one the repository committed.
    */
   gate: HeldOutTestRule;
+  /** R4-A4: the unit, the selection rule and the calibration the yardstick came from. */
+  preRegistration: PreRegistration;
   /** Task ids the evolver may see and be scored on. */
   train: string[];
   /** Task ids it may not: scored only on the final harness, never recorded as evidence. */
@@ -88,6 +109,7 @@ export function computeSplitsSha(splits: CorpusSplits): string {
   return crypto.createHash('sha256')
     .update(canonicalJson({
       version: splits.version, minHeldOut: splits.minHeldOut, gate: splits.gate,
+      preRegistration: splits.preRegistration,
       train: splits.train, heldOut: splits.heldOut, pool: splits.pool ?? [],
     }), 'utf8')
     .digest('hex');
@@ -149,6 +171,53 @@ export async function loadSplits(
       'code together, never a run-time choice.',
     );
   }
+  // R4-A4: the rest of the pre-registration. The gate fixes the test; this fixes its unit, the
+  // rule that chose the yardstick, and the measurement the yardstick came from. Each is compared
+  // with the code's own constant, so a split can only run the design it was written for.
+  const preRegistration = o['preRegistration'];
+  if (preRegistration === undefined || preRegistration === null || typeof preRegistration !== 'object')
+    throw new SplitsError(
+      `${file}: no "preRegistration". D-57 fixes the measurement before any run, so the split must ` +
+      'commit the attempt unit (attempts), the calibration selection rule (selection) and the ' +
+      `calibration file the held-out set came from (calibrationSha), not only the test.`,
+    );
+  const pre = preRegistration as Record<string, unknown>;
+  if (pre['attempts'] !== 'single')
+    throw new SplitsError(
+      `${file}: preRegistration.attempts is ${JSON.stringify(pre['attempts'])}, the code implements ` +
+      '"single". Calibration and the gate both count single attempts (R4-A2); a split that says ' +
+      'otherwise was measured in a different unit.',
+    );
+  if (pre['selection'] !== CALIBRATION_RULE)
+    throw new SplitsError(
+      `${file}: preRegistration.selection is not the selection rule this build implements. ` +
+      `The code selects by: ${JSON.stringify(CALIBRATION_RULE)}.`,
+    );
+  const calibrationSha = pre['calibrationSha'];
+  if (calibrationSha !== null
+    && (typeof calibrationSha !== 'string' || !/^[0-9a-f]{64}$/.test(calibrationSha)))
+    throw new SplitsError(
+      `${file}: preRegistration.calibrationSha must be null or a sha256 hex digest ` +
+      `(got ${JSON.stringify(calibrationSha)}).`,
+    );
+  if (typeof calibrationSha === 'string') {
+    let calibrationText: string;
+    try {
+      calibrationText = await readFile(path.join(corpusRoot, CALIBRATION_FILE), 'utf8');
+    } catch {
+      throw new SplitsError(
+        `${file}: preRegistration.calibrationSha is ${calibrationSha.slice(0, 12)}…, but there is no ` +
+        `${CALIBRATION_FILE} at ${corpusRoot}. The yardstick must come with the measurement behind it.`,
+      );
+    }
+    const actual = crypto.createHash('sha256').update(calibrationText, 'utf8').digest('hex');
+    if (actual !== calibrationSha)
+      throw new SplitsError(
+        `${file}: preRegistration.calibrationSha is ${calibrationSha.slice(0, 12)}…, but ` +
+        `${CALIBRATION_FILE} hashes to ${actual.slice(0, 12)}… — the committed held-out set does not ` +
+        'come from the measurement the split names.',
+      );
+  }
   const known = new Set(corpus.map((t) => t.id));
   const lists: { train: string[]; 'held-out': string[]; pool: string[] } = { train: [], 'held-out': [], pool: [] };
   // `pool` is optional (a corpus that has not run calibration has none); train and heldOut are not.
@@ -206,6 +275,7 @@ export async function loadSplits(
 
   const splits: CorpusSplits = {
     version: 1, minHeldOut, gate: HELD_OUT_RULE,
+    preRegistration: { attempts: 'single', selection: CALIBRATION_RULE, calibrationSha },
     train: lists.train, heldOut: lists['held-out'], pool: lists.pool,
   };
   return { ...splits, sha: computeSplitsSha(splits) };

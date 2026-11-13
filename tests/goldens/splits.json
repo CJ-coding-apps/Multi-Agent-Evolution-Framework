@@ -6,7 +6,12 @@
     "runs": 10,
     "alpha": 0.05,
     "minTasks": 20,
-    "decision": "improvement iff S > 0 and p < alpha, where for every held-out task t the base and the candidate each run `runs` single attempts, S = \u03a3_t (candidate passes_t \u2212 base passes_t), and p is the exact one-sided stratified permutation p-value: with k_t = base passes_t + candidate passes_t, the candidate's `runs` labels among the task's 2\u00b7runs attempts are exchangeable, so candidate passes_t ~ Hypergeometric(2\u00b7runs, k_t, runs) independently across the H tasks, and p is the probability that the convolution of those H distributions reaches at least the observed S. The test needs at least `minTasks` held-out tasks."
+    "decision": "improvement iff S > 0 and p < alpha, where for every held-out task t the base and the candidate each run `runs` single attempts, S = Σ_t (candidate passes_t − base passes_t), and p is the exact one-sided stratified permutation p-value: with k_t = base passes_t + candidate passes_t, the candidate's `runs` labels among the task's 2·runs attempts are exchangeable, so candidate passes_t ~ Hypergeometric(2·runs, k_t, runs) independently across the H tasks, and p is the probability that the convolution of those H distributions reaches at least the observed S. The test needs at least `minTasks` held-out tasks."
+  },
+  "preRegistration": {
+    "attempts": "single",
+    "selection": "keep tasks whose base pass count is 0, 1 or 2 of 3; at most a third of the kept set may be 0 of 3; at least 20 must qualify; when more than 20 qualify, 20 are drawn by a fixed-seed shuffle (seed 228128) and listed in id order",
+    "calibrationSha": null
   },
   "train": [
     "coder-sum",

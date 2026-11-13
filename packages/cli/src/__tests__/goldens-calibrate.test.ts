@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { LcmEngine } from '@maf/lcm';
-import { CALIBRATION_MIN_SELECTED, HELD_OUT_RULE, loadSplits } from '@maf/eval-harness';
+import { CALIBRATION_MIN_SELECTED, CALIBRATION_RULE, HELD_OUT_RULE, loadSplits } from '@maf/eval-harness';
 import type { GoldenSuiteResult, GoldenTask } from '@maf/eval-harness';
 import { calibrationTaskIds, runCalibration } from '../commands/goldens.js';
 
@@ -62,8 +62,8 @@ test('calibrate measures the whole pool 3 times with the scripted adapter and re
     // Every committed pool script is a plausible but wrong fix, so the base never passes one: no
     // task has headroom and the run reports and stops instead of writing a yardstick.
     assert.equal(code, 1, `calibration with nothing qualifying exits 1: ${stdout}${stderr}`);
-    assert.match(stdout, /20 pool tasks × 3 runs/);
-    assert.match(stdout, /20 never solved in 3, 0 solved every run \(no headroom\), 0 partial/);
+    assert.match(stdout, /35 pool tasks × 3 runs/);
+    assert.match(stdout, /35 never solved in 3, 0 solved every run \(no headroom\), 0 partial/);
     assert.match(stderr, /nothing was selected — only 0 tasks qualified/);
     assert.equal(await readFile(path.join(root, 'tests/goldens/splits.json'), 'utf8'), splitsBefore,
       'splits.json is untouched when nothing qualifies');
@@ -76,7 +76,7 @@ test('calibrate measures the whole pool 3 times with the scripted adapter and re
     assert.equal(record.version, 1);
     assert.equal(record.runs, 3);
     assert.match(record.ranAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.equal(record.tasks.length, 20);
+    assert.equal(record.tasks.length, 35);
     for (const t of record.tasks) {
       assert.equal(t.attempts, 3);
       assert.equal(t.passes, 0);
@@ -115,7 +115,7 @@ const task = (id: string): GoldenTask => ({
 });
 
 const HELD_OUT = ['h1', 'h2', 'h3', 'h4', 'h5'];
-const POOL = Array.from({ length: 12 }, (_, i) => `p${i}`);
+const POOL = Array.from({ length: 20 }, (_, i) => `p${i}`);
 const CORPUS = [...HELD_OUT, 'train-1', ...POOL].map(task);
 
 /** A base result in which `passes` of the three attempts pass, for the listed tasks. */
@@ -135,7 +135,9 @@ async function corpusRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-calibrate-corpus-'));
   await writeFile(path.join(root, 'corpus.json'), JSON.stringify(CORPUS, null, 2), 'utf8');
   await writeFile(path.join(root, 'splits.json'), JSON.stringify({
-    version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['train-1'], heldOut: HELD_OUT, pool: POOL,
+    version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
+    preRegistration: { attempts: 'single', selection: CALIBRATION_RULE, calibrationSha: null },
+    train: ['train-1'], heldOut: HELD_OUT, pool: POOL,
   }, null, 2), 'utf8');
   return root;
 }
@@ -144,10 +146,11 @@ test('a qualified calibration writes the counts and moves the selected pool task
   const root = await corpusRoot();
   try {
     const splits = await loadSplits(root, CORPUS);
-    // 10 partial and 2 never-solved: the cap allows floor(10/2) = 5, so both zeros are kept.
+    // 18 partial and 2 never-solved: the cap allows floor(18/2) = 9, so both zeros are kept, and
+    // 20 is exactly the floor the rule requires — no shuffle is needed to fill the yardstick.
     const counts: Array<[string, number]> = [
-      ...POOL.slice(0, 10).map((id, i): [string, number] => [id, i % 2 === 0 ? 1 : 2]),
-      [POOL[10] as string, 0], [POOL[11] as string, 0],
+      ...POOL.slice(0, 18).map((id, i): [string, number] => [id, i % 2 === 0 ? 1 : 2]),
+      [POOL[18] as string, 0], [POOL[19] as string, 0],
     ];
     const out = await runCalibration({
       corpusRoot: root, splits, taskIds: POOL, harness: { id: 'base', sha: 'a'.repeat(64) },
@@ -163,15 +166,17 @@ test('a qualified calibration writes the counts and moves the selected pool task
     };
     assert.equal(record.splitsSha, splits.sha, 'the record says which split it was decided against');
     assert.equal(record.harnessSha, 'a'.repeat(64));
-    assert.equal(record.tasks.length, 12);
+    assert.equal(record.tasks.length, 20);
     assert.deepEqual(record.errors, []);
     assert.deepEqual(record.selection.selected, POOL);
 
     const next = await loadSplits(root, CORPUS);
-    assert.deepEqual(next.heldOut, [...HELD_OUT, ...POOL]);
+    // R4-A3: the calibrated pool REPLACES the yardstick; the old held-out tasks stay in the corpus
+    // as training tasks, so nothing leaves the corpus and nothing is measured against a retired set.
+    assert.deepEqual(next.heldOut, POOL);
     assert.deepEqual(next.pool, []);
-    assert.deepEqual(next.train, ['train-1']);
-    assert.notEqual(next.sha, splits.sha, 'the yardstick changed identity when the held-out set grew');
+    assert.deepEqual(next.train, ['train-1', ...HELD_OUT]);
+    assert.notEqual(next.sha, splits.sha, 'the yardstick changed identity when the held-out set was replaced');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

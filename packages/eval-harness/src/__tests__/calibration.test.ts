@@ -101,6 +101,7 @@ test('calibration: the committed rule text states the rule the code implements',
 test('calibration: applying it REPLACES heldOut, retires the old set to train, and leaves the rest pooled', () => {
   const splits: CorpusSplits = {
     version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
+    preRegistration: { attempts: 'single', selection: CALIBRATION_RULE, calibrationSha: null },
     train: ['t1', 't2'],
     heldOut: ['h1', 'h2', 'h3', 'h4', 'h5'],
     pool: ['p1', 'p2', 'p3', 'p4'],
@@ -115,6 +116,9 @@ test('calibration: applying it REPLACES heldOut, retires the old set to train, a
     'the retired held-out tasks stay in the corpus as training tasks, never as yardstick');
   assert.deepEqual(next.pool, ['p4']);
   assert.equal(next.minHeldOut, 5);
+  // R4-A4: a calibrated split names the measurement it came from; without one the field is untouched.
+  assert.equal(next.preRegistration.calibrationSha, null);
+  assert.equal(applyCalibration(splits, sel, 'c'.repeat(64)).preRegistration.calibrationSha, 'c'.repeat(64));
   // The split must be re-read as a partition after the edit; an id it invents would fail here.
   assert.throws(() => applyCalibration(splits, { ...sel, selected: ['h1'] }),
     /calibration selected h1, which is not in the pool/);

@@ -1,12 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { GoldenRunner, HELD_OUT_RULE, SplitsError, computeSplitsSha, loadSplits } from '../index.js';
+import {
+  CALIBRATION_RULE, GoldenRunner, HELD_OUT_RULE, SplitsError, computeSplitsSha, loadSplits,
+} from '../index.js';
 import type { CorpusSplits, GoldenTask } from '../index.js';
 
 // ORACLE: D-57 — the train/held-out split is committed, named, and a partition of the corpus.
+
+/** R4-A4: the pre-registration block every split file now carries. */
+const PRE = { attempts: 'single' as const, selection: CALIBRATION_RULE, calibrationSha: null };
 
 const task = (id: string): GoldenTask => ({
   id, repoFixture: `fixtures/${id}`, prompt: `do ${id}`, role: 'coder',
@@ -33,7 +39,7 @@ async function withSplits(file: unknown, fn: (root: string) => Promise<void>): P
 }
 
 test('splits: a valid partition loads, and its sha covers the lists and the floor', async () => {
-  const splits: CorpusSplits = { version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: rest, heldOut: five };
+  const splits: CorpusSplits = { version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: rest, heldOut: five };
   await withSplits(splits, async (root) => {
     const loaded = await loadSplits(root, CORPUS);
     assert.deepEqual(loaded.train, rest);
@@ -47,7 +53,7 @@ test('splits: a valid partition loads, and its sha covers the lists and the floo
   assert.notEqual(computeSplitsSha(splits), computeSplitsSha({ ...splits, minHeldOut: 6 }));
 
   // R3-G1: a pool is a third list, on neither side, and it is part of the yardstick's identity.
-  const pooled: CorpusSplits = { version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['f', 'g'], heldOut: five, pool: ['h'] };
+  const pooled: CorpusSplits = { version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['f', 'g'], heldOut: five, pool: ['h'] };
   await withSplits(pooled, async (root) => {
     const loaded = await loadSplits(root, CORPUS);
     assert.deepEqual(loaded.pool, ['h']);
@@ -69,7 +75,7 @@ test('splits: a gate resting on fewer than minHeldOut deterministic held-out tas
     provenance: { source: 'human-decision', ref: 'split test fixture' },
   });
   const corpus = [...CORPUS, judge('j1'), judge('j2')];
-  const file = { version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: [...rest, five[4]!], heldOut: [...five.slice(0, 4), 'j1', 'j2'] };
+  const file = { version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: [...rest, five[4]!], heldOut: [...five.slice(0, 4), 'j1', 'j2'] };
   await withSplits(file, async (root) => {
     await assert.rejects(() => loadSplits(root, corpus), (err: unknown) => {
       assert.ok(err instanceof SplitsError, String(err));
@@ -87,7 +93,7 @@ test('splits: a gate resting on fewer than minHeldOut deterministic held-out tas
     await assert.rejects(() => loadSplits(root, CORPUS), /minHeldOut must be an integer of at least 5/);
   });
   // And a split claiming more than it has is refused with the count it does have.
-  await withSplits({ version: 1, minHeldOut: 6, gate: HELD_OUT_RULE, train: rest, heldOut: five }, async (root) => {
+  await withSplits({ version: 1, minHeldOut: 6, gate: HELD_OUT_RULE, preRegistration: PRE, train: rest, heldOut: five }, async (root) => {
     await assert.rejects(() => loadSplits(root, CORPUS), /has 5 deterministically scored tasks/);
   });
 });
@@ -96,23 +102,29 @@ test('splits: every way a split can fail to be a partition is refused', async ()
   const cases: Array<[unknown, RegExp]> = [
     [undefined, /no splits\.json/],
     ['{nope', /not readable JSON/],
-    [{ version: 2, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['a'], heldOut: ['b', 'c'] }, /version must be 1/],
-    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: 'a', heldOut: ['b', 'c'] }, /train must be an array/],
-    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['a', 'ghost'], heldOut: ['b', 'c'] }, /"ghost", which is not in the corpus/],
-    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['a', 'b', 'c'], heldOut: ['b'] }, /on both sides/],
-    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['a', 'a'], heldOut: ['b', 'c'] }, /more than once/],
-    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'] }, /g, h are in none of train, heldOut or pool/],
+    [{ version: 2, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['a'], heldOut: ['b', 'c'] }, /version must be 1/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: 'a', heldOut: ['b', 'c'] }, /train must be an array/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['a', 'ghost'], heldOut: ['b', 'c'] }, /"ghost", which is not in the corpus/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['a', 'b', 'c'], heldOut: ['b'] }, /on both sides/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['a', 'a'], heldOut: ['b', 'c'] }, /more than once/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'] }, /g, h are in none of train, heldOut or pool/],
     // R3-G1: the pool is a third list, and it obeys the same partition rules.
-    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'], pool: ['g', 'g'] }, /pool names g more than once/],
-    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'], pool: ['a'] }, /on both sides of the split \(train and pool\)/],
-    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'], pool: ['ghost'] }, /"ghost", which is not in the corpus/],
-    [{ version: 1, minHeldOut: 1, gate: HELD_OUT_RULE, train: ['a'], heldOut: ['b'] }, /minHeldOut must be an integer of at least 5/],
-    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: [], heldOut: IDS }, /both sides need at least one task/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'], pool: ['g', 'g'] }, /pool names g more than once/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'], pool: ['a'] }, /on both sides of the split \(train and pool\)/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['a', 'b'], heldOut: ['c', 'd', 'e', 'f'], pool: ['ghost'] }, /"ghost", which is not in the corpus/],
+    [{ version: 1, minHeldOut: 1, gate: HELD_OUT_RULE, preRegistration: PRE, train: ['a'], heldOut: ['b'] }, /minHeldOut must be an integer of at least 5/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: PRE, train: [], heldOut: IDS }, /both sides need at least one task/],
     // R3-G3: the held-out test is pre-registered. A split that omits it, or names a different
     // alpha or run count, is refused before any harness runs.
     [{ version: 1, minHeldOut: 5, train: ['a'], heldOut: ['b', 'c'] }, /no "gate"\. D-57 fixes the held-out test before any run/],
-    [{ version: 1, minHeldOut: 5, gate: { ...HELD_OUT_RULE, alpha: 0.1 }, train: ['a'], heldOut: ['b', 'c'] }, /alpha is 0\.1, the code implements 0\.05/],
-    [{ version: 1, minHeldOut: 5, gate: { ...HELD_OUT_RULE, runs: 3 }, train: ['a'], heldOut: ['b', 'c'] }, /runs is 3, the code implements 10/],
+    [{ version: 1, minHeldOut: 5, gate: { ...HELD_OUT_RULE, alpha: 0.1 }, preRegistration: PRE, train: ['a'], heldOut: ['b', 'c'] }, /alpha is 0\.1, the code implements 0\.05/],
+    [{ version: 1, minHeldOut: 5, gate: { ...HELD_OUT_RULE, runs: 3 }, preRegistration: PRE, train: ['a'], heldOut: ['b', 'c'] }, /runs is 3, the code implements 10/],
+    // R4-A4: the rest of the pre-registration — the unit, the selection rule, the measurement.
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, train: ['a'], heldOut: ['b', 'c'] }, /no "preRegistration"\. D-57 fixes the measurement before any run/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: { ...PRE, attempts: 'pass@2' }, train: ['a'], heldOut: ['b', 'c'] }, /attempts is "pass@2", the code implements "single"/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: { ...PRE, selection: 'keep everything' }, train: ['a'], heldOut: ['b', 'c'] }, /selection is not the selection rule this build implements/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: { ...PRE, calibrationSha: 'nope' }, train: ['a'], heldOut: ['b', 'c'] }, /must be null or a sha256 hex digest/],
+    [{ version: 1, minHeldOut: 5, gate: HELD_OUT_RULE, preRegistration: { ...PRE, calibrationSha: 'a'.repeat(64) }, train: ['a'], heldOut: ['b', 'c'] }, /there is no calibration\.json/],
   ];
   for (const [file, re] of cases) {
     await withSplits(file, async (root) => {
@@ -122,6 +134,32 @@ test('splits: every way a split can fail to be a partition is refused', async ()
         return true;
       });
     });
+  }
+});
+
+test('splits: the calibration a split names is the one on disk, byte for byte (R4-A4)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-splits-cal-'));
+  try {
+    const calibration = '{"version":1,"note":"measured"}\n';
+    const sha = createHash('sha256').update(calibration, 'utf8').digest('hex');
+    const file: CorpusSplits = {
+      version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
+      preRegistration: { ...PRE, calibrationSha: sha }, train: rest, heldOut: five,
+    };
+    await writeFile(path.join(root, 'splits.json'), JSON.stringify(file), 'utf8');
+    await writeFile(path.join(root, 'calibration.json'), calibration, 'utf8');
+    const loaded = await loadSplits(root, CORPUS);
+    assert.equal(loaded.preRegistration.calibrationSha, sha, 'the loaded split carries the measurement it names');
+    // The measurement is part of the yardstick's identity, not an annotation on it.
+    assert.notEqual(computeSplitsSha(file), computeSplitsSha({ ...file, preRegistration: PRE }));
+    assert.notEqual(computeSplitsSha(file),
+      computeSplitsSha({ ...file, preRegistration: { ...PRE, calibrationSha: 'b'.repeat(64) } }));
+    // A different measurement behind the same split is refused: the yardstick would not be the one named.
+    await writeFile(path.join(root, 'calibration.json'), '{"version":1,"note":"other"}\n', 'utf8');
+    await assert.rejects(() => loadSplits(root, CORPUS),
+      /does not come from the measurement the split names/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

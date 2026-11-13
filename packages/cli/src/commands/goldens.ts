@@ -335,10 +335,14 @@ export async function runCalibration(o: CalibrationOptions): Promise<Calibration
     splitsSha: o.splits.sha, rule: CALIBRATION_RULE, tasks: counts, errors, selection,
   };
   const calibrationPath = path.join(o.corpusRoot, CALIBRATION_FILE);
-  await writeFile(calibrationPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+  const calibrationText = `${JSON.stringify(record, null, 2)}\n`;
+  await writeFile(calibrationPath, calibrationText, 'utf8');
   if (!selection.qualified) return { path: calibrationPath, record, selection };
 
-  const splits = applyCalibration(o.splits, selection);
+  // R4-A4: the rewritten split names the file just written, by the sha of its exact bytes, so a
+  // later `loadSplits` can prove the held-out set came from this measurement and not another.
+  const calibrationSha = crypto.createHash('sha256').update(calibrationText, 'utf8').digest('hex');
+  const splits = applyCalibration(o.splits, selection, calibrationSha);
   const splitsPath = path.join(o.corpusRoot, SPLITS_FILE);
   await writeFile(splitsPath, `${JSON.stringify(splits, null, 2)}\n`, 'utf8');
   return { path: calibrationPath, record, selection, splitsPath };

@@ -5,7 +5,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
-import { HELD_OUT_RULE } from '@maf/eval-harness';
+import { CALIBRATION_RULE, HELD_OUT_RULE } from '@maf/eval-harness';
 import { estimateTokens } from '@maf/types';
 import type { AdapterInvokeOptions, AdapterInvokeResult, CliAdapter } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
@@ -224,6 +224,7 @@ test('maf evolve refuses a held-out gate resting on fewer than minHeldOut determ
     const corpusJson = JSON.parse(await readFile(path.join(corpus, 'corpus.json'), 'utf8')) as { id: string }[];
     await writeFile(path.join(corpus, 'splits.json'), JSON.stringify({
       version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
+      preRegistration: { attempts: 'single', selection: CALIBRATION_RULE, calibrationSha: null },
       train: corpusJson.map((t) => t.id).filter((id) => id !== 'coder-fib'),
       heldOut: ['coder-fib'],
     }), 'utf8');
@@ -253,6 +254,11 @@ test('R2-M1 budget: --max-tokens 2000 stops before the baseline, with the projec
   try {
     const corpus = path.join(root, 'corpus');
     await cp(SEED, corpus, { recursive: true });
+    // The projection is over the train split, so the figure is read from the split rather than
+    // pinned: growing the corpus is not a regression in this test.
+    const trainCount = (JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as {
+      train: string[];
+    }).train.length;
     const logs: string[] = [];
     t.mock.method(console, 'log', (...parts: unknown[]) => { logs.push(parts.map(String).join(' ')); });
     t.mock.method(console, 'error', () => {});
@@ -279,8 +285,11 @@ test('R2-M1 budget: --max-tokens 2000 stops before the baseline, with the projec
     assert.equal(report.rounds[0]?.manifest, undefined, 'no manifest exists: the planner never ran');
     // R2-M1: the projection is printed before the baseline starts, so the stop is before it —
     // not after it has already overspent. With no earlier run to measure, the estimate is used.
-    assert.match(report.rounds[0]?.note ?? '',
-      /the round-0 baseline was not started: 29 tasks × 8000 tokens each \(conservative estimate\) projects 232000 tokens; 0 already spent against a 2000-token budget — not started/);
+    assert.match(report.rounds[0]?.note ?? '', new RegExp(
+      `the round-0 baseline was not started: ${trainCount} tasks × 8000 tokens each ` +
+      `\\(conservative estimate\\) projects ${trainCount * 8000} tokens; ` +
+      '0 already spent against a 2000-token budget — not started'));
+    assert.equal(trainCount, 44, 'R4-A3: the train split carries the retired held-out tasks too');
     assert.equal(report.usage?.calls, 0, 'nothing was dispatched: the stop happened before the baseline');
     assert.ok(logs.some((l) => l.includes('stop=budget')), logs.join('\n'));
   } finally {

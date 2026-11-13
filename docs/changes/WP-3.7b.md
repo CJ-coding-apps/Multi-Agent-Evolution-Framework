@@ -650,6 +650,116 @@ than on behaviour:
 Neither test's body changed and no assertion was relaxed; the cap is a backstop for a hung
 process, not the thing being measured. Both pass at the new cap.
 
+## Round 4 — CJ's option A (2026-11-13)
+
+CJ recorded option A in `SPEC-3B.md` and wrote the round-4 brief (`FIXES-3.7b-round4.md`). The
+sign-flip gate and the 5-task pre-registration of round 3 are **replaced**; R3-G3 and R3-G4 above
+are kept as history and no longer describe this build.
+
+### R4-A1 — the gate is an exact stratified within-task permutation test
+
+The round-3 sign test threw away the within-task evidence: it compared one observed delta per task,
+so a task jumping from 0/10 to 10/10 and a task jumping from 5/10 to 6/10 entered the sum the same
+way, and the reachable sums were coarse. The gate is now one-sided and **stratified within each
+task**:
+
+> for every deterministic held-out task `t`, the base and the candidate each run `N = 10` single
+> attempts; with `k_t` = base passes + candidate passes out of `2N`, the candidate's `N` labels are
+> exchangeable among the task's `2N` attempts, so
+> `candidatePasses_t ~ Hypergeometric(2N, k_t, N)` independently across tasks;
+> `S = Σ_t (candidatePasses_t − basePasses_t)`; and `p` is the probability that the convolution of
+> those `H` hypergeometric distributions reaches at least the observed sum.
+
+The convolution is counted, not sampled or approximated: every partial sum carries an exact integer
+count in `BigInt`, the denominator is `C(2N, N)^H`, and the value is converted to a double exactly
+once at the end — a `1e-23` tail is a number, not `0`. The decision is `improved` iff `p < alpha`
+with `S > 0`, and the rule is refused, with each differing field named, when a split commits a
+different one (`runs is 3, the code implements 10`).
+
+`significance.test.ts` checks the implementation against an **enumerated oracle** — every one of the
+`C(2N,N)^H` label assignments, for small shapes up to 3 attempts × 3 tasks — rather than against a
+re-derivation of the same formula. It also pins the symmetry theorem (`S ≤ 0 ⇒ p ≥ 0.5`) instead of
+assuming it, the exact rational on a 20-task vector (0.1899126525200621…, where a normal
+approximation visibly differs), and a 19-task shape whose two-sided reading clears alpha (0.066) but
+whose one-sided reading does not (0.033), so a two-sided mutant dies. Mutants applied to `dist/`
+and reversed: a **two-sided tail** (red on four tests) and a **pooled, not stratified, model** —
+one hypergeometric over all `2NH` attempts instead of a convolution of `H` within-task ones (red on
+four). One mutant **survived** and is recorded rather than hidden: replacing the BigInt denominator
+with `Math.pow(Number(C(2N,N)), H)` changes no asserted value, because both sides round to the same
+double at this size. The exactness that the design depends on is the BigInt **accumulation** (a
+`1e-23` tail is a real integer count), not the final division — which is the one rounding the code
+documents.
+
+### R4-A2 — the attempt is the unit, in calibration and in the gate
+
+The round-3 verifier found the two stages measuring in different units: calibration asked "how many
+of three runs passed", while the gate's held-out runner gave each task **two** attempts per repeat
+and counted the repeat. A task the base solved on one of two tries was 2/3 to calibration and 10/10
+to the gate, so the calibrated set looked harder than the yardstick it became. Both now count single
+attempts: `runnerFor(harness, 1, …)` for the held-out runner, with `heldOutRepeats = 10` — ten
+single attempts per task, the same unit calibration records. Train scoring keeps `attempts: 2` (a
+task counts if either try passes): that is the evolver's own yardstick for choosing candidates, not
+the gate's measurement, and the comment says so where the number is. The isolation test pins the
+dispatch count at `held-out size × 10 × 2` (base and candidate), so a regression back to pass@2 is a
+red test rather than a quiet change of unit.
+
+### R4-A3 — a 35-task pool supplies the 20-task yardstick, and calibration replaces it
+
+Round 3 left seven held-out tasks, two of them judge-scored, for a gate stated over twenty. Fifteen
+new candidate tasks were added to the pool and fifteen matching train tasks to the corpus (56 → 86;
+pool 20 → 35; train 29 → 44). Each pool fixture is checked mechanically before it lands: the initial
+state fails its own test, and the scripted answer is a **plausible but wrong** fix that still fails
+it — so the base has no headroom there by construction, which the regenerated offline baseline
+records.
+
+The selection rule (`CALIBRATION_RUNS = 3` single attempts per task) keeps 0, 1 or 2 of 3, drops the
+always-solved, and keeps at most `floor(partial/2)` never-solved tasks — "at most a third of the kept
+set may be 0 of 3". `CALIBRATION_MIN_SELECTED` is now 20 (fewer is reported and nothing is written).
+`CALIBRATION_MAX_SELECTED` is 20: when more than 20 qualify, exactly 20 are kept by a seeded
+Fisher–Yates over the **sorted** qualified ids (so re-ordering `splits.json` cannot change the set),
+stratified so the never-solved cap still holds of the kept set. The seed (228128) is a constant —
+no flag, no clock, no `Math.random` — it is recorded beside the selection, the ids are listed in
+order, and `notDrawn` reports qualified tasks the yardstick did not take.
+
+`applyCalibration` **replaces** `heldOut` (round-3 L1): the retired set moves to `train`, because it
+is no longer the yardstick and the split must keep partitioning the corpus. `calibration.json` and
+the rewritten `splits.json` are written side by side; a calibration that does not qualify writes its
+measurement and leaves `splits.json` byte-identical.
+
+Two CLI tests pinned round-3's corpus sizes and were repaired here (they read the size from the split
+now, or pin the new count with a comment): `goldens-calibrate`'s 12-task injected pool became 20 with
+the replace-not-append assertion, and `eval-commands`' projection reads the train count instead of
+the literal 29.
+
+### R4-A4 — the measurement is pre-registered in `splits.json`
+
+The gate rule already fixed the test; the file now also fixes its **unit**, the **rule that chose the
+yardstick**, and the **measurement the yardstick came from**. Both committed copies
+(`tests/goldens/splits.json` and `packages/cli/assets/goldens/splits.json`) carry, verbatim:
+
+```json
+"gate": {
+  "test": "one-sided-stratified-permutation",
+  "runs": 10,
+  "alpha": 0.05,
+  "minTasks": 20,
+  "decision": "improvement iff S > 0 and p < alpha, where for every held-out task t the base and the candidate each run `runs` single attempts, S = Σ_t (candidate passes_t − base passes_t), and p is the exact one-sided stratified permutation p-value: with k_t = base passes_t + candidate passes_t, the candidate's `runs` labels among the task's 2·runs attempts are exchangeable, so candidate passes_t ~ Hypergeometric(2·runs, k_t, runs) independently across the H tasks, and p is the probability that the convolution of those H distributions reaches at least the observed S. The test needs at least `minTasks` held-out tasks."
+},
+"preRegistration": {
+  "attempts": "single",
+  "selection": "keep tasks whose base pass count is 0, 1 or 2 of 3; at most a third of the kept set may be 0 of 3; at least 20 must qualify; when more than 20 qualify, 20 are drawn by a fixed-seed shuffle (seed 228128) and listed in id order",
+  "calibrationSha": null
+}
+```
+
+`loadSplits` refuses a split that omits the block, names a different attempt unit
+(`attempts is "pass@2", the code implements "single"`), names a selection rule the build does not
+implement, or carries a `calibrationSha` that is not `null` / a sha256 digest or does not match the
+`calibration.json` on disk byte for byte. `calibrationSha` stays `null` until a paid calibration
+runs: `goldens calibrate` hashes exactly the bytes it writes, so the split names **that**
+measurement, and a split re-run against a different measurement is refused. All three fields are
+inside `computeSplitsSha`, so changing the pre-registration changes the yardstick's identity.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

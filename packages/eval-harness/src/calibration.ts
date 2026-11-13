@@ -199,7 +199,7 @@ export function selectCalibrated(counts: readonly CalibrationCount[]): Calibrati
  * gate forever while leaving the corpus intact.
  */
 export function applyCalibration(
-  splits: CorpusSplits, selection: CalibrationSelection,
+  splits: CorpusSplits, selection: CalibrationSelection, calibrationSha?: string,
 ): CorpusSplits {
   const pool = splits.pool ?? [];
   const notPooled = selection.selected.filter((id) => !pool.includes(id));
@@ -215,6 +215,12 @@ export function applyCalibration(
     version: splits.version,
     minHeldOut: splits.minHeldOut,
     gate: splits.gate,
+    // R4-A4: the split names the measurement its held-out set came from, so `loadSplits` can
+    // refuse a yardstick that does not hash to the committed calibration file.
+    preRegistration: {
+      ...splits.preRegistration,
+      ...(calibrationSha !== undefined ? { calibrationSha } : {}),
+    },
     train: [...splits.train, ...splits.heldOut],
     heldOut: [...selection.selected],
     pool: pool.filter((id) => !chosen.has(id)),
