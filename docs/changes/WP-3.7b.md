@@ -652,7 +652,8 @@ process, not the thing being measured. Both pass at the new cap.
 
 ## Round 4 — CJ's option A (2026-11-13)
 
-CJ recorded option A in `SPEC-3B.md` and wrote the round-4 brief (`FIXES-3.7b-round4.md`). The
+CJ recorded option A in the spec amendment `SPEC-3B` and wrote the round-4 brief
+`FIXES-3.7b-round4` (both in `~/projects`, not shipped here). The
 sign-flip gate and the 5-task pre-registration of round 3 are **replaced**; R3-G3 and R3-G4 above
 are kept as history and no longer describe this build.
 
@@ -730,6 +731,12 @@ Two CLI tests pinned round-3's corpus sizes and were repaired here (they read th
 now, or pin the new count with a comment): `goldens-calibrate`'s 12-task injected pool became 20 with
 the replace-not-append assertion, and `eval-commands`' projection reads the train count instead of
 the literal 29.
+
+Growing the corpus also re-timed `native-lifecycle`'s five-stack stress, which runs the whole
+corpus through a real stack five times. One iteration measures 148 s, so five are ~740 s, and
+round 3's 900 s cap was hit at 900.0 s in a full serial run with every other test green. The cap is
+1800 s on both the `node:test` option and the `execFile` call (commit `799137c`, test-only; the
+body and every assertion are unchanged). The recorded serial run takes 1051 s there.
 
 ### R4-A4 — the measurement is pre-registered in `splits.json`
 
@@ -901,23 +908,26 @@ the guard reddens the new test (1 failing test).
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
-  --workspace-concurrency=1 test` at code commit `50480e6`: **1794 tests, 1792 pass, 2 skipped,
-  0 fail** (`TEST_RC=0`), across the 25 packages that declare a test script. The two corpus-sized
-  tests measured 125 s and 480 s at their new caps. One earlier run of this same tree failed
-  `run-attribution.test.js`'s F1 overlap case — a load-sensitive test outside this lane's diff
-  (nothing in this branch touches it); it passed 30/30 over five isolated runs and in the recorded
-  run, and it passed on Linux in both runs.
+  --workspace-concurrency=1 test` at code commit `799137c`: **1806 tests, 1804 pass, 2 skipped,
+  0 fail** (`TEST_RC=0`), across the 25 packages that declare a test script. The three
+  corpus-sized tests measured 1051 s (five stacks), 293 s (fresh-clone baseline) and 191 s
+  (calibrate). Two earlier runs of the same tree are part of the record: the first failed four
+  tests under a host at load ~30 on 16 cores, and each passed in isolation (`@maf/tools` 15/15 in
+  6.5 s, calibrate 6/6 in 108 s, goldens-offline 11/11 in 436 s, five stacks 1/1 in 889 s); the
+  second had exactly one failure, the five-stack test at its then-cap of 900.0 s, with every other
+  test green — one stress iteration measures 148 s, so five are ~740 s. The cap is now 1800 s
+  (`799137c`, test-only; no assertion changed) and the recorded run passes under it at 1051 s.
 - **Linux (node 22.23.4, `node:22` container)** — `pnpm install --frozen-lockfile`, `pnpm -r
-  build`, then the same serial command over a `git archive` of `50480e6`: `INSTALL_RC=0`,
-  `BUILD_RC=0`, **1794 tests, 1792 pass, 2 skipped, 0 fail**, `TEST_RC=0`, zero `not ok` lines.
+  build`, then the same serial command over a `git archive` of `799137c`: `INSTALL_RC=0`,
+  `BUILD_RC=0`, **1806 tests, 1804 pass, 2 skipped, 0 fail**, `TEST_RC=0`, zero `not ok` lines.
   Every count agrees with macOS; the container renders its summary marker as ASCII `#`, the only
-  difference in the logs. The two corpus-sized tests measured 53 s and 170 s there.
+  difference in the logs. The same three tests measured 408 s, 123 s and 85 s there.
 - **Guards** — `check:test-scripts` 25 of 27 packages declare a test script (none for
   `@maf/blackboard`, `@maf/lcm-adapter`); `check:build-output` 27/27; `check:workspace-deps` 27
   packages, **94 internal edges, acyclic** (no new link — R2-H1 removed the `@maf/processors`
-  dependency); `check:doc-refs` OK (91 references; the three quoted leak fixtures sit in a fenced
-  block, so they are not read as citations); `check:package` **137 files**, installed and run,
-  `goldens solved 30/56`.
+  dependency); `check:doc-refs` OK (92 references; the quoted leak fixtures sit in a fenced block,
+  so they are not read as citations); `check:package` **199 files**, installed and run,
+  `goldens solved 45/86`.
 - **The offline rows above** are the round-2 measurement (`b978d85`, the 16-task corpus) and are
   kept as history: round 3 replaced the corpus and the comparison (the sign-flip gate at N = 5, and
   the pre-run cost projection that now stops a run before its baseline), so the verdict line and
