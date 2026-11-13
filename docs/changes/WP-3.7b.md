@@ -760,6 +760,33 @@ runs: `goldens calibrate` hashes exactly the bytes it writes, so the split names
 measurement, and a split re-run against a different measurement is refused. All three fields are
 inside `computeSplitsSha`, so changing the pre-registration changes the yardstick's identity.
 
+### R4-A5 — power at H = 20, N = 10, measured over 2000 sessions
+
+A scripted simulation draws each task's ten base passes and ten candidate passes from Bernoulli
+rates, feeds them to the real `stratifiedGate`, and counts the sessions it calls an improvement. No
+harness, no model, no spend; a seeded PRNG (mulberry32) makes every figure reproducible, and each is
+reported with a second seed. **2000 sessions** per shape:
+
+| shape | detection | second seed |
+|---|---|---|
+| 6 of 20 tasks move 0.3 → 0.8, the other 14 flat at 0.5 (**the specified effect**) | **0.908** (1816/2000) | 0.9035 |
+| 12 of 20 tasks move 0.5 → 0.7 (**broad +0.2 on 60%**), the others flat at 0.5 | **0.746** (1492/2000) | 0.7565 |
+| no true difference anywhere (all 20 at 0.5) | **0.0415** (83/2000) | — |
+
+The specified effect clears CJ's bar (at least 8 in 10) and reproduces the verifier's 0.91. The
+false-positive rate meets "at most 1 in 20"; null shapes at 0.3 and 0.8 measured 0.0345 and 0.0398
+over 4000 sessions, so the level holds across base rates, not only at the one quoted.
+
+**The broad +0.2 shape is detected about 3 times in 4, and that is reported rather than
+engineered around.** The brief asks for this number to be reported and for only the specified
+effect to clear 0.8. The design is powered for large per-task jumps and less so for many small
+ones; changing `N`, `H` or `alpha` after seeing this would defeat the pre-registration. The
+per-task counts in the report show the gain either way.
+
+`power.test.ts` runs all three shapes at 2000 sessions (about 15 s) and asserts the brief's floor on
+the first, a measured band on the second, the alpha ceiling on the third, and seed reproducibility
+with a second-seed agreement within 0.03.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
