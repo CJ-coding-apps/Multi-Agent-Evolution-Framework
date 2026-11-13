@@ -113,6 +113,9 @@ const SPACED_PATH_HEAD = /(?:^|(?<=[\s"'(=:`]))(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[
 const SPACED_WORD = /[^\S\r\n]+([^\s"'\n]+)/y;
 const NAMES_FILE = /\.[A-Za-z0-9]{1,8}(?::\d+)?$/;
 const MAX_SPACED_WORDS = 3;
+// R3-L4: a clause connector ends the path. `wrote /tmp/x then src/foo.ts was read` names two
+// things; `then` cannot be a directory, and swallowing it (with the next path) lost the prose.
+const SPACED_CONNECTORS = new Set(['then', 'and', 'but', 'or', 'so', 'yet']);
 
 function spacedPathTail(text: string, from: number, head: string): number | undefined {
   const headNamesFile = NAMES_FILE.test(head);
@@ -125,6 +128,7 @@ function spacedPathTail(text: string, from: number, head: string): number | unde
     if (word === null) break;
     const end = pos + word[0].length;
     const token = word[1]!;
+    if (i === 0 && SPACED_CONNECTORS.has(token.toLowerCase())) break;
     if (/[\\/]/.test(token)) carriesSeparator = true;
     if (NAMES_FILE.test(token) || /[\\/]/.test(token)) { tail = end; break; }
     pos = end;

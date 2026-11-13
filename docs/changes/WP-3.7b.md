@@ -885,6 +885,19 @@ from earlier rounds, plus this round's 5 + 5).
 Measured mutants: restoring the old owner gap reddens the benign side (1 failing test); removing
 `append|paste|save` reddens the leak side (1 failing test).
 
+### R3-L4 — a clause connector ends the spaced-path run
+
+`redactEvidenceText('wrote /tmp/x then src/foo.ts was read')` produced `wrote [REDACTED:path] was
+read`: the spaced-path continuation crossed `then` and swallowed the second path together with the
+prose between them. A connector cannot be a directory name, so the continuation now stops at
+`then|and|but|or|so|yet` in the first position and the result is `wrote [REDACTED:path] then
+src/foo.ts was read`. The second path is relative, which the absolute-path pattern does not mask and
+which is the same repo-relative shape the mask keeps elsewhere (it carries no machine layout).
+
+The connector guard applies only to the first word of the run: a spaced filename in one clause
+(`refused /home/u/my secret notes.txt then stopped`) is still masked whole. Measured mutant: removing
+the guard reddens the new test (1 failing test).
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

@@ -103,3 +103,15 @@ test('prose after an unquoted path is left alone (R2-L2)', () => {
   assert.equal(redactEvidenceText('error at /home/u/x.js:3 in test.js'),
     'error at [REDACTED:path] in test.js');
 });
+
+// R3-L4: the spaced-path run crossed a clause connector, so `/tmp/x then src/foo.ts` read as one
+// path and the prose between two paths went with it. A connector cannot be a directory name; the
+// run ends at it, and the second path keeps its own words.
+test('a clause connector between two paths ends the spaced-path run (R3-L4)', () => {
+  assert.equal(redactEvidenceText('wrote /tmp/x then src/foo.ts was read'),
+    'wrote [REDACTED:path] then src/foo.ts was read');
+  // A spaced filename in one clause is still one path: the connector guard applies only to the
+  // first word of the run, not to a word inside a path.
+  assert.equal(redactEvidenceText('refused /home/u/my secret notes.txt then stopped'),
+    'refused [REDACTED:path] then stopped');
+});
