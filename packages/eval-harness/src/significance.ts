@@ -1,29 +1,33 @@
 /**
- * The held-out gate's pre-registered test (WP-3.7b R3-G3, D-57).
+ * The held-out gate's pre-registered test (WP-3.7b R4-A1, D-57).
  *
- * Round 2 compared repeats with `min(candidate) − max(baseline) > spread`. That rule used only two
- * extreme order statistics, so a real 30%→80% gain on a couple of ten tasks was detected about 11%
- * of the time, and a lucky repeat or an unlucky one could decide the verdict. This module replaces
- * it with a fixed, one-sided exact test over per-task pass counts:
+ * Round 2 compared repeats with `min(candidate) − max(baseline) > spread`; round 3 replaced that
+ * with a one-sided sign-flip test over per-task deltas. Both were exact, and the sign-flip version
+ * matched brute force — but it was under-powered: a candidate that truly lifted 30% of the held-out
+ * tasks from 0.3 to 0.8 was certified about once in five sessions, because a one-run delta per task
+ * throws away the within-task evidence and the reachable sums are coarse.
  *
- *   for every held-out task t, run each harness N times;
- *   d_t = (candidate passes) − (base passes);
- *   S   = Σ d_t;
- *   p   = the fraction of all 2^H sign assignments of the observed d_t whose sum S* is >= S;
- *   improve iff S > 0 and p < alpha.
+ * This module implements CJ's round-4 choice (option A): for every held-out task t the base and the
+ * candidate each run N single attempts. Let k_t be the total passes out of 2N. Under "no effect"
+ * the task's 2N attempt outcomes are exchangeable, so the candidate's N labels are a uniformly
+ * random N-subset and
  *
- * The sign-flip test is exact and non-parametric: under "no effect", each d_t is as likely to be
- * negative as positive, so flipping its sign gives the null distribution with no normal
- * approximation and no model of the score. It is one-sided because the question is only whether the
- * candidate got better, and it is pre-registered (runs, alpha and the minimum number of tasks live
- * in `splits.json`, and the session refuses to run when the committed rule differs from this one).
+ *   candidatePasses_t ~ Hypergeometric(2N, k_t, N), independently across tasks;
+ *   S = Σ_t (candidatePasses_t − basePasses_t) = 2·Σ_t candidatePasses_t − Σ_t k_t;
+ *   p = P(Σ_t X_t >= Σ_t candidatePasses_t), the hypergeometric convolution.
+ *
+ * The convolution is computed exactly in integers (BigInt), not sampled and not approximated: the
+ * denominator is C(2N, N)^H, so the p-value is a ratio of exact counts. The test is one-sided
+ * because the question is only whether the candidate got better, and it is pre-registered: the
+ * run count, alpha, the minimum number of tasks and the decision sentence live in `splits.json`,
+ * and the session refuses to run when the committed rule differs from this one.
  */
 
 /** The rule as committed in `splits.json`. Comparing it with `HELD_OUT_RULE` is the pre-registration. */
 export interface HeldOutTestRule {
   /** One implementation is named; a different test is a different rule, not a flag. */
-  test: 'one-sided-sign-flip-permutation';
-  /** Independent runs per task, for each harness. */
+  test: 'one-sided-stratified-permutation';
+  /** Single attempts per task, for each harness. */
   runs: number;
   /** Significance level. */
   alpha: number;
@@ -34,20 +38,23 @@ export interface HeldOutTestRule {
 }
 
 const DECISION =
-  'improvement iff S > 0 and p < alpha, where d_t = candidate passes − base passes for held-out ' +
-  'task t over `runs` independent runs of each harness, S = Σ_t d_t, and p is the exact one-sided ' +
-  'sign-flip permutation p-value: the fraction of all 2^H sign assignments of the observed d_t ' +
-  'whose sum S* is at least S, with H the number of held-out tasks.';
+  'improvement iff S > 0 and p < alpha, where for every held-out task t the base and the candidate ' +
+  'each run `runs` single attempts, S = Σ_t (candidate passes_t − base passes_t), and p is the ' +
+  'exact one-sided stratified permutation p-value: with k_t = base passes_t + candidate passes_t, ' +
+  "the candidate's `runs` labels among the task's 2·runs attempts are exchangeable, so candidate " +
+  'passes_t ~ Hypergeometric(2·runs, k_t, runs) independently across the H tasks, and p is the ' +
+  'probability that the convolution of those H distributions reaches at least the observed S. ' +
+  'The test needs at least `minTasks` held-out tasks.';
 
 export const HELD_OUT_RULE: HeldOutTestRule = {
-  test: 'one-sided-sign-flip-permutation',
-  runs: 5,
+  test: 'one-sided-stratified-permutation',
+  runs: 10,
   alpha: 0.05,
-  minTasks: 10,
+  minTasks: 20,
   decision: DECISION,
 };
 
-/** One held-out task's measurement: how many of its `runs` runs each harness passed. */
+/** One held-out task's measurement: how many of its `runs` single attempts each harness passed. */
 export interface HeldOutTaskPasses {
   taskId: string;
   base: number;
@@ -58,6 +65,8 @@ export interface HeldOutDelta {
   taskId: string;
   base: number;
   candidate: number;
+  /** base + candidate: how many of the task's 2·runs attempts passed under either label. */
+  k: number;
   /** candidate − base. */
   d: number;
 }
@@ -69,76 +78,102 @@ export interface HeldOutGateVerdict {
   H: number;
   /** Σ d_t. */
   S: number;
-  /** Exact one-sided p-value, P(S* >= S). */
+  /** Exact one-sided stratified permutation p-value. */
   p: number;
   improved: boolean;
-  /** Every d_t, in the order supplied — the numbers the verdict used. */
+  /** Every task's counts, in the order supplied — the numbers the verdict used. */
   deltas: HeldOutDelta[];
   /** Why it is not an improvement, when it is not. */
   reason?: string;
 }
 
-/**
- * The exact one-sided sign-flip p-value for observed deltas: P(S* >= S) over the 2^H assignments
- * ε_i ∈ {−1, +1} of S* = Σ ε_i d_i.
- *
- * Computed by counting, not sampling: a subset-sum table over the achievable sums holds the exact
- * number of sign assignments for each. A zero delta doubles both the numerator and the denominator,
- * so keeping zeros in the list is exactly equivalent to dropping them and costs nothing but table
- * width — which is why the count is over all H tasks, as the rule says. Counts are BigInt because
- * 2^H leaves the exact-integer range of a double around H = 53 and an approximate p is not an exact
- * test; the returned ratio is rounded to twelve decimal places, far finer than `alpha`.
- */
-export function signFlipPValue(deltas: readonly number[]): number {
-  const H = deltas.length;
-  if (H === 0) return 1;
-  const total = 2n ** BigInt(H);
-  const offset = deltas.reduce((n, d) => n + Math.abs(d), 0);
-  const width = 2 * offset + 1;
-  let counts: bigint[] = new Array<bigint>(width).fill(0n);
-  counts[offset] = 1n;
-  let reach = 0;
-  for (const d of deltas) {
-    const next: bigint[] = new Array<bigint>(width).fill(0n);
-    for (let s = -reach; s <= reach; s++) {
-      const c = counts[s + offset]!;
-      if (c === 0n) continue;
-      next[s + d + offset] = (next[s + d + offset] ?? 0n) + c;
-      next[s - d + offset] = (next[s - d + offset] ?? 0n) + c;
-    }
-    counts = next;
-    reach += Math.abs(d);
-  }
-  const S = deltas.reduce((n, d) => n + d, 0);
-  let atLeast = 0n;
-  // Every achievable sum lies in [−offset, offset]; S does too, because |S| <= Σ|d_i| = offset.
-  for (let s = Math.max(S, -offset); s <= offset; s++) atLeast += counts[s + offset] ?? 0n;
-  return Number((atLeast * 1_000_000_000_000n) / total) / 1e12;
+/** C(n, r) as an exact integer; 0 outside 0 <= r <= n. */
+function choose(n: number, r: number): bigint {
+  if (r < 0 || r > n) return 0n;
+  let out = 1n;
+  for (let i = 0n; i < BigInt(r); i++) out = (out * (BigInt(n) - i)) / (i + 1n);
+  return out;
 }
 
 /**
- * The gate's verdict. The three clauses are checked in order and the first that fails is the
- * reason, so a report says what stopped it rather than only that it stopped:
+ * The exact one-sided stratified permutation p-value.
  *
- *   1. at least `minTasks` tasks (H >= 10) — below that no exact test can reach the level;
- *   2. S > 0 — the candidate must gain overall;
- *   3. p < alpha — the gain must be unlikely under the sign-flip null.
+ * For each task, the number of label assignments giving the candidate x passes out of N at total
+ * k = base + candidate is C(k, x) · C(2N − k, N − x); there are C(2N, N) assignments in all. The
+ * per-task distributions are convolved over the sum of candidate passes, and the p-value is the
+ * exact count of assignments at or above the observed sum, over C(2N, N)^H.
+ *
+ * Counting, not sampling: the numerator and denominator are exact integers (BigInt), because
+ * C(20, 10)^20 is far outside the exact-integer range of a double and an approximate p is not an
+ * exact test. Only the final ratio is turned into a double, so a tail p is reported as the small
+ * number it is rather than collapsing to zero.
  */
-export function signFlipGate(
+export function stratifiedPValue(
+  perTask: readonly HeldOutTaskPasses[], runs: number,
+): number {
+  const H = perTask.length;
+  if (H === 0) return 1;
+  const N = runs;
+  const twoN = 2 * N;
+  const perTaskWays = choose(twoN, N);
+  if (perTaskWays === 0n) return 1;
+
+  // Convolve the per-task candidate-pass distributions: ways[s] = number of label assignments over
+  // all tasks processed so far with total candidate passes s.
+  let ways: bigint[] = [1n];
+  let observed = 0;
+  for (const t of perTask) {
+    const k = t.base + t.candidate;
+    const dist: bigint[] = new Array<bigint>(N + 1).fill(0n);
+    for (let x = Math.max(0, N - (twoN - k)); x <= Math.min(N, k); x++) {
+      dist[x] = choose(k, x) * choose(twoN - k, N - x);
+    }
+    observed += t.candidate;
+    const next: bigint[] = new Array<bigint>(ways.length + N).fill(0n);
+    for (let s = 0; s < ways.length; s++) {
+      const c = ways[s]!;
+      if (c === 0n) continue;
+      for (let x = 0; x <= N; x++) {
+        const d = dist[x]!;
+        if (d !== 0n) next[s + x] = (next[s + x] ?? 0n) + c * d;
+      }
+    }
+    ways = next;
+  }
+
+  let atLeast = 0n;
+  for (let s = observed; s < ways.length; s++) atLeast += ways[s] ?? 0n;
+  const denominator = perTaskWays ** BigInt(H);
+  // Both sides are exact integers whose ratio is the exact p-value; the double conversion is the
+  // one rounding in the whole computation, and it keeps a 1e-23 tail from rounding to zero.
+  return Number(atLeast) / Number(denominator);
+}
+
+/**
+ * The gate's verdict. The clauses are checked in order and the first that fails is the reason, so
+ * a report says what stopped it rather than only that it stopped:
+ *
+ *   1. at least `minTasks` tasks (H >= 20) — the pre-registered design;
+ *   2. S > 0 — the candidate must gain overall;
+ *   3. p < alpha — the gain must be unlikely under the stratified permutation null.
+ */
+export function stratifiedGate(
   perTask: readonly HeldOutTaskPasses[], rule: HeldOutTestRule = HELD_OUT_RULE,
 ): HeldOutGateVerdict {
   for (const t of perTask) {
     for (const [who, n] of [['base', t.base], ['candidate', t.candidate]] as const) {
       if (!Number.isInteger(n) || n < 0 || n > rule.runs)
         throw new Error(
-          `held-out gate: ${t.taskId} has ${n} ${who} passes, but the test is fixed at ${rule.runs} runs per task.`,
+          `held-out gate: ${t.taskId} has ${n} ${who} passes, but the test is fixed at ${rule.runs} single attempts per task.`,
         );
     }
   }
-  const deltas: HeldOutDelta[] = perTask.map((t) => ({ ...t, d: t.candidate - t.base }));
+  const deltas: HeldOutDelta[] = perTask.map((t) => ({
+    ...t, k: t.base + t.candidate, d: t.candidate - t.base,
+  }));
   const H = deltas.length;
   const S = deltas.reduce((n, d) => n + d.d, 0);
-  const p = signFlipPValue(deltas.map((d) => d.d));
+  const p = stratifiedPValue(perTask, rule.runs);
   const verdict = { runs: rule.runs, alpha: rule.alpha, H, S, p, deltas };
   if (H < rule.minTasks) {
     return {

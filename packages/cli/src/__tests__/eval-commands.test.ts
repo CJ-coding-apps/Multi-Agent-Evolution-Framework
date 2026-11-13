@@ -202,7 +202,7 @@ test('maf evolve refuses a --held-out-repeats the test was not pre-registered fo
     await program.parseAsync(evolve(root, '--held-out-repeats', '3'), { from: 'user' });
     assert.equal(process.exitCode, 2, 'a count the test was not pre-registered for is refused, non-zero');
     assert.ok(
-      errors.some((l) => l.includes('--held-out-repeats must be 5')),
+      errors.some((l) => l.includes('--held-out-repeats must be 10')),
       errors.join('\n'),
     );
     assert.deepEqual(stacks, [], 'no stack, no round, no money');
@@ -952,7 +952,7 @@ test('real evolve.ts (R2-H2): held-out scoring is dispatched through an isolated
     };
     assert.ok(report.heldOut, 'the report carries a held-out verdict');
     assert.deepEqual(report.heldOut.judgeScored?.taskIds, ['review-off-by-one', 'security-sql-concat']);
-    assert.equal(report.heldOut.baselineScores.length, 5, 'each harness is scored five times (R3-G3)');
+    assert.equal(report.heldOut.baselineScores.length, 10, 'each harness is scored ten times (R3-G3/R4-A1)');
     assert.match(report.heldOut.statement, /never counted \(review-off-by-one, security-sql-concat\)/);
   } finally {
     await rm(root, { recursive: true, force: true });

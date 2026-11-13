@@ -19,7 +19,7 @@ export {
 export type {
   HeldOutTestRule, HeldOutTaskPasses, HeldOutDelta, HeldOutGateVerdict,
 } from './significance.js';
-export { HELD_OUT_RULE, signFlipPValue, signFlipGate } from './significance.js';
+export { HELD_OUT_RULE, stratifiedPValue, stratifiedGate } from './significance.js';
 export type { JudgeVerdict, JudgeDisclosure, ModelRef } from './judge.js';
 export {
   JUDGE_SYSTEM_PROMPT, judgePrompt, formatJudgeVerdict, parseJudgeVerdict, describeJudge, makeLlmJudge,

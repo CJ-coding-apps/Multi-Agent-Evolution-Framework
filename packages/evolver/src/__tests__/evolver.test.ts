@@ -1694,12 +1694,13 @@ test('§7 candidate ids stay bounded across many ships', async () => {
 
 const SPLITS_SHA = 'c'.repeat(64);
 
-const TEN = Array.from({ length: 10 }, (_, i) => `t${i + 1}`);
+// R4-A1: the pre-registered design is 20 held-out tasks, each with 10 single attempts per harness.
+const TWENTY = Array.from({ length: 20 }, (_, i) => `t${i + 1}`);
 
 /** A held-out runner whose verdicts are keyed by whether the harness is still the base. */
 function heldOutRunner(base: HarnessConfig, verdicts: {
   base: string[][]; candidate: string[][];
-}, taskIds: string[] = TEN) {
+}, taskIds: string[] = TWENTY) {
   const seen = new Map<string, number>();
   return async (h: HarnessConfig): Promise<GoldenSuiteResult> => {
     const which = h.sha === base.sha ? 'base' : 'candidate';
@@ -1717,16 +1718,13 @@ const improveManifest = () => mockMeta([manifestJson({
   kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'missed t2',
 }, ['t2'])]);
 
-test('D-57 held-out: a broad gain over ten tasks clears the exact sign-flip test', async () => {
+test('D-57 held-out: a broad gain over twenty tasks clears the exact stratified test', async () => {
   const recorded: GoldenSuiteResult[] = [];
   const baseSolved = ['t1', 't2', 't3'];
   const candidateSolved = ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8'];
   const report = await evolve(loopOpts({
     metaGenerate: improveManifest(),
-    runHeldOut: heldOutRunner(CURRENT, {
-      base: [baseSolved, baseSolved, baseSolved, baseSolved, baseSolved],
-      candidate: [candidateSolved, candidateSolved, candidateSolved, candidateSolved, candidateSolved],
-    }),
+    runHeldOut: heldOutRunner(CURRENT, { base: [baseSolved], candidate: [candidateSolved] }),
     heldOutSplitsSha: SPLITS_SHA,
     recordGoldens: async (r) => { recorded.push(r); },
   }));
@@ -1734,20 +1732,22 @@ test('D-57 held-out: a broad gain over ten tasks clears the exact sign-flip test
   assert.equal(report.ships, 1);
   const held = report.heldOut;
   assert.ok(held, 'a held-out report is present');
-  assert.equal(held!.repeats, 5, 'the pre-registered run count, not a floor');
-  assert.equal(held!.baseline.length, 5);
-  assert.equal(held!.candidate?.length, 5);
-  assert.deepEqual(held!.baselineScores, [3, 3, 3, 3, 3]);
-  assert.deepEqual(held!.candidateScores, [8, 8, 8, 8, 8]);
+  assert.equal(held!.repeats, 10, 'the pre-registered single-attempt count, not a floor');
+  assert.equal(held!.baseline.length, 10);
+  assert.equal(held!.candidate?.length, 10);
+  assert.deepEqual(held!.baselineScores, Array<number>(10).fill(3));
+  assert.deepEqual(held!.candidateScores, Array<number>(10).fill(8));
   const gate = held!.gate!;
-  assert.equal(gate.H, 10);
-  assert.equal(gate.S, 25, 'five tasks gain five passes each');
-  assert.equal(gate.p, 1 / 32, 'only the all-positive sign assignment of the five gaining tasks reaches S');
+  assert.equal(gate.H, 20);
+  assert.equal(gate.S, 50, 'five tasks gain ten passes each');
+  // The five gainers have k_t = 10 (never passed, then always), so one task alone reaches the
+  // observed sum with probability 1/C(20,10); five of them (1/184756)^5.
+  assert.equal(gate.p, 4.6452302377374694e-27);
   assert.equal(gate.improved, true);
-  // Every d_t is in the verdict and in the sentence.
+  // Every task's two counts and k_t are in the verdict and in the sentence.
   assert.deepEqual(gate.deltas.filter((d) => d.d !== 0).map((d) => d.taskId), ['t4', 't5', 't6', 't7', 't8']);
-  assert.match(held!.statement, /t4 0\/5→5\/5 \(\+5\)/);
-  assert.match(held!.statement, /S = 25; p = 0\.03125/);
+  assert.match(held!.statement, /t4 0\/10→10\/10 \(k=10, \+10\)/);
+  assert.match(held!.statement, /S = 50; p = 4\.645230237737469/);
   assert.match(held!.statement, /improvement$/);
   assert.equal(held!.splitsSha, SPLITS_SHA);
   // The yardstick is not evidence: no held-out result reaches the recorder.
@@ -1760,85 +1760,86 @@ test('D-57 held-out: no gain is no improvement, and the report says why', async 
   const solved = ['t1', 't2'];
   const report = await evolve(loopOpts({
     metaGenerate: improveManifest(),
-    runHeldOut: heldOutRunner(CURRENT, {
-      base: [solved, solved, solved, solved, solved],
-      candidate: [solved, solved, solved, solved, solved],
-    }),
+    runHeldOut: heldOutRunner(CURRENT, { base: [solved], candidate: [solved] }),
     heldOutSplitsSha: SPLITS_SHA,
   }));
   const held = report.heldOut!;
   assert.equal(held.gate!.S, 0);
-  assert.equal(held.gate!.p, 1);
+  // Every task's distribution is symmetric about k_t/2, so at S = 0 the p-value is at or above a
+  // half — the S clause decides, not the level.
+  assert.ok(held.gate!.p >= 0.5, `p = ${held.gate!.p}`);
   assert.equal(held.gate!.improved, false);
   assert.match(held.statement, /no improvement — S = 0: the candidate did not gain overall/);
 });
 
 test('D-57 held-out: one task jumping from never to always is not enough', async () => {
-  const baseSolved: string[] = [];
-  const candidateSolved = ['t1'];
+  // Nineteen tasks are solved in five of ten attempts by both harnesses (k_t = 10), and one task
+  // goes 0/10 → 10/10. A single task alone would be 1/C(20,10), but the other tasks are still
+  // exchangeable, so the exact stratified p is 0.19 — no task is special-cased.
+  const nineteen = TWENTY.slice(1);
+  const half = Array.from({ length: 10 }, (_, i) => (i < 5 ? nineteen : []));
   const report = await evolve(loopOpts({
     metaGenerate: improveManifest(),
     runHeldOut: heldOutRunner(CURRENT, {
-      base: [baseSolved, baseSolved, baseSolved, baseSolved, baseSolved],
-      candidate: [candidateSolved, candidateSolved, candidateSolved, candidateSolved, candidateSolved],
+      base: half,
+      candidate: half.map((s) => [...s, 't1']),
     }),
     heldOutSplitsSha: SPLITS_SHA,
   }));
   const gate = report.heldOut!.gate!;
-  assert.equal(gate.S, 5);
-  assert.equal(gate.p, 0.5, 'one delta alone: half the sign assignments reach the observed sum');
+  assert.equal(gate.S, 10);
+  assert.equal(gate.p, 0.18991265252006212);
   assert.equal(gate.improved, false);
-  assert.match(report.heldOut!.statement, /p = 0\.5 is not below alpha = 0\.05/);
+  assert.match(report.heldOut!.statement, /p = 0\.18991265252006212 is not below alpha = 0\.05/);
 });
 
-test('D-57 held-out: fewer than ten tasks cannot carry the pre-registered test', async () => {
+test('D-57 held-out: fewer than twenty tasks cannot carry the pre-registered test', async () => {
   const report = await evolve(loopOpts({
     metaGenerate: improveManifest(),
     runHeldOut: heldOutRunner(CURRENT, {
-      base: [[], [], [], [], []],
-      candidate: [['x', 'y', 'z'], ['x', 'y', 'z'], ['x', 'y', 'z'], ['x', 'y', 'z'], ['x', 'y', 'z']],
+      base: [[]], candidate: [['x', 'y', 'z']],
     }, ['x', 'y', 'z']),
     heldOutSplitsSha: SPLITS_SHA,
   }));
   const gate = report.heldOut!.gate!;
   assert.equal(gate.H, 3);
   assert.equal(gate.improved, false);
-  assert.match(report.heldOut!.statement, /needs at least 10 held-out tasks; the split has 3/);
+  assert.match(report.heldOut!.statement, /needs at least 20 held-out tasks; the split has 3/);
 });
 
 test('D-57 held-out: the run count is pre-registered, and any other is refused', async () => {
-  const five = await evolve(loopOpts({
+  const ten = await evolve(loopOpts({
     metaGenerate: improveManifest(),
     runHeldOut: heldOutRunner(CURRENT, { base: [['t1']], candidate: [['t1', 't2']] }),
-    heldOutRepeats: 5,
+    heldOutRepeats: 10,
   }));
-  assert.equal(five.heldOut!.repeats, 5);
-  assert.equal(five.heldOut!.baseline.length, 5);
-  assert.equal(five.heldOut!.candidate?.length, 5);
+  assert.equal(ten.heldOut!.repeats, 10);
+  assert.equal(ten.heldOut!.baseline.length, 10);
+  assert.equal(ten.heldOut!.candidate?.length, 10);
 
-  for (const n of [2, 3, 6]) {
+  for (const n of [2, 5, 12]) {
     await assert.rejects(
       evolve(loopOpts({ metaGenerate: mockMeta([]), runHeldOut: heldOutRunner(CURRENT, { base: [[]], candidate: [[]] }), heldOutRepeats: n })),
-      /held-out repeats are pre-registered at 5/,
+      /held-out repeats are pre-registered at 10/,
       `${n} repeats is a different test and is refused, not clamped`,
     );
   }
 });
 
 test('R2-M3 held-out: a candidate that improves only where a judge said so gives no improvement', async () => {
-  // Ten deterministic tasks are unchanged; five judge-scored tasks go from never to always.
+  // Twenty deterministic tasks are unchanged; five judge-scored tasks go from never to always.
   const judge = ['j1', 'j2', 'j3', 'j4', 'j5'];
-  const ids = [...TEN, ...judge];
+  const ids = [...TWENTY, ...judge];
   const verdicts = {
-    base: [['t1'], ['t1'], ['t1'], ['t1'], ['t1']],
-    candidate: [['t1', ...judge], ['t1', ...judge], ['t1', ...judge], ['t1', ...judge], ['t1', ...judge]],
+    base: [['t1']],
+    candidate: [['t1', ...judge]],
   };
 
-  // Control: without the judge marking, five judge tasks gaining five passes each is an improvement.
+  // Control: without the judge marking, five judge tasks gaining ten passes each is an improvement.
   const counted = await evolve(loopOpts({
     metaGenerate: improveManifest(), runHeldOut: heldOutRunner(CURRENT, verdicts, ids), heldOutSplitsSha: SPLITS_SHA,
   }));
-  assert.equal(counted.heldOut!.gate!.H, 15);
+  assert.equal(counted.heldOut!.gate!.H, 25);
   assert.equal(counted.heldOut!.gate!.improved, true, 'a judge-only gain would pass if it were counted');
 
   // Marked as judge-scored, they are reported beside the gate and never counted.
@@ -1847,13 +1848,13 @@ test('R2-M3 held-out: a candidate that improves only where a judge said so gives
     heldOutJudgeScored: judge, heldOutSplitsSha: SPLITS_SHA,
   }));
   const held = report.heldOut!;
-  assert.equal(held.gate!.H, 10, 'only the deterministic tasks enter the test');
+  assert.equal(held.gate!.H, 20, 'only the deterministic tasks enter the test');
   assert.equal(held.gate!.S, 0);
   assert.equal(held.gate!.improved, false, 'a judge-only improvement is no improvement');
   assert.match(held.statement, /judge-scored held-out reported beside, never counted \(j1, j2, j3, j4, j5\)/);
   assert.deepEqual(held.judgeScored?.taskIds, judge);
-  assert.deepEqual(held.judgeScored?.baselineScores, [0, 0, 0, 0, 0]);
-  assert.deepEqual(held.judgeScored?.candidateScores, [5, 5, 5, 5, 5], 'the judge tasks are still reported');
+  assert.deepEqual(held.judgeScored?.baselineScores, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(held.judgeScored?.candidateScores, Array<number>(10).fill(5), 'the judge tasks are still reported');
 });
 
 test('D-57 held-out: every reason for not scoring is stated, never silent', async () => {
@@ -2058,7 +2059,7 @@ test('R2-M4 budget: every held-out repeat asks the budget, and exhaustion stops 
   }));
   assert.equal(report.ships, 1);
   assert.equal(repeats, 1, 'only the first baseline repeat started');
-  assert.match(report.heldOut?.skipped ?? '', /after 1 of 5 baseline repeats; the verdict needs all 5/);
+  assert.match(report.heldOut?.skipped ?? '', /after 1 of 10 baseline repeats; the verdict needs all 10/);
   assert.equal(report.budget?.exhausted, true);
 });
 

@@ -112,7 +112,7 @@ test('splits: every way a split can fail to be a partition is refused', async ()
     // alpha or run count, is refused before any harness runs.
     [{ version: 1, minHeldOut: 5, train: ['a'], heldOut: ['b', 'c'] }, /no "gate"\. D-57 fixes the held-out test before any run/],
     [{ version: 1, minHeldOut: 5, gate: { ...HELD_OUT_RULE, alpha: 0.1 }, train: ['a'], heldOut: ['b', 'c'] }, /alpha is 0\.1, the code implements 0\.05/],
-    [{ version: 1, minHeldOut: 5, gate: { ...HELD_OUT_RULE, runs: 3 }, train: ['a'], heldOut: ['b', 'c'] }, /runs is 3, the code implements 5/],
+    [{ version: 1, minHeldOut: 5, gate: { ...HELD_OUT_RULE, runs: 3 }, train: ['a'], heldOut: ['b', 'c'] }, /runs is 3, the code implements 10/],
   ];
   for (const [file, re] of cases) {
     await withSplits(file, async (root) => {

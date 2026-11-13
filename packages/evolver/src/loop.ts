@@ -1,6 +1,6 @@
 import type { PermissionLevel, RunId } from '@maf/types';
 import type { HarnessConfig, ProcessorRef } from '@maf/harness-config';
-import { HELD_OUT_RULE, signFlipGate } from '@maf/eval-harness';
+import { HELD_OUT_RULE, stratifiedGate } from '@maf/eval-harness';
 import type { GoldenSuiteResult, HeldOutGateVerdict, HeldOutTaskPasses } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { digestEvidence, heldOutScrubber, isEmptyDigest } from './digester.js';
@@ -199,8 +199,9 @@ export interface HeldOutReport {
    */
   judgeScored?: JudgeScoredHeldOut;
   /**
-   * R3-G3: the pre-registered test's verdict — every d_t, S, the exact one-sided sign-flip p-value
-   * and the decision. Absent when the split was not scored (see `skipped`).
+   * R3-G3/R4-A1: the pre-registered test's verdict — every task's two pass counts and k_t, S, the
+   * exact one-sided stratified permutation p-value and the decision. Absent when the split was not
+   * scored (see `skipped`).
    */
   gate?: HeldOutGateVerdict;
   statement: string;
@@ -375,7 +376,10 @@ function sensitiveRoleOf(
     : undefined;
 }
 
-/** R3-G3: the held-out run count is pre-registered in `splits.json`, not chosen per session. */
+/**
+ * R3-G3/R4-A1: the held-out run count — single attempts per task — is pre-registered in
+ * `splits.json`, not chosen per session.
+ */
 export const HELD_OUT_REPEATS = HELD_OUT_RULE.runs;
 
 /**
@@ -387,11 +391,13 @@ function heldOutScore(run: GoldenSuiteResult, judgeScored: ReadonlySet<string>):
 }
 
 /**
- * D-57 (R3-G3): score the harness that survived on the held-out split, N = the pre-registered run
- * count times each, count how many runs each harness passed each task, and hand the per-task counts
- * to the exact one-sided sign-flip test. Replacing min−max with this test is what gives the gate
- * power: the old rule compared two extreme repeats, so a real gain on a few of ten tasks was
- * detected about 11% of the time and one lucky repeat could carry the verdict.
+ * D-57 (R3-G3, revised by R4-A1): score the harness that survived on the held-out split, N = the
+ * pre-registered run count single attempts each, count how many of those attempts each harness
+ * passed each task, and hand the per-task counts to the exact one-sided stratified permutation
+ * test. The test pools every attempt of a task — k_t = base + candidate — so the within-task
+ * evidence is used instead of two extreme repeats: min−max detected a real gain about 11% of the
+ * time, the round-3 sign-flip test 19%, and the stratified test at N = 10 on 20 tasks about 91%
+ * for the specified effect.
  *
  * Returns undefined when the caller wired no held-out runner; every other reason for not scoring is
  * carried in `skipped` so the report says why rather than staying silent.
@@ -465,7 +471,8 @@ async function evaluateHeldOut(
   const baselineScores = baselineRuns.map((r) => heldOutScore(r, judgeScored));
   const candidateScores = candidateRuns.map((r) => heldOutScore(r, judgeScored));
   // The test's unit is the task, not the run: for every deterministic held-out task, how many of the
-  // N runs each harness passed it. `solvedTaskIds` is the same "solved" the rest of the harness uses.
+  // N single attempts each harness passed it. `solvedTaskIds` is the same "solved" the rest of the
+  // harness uses, and the attempt count is one (R4-A2) so the two harnesses are measured alike.
   const deterministicIds = baselineRuns[0]!.tasks
     .map((t) => t.taskId).filter((id) => !judgeScored.has(id)).sort();
   const passes = (runs: GoldenSuiteResult[], id: string): number =>
@@ -473,7 +480,7 @@ async function evaluateHeldOut(
   const perTask: HeldOutTaskPasses[] = deterministicIds.map((taskId) => ({
     taskId, base: passes(baselineRuns, taskId), candidate: passes(candidateRuns, taskId),
   }));
-  const gate = signFlipGate(perTask, HELD_OUT_RULE);
+  const gate = stratifiedGate(perTask, HELD_OUT_RULE);
   const judgeIds = [...judgeScored].filter((id) => baselineRuns[0]!.tasks.some((t) => t.taskId === id)).sort();
   const judgeScoredReport: JudgeScoredHeldOut | undefined = judgeIds.length === 0
     ? undefined
@@ -489,9 +496,9 @@ async function evaluateHeldOut(
       `candidate solved ${(judgeScoredReport.candidateScores ?? []).map((n) => `${n}/${judgeScoredReport.taskIds.length}`).join(', ')}`;
   const splitsSha = opts.heldOutSplitsSha ?? candidateRuns[0]!.splitsSha ?? baselineRuns[0]!.splitsSha;
   // Every figure the decision used is in the sentence: per-task pass counts for both harnesses,
-  // their deltas, S, and the exact p-value.
+  // the task's k_t, its delta, S, and the exact p-value.
   const perTaskText = gate.deltas
-    .map((d) => `${d.taskId} ${d.base}/${repeats}→${d.candidate}/${repeats} (${d.d >= 0 ? '+' : ''}${d.d})`)
+    .map((d) => `${d.taskId} ${d.base}/${repeats}→${d.candidate}/${repeats} (k=${d.k}, ${d.d >= 0 ? '+' : ''}${d.d})`)
     .join(', ');
   return {
     ...(splitsSha !== undefined ? { splitsSha } : {}),
@@ -503,8 +510,8 @@ async function evaluateHeldOut(
     ...(judgeScoredReport !== undefined ? { judgeScored: judgeScoredReport } : {}),
     gate,
     statement:
-      `held-out: ${gate.H} deterministic task${gate.H === 1 ? '' : 's'} × ${repeats} runs each — ${perTaskText}; ` +
-      `S = ${gate.S}; p = ${gate.p} (exact one-sided sign-flip over 2^${gate.H} assignments); ` +
+      `held-out: ${gate.H} deterministic task${gate.H === 1 ? '' : 's'} × ${repeats} single attempts each — ${perTaskText}; ` +
+      `S = ${gate.S}; p = ${gate.p} (exact one-sided stratified permutation over ${gate.H} hypergeometric tasks); ` +
       (gate.improved ? 'improvement' : `no improvement — ${gate.reason}`) +
       judgePart,
   };
