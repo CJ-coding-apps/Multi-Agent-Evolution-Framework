@@ -939,6 +939,25 @@ task failed — the base has no headroom in the pool by construction. The corpus
 (scoring reads them) and not `.reference/` (an artifact no run reads), so R5-P2's references do not
 move it.
 
+### R5-P2 — every pool task ships a reference solution the checks prove (round-4 finding R4-M3)
+
+Each of the fifty pool tasks now carries a `.reference/` solution. It is never copied into a run and
+never enters the corpus sha; `reference-solutions.test.ts` stages every hidden-check task twice — as
+committed, and with the reference overlaid — with the checks copied in where the verifier runs them,
+and asserts that the unmodified fixture fails every verifier and the reference passes all of them. A
+task that cannot show both cannot be calibrated honestly, so the proof would refuse it.
+
+Writing the references found three hidden checks with wrong expectations, all in tasks whose
+requirement was right: `pool-bowling` (a spare's bonus in a 10-10-10-1-2 game is 67, not 63),
+`pool-checksum` (the two's complement of [1,2] is 0xfd and of [0x80] is 0x80), and
+`pool-token-bucket` (the prompt consumes a token on success, so (0,2,.001,1000) returns {true,0},
+(2,2,.001,0) returns {true,1}, and the refusal case reports the fractional count available). The
+token-bucket scripted stand-in had been "wrong" only in shape — it capped rather than clamped and
+happened to return the answers the check wanted — so the corrected check exposed it as a passing
+pool task (61 solved of 116). Its stand-in now reports the tokens available before spending the one
+it allows: a genuinely failing plausible fix. The baseline is 60 of 116 again, with all fifty pool
+tasks failing by construction; corpus sha `227cf9f7…`.
+
 ### R5-P4 — the first-run projection is a measurement, and calibration records what it cost (round-4 finding R4-M2)
 
 The pre-run projection's first-run figure was 8000 tokens/task, justified by a "276 tokens/task"
