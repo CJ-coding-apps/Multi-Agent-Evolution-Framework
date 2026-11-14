@@ -1336,7 +1336,7 @@
       "final": "Rewrote bowling.js, but the tests still fail."
     },
     "pool-caesar-wrap": {
-      "note": "A plausible but incomplete fix: the wrap is right, but lowercase and uppercase are not both mapped \u2014 the uppercase branch is added and the lowercase one is lost.",
+      "note": "A plausible but incomplete fix: the wrap is right, but lowercase and uppercase are not both mapped — the uppercase branch is added and the lowercase one is lost.",
       "steps": [
         {
           "tool": "fs.read",
@@ -1677,25 +1677,6 @@
       ],
       "final": "Rewrote mode.js."
     },
-    "pool-invoice-two-file": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "money.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "money.js",
-            "content": "function discount(cents, rate) {\n  return Math.round(cents * rate);\n}\nfunction tax(cents, rate) {\n  return Math.round(cents * rate);\n}\nmodule.exports = { discount, tax };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
-    },
     "train-invoice-two-file": {
       "note": "A correct fix: the visible test passes.",
       "steps": [
@@ -1721,25 +1702,6 @@
         }
       ],
       "final": "Fixed it; the test passes."
-    },
-    "pool-router-two-file": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "router.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "router.js",
-            "content": "const { splitPath } = require('./segments');\nfunction match(pattern, path) {\n  const wanted = splitPath(pattern);\n  const actual = splitPath(path.split('?')[0]);\n  if (wanted.length !== actual.length) return null;\n  const out = {};\n  for (let i = 0; i < wanted.length; i++) {\n    if (wanted[i].startsWith(':')) out[wanted[i].slice(1)] = actual[i];\n    else if (wanted[i] !== actual[i]) return null;\n  }\n  return out;\n}\nmodule.exports = { match };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
     },
     "train-router-two-file": {
       "note": "A correct fix: the visible test passes.",
@@ -1767,25 +1729,6 @@
       ],
       "final": "Fixed it; the test passes."
     },
-    "pool-state-machine-two-file": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "machine.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "machine.js",
-            "content": "const { TRANSITIONS } = require('./transitions');\nfunction run(state, event, context, log = []) {\n  const t = TRANSITIONS[state] && TRANSITIONS[state][event];\n  if (!t) return { state, log: [...log] };\n  return { state: t.to, log: [...log, event] };\n}\nmodule.exports = { run };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
-    },
     "train-state-machine-two-file": {
       "note": "A correct fix: the visible test passes.",
       "steps": [
@@ -1804,25 +1747,6 @@
         }
       ],
       "final": "Fixed it; the test passes."
-    },
-    "pool-config-two-file": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "config.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "config.js",
-            "content": "const { parseEnv } = require('./env');\nfunction load(defaults, fileConfig, env) {\n  return { ...defaults, ...fileConfig, ...parseEnv(env) };\n}\nmodule.exports = { load };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
     },
     "train-config-two-file": {
       "note": "A correct fix: the visible test passes.",
@@ -1850,25 +1774,6 @@
       ],
       "final": "Fixed it; the test passes."
     },
-    "pool-pagination-two-file": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "links.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "links.js",
-            "content": "const { buildUrl } = require('./url');\nfunction pageLinks(base, params, page, pageSize, total) {\n  const pages = Math.ceil(total / pageSize);\n  return {\n    pages,\n    next: page < pages ? buildUrl(base, { ...params, page: page + 1 }) : null,\n    prev: page > 1 ? buildUrl(base, { ...params, page: page - 1 }) : null,\n  };\n}\nmodule.exports = { pageLinks };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
-    },
     "train-pagination-two-file": {
       "note": "A correct fix: the visible test passes.",
       "steps": [
@@ -1895,25 +1800,6 @@
       ],
       "final": "Fixed it; the test passes."
     },
-    "pool-feature-csv-writer": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "csv-writer.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "csv-writer.js",
-            "content": "function escapeCell(cell) {\n  const text = String(cell);\n  return text.includes(',') ? '\"' + text + '\"' : text;\n}\nfunction formatRow(cells) {\n  return cells.map(escapeCell).join(',');\n}\nfunction formatRows(rows) {\n  return rows.map(formatRow).join('\\n');\n}\nmodule.exports = { escapeCell, formatRow, formatRows };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
-    },
     "train-feature-csv-writer": {
       "note": "A correct fix: the visible test passes.",
       "steps": [
@@ -1932,25 +1818,6 @@
         }
       ],
       "final": "Fixed it; the test passes."
-    },
-    "pool-feature-template": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "template.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "template.js",
-            "content": "function render(template, vars) {\n  return template.replace(/\\{\\{\\s*(\\w+)\\s*\\}\\}/g, (m, key) => {\n    return vars[key] === undefined ? '' : String(vars[key]);\n  });\n}\nmodule.exports = { render };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
     },
     "train-feature-template": {
       "note": "A correct fix: the visible test passes.",
@@ -1971,25 +1838,6 @@
       ],
       "final": "Fixed it; the test passes."
     },
-    "pool-feature-retry": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "retry.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "retry.js",
-            "content": "async function withRetry(fn, options = {}) {\n  const attempts = options.attempts ?? 3;\n  let last;\n  for (let i = 0; i < attempts; i++) {\n    try { return await fn(); } catch (err) { last = err; }\n  }\n  throw last;\n}\nmodule.exports = { withRetry };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
-    },
     "train-feature-retry": {
       "note": "A correct fix: the visible test passes.",
       "steps": [
@@ -2008,25 +1856,6 @@
         }
       ],
       "final": "Fixed it; the test passes."
-    },
-    "pool-feature-rate-limit": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "limit.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "limit.js",
-            "content": "class SlidingWindow {\n  constructor(limit, windowMs, now) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.now = now;\n    this.hits = new Map();\n  }\n  take(key) {\n    const count = (this.hits.get(key) ?? 0) + 1;\n    if (count > this.limit) return false;\n    this.hits.set(key, count);\n    return true;\n  }\n}\nmodule.exports = { SlidingWindow };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
     },
     "train-feature-rate-limit": {
       "note": "A correct fix: the visible test passes.",
@@ -2047,25 +1876,6 @@
       ],
       "final": "Fixed it; the test passes."
     },
-    "pool-feature-deep-equal": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "equal.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "equal.js",
-            "content": "function deepEqual(a, b) {\n  if (a === b) return true;\n  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;\n  return JSON.stringify(a) === JSON.stringify(b);\n}\nmodule.exports = { deepEqual };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
-    },
     "train-feature-deep-equal": {
       "note": "A correct fix: the visible test passes.",
       "steps": [
@@ -2084,25 +1894,6 @@
         }
       ],
       "final": "Fixed it; the test passes."
-    },
-    "pool-bug-sort-comparator": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "sort.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "sort.js",
-            "content": "function sortBy(items, keyOf) {\n  return items.sort((a, b) => keyOf(a) - keyOf(b));\n}\nmodule.exports = { sortBy };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
     },
     "train-bug-sort-comparator": {
       "note": "A correct fix: the visible test passes.",
@@ -2123,25 +1914,6 @@
       ],
       "final": "Fixed it; the test passes."
     },
-    "pool-bug-float-sum": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "money.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "money.js",
-            "content": "function total(values) {\n  return values.reduce((sum, v) => sum + Math.round(v * 100), 0);\n}\nmodule.exports = { total };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
-    },
     "train-bug-float-sum": {
       "note": "A correct fix: the visible test passes.",
       "steps": [
@@ -2161,25 +1933,6 @@
       ],
       "final": "Fixed it; the test passes."
     },
-    "pool-bug-utf8-truncate": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "text.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "text.js",
-            "content": "function truncate(text, max) {\n  if (Array.from(text).length <= max) return text;\n  return text.substr(0, max) + '\u2026';\n}\nmodule.exports = { truncate };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
-    },
     "train-bug-utf8-truncate": {
       "note": "A correct fix: the visible test passes.",
       "steps": [
@@ -2193,30 +1946,11 @@
           "tool": "fs.write",
           "input": {
             "path": "text.js",
-            "content": "function truncate(text, max) {\n  const points = Array.from(text);\n  return points.length <= max ? text : points.slice(0, max).join('') + '\u2026';\n}\nmodule.exports = { truncate };\n"
+            "content": "function truncate(text, max) {\n  const points = Array.from(text);\n  return points.length <= max ? text : points.slice(0, max).join('') + '…';\n}\nmodule.exports = { truncate };\n"
           }
         }
       ],
       "final": "Fixed it; the test passes."
-    },
-    "pool-bug-async-order": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "queue.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "queue.js",
-            "content": "async function runSequential(factories) {\n  const results = [];\n  for (const factory of factories) {\n    try {\n      results.push(await factory());\n    } catch {\n      results.push(undefined);\n    }\n  }\n  return results;\n}\nmodule.exports = { runSequential };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
     },
     "train-bug-async-order": {
       "note": "A correct fix: the visible test passes.",
@@ -2237,25 +1971,6 @@
       ],
       "final": "Fixed it; the test passes."
     },
-    "pool-bug-object-keys": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "pick.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "pick.js",
-            "content": "function pick(obj, keys) {\n  const out = Object.create(null);\n  for (const key of keys) {\n    if (obj[key] !== undefined) out[key] = obj[key];\n  }\n  return out;\n}\nmodule.exports = { pick };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix, but the acceptance checks still fail."
-    },
     "train-bug-object-keys": {
       "note": "A correct fix: the visible test passes.",
       "steps": [
@@ -2274,6 +1989,291 @@
         }
       ],
       "final": "Fixed it; the test passes."
+    },
+    "pool-cidr-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "ip.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "ip.js",
+            "content": "function ipToInt(ip) {\n  return ip.split('.').reduce((acc, part) => acc * 256 + Number(part), 0);\n}\n\nmodule.exports = { ipToInt };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-maze-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "grid.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "grid.js",
+            "content": "function neighbors(grid, row, col) {\n  const out = [];\n  for (const [r, c] of [[row - 1, col], [row + 1, col], [row, col - 1], [row, col + 1]]) {\n    if (grid[r] && grid[r][c] !== undefined && grid[r][c] !== '#') out.push([r, c]);\n  }\n  return out;\n}\n\nmodule.exports = { neighbors };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-bigadd-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bigadd.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bigadd.js",
+            "content": "const { normalize } = require('./digits');\n\nfunction addStrings(a, b) {\n  return normalize(String(Number(a || '0') + Number(b || '0')));\n}\n\nmodule.exports = { addStrings };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-cron-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "fields.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "fields.js",
+            "content": "function fieldMatches(field, value) {\n  if (field === '*') return true;\n  return field === String(value);\n}\n\nmodule.exports = { fieldMatches };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-jsonpath-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "tokens.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "tokens.js",
+            "content": "function tokenize(path) {\n  const tokens = [];\n  for (const part of String(path).split('.').slice(1)) tokens.push({ type: 'key', value: part });\n  return tokens;\n}\n\nmodule.exports = { tokenize };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-feature-varint": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "varint.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "varint.js",
+            "content": "function encode(n) {\n  const bytes = [];\n  let value = n;\n  do {\n    let byte = value & 0x7f;\n    value >>>= 7;\n    if (value > 0) byte |= 0x80;\n    bytes.push(byte);\n  } while (value > 0);\n  return Uint8Array.from(bytes);\n}\n\nfunction decode(bytes, offset = 0) {\n  let value = 0;\n  let shift = 0;\n  let i = offset;\n  for (;;) {\n    const byte = bytes[i++];\n    value |= (byte & 0x7f) << shift;\n    if ((byte & 0x80) === 0) return { value, bytesRead: i - offset };\n    shift += 7;\n  }\n}\n\nmodule.exports = { encode, decode };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-feature-luhn": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "luhn.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "luhn.js",
+            "content": "function valid(digits) {\n  const all = String(digits).replace(/ /g, '');\n  if (!/^\\d+$/.test(all)) return false;\n  let sum = 0;\n  for (let i = 0; i < all.length; i++) {\n    let value = Number(all[all.length - 1 - i]);\n    if (i % 2 === 1) value = value * 2 > 9 ? value * 2 - 9 : value * 2;\n    sum += value;\n  }\n  return sum % 10 === 0;\n}\n\nfunction checkDigit(partial) {\n  return 0;\n}\n\nmodule.exports = { valid, checkDigit };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-feature-trie": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "trie.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "trie.js",
+            "content": "function createTrie() {\n  const words = [];\n  return {\n    insert(word) {\n      words.push(word);\n    },\n    has(word) {\n      return words.includes(word);\n    },\n    wordsWithPrefix(prefix) {\n      return words.filter((word) => word.startsWith(prefix));\n    },\n  };\n}\n\nmodule.exports = { createTrie };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-feature-base58": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "base58.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "base58.js",
+            "content": "const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';\n\nfunction encode(bytes) {\n  let value = 0n;\n  for (const byte of bytes) value = value * 256n + BigInt(byte);\n  let text = '';\n  while (value > 0n) {\n    text = ALPHABET[Number(value % 58n)] + text;\n    value /= 58n;\n  }\n  return text;\n}\n\nfunction decode(text) {\n  let value = 0n;\n  for (const char of text) value = value * 58n + BigInt(ALPHABET.indexOf(char));\n  const bytes = [];\n  while (value > 0n) {\n    bytes.unshift(Number(value % 256n));\n    value /= 256n;\n  }\n  return Uint8Array.from(bytes);\n}\n\nmodule.exports = { encode, decode };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-feature-shell-quote": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "shellquote.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "shellquote.js",
+            "content": "function quoteArg(arg) {\n  return `\"${String(arg)}\"`;\n}\n\nfunction quoteAll(args) {\n  return args.map(quoteArg).join(' ');\n}\n\nmodule.exports = { quoteArg, quoteAll };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-bug-memo-key": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "memoize.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "memoize.js",
+            "content": "function memoize(fn) {\n  const cache = new Map();\n  return function (...args) {\n    const key = args[0];\n    if (cache.has(key)) return cache.get(key);\n    const value = fn(...args);\n    cache.set(key, value);\n    return value;\n  };\n}\n\nmodule.exports = { memoize };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-bug-loop-splice": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "compact.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "compact.js",
+            "content": "function compact(xs) {\n  return xs.filter((x) => x !== 0);\n}\n\nmodule.exports = { compact };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-bug-closure-capture": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "handlers.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "handlers.js",
+            "content": "function makeHandlers(n) {\n  const handlers = [];\n  for (var i = 0; i < n; i++) {\n    handlers.push(function (index) {\n      return index;\n    });\n  }\n  return handlers;\n}\n\nmodule.exports = { makeHandlers };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-bug-regex-global": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "clean.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "clean.js",
+            "content": "const TODO = /TODO/;\nconst FIXME = /FIXME/g;\n\nfunction isClean(text) {\n  return !TODO.test(text) && !FIXME.test(text);\n}\n\nmodule.exports = { isClean };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-bug-immutable-merge": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "merge.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "merge.js",
+            "content": "function withDefaults(defaults, overrides) {\n  return { ...overrides, ...defaults };\n}\n\nmodule.exports = { withDefaults };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
     }
   },
   "evolution": {

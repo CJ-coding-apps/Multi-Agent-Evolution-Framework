@@ -1950,9 +1950,9 @@
     }
   },
   {
-    "id": "pool-invoice-two-file",
-    "repoFixture": "fixtures/pool-invoice-two-file",
-    "prompt": "`total(items, discountRate, taxRate)` in invoice.js returns an integer number of cents. The subtotal is the sum of `price * qty`. The discount is `Math.round(subtotal * discountRate)`; tax is `Math.round((subtotal - discount) * taxRate)`; the total is the discounted amount plus tax. The money helpers live in money.js and must carry that arithmetic.",
+    "id": "pool-cidr-two-file",
+    "repoFixture": "fixtures/pool-cidr-two-file",
+    "prompt": "ip.js exposes `ipToInt(ip)`: the address as a 32-bit number, throwing on anything that is not four decimal octets of 0-255. cidr.js exposes `parseCidr(text)` for `address/prefix`: a prefix outside 0..32 throws; the result carries `network` (the masked network address as dotted text), `prefix`, and `contains(ip)`, which reports whether an address falls inside the block.",
     "role": "coder",
     "verifiers": [
       {
@@ -1969,7 +1969,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -1996,9 +1996,9 @@
     }
   },
   {
-    "id": "pool-router-two-file",
-    "repoFixture": "fixtures/pool-router-two-file",
-    "prompt": "`match(pattern, path)` in router.js matches a `/`-separated pattern against a request path. The path may carry a query string or fragment, which the pattern never sees; a trailing slash is ignored; a `:name` segment captures that path segment percent-decoded exactly once; every other segment matches literally. A different segment count or a literal mismatch returns null. The splitting helper lives in segments.js.",
+    "id": "pool-maze-two-file",
+    "repoFixture": "fixtures/pool-maze-two-file",
+    "prompt": "grid.js `neighbors(grid, row, col)` returns the passable orthogonal neighbours as `[row, col]` pairs in the order up, right, down, left; a cell is passable when it is not `#`, and a cell off the grid is not a neighbour. maze.js `shortestPath(grid, start, end)` returns the number of steps on the shortest path, 0 when start and end are the same cell, or -1 when there is none. Grid rows are equal-length strings.",
     "role": "coder",
     "verifiers": [
       {
@@ -2015,7 +2015,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2042,9 +2042,9 @@
     }
   },
   {
-    "id": "pool-state-machine-two-file",
-    "repoFixture": "fixtures/pool-state-machine-two-file",
-    "prompt": "`run(state, event, context, log)` in machine.js performs one transition of the table in transitions.js and returns `{ state, log }` with a new array. Each table entry is `{ to, guard }`; the guard is called with `context` and the transition happens only when it returns true. An accepted event is appended to the log; a rejected one changes nothing. An unknown state or event throws an Error whose message names it.",
+    "id": "pool-bigadd-two-file",
+    "repoFixture": "fixtures/pool-bigadd-two-file",
+    "prompt": "digits.js `normalize(text)` strips leading zeros but keeps a single `0`, and throws on anything that is not one or more decimal digits. bigadd.js `addStrings(a, b)` adds two non-negative decimal strings of any length exactly, beyond what a JavaScript number can hold, and returns the normalized sum; an empty string counts as `0`.",
     "role": "coder",
     "verifiers": [
       {
@@ -2061,7 +2061,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2088,9 +2088,9 @@
     }
   },
   {
-    "id": "pool-config-two-file",
-    "repoFixture": "fixtures/pool-config-two-file",
-    "prompt": "`load(defaults, fileConfig, env)` in config.js merges three layers with env winning over the file and the file over the defaults; nested plain objects merge key by key and the inputs are not mutated. `parseEnv(source)` in env.js coerces `'true'`/`'false'` to booleans and integer strings to numbers; `env` is keyed by dotted paths such as `server.port`.",
+    "id": "pool-cron-two-file",
+    "repoFixture": "fixtures/pool-cron-two-file",
+    "prompt": "fields.js `fieldMatches(field, value)` decides one cron field: `*`, a single number, an inclusive `a-b` range, or `*/step` (a multiple of step), and throws on any other form. cron.js `matches(expr, date)` takes the five whitespace-separated fields minute, hour, day-of-month, month, weekday (0 is Sunday) and reports whether `date`'s local time falls in all of them, throwing when the expression does not have five fields.",
     "role": "coder",
     "verifiers": [
       {
@@ -2107,7 +2107,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2134,9 +2134,9 @@
     }
   },
   {
-    "id": "pool-pagination-two-file",
-    "repoFixture": "fixtures/pool-pagination-two-file",
-    "prompt": "`pageLinks(base, params, page, pageSize, total)` in links.js returns `{ pages, prev, next }`. `pages` is `Math.ceil(total / pageSize)`; `next` is null on the last page and `prev` is null on the first. The URLs come from `buildUrl(base, params)` in url.js: the base may already carry a query string, the new parameters are merged after the existing ones, and every value is percent-encoded (a space is `%20`).",
+    "id": "pool-jsonpath-two-file",
+    "repoFixture": "fixtures/pool-jsonpath-two-file",
+    "prompt": "tokens.js `tokenize(path)` splits a path that starts at `$` into `{type: 'key', value}`, `{type: 'index', value}` and `{type: 'wildcard'}` tokens, and throws on malformed syntax or a path that does not start at `$`. jsonpath.js `get(doc, path)` returns every value the path selects as an array: keys select object properties, indices select one array element, and `[*]` selects every element of an array; a path that selects nothing is an empty array.",
     "role": "coder",
     "verifiers": [
       {
@@ -2153,7 +2153,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2180,9 +2180,9 @@
     }
   },
   {
-    "id": "pool-feature-csv-writer",
-    "repoFixture": "fixtures/pool-feature-csv-writer",
-    "prompt": "Implement csv-writer.js: `escapeCell(cell)` quotes a field only when it contains a comma, a double quote, a carriage return or a newline, and doubles any quote inside it; `formatRow(cells)` joins the escaped cells with commas; `formatRows(rows)` joins the rows with CRLF. Every cell is stringified.",
+    "id": "pool-feature-varint",
+    "repoFixture": "fixtures/pool-feature-varint",
+    "prompt": "Implement varint.js as LEB128 for non-negative safe integers. `encode(n)` returns a Uint8Array of base-128 digits, least significant first, with the continuation bit set on every byte but the last; it throws on a negative, fractional or unsafe integer. `decode(bytes, offset = 0)` returns `{ value, bytesRead }`, consuming one varint that starts at `offset`; it throws on a truncated value and on an encoding that is not the shortest one (a multi-byte value whose last byte is zero). Every value up to `Number.MAX_SAFE_INTEGER` must survive encode then decode.",
     "role": "coder",
     "verifiers": [
       {
@@ -2199,7 +2199,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2226,9 +2226,9 @@
     }
   },
   {
-    "id": "pool-feature-template",
-    "repoFixture": "fixtures/pool-feature-template",
-    "prompt": "Implement template.js: `render(template, vars)` replaces `{{ key }}` (spaces optional) with `String(vars[key])`. `{{key|default}}` uses the default when the key is missing or undefined. A placeholder with no value and no default is left exactly as written. Substitution is a single pass: a value that itself contains `{{...}}` is not expanded again.",
+    "id": "pool-feature-luhn",
+    "repoFixture": "fixtures/pool-feature-luhn",
+    "prompt": "Implement luhn.js. `valid(digits)` applies the Luhn check to a string of decimal digits, ignoring spaces; anything containing another character, and an empty string, is not valid. `checkDigit(partial)` returns the one digit that makes `partial` valid and throws if none does.",
     "role": "coder",
     "verifiers": [
       {
@@ -2245,7 +2245,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2272,9 +2272,9 @@
     }
   },
   {
-    "id": "pool-feature-retry",
-    "repoFixture": "fixtures/pool-feature-retry",
-    "prompt": "Implement `withRetry(fn, options)` in retry.js. It awaits `fn()` and returns its value. On a rejection it retries while attempts remain and `shouldRetry(error)` is true, waiting `delayMs * backoff ** (n-1)` between the first and second attempt, then twice that, and so on. `sleep(ms)` is injected. When it gives up it rejects with the last error. Defaults: attempts 3, delayMs 0, backoff 1, shouldRetry always true; `sleep` is required.",
+    "id": "pool-feature-trie",
+    "repoFixture": "fixtures/pool-feature-trie",
+    "prompt": "Implement trie.js: `createTrie()` returns an object with `insert(word)`, `has(word)` (true only for a word that was inserted, not for a prefix of one) and `wordsWithPrefix(prefix)` (every inserted word under the prefix, each once, in ascending order; the empty prefix selects all of them).",
     "role": "coder",
     "verifiers": [
       {
@@ -2291,7 +2291,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2318,9 +2318,9 @@
     }
   },
   {
-    "id": "pool-feature-rate-limit",
-    "repoFixture": "fixtures/pool-feature-rate-limit",
-    "prompt": "Implement `SlidingWindow(limit, windowMs, now)` in limit.js. `take(key)` allows at most `limit` calls per key in any rolling window: a hit at time x still counts while `now() - x < windowMs`. An allowed call records the current time and returns true; a rejected one records nothing and returns false. Keys are independent. `now()` is injected.",
+    "id": "pool-feature-base58",
+    "repoFixture": "fixtures/pool-feature-base58",
+    "prompt": "Implement base58.js with the Bitcoin alphabet `123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz`. `encode(bytes)` takes a Uint8Array and returns the shortest base58 text, turning each leading zero byte into a leading `1`. `decode(text)` returns a Uint8Array and restores those leading zero bytes; it throws on a character outside the alphabet. The empty input encodes to the empty string.",
     "role": "coder",
     "verifiers": [
       {
@@ -2337,7 +2337,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2364,9 +2364,9 @@
     }
   },
   {
-    "id": "pool-feature-deep-equal",
-    "repoFixture": "fixtures/pool-feature-deep-equal",
-    "prompt": "Implement `deepEqual(a, b)` in equal.js: structural equality for primitives, arrays and plain objects. Object key order does not matter; `NaN` equals `NaN`; two Dates are equal when their times are equal; an own key with value `undefined` is not the same as an absent key; a value of a different type is never equal.",
+    "id": "pool-feature-shell-quote",
+    "repoFixture": "fixtures/pool-feature-shell-quote",
+    "prompt": "Implement shellquote.js: `quoteArg(arg)` returns a POSIX shell word for `arg` by wrapping it in single quotes and replacing each single quote inside it with `'\\''`; `quoteAll(args)` quotes the arguments that way and joins them with single spaces, and is the empty string for no arguments. Every argument is stringified.",
     "role": "coder",
     "verifiers": [
       {
@@ -2383,7 +2383,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2410,9 +2410,9 @@
     }
   },
   {
-    "id": "pool-bug-sort-comparator",
-    "repoFixture": "fixtures/pool-bug-sort-comparator",
-    "prompt": "`sortBy(items, keyOf)` in sort.js returns a new array sorted ascending by `keyOf(item)` without mutating the input. Sorting must be stable: items with equal keys keep their input order.",
+    "id": "pool-bug-memo-key",
+    "repoFixture": "fixtures/pool-bug-memo-key",
+    "prompt": "`memoize(fn)` in memoize.js caches results by argument value, not by object identity: `sum([1, 2])` and a second `sum([1, 2])` must call `fn` once, and so must two objects with the same contents. A call whose arguments differ in value must compute again. It works for any number of arguments.",
     "role": "coder",
     "verifiers": [
       {
@@ -2429,7 +2429,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2456,9 +2456,9 @@
     }
   },
   {
-    "id": "pool-bug-float-sum",
-    "repoFixture": "fixtures/pool-bug-float-sum",
-    "prompt": "`total(values)` in money.js returns the sum of decimal amounts rounded to the nearest cent, with no binary floating-point drift: `0.1 + 0.2` must come back as `0.3`, and an empty list is 0.",
+    "id": "pool-bug-loop-splice",
+    "repoFixture": "fixtures/pool-bug-loop-splice",
+    "prompt": "`compact(xs)` in compact.js returns the elements of `xs` that are not falsy, in order, and must not modify the array it was given: `compact([0, 1, false, 2])` is `[1, 2]`.",
     "role": "coder",
     "verifiers": [
       {
@@ -2475,7 +2475,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2502,9 +2502,9 @@
     }
   },
   {
-    "id": "pool-bug-utf8-truncate",
-    "repoFixture": "fixtures/pool-bug-utf8-truncate",
-    "prompt": "`truncate(text, max)` in text.js returns `text` unchanged when it has no more than `max` code points; otherwise the first `max` code points followed by a single `\u2026`. It must never split a surrogate pair, and `max` may be 0.",
+    "id": "pool-bug-closure-capture",
+    "repoFixture": "fixtures/pool-bug-closure-capture",
+    "prompt": "`makeHandlers(n)` in handlers.js returns an array of `n` functions where the function at index `i` returns `i`: `makeHandlers(4)[2]()` is 2.",
     "role": "coder",
     "verifiers": [
       {
@@ -2521,7 +2521,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2548,9 +2548,9 @@
     }
   },
   {
-    "id": "pool-bug-async-order",
-    "repoFixture": "fixtures/pool-bug-async-order",
-    "prompt": "`runSequential(factories)` in queue.js awaits each factory in order, starting the next only after the previous has resolved, and returns the results in the same order. If one rejects it rejects with that error and does not start the factories after it.",
+    "id": "pool-bug-regex-global",
+    "repoFixture": "fixtures/pool-bug-regex-global",
+    "prompt": "`isClean(text)` in clean.js reports whether `text` contains neither `TODO` nor `FIXME`. It must give the same answer for the same input every time it is called.",
     "role": "coder",
     "verifiers": [
       {
@@ -2567,7 +2567,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {
@@ -2594,9 +2594,9 @@
     }
   },
   {
-    "id": "pool-bug-object-keys",
-    "repoFixture": "fixtures/pool-bug-object-keys",
-    "prompt": "`pick(obj, keys)` in pick.js returns a new plain object holding, in the given key order, each named property that `obj` itself has (own properties only \u2014 inherited ones are ignored). A key that is absent contributes nothing; a key present with value `undefined` is kept.",
+    "id": "pool-bug-immutable-merge",
+    "repoFixture": "fixtures/pool-bug-immutable-merge",
+    "prompt": "`withDefaults(defaults, overrides)` in merge.js returns a new object with `overrides`' own properties layered over `defaults`' and leaves both inputs unchanged; the result must not be either input.",
     "role": "coder",
     "verifiers": [
       {
@@ -2613,7 +2613,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+      "ref": "WP-3.7b R6-H2 replacement pool candidate, authored 2026-11-14"
     }
   },
   {

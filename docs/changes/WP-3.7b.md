@@ -1254,3 +1254,65 @@ still passes all 50 tasks (and refuses a fixture that ships a plaintext hidden d
 **Mutants** (applied to the compiled `dist/`, observed red, reversed): `hiddenStoreMarkers()` → `[]`
 (canary scan off) reddens 4; skipping the contaminated early return (scoring it normally) reddens 4;
 the gate taking the stratified verdict unconditionally reddens 5, the new test among them.
+
+### R6-H2 (D-57) — the fifteen copied pool tasks are replaced, and a guard compares the splits
+
+Round 5's pool grew by fifteen tasks that were byte-identical copies of fifteen new train tasks:
+same file, same bug or feature, same check. The pool is where the calibrated held-out set is going
+to come from, so a pool task the evolver was already scored on under a train name is not a
+measurement. Both halves are fixed.
+
+**Genuinely different tasks.** The fifteen are replaced, one for one, and every replacement has a
+different shape from its train counterpart: five two-file tasks (`pool-cidr-two-file`,
+`pool-maze-two-file`, `pool-bigadd-two-file`, `pool-cron-two-file`, `pool-jsonpath-two-file` — a
+helper module owns the primitive arithmetic or grammar, the caller owns the feature), five
+feature builds (`pool-feature-varint` LEB128, `pool-feature-luhn`, `pool-feature-trie`,
+`pool-feature-base58`, `pool-feature-shell-quote`) and five single-bug fixes
+(`pool-bug-memo-key`, `pool-bug-loop-splice`, `pool-bug-closure-capture`,
+`pool-bug-regex-global`, `pool-bug-immutable-merge`). Each ships a starter that fails, a hidden
+check, a stored reference, and a scripted answer that is a plausible wrong fix, so the base harness
+has no headroom on any of them. The pool is still 50 and the corpus is still 116; `splits.json`'s
+`pool` list, `scripted.json` and the fixture trees were updated together. The hidden store was
+rebuilt from the new set: 50 check files for 50 tasks, 74 reference files for 65 tasks (one more
+than R6-H1 because a replacement two-file task stores one more reference file), 50 025 bytes. The
+corpus sha moved `1c2d1506…` → `4afb6139…`, and the offline baseline was regenerated; solved is
+unchanged at 60/116 — every pool task fails by construction, which is the point of a calibration
+candidate.
+
+**The guard.** `packages/eval-harness/src/heldoutDuplicates.ts` compares every task outside the
+train split (the held-out set and the pool, because a pool task is a future held-out task) against
+every train task and reports a finding when they share:
+
+* a fixture file with the same bytes;
+* a fixture file with the same bytes after comments and whitespace are removed (`normalizeSource`
+  is deliberately textual — a `//` inside a string loses its tail, which can only over-report);
+* a hidden check with the same text, or a stored reference with the same text (the canary line is
+  removed before the comparison — its token differs per task by design, and leaving it in would
+  make two identical references look different);
+* or a fixture-file pair whose token-set Jaccard similarity is at or above `NEAR_COPY_THRESHOLD`
+  (0.9), with files under 12 tokens left to the exact hashes because a two-line module sharing
+  `module.exports` is boilerplate, not a copy.
+
+`scripts/check-heldout-duplicates.mjs` runs it over the committed corpus, lists every finding and
+exits 1; `pnpm check:heldout-duplicates` is a CI step beside the other guards. On the current
+corpus it compares 57 held-out/pool tasks against 59 train tasks and reports the closest unrelated
+file pair at 0.821, below the 0.9 floor.
+
+The guard found one pre-existing pair on its first run: `pool-slugify/slug.js` was byte-identical
+to `train-title-case/title.js` — a shared starter stub, not a copied task, since the two prompts,
+checks and references differ. The rule is the rule: the pool starter's helper was renamed and
+rewritten (`normalizeCase`), so the two files no longer share bytes. That it was found, and was
+not the fifteen copies it was written for, is the argument for the check.
+
+**Tooling note.** `build-hidden-store.mjs extract` wrote the canary line back out with the
+plaintext, and `build` refuses a file that already carries one — so the documented
+extract/edit/build cycle could not run at all. Extract now strips the canary (it is re-derived per
+task and path at build time); extract → build on the current store reproduces it byte for byte
+(`ed8bb79b…`).
+
+**Tests.** `heldoutDuplicates.test.ts` (2): the committed corpus has no finding and its closest
+pair is below the floor; a planted copy in a temporary corpus is caught on every signal — a
+byte-identical file, a comment-and-whitespace variant, a one-line-edit near-copy, and a reference
+re-caned for a train task that has none — and every finding names a non-train task as the
+duplicate. The reference proof (`reference-solutions.test.ts`, 50 tasks) passes on the replacement
+set, and the offline baseline and the CLI's full-dispatch e2e both reproduce it.

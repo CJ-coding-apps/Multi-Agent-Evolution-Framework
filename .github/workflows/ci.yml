@@ -75,6 +75,11 @@ jobs:
       - name: Guard doc references
         run: pnpm check:doc-refs
 
+      # Round 5 shipped fifteen pool tasks that were byte-identical copies of fifteen train tasks;
+      # a held-out task the evolver already trained on measures memorisation, not generalisation.
+      - name: Guard held-out duplicates
+        run: pnpm check:heldout-duplicates
+
       - name: Typecheck
         run: pnpm -r typecheck
 

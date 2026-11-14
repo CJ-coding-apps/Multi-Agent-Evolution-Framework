@@ -1,4 +1,4 @@
-function lower(s) {
+function normalizeCase(s) {
   return s.toLowerCase();
 }
-module.exports = { lower };
+module.exports = { normalizeCase };

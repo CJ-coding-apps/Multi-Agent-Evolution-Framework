@@ -13,7 +13,8 @@
  *   node scripts/build-hidden-store.mjs build <sourceRoot>
  *       Builds from an extracted tree (`<sourceRoot>/<taskId>/.checks/...`).
  *   node scripts/build-hidden-store.mjs extract <destRoot>
- *       Writes the store's plaintext back out for editing. Extract, edit, build.
+ *       Writes the store's plaintext back out for editing, without the canary lines, so that
+ *       `extract`, edit, `build` round-trips. Extract, edit, build.
  *
  * The canonical store is mirrored byte-for-byte into `packages/cli/assets/goldens/`, which the
  * package's asset test requires. Run `pnpm -r build` first: the encoder is the package's own, so
@@ -120,7 +121,10 @@ if (mode === '--from-fixtures') {
       for (const rel of hiddenPaths(store, section, taskId)) {
         const target = path.join(dest, taskId, rel);
         await mkdir(path.dirname(target), { recursive: true });
-        await writeFile(target, readHiddenFile(store, section, taskId, rel), 'utf8');
+        // R6-H2: extract used to write the canary line back out, and `build` refuses a file that
+        // already carries one — so the documented extract/edit/build cycle could not run. The
+        // plaintext is what is being edited; the canary is derived per task and path at build time.
+        await writeFile(target, harness.withoutCanary(readHiddenFile(store, section, taskId, rel)), 'utf8');
         n++;
       }
     }

@@ -1,7 +1,7 @@
 {
   "harnessSha": "3124b5a9d019624e7e6e6a5d9983244a442eeeb15050f2867c66fd806b618379",
   "harnessId": "legacy-default",
-  "corpusSha": "1c2d1506109b3c6368776fb52535dae260056c40effcf10130aec20d383e9964",
+  "corpusSha": "4afb61396b15ec90cec8e5632d986a4abd9e7ed5adf7deab2a85427b3715e0d8",
   "attempts": 2,
   "adapter": "scripted",
   "judge": {
@@ -3148,7 +3148,7 @@
       ]
     },
     {
-      "taskId": "pool-invoice-two-file",
+      "taskId": "pool-cidr-two-file",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3220,7 +3220,7 @@
       ]
     },
     {
-      "taskId": "pool-router-two-file",
+      "taskId": "pool-maze-two-file",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3292,7 +3292,7 @@
       ]
     },
     {
-      "taskId": "pool-state-machine-two-file",
+      "taskId": "pool-bigadd-two-file",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3364,7 +3364,7 @@
       ]
     },
     {
-      "taskId": "pool-config-two-file",
+      "taskId": "pool-cron-two-file",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3436,7 +3436,7 @@
       ]
     },
     {
-      "taskId": "pool-pagination-two-file",
+      "taskId": "pool-jsonpath-two-file",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3508,7 +3508,7 @@
       ]
     },
     {
-      "taskId": "pool-feature-csv-writer",
+      "taskId": "pool-feature-varint",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3580,7 +3580,7 @@
       ]
     },
     {
-      "taskId": "pool-feature-template",
+      "taskId": "pool-feature-luhn",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3652,7 +3652,7 @@
       ]
     },
     {
-      "taskId": "pool-feature-retry",
+      "taskId": "pool-feature-trie",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3724,7 +3724,7 @@
       ]
     },
     {
-      "taskId": "pool-feature-rate-limit",
+      "taskId": "pool-feature-base58",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3796,7 +3796,7 @@
       ]
     },
     {
-      "taskId": "pool-feature-deep-equal",
+      "taskId": "pool-feature-shell-quote",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3868,7 +3868,7 @@
       ]
     },
     {
-      "taskId": "pool-bug-sort-comparator",
+      "taskId": "pool-bug-memo-key",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -3940,7 +3940,7 @@
       ]
     },
     {
-      "taskId": "pool-bug-float-sum",
+      "taskId": "pool-bug-loop-splice",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -4012,7 +4012,7 @@
       ]
     },
     {
-      "taskId": "pool-bug-utf8-truncate",
+      "taskId": "pool-bug-closure-capture",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -4084,7 +4084,7 @@
       ]
     },
     {
-      "taskId": "pool-bug-async-order",
+      "taskId": "pool-bug-regex-global",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -4156,7 +4156,7 @@
       ]
     },
     {
-      "taskId": "pool-bug-object-keys",
+      "taskId": "pool-bug-immutable-merge",
       "role": "coder",
       "passed": false,
       "attempts": [
@@ -4290,5 +4290,5 @@
     "train-bug-async-order",
     "train-bug-object-keys"
   ],
-  "ranAt": "2026-11-14T01:25:36.054Z"
+  "ranAt": "2026-11-14T21:03:53.379Z"
 }

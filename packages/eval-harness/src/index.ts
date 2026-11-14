@@ -9,6 +9,11 @@ export type {
 export { GoldenRunner, seesawDecision } from './GoldenRunner.js';
 export { ScoreRecorder } from './ScoreRecorder.js';
 export { computeCorpusSha } from './corpusSha.js';
+export type { DuplicateFinding, DuplicateKind, DuplicateReport } from './heldoutDuplicates.js';
+export {
+  NEAR_COPY_THRESHOLD, SIMILARITY_MIN_TOKENS, findHeldOutDuplicates, normalizeSource,
+  tokenSimilarity, withoutCanary,
+} from './heldoutDuplicates.js';
 export type { HiddenStoreFile } from './hiddenStore.js';
 export {
   HIDDEN_STORE_FILE, CANARY_PREFIX, hiddenStorePath, hiddenStoreMarkers, findHiddenMarkers,
