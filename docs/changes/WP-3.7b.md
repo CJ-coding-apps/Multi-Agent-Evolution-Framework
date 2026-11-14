@@ -912,6 +912,33 @@ the guard reddens the new test (1 failing test).
 
 ## Round 5 — the round-4 verifier findings
 
+### R5-P1 — the pool's checks are hidden, and the pool grows to fifty
+
+The round-4 verdict put a 60–80% chance on fewer than 20 of the 35 pool tasks qualifying: a
+one-function fix with a visible test is too easy, so the yardstick would not exist. Three changes.
+
+**Hidden checks.** A task's acceptance test moves into the fixture's `.checks/` directory, which the
+golden runner leaves out of the worktree it hands the agent. After the agent finishes and the diff
+has been taken, the runner copies each check to its path below the worktree root (so `node test.js`
+still resolves the fixture's own modules), runs the verifiers, and removes them again. The task text
+states the requirement and never points at a test. A task that declares `hiddenChecks` cannot also
+declare `mustNotModify`, because its checks are not in the worktree to protect; the corpus validator
+refuses the pair.
+
+**Fifty tasks.** The 15 new pool tasks need more than a one-line fix: five span two files
+(invoice+money, segments+router, transitions+machine, env+config, url+links), five are small
+features specified in prose (CSV writer, template, retry, sliding-window limiter, deepEqual), and
+five are bugs with no failing test given (sort comparator, float total, code-point truncation, async
+ordering, own properties only). The corpus is 116 tasks — 59 train, 7 held-out, 50 pool.
+
+**Train companions.** Fifteen matching train tasks carry the same kinds with their tests visible, so
+the pool is not the only place a kind of work appears.
+
+The scripted baseline was regenerated: 60 of 116 solved, every new train task solved and every pool
+task failed — the base has no headroom in the pool by construction. The corpus sha covers `.checks/`
+(scoring reads them) and not `.reference/` (an artifact no run reads), so R5-P2's references do not
+move it.
+
 ### R5-P4 — the first-run projection is a measurement, and calibration records what it cost (round-4 finding R4-M2)
 
 The pre-run projection's first-run figure was 8000 tokens/task, justified by a "276 tokens/task"
