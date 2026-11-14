@@ -20,6 +20,7 @@ import { assertSmokeTarget, registerEvolveCommand } from '../commands/evolve.js'
 import { readApprovalRecords, writeApprovalRecord } from '../approval.js';
 import { registerHarnessCommand } from '../commands/harness.js';
 import { messageOf } from './runFixture.js';
+import { calibrateSplitForTest } from './calibratedCorpus.js';
 
 // ORACLE: verifier F3 and F11 — `goldens run` and `evolve` take `--allow-ungoverned` to the stack
 // they dispatch through (on an adapter that cannot run the in-process loop, every writer task is
@@ -45,8 +46,17 @@ async function freshClone(): Promise<{ root: string; defaultSha: string }> {
   const name = (await readdir(path.join(from, 'harnesses'))).find((n) => /^default-[0-9a-f]{64}\.json$/.test(n));
   assert.ok(name, 'the repository commits a default harness');
   await cp(path.join(from, 'harnesses', name), path.join(to, 'harnesses', name));
+  // R5-P3: `evolve` refuses a split with no calibration behind its heldOut. The clone gets a copy
+  // of the seed corpus whose split names a synthetic record that derives it, so the gate is
+  // exercisable offline. `goldens run` reads no split and is unaffected.
+  const corpus = path.join(root, 'tests', 'goldens');
+  await cp(SEED, corpus, { recursive: true });
+  await calibrateSplitForTest(corpus);
   return { root, defaultSha: name.slice('default-'.length, -'.json'.length) };
 }
+
+/** The corpus `freshClone` calibrated; `evolve` reads a split, so it gets this one, not SEED. */
+const cloneCorpus = (root: string): string => path.join(root, 'tests', 'goldens');
 
 /** Stops `buildRunStack` at its first line, keeping what it was asked for, and keeps what the commands log. */
 function stopAtStack(t: TestContext): { stacks: StackConfig[]; logs: string[] } {
@@ -74,7 +84,7 @@ async function drive(register: (program: Command) => void, args: string[]): Prom
 }
 
 const goldens = (root: string, ...extra: string[]) => ['goldens', 'run', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', ...extra];
-const evolve = (root: string, ...extra: string[]) => ['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', ...extra];
+const evolve = (root: string, ...extra: string[]) => ['evolve', '--dir', root, '--corpus', cloneCorpus(root), '--adapter', 'scripted', ...extra];
 
 test('goldens run and evolve take --allow-ungoverned to the stack they dispatch through, and only when typed', async (t) => {
   const { root } = await freshClone();
@@ -247,6 +257,40 @@ test('maf evolve refuses a held-out gate resting on fewer than minHeldOut determ
   }
 });
 
+// R5-P3 (round-4 finding R4-M1): the gate may only score a yardstick derived from a committed
+// measurement. The seed split names no calibration (`calibrationSha: null`) and its held-out tasks
+// were hand-picked; `evolve` refuses it before the stack exists, rather than scoring a set nobody
+// measured.
+test('maf evolve refuses a split with no calibration behind its heldOut (R5-P3)', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    const splits = JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as {
+      preRegistration: { calibrationSha: string | null };
+    };
+    assert.equal(splits.preRegistration.calibrationSha, null, 'the seed split has no measurement');
+
+    const { stacks } = stopAtStack(t);
+    const errors: string[] = [];
+    t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted'], { from: 'user' });
+    assert.equal(process.exitCode, 2, 'a yardstick with no measurement is refused, non-zero');
+    assert.ok(
+      errors.some((l) => l.includes('calibrationSha') && l.includes('is null') && l.includes('maf goldens calibrate')),
+      errors.join('\n'),
+    );
+    assert.deepEqual(stacks, [], 'no stack, no round, no money');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('R2-M1 budget: --max-tokens 2000 stops before the baseline, with the projection printed', async (t) => {
   const { root } = await freshClone();
   const saved = process.exitCode;
@@ -254,11 +298,15 @@ test('R2-M1 budget: --max-tokens 2000 stops before the baseline, with the projec
   try {
     const corpus = path.join(root, 'corpus');
     await cp(SEED, corpus, { recursive: true });
+    // R5-P3: the seed split names no calibration, so `evolve` refuses it before the projection.
+    // The copy gets the synthetic record its heldOut must be derived from, so this measures budget.
+    await calibrateSplitForTest(corpus);
     // The projection is over the train split, so the figure is read from the split rather than
     // pinned: growing the corpus is not a regression in this test.
-    const trainCount = (JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as {
-      train: string[];
-    }).train.length;
+    const split = JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as {
+      train: string[]; heldOut: string[]; pool?: string[];
+    };
+    const trainCount = split.train.length;
     const logs: string[] = [];
     t.mock.method(console, 'log', (...parts: unknown[]) => { logs.push(parts.map(String).join(' ')); });
     t.mock.method(console, 'error', () => {});
@@ -289,7 +337,14 @@ test('R2-M1 budget: --max-tokens 2000 stops before the baseline, with the projec
       `the round-0 baseline was not started: ${trainCount} tasks × 8000 tokens each ` +
       `\\(conservative estimate\\) projects ${trainCount * 8000} tokens; ` +
       '0 already spent against a 2000-token budget — not started'));
-    assert.equal(trainCount, 44, 'R4-A3: the train split carries the retired held-out tasks too');
+    // R4-A3 (amended by R5-P1): calibration retires the previous held-out tasks into `train`, and
+    // the corpus has since grown, so the count is read rather than pinned. What must hold is that
+    // moving tasks between sides never drops one: the split stays a partition of the corpus.
+    const corpusIds = (JSON.parse(await readFile(path.join(corpus, 'corpus.json'), 'utf8')) as { id: string }[]);
+    assert.equal(
+      new Set([...split.train, ...split.heldOut, ...(split.pool ?? [])]).size, corpusIds.length,
+      'R4-A3: calibrating moves tasks between sides; it never loses one',
+    );
     assert.equal(report.usage?.calls, 0, 'nothing was dispatched: the stop happened before the baseline');
     assert.ok(logs.some((l) => l.includes('stop=budget')), logs.join('\n'));
   } finally {
@@ -426,7 +481,7 @@ test('maf evolve refuses an unknown tool id at the invariant stage, naming the k
     const program = new Command();
     program.exitOverride();
     registerEvolveCommand(program);
-    await program.parseAsync(['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', cloneCorpus(root), '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
 
     const reportDir = path.join(root, '.maf', 'evolve');
     const reports = (await readdir(reportDir)).filter((n) => n.endsWith('.json'));
@@ -485,7 +540,7 @@ test('maf evolve gives the gate each tool\'s registry permission: fs.write widen
     const program = new Command();
     program.exitOverride();
     registerEvolveCommand(program);
-    await program.parseAsync(['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', cloneCorpus(root), '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
 
     const reportDir = path.join(root, '.maf', 'evolve');
     const reports = (await readdir(reportDir)).filter((n) => n.endsWith('.json'));
@@ -548,7 +603,7 @@ test('maf evolve refuses a budget edit that cannot reach its role\'s tier (§7)'
     const program = new Command();
     program.exitOverride();
     registerEvolveCommand(program);
-    await program.parseAsync(['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', cloneCorpus(root), '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
 
     const reportDir = path.join(root, '.maf', 'evolve');
     const reports = (await readdir(reportDir)).filter((n) => n.endsWith('.json'));

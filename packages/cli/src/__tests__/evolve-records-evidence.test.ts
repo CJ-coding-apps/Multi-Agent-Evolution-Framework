@@ -17,6 +17,7 @@ import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { registerEvolveCommand } from '../commands/evolve.js';
 import { runInit } from '../commands/init.js';
 import { collector, needsLcm } from './runFixture.js';
+import { calibrateSplitForTest } from './calibratedCorpus.js';
 
 // ORACLE (WP-3.7a MED-4). The original defect was in this CLI wiring: `evolve.ts` built the loop
 // without `recordGoldens`, so every run it paid for was thrown away. Five planted bugs survived the
@@ -101,7 +102,8 @@ async function project(): Promise<Project> {
   }));
   await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([task, ...heldOut]), 'utf8');
   // D-57: the evolver refuses to start without a committed partition, and R2-M2 refuses one whose
-  // held-out side cannot carry a gate.
+  // held-out side cannot carry a gate. R5-P3: the heldOut set must be the selection a committed
+  // calibration derives, so the project gets the synthetic record for exactly this split.
   await writeFile(
     path.join(corpus, 'splits.json'),
     JSON.stringify({
@@ -111,6 +113,7 @@ async function project(): Promise<Project> {
     }),
     'utf8',
   );
+  await calibrateSplitForTest(corpus);
 
   return { root, mafDir: path.join(root, '.maf'), corpus };
 }

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   CALIBRATION_RULE, GoldenRunner, HELD_OUT_RULE, SplitsError, computeSplitsSha, loadSplits,
+  selectCalibrated,
 } from '../index.js';
 import type { CorpusSplits, GoldenTask } from '../index.js';
 
@@ -137,10 +138,20 @@ test('splits: every way a split can fail to be a partition is refused', async ()
   }
 });
 
+/** A calibration record whose counts select exactly `ids`, for a split that names it. */
+function calibrationRecord(ids: readonly string[]): string {
+  const counts = ids.map((taskId) => ({ taskId, passes: 1, attempts: 3 }));
+  return `${JSON.stringify({
+    version: 1, harnessId: 'split-test', harnessSha: 'a'.repeat(64), adapter: 'scripted', runs: 3,
+    ranAt: '2026-11-13T00:00:00.000Z', splitsSha: 'split-test', rule: CALIBRATION_RULE,
+    tasks: counts, errors: [], selection: selectCalibrated(counts),
+  }, null, 2)}\n`;
+}
+
 test('splits: the calibration a split names is the one on disk, byte for byte (R4-A4)', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-splits-cal-'));
   try {
-    const calibration = '{"version":1,"note":"measured"}\n';
+    const calibration = calibrationRecord(five);
     const sha = createHash('sha256').update(calibration, 'utf8').digest('hex');
     const file: CorpusSplits = {
       version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
@@ -158,6 +169,31 @@ test('splits: the calibration a split names is the one on disk, byte for byte (R
     await writeFile(path.join(root, 'calibration.json'), '{"version":1,"note":"other"}\n', 'utf8');
     await assert.rejects(() => loadSplits(root, CORPUS),
       /does not come from the measurement the split names/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R5-P3 (round-4 finding R4-M1): `heldOut` is the selection the committed counts and rule produce.
+// A hand-edited held-out set that the record does not derive is refused at load.
+test('splits: a heldOut the calibration record does not derive is refused (R5-P3)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-splits-derived-'));
+  try {
+    const calibration = calibrationRecord(five);
+    const sha = createHash('sha256').update(calibration, 'utf8').digest('hex');
+    const handPicked: CorpusSplits = {
+      version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
+      // The record selects a, b, c, d, e; the split names a, b, c, d, f — one task swapped.
+      preRegistration: { ...PRE, calibrationSha: sha }, train: ['e', 'g', 'h'],
+      heldOut: ['a', 'b', 'c', 'd', 'f'],
+    };
+    await writeFile(path.join(root, 'splits.json'), JSON.stringify(handPicked), 'utf8');
+    await writeFile(path.join(root, 'calibration.json'), calibration, 'utf8');
+    await assert.rejects(() => loadSplits(root, CORPUS), (err: unknown) => {
+      assert.ok(err instanceof SplitsError, `not a SplitsError: ${String(err)}`);
+      assert.match(err.message, /heldOut is not the selection calibration\.json derives/);
+      return true;
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

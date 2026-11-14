@@ -175,6 +175,19 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         return;
       }
 
+      // R5-P3 (round-4 finding R4-M1): the held-out gate may only score a yardstick derived from a
+      // committed calibration. A split with no measurement behind it — hand-picked held-out tasks,
+      // however reasonable — is refused before anything is opened or paid for.
+      if (splits.preRegistration.calibrationSha === null) {
+        console.error(
+          '[maf] evolve: the split names no calibration measurement (preRegistration.calibrationSha ' +
+          'is null), so its held-out set was not derived from one and the gate cannot score it. ' +
+          'Run `maf goldens calibrate` to measure the pool and write the yardstick it selects.',
+        );
+        process.exitCode = 2;
+        return;
+      }
+
       // The scripted stand-in is built from this corpus's scripts (D-14). The registry's bare
       // `scripted` adapter has no scripts, so `evolve --adapter scripted` could not answer its own
       // first task. Only that bare one is replaced: a caller-injected adapter (a test's map, or a

@@ -6,7 +6,8 @@ import { refusePrototypeKey } from '@maf/types';
 import type { GoldenTask } from './GoldenTask.js';
 import { HELD_OUT_RULE } from './significance.js';
 import type { HeldOutTestRule } from './significance.js';
-import { CALIBRATION_FILE, CALIBRATION_RULE } from './calibration.js';
+import { CALIBRATION_FILE, CALIBRATION_RULE, selectCalibrated } from './calibration.js';
+import type { CalibrationRecord, CalibrationSelection } from './calibration.js';
 
 /**
  * The corpus split (D-57). The evolver may see the `train` tasks — they are what it measures every
@@ -200,6 +201,11 @@ export async function loadSplits(
       `${file}: preRegistration.calibrationSha must be null or a sha256 hex digest ` +
       `(got ${JSON.stringify(calibrationSha)}).`,
     );
+  // R5-P3 (round-4 finding R4-M1): `heldOut` is derived, never hand-written. When the split names a
+  // measurement, the record it hashes to must reproduce `heldOut` exactly from its own counts and
+  // the committed seed and rule. A reviewed edit to `heldOut` that is not the selection the counts
+  // and rule produce is refused at load, so a yardstick cannot be chosen by preference.
+  let calibrationRecord: CalibrationRecord | undefined;
   if (typeof calibrationSha === 'string') {
     let calibrationText: string;
     try {
@@ -217,6 +223,18 @@ export async function loadSplits(
         `${CALIBRATION_FILE} hashes to ${actual.slice(0, 12)}… — the committed held-out set does not ` +
         'come from the measurement the split names.',
       );
+    let record: unknown;
+    try {
+      record = JSON.parse(calibrationText, refusePrototypeKey);
+    } catch (err) {
+      throw new SplitsError(
+        `${CALIBRATION_FILE} is not readable JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const recorded = record !== null && typeof record === 'object' ? record as Record<string, unknown> : undefined;
+    if (recorded === undefined || recorded['version'] !== 1 || !Array.isArray(recorded['tasks']))
+      throw new SplitsError(`${CALIBRATION_FILE}: version must be 1 and tasks must be an array of counts.`);
+    calibrationRecord = recorded as unknown as CalibrationRecord;
   }
   const known = new Set(corpus.map((t) => t.id));
   const lists: { train: string[]; 'held-out': string[]; pool: string[] } = { train: [], 'held-out': [], pool: [] };
@@ -271,6 +289,28 @@ export async function loadSplits(
         : '') +
       'Add deterministic held-out tasks or move them from train; do not lower minHeldOut.',
     );
+  }
+
+  // R5-P3: recompute the selection the committed counts and rule produce and require it to be the
+  // committed `heldOut` — same tasks, same order. `selectCalibrated` reads the seed and the rule from
+  // this build, so a split can only carry a yardstick the measurement behind it derives.
+  if (calibrationRecord !== undefined) {
+    let derived: CalibrationSelection;
+    try {
+      derived = selectCalibrated(calibrationRecord.tasks);
+    } catch (err) {
+      throw new SplitsError(
+        `${CALIBRATION_FILE}: cannot derive the held-out selection from its counts: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (canonicalJson(derived.selected) !== canonicalJson(lists['held-out']))
+      throw new SplitsError(
+        `${file}: heldOut is not the selection ${CALIBRATION_FILE} derives from its counts and rule ` +
+        `(the record selects ${derived.selected.join(', ') || 'nothing'}; the split names ` +
+        `${lists['held-out'].join(', ') || 'nothing'}). The held-out set is derived, never hand-written: ` +
+        're-run `maf goldens calibrate` or restore the split the record produced.',
+      );
   }
 
   const splits: CorpusSplits = {
