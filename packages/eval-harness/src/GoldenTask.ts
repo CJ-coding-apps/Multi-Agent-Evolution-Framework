@@ -31,6 +31,15 @@ export interface GoldenTask {
    * rewriting its own test.
    */
   mustNotModify?: string[];
+  /**
+   * WP-3.7b R5-P1: acceptance checks the agent never sees. Each entry is a fixture-relative path
+   * below `.checks/`. The runner leaves the whole directory out of the worktree it hands the
+   * agent, and copies each file in — at its path below `.checks/` — only after the agent has
+   * finished and the diff has been taken. The task text must state the requirement, never the
+   * test: a visible test turns a fix into copying an answer, which is what made the pool too easy
+   * to calibrate.
+   */
+  hiddenChecks?: string[];
   provenance: GoldenProvenance;
 }
 
@@ -86,6 +95,24 @@ export function assertGoldenTask(x: unknown, where: string): asserts x is Golden
       if (typeof p !== 'string' || p.length === 0 || p.startsWith('/') || p.split(/[\\/]/).includes('..'))
         fail(`mustNotModify[${i}] must be a fixture-relative path without ..`);
     }
+  }
+  if (o['hiddenChecks'] !== undefined) {
+    const checks = o['hiddenChecks'];
+    if (!Array.isArray(checks) || checks.length === 0)
+      fail('hiddenChecks must be a non-empty array of fixture-relative paths below .checks/');
+    for (const [i, raw] of (checks as unknown[]).entries()) {
+      if (typeof raw !== 'string') fail(`hiddenChecks[${i}] must be a path below .checks/`);
+      const p = raw as string;
+      if (!p.startsWith('.checks/')) fail(`hiddenChecks[${i}] must be a path below .checks/`);
+      const segments = p.split(/[\\/]/);
+      if (segments.includes('..') || segments.includes('') || p.startsWith('/'))
+        fail(`hiddenChecks[${i}] must be a fixture-relative path without ..`);
+      if (segments.length < 2) fail(`hiddenChecks[${i}] names the .checks/ directory, not a file`);
+    }
+    // A visible test and a hidden check for the same task would make the hidden one pointless:
+    // the agent is scored by a file it has already read.
+    if (o['mustNotModify'] !== undefined)
+      fail('a task with hiddenChecks must not also declare mustNotModify: its checks are not in the worktree');
   }
   const prov = o['provenance'] as Record<string, unknown> | undefined;
   if (!prov || typeof prov !== 'object')

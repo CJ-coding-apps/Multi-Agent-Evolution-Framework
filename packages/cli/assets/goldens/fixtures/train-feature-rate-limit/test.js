@@ -1,0 +1,14 @@
+const assert = require('node:assert/strict');
+const { SlidingWindow } = require('./limit');
+let t = 0;
+const w = new SlidingWindow(2, 100, () => t);
+assert.equal(w.take('a'), true);
+assert.equal(w.take('a'), true);
+assert.equal(w.take('a'), false);
+assert.equal(w.take('b'), true);
+t = 100;
+assert.equal(w.take('a'), true);
+t = 101;
+assert.equal(w.take('a'), true);
+assert.equal(w.take('a'), false);
+console.log('ok');

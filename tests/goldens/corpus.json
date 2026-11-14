@@ -342,7 +342,7 @@
   {
     "id": "pool-csv-parse",
     "repoFixture": "fixtures/pool-csv-parse",
-    "prompt": "Fix csv.js so test.js passes.",
+    "prompt": "Implement `parse(line)` in csv.js for one RFC 4180 CSV record. Fields are separated by commas; a field may be wrapped in double quotes, in which case it may contain commas, and a doubled quote inside it is one literal quote. Return the array of field strings, unquoted and untrimmed.",
     "role": "coder",
     "verifiers": [
       {
@@ -354,18 +354,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-duration",
     "repoFixture": "fixtures/pool-duration",
-    "prompt": "Fix duration.js so test.js passes.",
+    "prompt": "`parseDuration` and `formatDuration` in duration.js convert between minute counts and compact durations. Accept `1h30m`, `2h`, `45m` and `1h5m`; reject anything else with 0. Format so minutes are always two digits: 65 is `1h05m`, 120 is `2h00m`, 45 is `0h45m`.",
     "role": "coder",
     "verifiers": [
       {
@@ -377,18 +377,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-ranges",
     "repoFixture": "fixtures/pool-ranges",
-    "prompt": "Fix ranges.js so test.js passes. Merged ranges may touch.",
+    "prompt": "Implement `merge(ranges)` in ranges.js: each input is a `[start, end]` pair of integers. Return the sorted, non-overlapping ranges covering the same numbers, joining ranges that overlap or touch. The input must not be mutated.",
     "role": "coder",
     "verifiers": [
       {
@@ -400,18 +400,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-wordwrap",
     "repoFixture": "fixtures/pool-wordwrap",
-    "prompt": "Fix wrap.js so test.js passes.",
+    "prompt": "Implement `wrap(text, width)` in wrap.js: greedily fill lines with whole words separated by one space, breaking before a word that would make the line longer than `width`. A word longer than `width` occupies a line by itself. No empty lines are produced.",
     "role": "coder",
     "verifiers": [
       {
@@ -423,18 +423,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-roman",
     "repoFixture": "fixtures/pool-roman",
-    "prompt": "Fix roman.js so test.js passes.",
+    "prompt": "Implement `toRoman(n)` and `fromRoman(text)` in roman.js for 1..3999. Both must use subtractive notation (`IV` is 4, `MCMXCIV` is 1994): a smaller numeral before a larger one is subtracted, and `toRoman` produces the shortest correct form.",
     "role": "coder",
     "verifiers": [
       {
@@ -445,19 +445,19 @@
         ],
         "expectExit": 0
       }
-    ],
-    "mustNotModify": [
-      "test.js"
     ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (multi-step)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-matrix-transpose",
     "repoFixture": "fixtures/pool-matrix-transpose",
-    "prompt": "Fix matrix.js so test.js passes.",
+    "prompt": "Implement `transpose(rows)` in matrix.js: return the matrix with rows and columns exchanged, preserving order and handling non-square input and an empty matrix.",
     "role": "coder",
     "verifiers": [
       {
@@ -469,18 +469,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-lru",
     "repoFixture": "fixtures/pool-lru",
-    "prompt": "Fix lru.js so test.js passes.",
+    "prompt": "`Lru(capacity)` in lru.js is a fixed-capacity cache. `get(key)` returns the value or `undefined` and marks the key most recently used; `set(key, value)` inserts or updates and evicts the least recently used key when over capacity.",
     "role": "coder",
     "verifiers": [
       {
@@ -492,18 +492,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-edit-distance",
     "repoFixture": "fixtures/pool-edit-distance",
-    "prompt": "Fix distance.js so test.js passes.",
+    "prompt": "Implement Levenshtein `distance(a, b)` in distance.js: the minimum number of single-character insertions, deletions and substitutions that turn `a` into `b`. The empty string against an n-character string costs n.",
     "role": "coder",
     "verifiers": [
       {
@@ -515,18 +515,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-heap",
     "repoFixture": "fixtures/pool-heap",
-    "prompt": "Fix heap.js so test.js passes.",
+    "prompt": "`MinHeap` in heap.js must keep `items` a valid binary min-heap on every push and pop: each parent is no greater than either child, and pop returns the smallest item. The current down-sift only compares the left child.",
     "role": "coder",
     "verifiers": [
       {
@@ -538,18 +538,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-date-add",
     "repoFixture": "fixtures/pool-date-add",
-    "prompt": "Fix dateadd.js so test.js passes.",
+    "prompt": "`addMonths(iso, months)` in dateadd.js takes a `YYYY-MM-DD` date and returns the same format shifted by whole months. Days are clamped to the end of the target month (31 Jan + 1 month is the last day of February). Work in UTC and do not use the host clock.",
     "role": "coder",
     "verifiers": [
       {
@@ -560,19 +560,19 @@
         ],
         "expectExit": 0
       }
-    ],
-    "mustNotModify": [
-      "test.js"
     ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (unnamed-bug)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-stats-median",
     "repoFixture": "fixtures/pool-stats-median",
-    "prompt": "Add median to stats.js so test.js passes.",
+    "prompt": "Add `median(xs)` to stats.js (keep `mean`): the middle value of the sorted values, or the average of the two middle values when the count is even; the empty array returns null.",
     "role": "coder",
     "verifiers": [
       {
@@ -584,18 +584,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-slugify",
     "repoFixture": "fixtures/pool-slugify",
-    "prompt": "Add slugify to slug.js so test.js passes.",
+    "prompt": "Implement `slugify(text)` in slug.js: lowercase, replace each run of characters that are not ASCII letters or digits with a single hyphen, and trim leading and trailing hyphens. An empty or all-punctuation string becomes the empty string.",
     "role": "coder",
     "verifiers": [
       {
@@ -607,18 +607,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-binary-search",
     "repoFixture": "fixtures/pool-binary-search",
-    "prompt": "Add binarySearch to search.js so test.js passes.",
+    "prompt": "Implement `binarySearch(xs, target)` in search.js. `xs` is sorted ascending; return the index of `target`, or -1 when it is absent (an empty array has no match). With duplicates any matching index is correct. It must be logarithmic time, not a linear scan.",
     "role": "coder",
     "verifiers": [
       {
@@ -630,18 +630,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-diff-lines",
     "repoFixture": "fixtures/pool-diff-lines",
-    "prompt": "Add diffLines to diff.js so test.js passes.",
+    "prompt": "Implement `diffLines(before, after)` in diff.js. Split both texts into lines; return the shortest sequence of `{ op, line }` entries that turns `before` into `after`, where `op` is '=' for a kept line, '-' for a removed line and '+' for an added line, in order. A line that is common to both sides must be kept where the shortest sequence keeps it.",
     "role": "coder",
     "verifiers": [
       {
@@ -653,18 +653,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-format-bytes",
     "repoFixture": "fixtures/pool-format-bytes",
-    "prompt": "Add formatBytes to bytes.js so test.js passes.",
+    "prompt": "Implement `formatBytes(n)` in bytes.js: `0 B` below 1024 bytes with no decimals, otherwise the value in KB, MB, GB or TB at base 1024 with exactly one decimal (`1.0 KB`, `1.5 KB`, `1.0 MB`).",
     "role": "coder",
     "verifiers": [
       {
@@ -676,18 +676,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-group-by",
     "repoFixture": "fixtures/pool-group-by",
-    "prompt": "Add groupBy to groupby.js so test.js passes.",
+    "prompt": "Implement `groupBy(xs, keyOf)` in groupby.js: return a plain object whose keys are `String(keyOf(item))` and whose values are arrays of the items with that key, in input order.",
     "role": "coder",
     "verifiers": [
       {
@@ -698,19 +698,19 @@
         ],
         "expectExit": 0
       }
-    ],
-    "mustNotModify": [
-      "test.js"
     ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (missing-feature)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-config-merge",
     "repoFixture": "fixtures/pool-config-merge",
-    "prompt": "Fix config.js so test.js passes. The defaults in defaults.js define the shape.",
+    "prompt": "`load(override)` in config.js must deep-merge `override` into the defaults in defaults.js and return the merged object. Nested plain objects merge key by key; a value in `override` wins over the default at the same path; keys the override omits keep their default. Arrays and null are values, not objects to merge. The defaults object must not be mutated.",
     "role": "coder",
     "verifiers": [
       {
@@ -722,18 +722,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (two-file)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-route-params",
     "repoFixture": "fixtures/pool-route-params",
-    "prompt": "Fix router.js so test.js passes. params.js decodes one component.",
+    "prompt": "Implement `match(pattern, path)` in router.js: split both on `/`; a segment of the pattern starting with `:` captures that path segment, percent-decoded exactly once; every other segment must match literally; a length mismatch or a literal mismatch returns null, otherwise return the object of captured parameters.",
     "role": "coder",
     "verifiers": [
       {
@@ -745,18 +745,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (two-file)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-cart-discount",
     "repoFixture": "fixtures/pool-cart-discount",
-    "prompt": "Fix cart.js so test.js passes. pricing.js rounds to whole cents.",
+    "prompt": "`total(items, discountRate, taxRate)` in cart.js returns an integer number of cents. The subtotal is the sum of `price * qty`. Apply the discount to the subtotal, rounding the discount to the nearest cent; apply tax to the already-discounted amount, rounding the tax to the nearest cent; return the sum. The current code computes both on the undiscounted subtotal.",
     "role": "coder",
     "verifiers": [
       {
@@ -768,18 +768,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (two-file)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-tokenize",
     "repoFixture": "fixtures/pool-tokenize",
-    "prompt": "Fix tokenizer.js so test.js passes. rules.js lists the operators.",
+    "prompt": "Implement `tokenize(text)` across tokenizer.js and rules.js. It reads integers (returned as `{ kind: 'number', value }` with the digits as a string) and the operators in rules.js (returned as `{ kind: 'op', value }`), skipping whitespace. Longer operators must win over their prefixes, so `<=` is one token, never `<` then `=`. Any other character throws.",
     "role": "coder",
     "verifiers": [
       {
@@ -790,19 +790,19 @@
         ],
         "expectExit": 0
       }
-    ],
-    "mustNotModify": [
-      "test.js"
     ],
     "provenance": {
       "source": "human-decision",
       "ref": "round-3 pool, authored 2026-11-12 (two-file)"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-semver-compare",
     "repoFixture": "fixtures/pool-semver-compare",
-    "prompt": "Fix semver.js so test.js passes.",
+    "prompt": "Implement `compareSemver(a, b)` in semver.js: compare two `major.minor.patch` versions and return 1, -1 or 0. Each component is compared numerically, so 10 sorts after 9.",
     "role": "coder",
     "verifiers": [
       {
@@ -814,18 +814,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-debounce",
     "repoFixture": "fixtures/pool-debounce",
-    "prompt": "Fix debounce.js so test.js passes.",
+    "prompt": "Implement `debounce(fn, ms, schedule, cancel)` in debounce.js. It returns a function that delays `fn` until `ms` milliseconds have passed without another call; every new call restarts the wait. It must pass the eventual call's arguments and `this` through. `schedule` and `cancel` are injected (`setTimeout`/`clearTimeout` by default) so it never touches the real clock in a test.",
     "role": "coder",
     "verifiers": [
       {
@@ -837,18 +837,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-matrix-multiply",
     "repoFixture": "fixtures/pool-matrix-multiply",
-    "prompt": "Fix multiply.js so test.js passes.",
+    "prompt": "Implement `multiply(a, b)` in multiply.js for two square numeric matrices of any size: the result's cell (i, j) is the dot product of row i of `a` and column j of `b`.",
     "role": "coder",
     "verifiers": [
       {
@@ -860,18 +860,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-parse-args",
     "repoFixture": "fixtures/pool-parse-args",
-    "prompt": "Fix parseArgs.js so test.js passes.",
+    "prompt": "Implement `parseArgs(argv)` in args.js. An argument starting with `--` sets a key to `true` unless it has `=value` (the value is the string after `=`); a `--name` whose next argument does not start with `--` takes that next argument as its string value. Other arguments are ignored.",
     "role": "coder",
     "verifiers": [
       {
@@ -883,18 +883,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-pluralize",
     "repoFixture": "fixtures/pool-pluralize",
-    "prompt": "Fix pluralize.js so test.js passes.",
+    "prompt": "Implement `pluralize(word)` in plural.js: a consonant followed by `y` becomes `ies`; a vowel followed by `y` just adds `s`; words ending in s, x, z, ch or sh add `es`; everything else adds `s`.",
     "role": "coder",
     "verifiers": [
       {
@@ -906,18 +906,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-time-diff",
     "repoFixture": "fixtures/pool-time-diff",
-    "prompt": "Fix time.js so test.js passes.",
+    "prompt": "Implement `minutesBetween(a, b)` in time.js for two `HH:MM` times on a 24-hour clock: return the absolute number of minutes between them, taking the shorter way across midnight (23:50 to 00:10 is 20 minutes).",
     "role": "coder",
     "verifiers": [
       {
@@ -929,18 +929,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-tree-flatten",
     "repoFixture": "fixtures/pool-tree-flatten",
-    "prompt": "Fix flattenKeys.js so test.js passes.",
+    "prompt": "Implement `flatten(obj)` in flatten-keys.js: return a flat object whose keys are the dot-joined paths of the leaves, with no leading dot, and whose values are the leaves. Nested plain objects are the only things descended into.",
     "role": "coder",
     "verifiers": [
       {
@@ -952,18 +952,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-query-string",
     "repoFixture": "fixtures/pool-query-string",
-    "prompt": "Fix query.js so test.js passes.",
+    "prompt": "Implement `parseQuery(q)` in query.js: parse a query string with an optional leading `?` into a plain object of percent-decoded strings. A key repeated more than once maps to an array of its values in order; a key with no `=` maps to the empty string.",
     "role": "coder",
     "verifiers": [
       {
@@ -975,18 +975,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-checksum",
     "repoFixture": "fixtures/pool-checksum",
-    "prompt": "Fix checksum.js so test.js passes.",
+    "prompt": "Implement `checksum(bytes)` in checksum.js. It returns the 8-bit two's-complement checksum of the bytes: add the bytes, take the low 8 bits, and return `(256 - sum) & 0xff` (so the sum of the input and the checksum is zero mod 256). The result is always 0..255.",
     "role": "coder",
     "verifiers": [
       {
@@ -998,18 +998,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-queue-batch",
     "repoFixture": "fixtures/pool-queue-batch",
-    "prompt": "Fix batch.js so test.js passes.",
+    "prompt": "Implement `batch(items, size)` in batch.js: split the array into consecutive arrays of at most `size` items, including the final shorter one; an empty input returns an empty array and `size` must be a positive integer.",
     "role": "coder",
     "verifiers": [
       {
@@ -1021,18 +1021,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-gcd-lcm",
     "repoFixture": "fixtures/pool-gcd-lcm",
-    "prompt": "Fix lcm.js so test.js passes.",
+    "prompt": "Implement `lcm(a, b)` in lcm.js: the smallest positive integer divisible by both, using the greatest common divisor (return 0 when either input is 0).",
     "role": "coder",
     "verifiers": [
       {
@@ -1044,18 +1044,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-bowling",
     "repoFixture": "fixtures/pool-bowling",
-    "prompt": "Fix bowling.js so test.js passes.",
+    "prompt": "Implement `total(rolls)` in bowling.js for one ten-pin game given the flat list of rolls. A frame's score is its two rolls (or a strike's 10), a spare adds the next roll and a strike adds the next two rolls to that frame. The list may stop after the final frame's bonus rolls. Return the integer final score.",
     "role": "coder",
     "verifiers": [
       {
@@ -1067,18 +1067,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-caesar-wrap",
     "repoFixture": "fixtures/pool-caesar-wrap",
-    "prompt": "Fix caesar.js so test.js passes.",
+    "prompt": "Implement `caesar(text, shift)` in caesar.js: shift every ASCII letter by `shift` positions, wrapping within the same case (`z`+1 is `a`, `a`-1 is `z`). Leave non-letters unchanged. A negative shift moves backwards.",
     "role": "coder",
     "verifiers": [
       {
@@ -1090,18 +1090,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-token-bucket",
     "repoFixture": "fixtures/pool-token-bucket",
-    "prompt": "Fix bucket.js so test.js passes.",
+    "prompt": "Implement `allow(tokens, capacity, ratePerMs, elapsedMs)` in bucket.js. Refill the bucket by `elapsedMs * ratePerMs`, capped at `capacity`; if at least one token is available, consume one and return `{ allowed: true, tokens }` with the count after consuming; otherwise return `{ allowed: false, tokens }` with the count available.",
     "role": "coder",
     "verifiers": [
       {
@@ -1113,18 +1113,18 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "pool-round-sig",
     "repoFixture": "fixtures/pool-round-sig",
-    "prompt": "Fix round.js so test.js passes.",
+    "prompt": "Implement `roundSig(x, digits)` in round.js: round `x` to `digits` significant digits, not decimal places. 1234 at 2 is 1200, 0.001234 at 2 is 0.0012, and 99.5 at 2 is 100.",
     "role": "coder",
     "verifiers": [
       {
@@ -1136,13 +1136,13 @@
         "expectExit": 0
       }
     ],
-    "mustNotModify": [
-      "test.js"
-    ],
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
-    }
+    },
+    "hiddenChecks": [
+      ".checks/test.js"
+    ]
   },
   {
     "id": "train-crc8",
@@ -1947,6 +1947,696 @@
     "provenance": {
       "source": "human-decision",
       "ref": "WP-3.7b R4-A3 candidate pool, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-invoice-two-file",
+    "repoFixture": "fixtures/pool-invoice-two-file",
+    "prompt": "`total(items, discountRate, taxRate)` in invoice.js returns an integer number of cents. The subtotal is the sum of `price * qty`. The discount is `Math.round(subtotal * discountRate)`; tax is `Math.round((subtotal - discount) * taxRate)`; the total is the discounted amount plus tax. The money helpers live in money.js and must carry that arithmetic.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-invoice-two-file",
+    "repoFixture": "fixtures/train-invoice-two-file",
+    "prompt": "Fix invoice.js and money.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-router-two-file",
+    "repoFixture": "fixtures/pool-router-two-file",
+    "prompt": "`match(pattern, path)` in router.js matches a `/`-separated pattern against a request path. The path may carry a query string or fragment, which the pattern never sees; a trailing slash is ignored; a `:name` segment captures that path segment percent-decoded exactly once; every other segment matches literally. A different segment count or a literal mismatch returns null. The splitting helper lives in segments.js.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-router-two-file",
+    "repoFixture": "fixtures/train-router-two-file",
+    "prompt": "Fix router.js and segments.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-state-machine-two-file",
+    "repoFixture": "fixtures/pool-state-machine-two-file",
+    "prompt": "`run(state, event, context, log)` in machine.js performs one transition of the table in transitions.js and returns `{ state, log }` with a new array. Each table entry is `{ to, guard }`; the guard is called with `context` and the transition happens only when it returns true. An accepted event is appended to the log; a rejected one changes nothing. An unknown state or event throws an Error whose message names it.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-state-machine-two-file",
+    "repoFixture": "fixtures/train-state-machine-two-file",
+    "prompt": "Fix machine.js and transitions.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-config-two-file",
+    "repoFixture": "fixtures/pool-config-two-file",
+    "prompt": "`load(defaults, fileConfig, env)` in config.js merges three layers with env winning over the file and the file over the defaults; nested plain objects merge key by key and the inputs are not mutated. `parseEnv(source)` in env.js coerces `'true'`/`'false'` to booleans and integer strings to numbers; `env` is keyed by dotted paths such as `server.port`.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-config-two-file",
+    "repoFixture": "fixtures/train-config-two-file",
+    "prompt": "Fix config.js and env.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-pagination-two-file",
+    "repoFixture": "fixtures/pool-pagination-two-file",
+    "prompt": "`pageLinks(base, params, page, pageSize, total)` in links.js returns `{ pages, prev, next }`. `pages` is `Math.ceil(total / pageSize)`; `next` is null on the last page and `prev` is null on the first. The URLs come from `buildUrl(base, params)` in url.js: the base may already carry a query string, the new parameters are merged after the existing ones, and every value is percent-encoded (a space is `%20`).",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-pagination-two-file",
+    "repoFixture": "fixtures/train-pagination-two-file",
+    "prompt": "Fix links.js and url.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-feature-csv-writer",
+    "repoFixture": "fixtures/pool-feature-csv-writer",
+    "prompt": "Implement csv-writer.js: `escapeCell(cell)` quotes a field only when it contains a comma, a double quote, a carriage return or a newline, and doubles any quote inside it; `formatRow(cells)` joins the escaped cells with commas; `formatRows(rows)` joins the rows with CRLF. Every cell is stringified.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-feature-csv-writer",
+    "repoFixture": "fixtures/train-feature-csv-writer",
+    "prompt": "Fix csv-writer.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-feature-template",
+    "repoFixture": "fixtures/pool-feature-template",
+    "prompt": "Implement template.js: `render(template, vars)` replaces `{{ key }}` (spaces optional) with `String(vars[key])`. `{{key|default}}` uses the default when the key is missing or undefined. A placeholder with no value and no default is left exactly as written. Substitution is a single pass: a value that itself contains `{{...}}` is not expanded again.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-feature-template",
+    "repoFixture": "fixtures/train-feature-template",
+    "prompt": "Fix template.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-feature-retry",
+    "repoFixture": "fixtures/pool-feature-retry",
+    "prompt": "Implement `withRetry(fn, options)` in retry.js. It awaits `fn()` and returns its value. On a rejection it retries while attempts remain and `shouldRetry(error)` is true, waiting `delayMs * backoff ** (n-1)` between the first and second attempt, then twice that, and so on. `sleep(ms)` is injected. When it gives up it rejects with the last error. Defaults: attempts 3, delayMs 0, backoff 1, shouldRetry always true; `sleep` is required.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-feature-retry",
+    "repoFixture": "fixtures/train-feature-retry",
+    "prompt": "Fix retry.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-feature-rate-limit",
+    "repoFixture": "fixtures/pool-feature-rate-limit",
+    "prompt": "Implement `SlidingWindow(limit, windowMs, now)` in limit.js. `take(key)` allows at most `limit` calls per key in any rolling window: a hit at time x still counts while `now() - x < windowMs`. An allowed call records the current time and returns true; a rejected one records nothing and returns false. Keys are independent. `now()` is injected.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-feature-rate-limit",
+    "repoFixture": "fixtures/train-feature-rate-limit",
+    "prompt": "Fix limit.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-feature-deep-equal",
+    "repoFixture": "fixtures/pool-feature-deep-equal",
+    "prompt": "Implement `deepEqual(a, b)` in equal.js: structural equality for primitives, arrays and plain objects. Object key order does not matter; `NaN` equals `NaN`; two Dates are equal when their times are equal; an own key with value `undefined` is not the same as an absent key; a value of a different type is never equal.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-feature-deep-equal",
+    "repoFixture": "fixtures/train-feature-deep-equal",
+    "prompt": "Fix equal.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-bug-sort-comparator",
+    "repoFixture": "fixtures/pool-bug-sort-comparator",
+    "prompt": "`sortBy(items, keyOf)` in sort.js returns a new array sorted ascending by `keyOf(item)` without mutating the input. Sorting must be stable: items with equal keys keep their input order.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-bug-sort-comparator",
+    "repoFixture": "fixtures/train-bug-sort-comparator",
+    "prompt": "Fix sort.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-bug-float-sum",
+    "repoFixture": "fixtures/pool-bug-float-sum",
+    "prompt": "`total(values)` in money.js returns the sum of decimal amounts rounded to the nearest cent, with no binary floating-point drift: `0.1 + 0.2` must come back as `0.3`, and an empty list is 0.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-bug-float-sum",
+    "repoFixture": "fixtures/train-bug-float-sum",
+    "prompt": "Fix money.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-bug-utf8-truncate",
+    "repoFixture": "fixtures/pool-bug-utf8-truncate",
+    "prompt": "`truncate(text, max)` in text.js returns `text` unchanged when it has no more than `max` code points; otherwise the first `max` code points followed by a single `\u2026`. It must never split a surrogate pair, and `max` may be 0.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-bug-utf8-truncate",
+    "repoFixture": "fixtures/train-bug-utf8-truncate",
+    "prompt": "Fix text.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-bug-async-order",
+    "repoFixture": "fixtures/pool-bug-async-order",
+    "prompt": "`runSequential(factories)` in queue.js awaits each factory in order, starting the next only after the previous has resolved, and returns the results in the same order. If one rejects it rejects with that error and does not start the factories after it.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-bug-async-order",
+    "repoFixture": "fixtures/train-bug-async-order",
+    "prompt": "Fix queue.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "pool-bug-object-keys",
+    "repoFixture": "fixtures/pool-bug-object-keys",
+    "prompt": "`pick(obj, keys)` in pick.js returns a new plain object holding, in the given key order, each named property that `obj` itself has (own properties only \u2014 inherited ones are ignored). A key that is absent contributes nothing; a key present with value `undefined` is kept.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "hiddenChecks": [
+      ".checks/test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 harder pool candidate, authored 2026-11-13"
+    }
+  },
+  {
+    "id": "train-bug-object-keys",
+    "repoFixture": "fixtures/train-bug-object-keys",
+    "prompt": "Fix pick.js so test.js passes.",
+    "role": "coder",
+    "verifiers": [
+      {
+        "kind": "test-script",
+        "command": "node",
+        "args": [
+          "test.js"
+        ],
+        "expectExit": 0
+      }
+    ],
+    "mustNotModify": [
+      "test.js"
+    ],
+    "provenance": {
+      "source": "human-decision",
+      "ref": "WP-3.7b R5-P1 matching train task, authored 2026-11-13"
     }
   }
 ]

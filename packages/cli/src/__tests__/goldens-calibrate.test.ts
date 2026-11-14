@@ -62,8 +62,8 @@ test('calibrate measures the whole pool 3 times with the scripted adapter and re
     // Every committed pool script is a plausible but wrong fix, so the base never passes one: no
     // task has headroom and the run reports and stops instead of writing a yardstick.
     assert.equal(code, 1, `calibration with nothing qualifying exits 1: ${stdout}${stderr}`);
-    assert.match(stdout, /35 pool tasks × 3 runs/);
-    assert.match(stdout, /35 never solved in 3, 0 solved every run \(no headroom\), 0 partial/);
+    assert.match(stdout, /50 pool tasks × 3 runs/);
+    assert.match(stdout, /50 never solved in 3, 0 solved every run \(no headroom\), 0 partial/);
     assert.match(stderr, /nothing was selected — only 0 tasks qualified/);
     assert.equal(await readFile(path.join(root, 'tests/goldens/splits.json'), 'utf8'), splitsBefore,
       'splits.json is untouched when nothing qualifies');
@@ -76,7 +76,7 @@ test('calibrate measures the whole pool 3 times with the scripted adapter and re
     assert.equal(record.version, 1);
     assert.equal(record.runs, 3);
     assert.match(record.ranAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.equal(record.tasks.length, 35);
+    assert.equal(record.tasks.length, 50);
     for (const t of record.tasks) {
       assert.equal(t.attempts, 3);
       assert.equal(t.passes, 0);

@@ -29,7 +29,8 @@ function lcmLoads(): boolean {
 // longer fit the old 240 s budget: 425 s alone and 525 s in the serial suite on the recording host
 // (188 s in the Linux container). R4-A3 grew it again, to 86 tasks: measured on the round-4 host,
 // one iteration is 148 s, so five are ~740 s and the 900 s backstop sat within contention's reach
-// (the second serial run hit it at 900.0 s with every other test green). The cap is 1800 s, a
+// (the second serial run hit it at 900.0 s with every other test green). R5-P1 grew the corpus to
+// 116 tasks, so the measured cap is re-checked against the round-5 timing; the 1800 s cap is a
 // backstop well above the measurement rather than a race.
 test('five goldens stacks built, run and torn down in one process each reproduce the baseline, and the process lives', {
   skip: lcmLoads() || process.env['CI'] ? false : 'better-sqlite3 does not load on this host (CI runs this)',

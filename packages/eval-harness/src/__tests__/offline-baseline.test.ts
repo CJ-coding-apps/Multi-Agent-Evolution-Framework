@@ -35,12 +35,12 @@ test('the scripted model reproduces the committed baseline from the committed co
 
   assert.deepEqual(stable(result), stable(baseline));
   // What the baseline says, spelled out, so a regenerated baseline cannot quietly lose it.
-  // R4-A3 grew the corpus to 86 tasks: 44 train, seven held-out (five deterministic, two judge) and
-  // 35 pool candidates awaiting calibration. The scripted model solves exactly the tasks it answers
-  // correctly — the thirty-five train tasks and the ten seed coder tasks outside held-out. It fails
-  // coder-fib (its plain script is a wrong fix), every pool task (each pool script is a plausible
-  // but wrong fix, so the base has no headroom there by construction), and both judge tasks,
-  // because the scripted judge fails closed.
+  // R5-P1 grew the corpus to 116 tasks: 59 train, seven held-out (five deterministic, two judge) and
+  // 50 pool candidates awaiting calibration. The scripted model solves exactly the tasks it answers
+  // correctly — 50 of the train tasks including the fifteen R5-P1 additions, and the ten seed coder
+  // tasks outside held-out. It fails coder-fib (its plain script is a wrong fix), every pool task
+  // (each pool script is a plausible but wrong fix, so the base has no headroom there by
+  // construction), and both judge tasks, because the scripted judge fails closed.
   assert.deepEqual(result.solvedTaskIds, [
     'coder-sum', 'coder-reverse', 'coder-clamp', 'coder-isodd', 'coder-repeat', 'coder-contains',
     'coder-max', 'coder-unique', 'coder-flatten', 'coder-pad',
@@ -52,6 +52,11 @@ test('the scripted model reproduces the committed baseline from the committed co
     'train-parse-binary', 'train-isbn-check', 'train-parse-bool', 'train-merge-sorted',
     'train-matrix-diagonal', 'train-hyphenate', 'train-calc-eval', 'train-dedupe', 'train-truncate',
     'train-split-path', 'train-mode',
+    'train-invoice-two-file', 'train-router-two-file', 'train-state-machine-two-file',
+    'train-config-two-file', 'train-pagination-two-file', 'train-feature-csv-writer',
+    'train-feature-template', 'train-feature-retry', 'train-feature-rate-limit',
+    'train-feature-deep-equal', 'train-bug-sort-comparator', 'train-bug-float-sum',
+    'train-bug-utf8-truncate', 'train-bug-async-order', 'train-bug-object-keys',
   ]);
   const capitalize = result.tasks.find((t) => t.taskId === 'coder-capitalize')?.attempts[0]?.outcomes;
   assert.deepEqual(capitalize?.map((o) => [o.kind, o.passed]), [['must-not-modify', false], ['test-script', true]],
