@@ -269,3 +269,72 @@ test('--tasks accepts the pool or pool ids only: a train or held-out task cannot
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// ─── R5-P5: the probe — a seeded sample that prices a full calibration ──────────────────────────
+
+test('--probe measures a seeded sample, writes only calibration-probe.json, and projects the pool', needsLcm, async () => {
+  const root = await freshClone();
+  try {
+    const splitsPath = path.join(root, 'tests/goldens/splits.json');
+    const splitsBefore = await readFile(splitsPath, 'utf8');
+    const { code, stdout, stderr } = await run(root, ['calibrate', '--probe', '10', '--adapter', 'scripted', '--corpus', 'tests/goldens']);
+    // Every committed pool script is a plausible but wrong fix, so the sampled base never passes
+    // one: nothing has headroom and the projection is zero, below the threshold, exit 1.
+    assert.equal(code, 1, `a probe that projects nothing exits 1: ${stdout}${stderr}`);
+    assert.match(stdout, /goldens calibrate --probe \| harness:/);
+    assert.match(stdout, /10 pool tasks × 3 runs/);
+    assert.match(stdout, /10 of 50 pool tasks probed: 0 partial \(1 or 2 of 3\), 10 never solved, 0 solved every run/);
+    assert.match(stdout, /projecting about 0 qualifying across the pool/);
+    assert.match(stdout, /threshold is 22 — below it/);
+    assert.match(stderr, /below the 22-task threshold — do not pay for a full calibration yet/);
+    assert.match(stderr, /splits\.json and calibration\.json are unchanged/);
+
+    const probe = JSON.parse(await readFile(path.join(root, 'tests/goldens/calibration-probe.json'), 'utf8')) as {
+      kind: string; runs: number; splitsSha: string; sampledTaskIds: string[];
+      tasks: { taskId: string; passes: number; attempts: number }[];
+      errors: unknown[]; projection: { projectedQualifying: number; threshold: number; clears: boolean };
+      usage?: { tokens: number; tasks: number; calls: number };
+    };
+    assert.equal(probe.kind, 'probe', 'a probe can never be mistaken for the calibration a split derives from');
+    assert.equal(probe.runs, 3);
+    assert.equal(probe.tasks.length, 10);
+    assert.ok(probe.tasks.every((t) => t.attempts === 3));
+    assert.deepEqual(probe.sampledTaskIds, [...probe.sampledTaskIds].sort(), 'the sample is recorded in id order');
+    assert.equal(new Set(probe.sampledTaskIds).size, 10);
+    // The suite reports in corpus order, not the sample's order; the drawn set is what must agree.
+    assert.deepEqual(probe.tasks.map((t) => t.taskId).sort(), probe.sampledTaskIds);
+    assert.deepEqual(probe.errors, []);
+    assert.equal(probe.projection.projectedQualifying, 0);
+    assert.equal(probe.projection.threshold, 22);
+    assert.equal(probe.projection.clears, false);
+    assert.equal(probe.usage?.tasks, 10, 'the probe is metered like the full run');
+    assert.ok((probe.usage?.tokens ?? 0) > 0);
+
+    // A probe decides nothing: the split is byte-identical and no calibration was written.
+    assert.equal(await readFile(splitsPath, 'utf8'), splitsBefore, 'splits.json is untouched');
+    await assert.rejects(() => readFile(path.join(root, 'tests/goldens/calibration.json'), 'utf8'), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('--probe refuses --tasks, and a sample larger than the pool, before anything runs', async () => {
+  const root = await freshClone();
+  try {
+    const splitsBefore = await readFile(path.join(root, 'tests/goldens/splits.json'), 'utf8');
+    const both = await run(root, ['calibrate', '--probe', '10', '--tasks', 'pool', '--adapter', 'scripted', '--corpus', 'tests/goldens']);
+    assert.equal(both.code, 2, `--probe with --tasks is refused: ${both.stdout}${both.stderr}`);
+    assert.match(both.stderr, /--probe draws its own seeded sample of the pool, so it cannot be combined with --tasks/);
+    assert.match(both.stderr, /nothing was run/);
+
+    const tooMany = await run(root, ['calibrate', '--probe', '99', '--adapter', 'scripted', '--corpus', 'tests/goldens']);
+    assert.equal(tooMany.code, 2, `a sample larger than the pool is refused: ${tooMany.stdout}${tooMany.stderr}`);
+    assert.match(tooMany.stderr, /a probe of 99 tasks cannot be drawn from a pool of 50/);
+    assert.match(tooMany.stderr, /nothing was run/);
+
+    assert.equal(await readFile(path.join(root, 'tests/goldens/splits.json'), 'utf8'), splitsBefore);
+    await assert.rejects(() => readFile(path.join(root, 'tests/goldens/calibration-probe.json'), 'utf8'), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

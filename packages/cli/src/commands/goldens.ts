@@ -13,13 +13,14 @@ import { MemoryGraph } from '@maf/memory-graph';
 import { RoleRegistry, roleSetFromHarness } from '@maf/roles';
 import { createDefaultRegistry } from '@maf/tools';
 import {
-  CALIBRATION_FILE, CALIBRATION_RULE, CALIBRATION_RUNS, GoldenRunner, ScoreRecorder, ScriptedAdapter,
-  SCRIPTED_ADAPTER_NAME, SPLITS_FILE, applyCalibration, assertGoldenCorpus, describeJudge,
-  loadScriptedTasks, loadSplits, makeLlmJudge, seesawDecision, selectCalibrated,
+  CALIBRATION_FILE, CALIBRATION_RULE, CALIBRATION_RUNS, GoldenRunner, PROBE_DEFAULT_TASKS, PROBE_FILE,
+  ScoreRecorder, ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SPLITS_FILE, applyCalibration,
+  assertGoldenCorpus, describeJudge, loadScriptedTasks, loadSplits, makeLlmJudge, projectProbe,
+  seesawDecision, selectCalibrated, selectProbeTasks,
 } from '@maf/eval-harness';
 import type {
-  CalibrationCount, CalibrationRecord, CalibrationSelection, CalibrationUsage, GoldenSuiteResult,
-  GoldenTask, LoadedSplits,
+  CalibrationCount, CalibrationProbeProjection, CalibrationRecord, CalibrationSelection,
+  CalibrationUsage, GoldenSuiteResult, GoldenTask, LoadedSplits,
 } from '@maf/eval-harness';
 import { UsageMeter, meterAdapter } from '@maf/evolver';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
@@ -310,17 +311,27 @@ export interface CalibrationOutcome {
  * A calibration score is never a gate baseline: it is not written to `.maf/goldens/results`, it is
  * not recorded in the evolver's score graph, and the gate re-measures the base itself.
  */
+/** The counts and crashed attempts a measured result carries, which both calibration and its probe record. */
+function measurement(result: GoldenSuiteResult): {
+  counts: CalibrationCount[];
+  errors: { taskId: string; attempt: number; error: string }[];
+} {
+  return {
+    counts: result.tasks.map((t) => ({
+      taskId: t.taskId,
+      passes: t.attempts.filter((a) => a.passed).length,
+      attempts: t.attempts.length,
+    })),
+    errors: result.tasks.flatMap((t) => t.attempts
+      .filter((a) => a.error !== undefined)
+      .map((a) => ({ taskId: t.taskId, attempt: a.attempt, error: a.error as string }))),
+  };
+}
+
 export async function runCalibration(o: CalibrationOptions): Promise<CalibrationOutcome> {
   const result = await o.execute(o.taskIds);
 
-  const counts: CalibrationCount[] = result.tasks.map((t) => ({
-    taskId: t.taskId,
-    passes: t.attempts.filter((a) => a.passed).length,
-    attempts: t.attempts.length,
-  }));
-  const errors = result.tasks.flatMap((t) => t.attempts
-    .filter((a) => a.error !== undefined)
-    .map((a) => ({ taskId: t.taskId, attempt: a.attempt, error: a.error as string })));
+  const { counts, errors } = measurement(result);
   // R5-P4: what the measurement cost, from the meter the caller wrapped the adapter with. Absent
   // when no meter was supplied (a test's injected result), in which case the record says nothing
   // about usage rather than inventing a figure.
@@ -358,6 +369,72 @@ export async function runCalibration(o: CalibrationOptions): Promise<Calibration
   const splitsPath = path.join(o.corpusRoot, SPLITS_FILE);
   await writeFile(splitsPath, `${JSON.stringify(splits, null, 2)}\n`, 'utf8');
   return { path: calibrationPath, record, selection, splitsPath };
+}
+
+// ─── R5-P5: the probe — a cheap sample that prices a full calibration ───────────────────────────
+
+export interface CalibrationProbeOptions extends CalibrationOptions {
+  /** How many tasks the whole pool holds, so a sample can be scaled to it. */
+  poolSize: number;
+}
+
+/**
+ * The probe's record: the same measurement a calibration keeps, plus the projection, and none of
+ * the selection. `kind` distinguishes it from `calibration.json` so a probe left in a checkout can
+ * never be mistaken for the measurement a split derives its held-out set from.
+ */
+export interface CalibrationProbeRecord {
+  version: 1;
+  kind: 'probe';
+  harnessId: string;
+  harnessSha: string;
+  adapter: string;
+  model?: string;
+  runs: number;
+  ranAt: string;
+  corpusSha?: string;
+  splitsSha: string;
+  rule: string;
+  /** The seeded sample this probe measured, in id order. */
+  sampledTaskIds: string[];
+  tasks: CalibrationCount[];
+  errors: { taskId: string; attempt: number; error: string }[];
+  projection: CalibrationProbeProjection;
+  usage?: CalibrationUsage;
+}
+
+export interface CalibrationProbeOutcome {
+  path: string;
+  record: CalibrationProbeRecord;
+  projection: CalibrationProbeProjection;
+}
+
+/**
+ * R5-P5: measures the base harness on a seeded sample of the pool and writes what that sample
+ * implies for the whole pool. It writes **only** `calibration-probe.json`: a sample is not a
+ * measurement of every pool task, so it must not become the calibration a split's held-out set is
+ * derived from, and `splits.json` is not touched under any outcome. The full run stays the
+ * authority; this exists so CJ can refuse a hopeless pool before paying for one.
+ */
+export async function runCalibrationProbe(o: CalibrationProbeOptions): Promise<CalibrationProbeOutcome> {
+  const result = await o.execute(o.taskIds);
+  const { counts, errors } = measurement(result);
+  const usage = o.usage?.();
+  const projection = projectProbe(counts, o.poolSize);
+  const record: CalibrationProbeRecord = {
+    version: 1, kind: 'probe',
+    harnessId: o.harness.id, harnessSha: o.harness.sha, adapter: o.adapter.name,
+    ...(o.model !== undefined ? { model: o.model } : {}),
+    runs: CALIBRATION_RUNS, ranAt: result.ranAt,
+    ...(result.corpusSha !== undefined ? { corpusSha: result.corpusSha } : {}),
+    splitsSha: o.splits.sha, rule: CALIBRATION_RULE,
+    sampledTaskIds: [...o.taskIds].sort(),
+    tasks: counts, errors, projection,
+    ...(usage !== undefined ? { usage } : {}),
+  };
+  const probePath = path.join(o.corpusRoot, PROBE_FILE);
+  await writeFile(probePath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+  return { path: probePath, record, projection };
 }
 
 /** Why two results cannot be seesaw-compared, or undefined when they can (D-38). */
@@ -433,6 +510,8 @@ interface GoldenOpts {
 interface CalibrationOpts {
   adapter: string; model?: string; judgeAdapter?: string; judgeModel?: string;
   dir: string; corpus: string; harness?: string; runs: string; tasks: string;
+  /** R5-P5: a count, `true` when typed without one, absent for a full calibration. */
+  probe?: string | true;
   policy: string; allowUngoverned?: boolean;
 }
 
@@ -506,6 +585,7 @@ export function registerGoldensCommand(program: Command): void {
     .option('--harness <ref>', 'Base harness to calibrate against (default: current, else the roles file)')
     .option('--runs <n>', `base runs per task (pinned to ${CALIBRATION_RUNS}: the selection rule is pre-registered for that many)`, String(CALIBRATION_RUNS))
     .option('--tasks <ids>', 'Pool task ids to measure, comma-separated (default: the whole pool)', 'pool')
+    .option('--probe [n]', `Measure only a seeded sample of n pool tasks (default ${PROBE_DEFAULT_TASKS}) and project the whole pool; writes ${PROBE_FILE} and never touches ${SPLITS_FILE} or ${CALIBRATION_FILE} (exits 1 below the full-calibration threshold)`, undefined)
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .description('Measure the base harness on the held-out task pool, then select the tasks that have headroom into heldOut (writes calibration.json and splits.json; exits 1 when fewer than 10 qualify)')
@@ -527,11 +607,32 @@ export function registerGoldensCommand(program: Command): void {
         process.exitCode = 2;
         return;
       }
-      const taskIds = calibrationTaskIds(opts.tasks, splits);
+      // R5-P5: `--probe` measures a seeded sample instead of the pool and decides nothing. It draws
+      // its own tasks, so naming `--tasks` as well is a contradiction, refused before anything runs.
+      let probeTasks: string[] | undefined;
+      if (opts.probe !== undefined) {
+        if (cmd.getOptionValueSource('tasks') === 'cli') {
+          console.error(
+            '[maf] goldens calibrate: --probe draws its own seeded sample of the pool, so it cannot be ' +
+            'combined with --tasks; nothing was run.',
+          );
+          process.exitCode = 2;
+          return;
+        }
+        const requested = opts.probe === true ? String(PROBE_DEFAULT_TASKS) : opts.probe;
+        try {
+          probeTasks = selectProbeTasks(splits.pool ?? [], Number(requested));
+        } catch (err) {
+          console.error(`[maf] goldens calibrate: ${err instanceof Error ? err.message : String(err)}; nothing was run.`);
+          process.exitCode = 2;
+          return;
+        }
+      }
+      const taskIds = probeTasks ?? calibrationTaskIds(opts.tasks, splits);
 
       const { harness, source } = await resolveGoldensHarness(mafDir, opts.harness);
       console.log(
-        `[maf] goldens calibrate | harness: ${harness.id} (${shortSha(harness.sha)}) from ${source} | ` +
+        `[maf] goldens calibrate${probeTasks !== undefined ? ' --probe' : ''} | harness: ${harness.id} (${shortSha(harness.sha)}) from ${source} | ` +
         `${taskIds.length} pool task${taskIds.length === 1 ? '' : 's'} × ${CALIBRATION_RUNS} runs | rule: ${CALIBRATION_RULE}`,
       );
 
@@ -544,26 +645,69 @@ export function registerGoldensCommand(program: Command): void {
       // per-task figure is the one a later projection will spend against.
       const usage = new UsageMeter();
       const meteredAgent = meterAdapter(agent, usage);
+      const usageOf = (): CalibrationUsage => {
+        const snapshot = usage.snapshot();
+        return {
+          calls: snapshot.calls, tokens: snapshot.tokens, tasks: taskIds.length,
+          attemptsPerTask: CALIBRATION_RUNS,
+          ...(snapshot.usd !== undefined ? { usd: snapshot.usd } : {}),
+        };
+      };
+      // The paid path: the base harness, isolated exactly as a gate run is (H2).
+      const execute = async (only: readonly string[]): Promise<GoldenSuiteResult> => (await runGoldenSuite({
+        cwd, corpusRoot, harness, harnessSource: source, agent: meteredAgent, only,
+        ...(opts.model ? { model: opts.model } : {}),
+        judge: { adapter: judgeAdapter, ...(judgeModel ? { model: judgeModel } : {}) },
+        attempts: CALIBRATION_RUNS, runId: makeRunId(crypto.randomUUID()),
+        policy: { value: opts.policy, typed: cmd.getOptionValueSource('policy') === 'cli' },
+        ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
+      })).result;
+
+      if (probeTasks !== undefined) {
+        const probe = await runCalibrationProbe({
+          corpusRoot, splits, taskIds,
+          harness: { id: harness.id, sha: harness.sha },
+          adapter: { name: agent.name }, ...(opts.model ? { model: opts.model } : {}),
+          poolSize: (splits.pool ?? []).length, usage: usageOf, execute,
+        });
+        for (const e of probe.record.errors)
+          console.error(`[maf] calibration probe: ${e.taskId} attempt ${e.attempt + 1} failed: ${e.error}`);
+        console.log(`[maf] calibration probe: wrote ${probe.path}`);
+        if (probe.record.usage !== undefined && probe.record.usage.tasks > 0)
+          console.log(
+            `[maf] calibration probe: measured ${probe.record.usage.tokens} tokens over ` +
+            `${probe.record.usage.calls} model calls — ${Math.round(probe.record.usage.tokens / probe.record.usage.tasks)} per task`,
+          );
+        console.log(`[maf] calibration probe: ${probe.projection.statement}`);
+        if (probe.record.errors.length > 0) {
+          console.error(
+            '[maf] calibration probe: a crashed attempt is not a measurement, so the projection above is void. ' +
+            `${SPLITS_FILE} and ${CALIBRATION_FILE} are unchanged.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        if (!probe.projection.clears) {
+          console.error(
+            `[maf] calibration probe: projected ${probe.projection.projectedQualifying} qualifying, below the ` +
+            `${probe.projection.threshold}-task threshold — do not pay for a full calibration yet; redesign the pool ` +
+            `and probe again. ${SPLITS_FILE} and ${CALIBRATION_FILE} are unchanged.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        console.log(
+          `[maf] calibration probe: projects ${probe.projection.projectedQualifying} qualifying, at or above the ` +
+          `${probe.projection.threshold}-task threshold — worth a full calibration. ` +
+          `${SPLITS_FILE} and ${CALIBRATION_FILE} are unchanged.`,
+        );
+        return;
+      }
+
       const outcome = await runCalibration({
         corpusRoot, splits, taskIds, harness: { id: harness.id, sha: harness.sha },
         adapter: { name: agent.name }, ...(opts.model ? { model: opts.model } : {}),
-        usage: () => {
-          const snapshot = usage.snapshot();
-          return {
-            calls: snapshot.calls, tokens: snapshot.tokens, tasks: taskIds.length,
-            attemptsPerTask: CALIBRATION_RUNS,
-            ...(snapshot.usd !== undefined ? { usd: snapshot.usd } : {}),
-          };
-        },
-        // The paid path: the base harness, isolated exactly as a gate run is (H2).
-        execute: async (only) => (await runGoldenSuite({
-          cwd, corpusRoot, harness, harnessSource: source, agent: meteredAgent, only,
-          ...(opts.model ? { model: opts.model } : {}),
-          judge: { adapter: judgeAdapter, ...(judgeModel ? { model: judgeModel } : {}) },
-          attempts: CALIBRATION_RUNS, runId: makeRunId(crypto.randomUUID()),
-          policy: { value: opts.policy, typed: cmd.getOptionValueSource('policy') === 'cli' },
-          ...(opts.allowUngoverned === true ? { allowUngoverned: true } : {}),
-        })).result,
+        usage: usageOf, execute,
       });
 
       const { record, selection } = outcome;

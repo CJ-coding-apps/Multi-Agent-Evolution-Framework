@@ -11,10 +11,14 @@ export { ScoreRecorder } from './ScoreRecorder.js';
 export { computeCorpusSha } from './corpusSha.js';
 export type { CorpusSplits, LoadedSplits, SplitName } from './splits.js';
 export { SPLITS_FILE, MIN_HELD_OUT, SplitsError, computeSplitsSha, isDeterministicTask, isJudgeScored, loadSplits } from './splits.js';
-export type { CalibrationCount, CalibrationSelection, CalibrationRecord, CalibrationUsage } from './calibration.js';
+export type {
+  CalibrationCount, CalibrationSelection, CalibrationRecord, CalibrationUsage, CalibrationProbeProjection,
+} from './calibration.js';
 export {
   CALIBRATION_FILE, CALIBRATION_RUNS, CALIBRATION_MIN_SELECTED, CALIBRATION_MAX_SELECTED,
   CALIBRATION_SELECTION_SEED, CALIBRATION_RULE, CalibrationError, selectCalibrated, applyCalibration,
+  PROBE_FILE, PROBE_DEFAULT_TASKS, PROBE_SELECTION_SEED, CALIBRATION_PROBE_THRESHOLD,
+  selectProbeTasks, projectProbe,
 } from './calibration.js';
 export type {
   HeldOutTestRule, HeldOutTaskPasses, HeldOutDelta, HeldOutGateVerdict,

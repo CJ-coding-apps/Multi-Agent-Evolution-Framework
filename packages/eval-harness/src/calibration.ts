@@ -47,6 +47,31 @@ export const CALIBRATION_MAX_SELECTED = 20;
  */
 export const CALIBRATION_SELECTION_SEED = 0x37b20; // 228128
 
+// ─── R5-P5: the probe that prices a calibration before it is paid for ────────────────────────────
+
+/**
+ * The probe's own record, beside `calibration.json` in the corpus root. It is deliberately a
+ * different file: a probe measures a sample of the pool, so it cannot be the measurement a
+ * committed split derives its `heldOut` from, and writing it over `calibration.json` would make a
+ * partial measurement look like a whole one.
+ */
+export const PROBE_FILE = 'calibration-probe.json';
+
+/** Pool tasks a probe measures when `--probe` is given without a number. */
+export const PROBE_DEFAULT_TASKS = 10;
+
+/** Seed of the probe's draw from the pool. A constant, like the selection seed: re-running a probe
+ * of the same pool measures the same tasks, so two probes are comparable. */
+export const PROBE_SELECTION_SEED = 0x5eed; // 24301
+
+/**
+ * R5-P5: the number of raw qualifiers a full calibration should project before CJ pays for one.
+ * It is above `CALIBRATION_MIN_SELECTED` (20) on purpose: the full run has to fill the 20-task
+ * yardstick with margin, not exactly, or the first task that behaves differently on the day drops
+ * it below the floor.
+ */
+export const CALIBRATION_PROBE_THRESHOLD = 22;
+
 export class CalibrationError extends Error {
   constructor(message: string) {
     super(message);
@@ -100,11 +125,13 @@ export interface CalibrationSelection {
  * keeps the decision reproducible from the seed alone, in this build and any later one that copies
  * these four lines.
  */
-function sampleDeterministically(ids: readonly string[], count: number): string[] {
+function sampleDeterministically(
+  ids: readonly string[], count: number, seed: number = CALIBRATION_SELECTION_SEED,
+): string[] {
   // Sorted first, so the draw depends on the SET of qualified ids and not on the order the pool
   // happens to list them in: re-ordering `splits.json` cannot change the held-out set.
   const a = [...ids].sort();
-  let s = CALIBRATION_SELECTION_SEED >>> 0;
+  let s = seed >>> 0;
   const next = (): number => {
     s = (s + 0x6d2b79f5) >>> 0;
     let t = s;
@@ -135,7 +162,7 @@ function sampleDeterministically(ids: readonly string[], count: number): string[
  * the over-full case: the seed is a constant and the result is sorted, so the held-out set is a
  * function of the counts alone.
  */
-export function selectCalibrated(counts: readonly CalibrationCount[]): CalibrationSelection {
+function assertCalibrationCounts(counts: readonly CalibrationCount[]): void {
   const seen = new Set<string>();
   for (const c of counts) {
     if (seen.has(c.taskId)) throw new CalibrationError(`calibration counts list ${c.taskId} more than once`);
@@ -148,6 +175,10 @@ export function selectCalibrated(counts: readonly CalibrationCount[]): Calibrati
     if (!Number.isInteger(c.passes) || c.passes < 0 || c.passes > c.attempts)
       throw new CalibrationError(`calibration for ${c.taskId} has ${c.passes} passes of ${c.attempts}`);
   }
+}
+
+export function selectCalibrated(counts: readonly CalibrationCount[]): CalibrationSelection {
+  assertCalibrationCounts(counts);
   const partial = counts.filter((c) => c.passes > 0 && c.passes < CALIBRATION_RUNS);
   const zeros = counts.filter((c) => c.passes === 0);
   const zerosAllowed = Math.floor(partial.length / 2);
@@ -188,6 +219,91 @@ export function selectCalibrated(counts: readonly CalibrationCount[]): Calibrati
       reason: `only ${selected.length} task${selected.length === 1 ? '' : 's'} qualified; ` +
         `the rule needs at least ${CALIBRATION_MIN_SELECTED}.`,
     }),
+  };
+}
+
+/**
+ * R5-P5: the tasks a probe measures — a seeded draw of `count` from the pool, in id order. The
+ * draw is a function of the pool's SET of ids and the committed `PROBE_SELECTION_SEED`, so the same
+ * pool always probes the same tasks and two probes can be compared. It says nothing about the
+ * selection: the probe's counts project the whole pool (see `projectProbe`), they never pick a
+ * held-out set.
+ */
+export function selectProbeTasks(pool: readonly string[], count: number = PROBE_DEFAULT_TASKS): string[] {
+  if (!Number.isInteger(count) || count < 1)
+    throw new CalibrationError(`a probe measures a positive whole number of tasks, not ${count}`);
+  if (count > pool.length)
+    throw new CalibrationError(
+      `a probe of ${count} task${count === 1 ? '' : 's'} cannot be drawn from a pool of ${pool.length}`,
+    );
+  return sampleDeterministically(pool, count, PROBE_SELECTION_SEED);
+}
+
+/**
+ * R5-P5: what a probe's sample implies for the whole pool. The probe is a cheap sample of the
+ * calibration CJ would pay for, so the projection is deliberately the same arithmetic as
+ * `selectCalibrated`, applied to the sampled rates scaled to the pool: partial tasks (1 or 2 of 3)
+ * qualify, never-solved tasks qualify only up to the cap that keeps them at most a third of the
+ * kept set, and a task solved every run never qualifies. The threshold is
+ * `CALIBRATION_PROBE_THRESHOLD`; `clears` says whether a full run is worth paying for.
+ *
+ * A projection is not a measurement. It is stated as "about", it is rounded to whole tasks, and a
+ * sample of ten cannot promise what fifty tasks will do; the point is to refuse an obviously
+ * hopeless pool before the full price, not to certify a good one.
+ */
+export interface CalibrationProbeProjection {
+  /** Pool tasks measured. */
+  sampled: number;
+  /** Pool tasks the projection speaks for. */
+  poolSize: number;
+  /** Sampled counts by outcome. */
+  partial: number;
+  zeros: number;
+  solved: number;
+  /** The same three figures scaled to the pool, rounded to whole tasks. */
+  projectedPartial: number;
+  projectedZeros: number;
+  /** The cap the rule applies to never-solved tasks at the projected size. */
+  projectedZerosAllowed: number;
+  /** Partial + never-solved within the cap: the raw qualifiers a full calibration would see. */
+  projectedQualifying: number;
+  threshold: number;
+  clears: boolean;
+  /** One sentence an operator reads before deciding to pay for a full calibration. */
+  statement: string;
+}
+
+export function projectProbe(
+  counts: readonly CalibrationCount[], poolSize: number,
+  threshold: number = CALIBRATION_PROBE_THRESHOLD,
+): CalibrationProbeProjection {
+  if (counts.length === 0) throw new CalibrationError('a probe measured no tasks, so it projects nothing');
+  if (!Number.isInteger(poolSize) || poolSize < counts.length)
+    throw new CalibrationError(`a probe of ${counts.length} tasks cannot project a pool of ${poolSize}`);
+  assertCalibrationCounts(counts);
+
+  const sampled = counts.length;
+  const partial = counts.filter((c) => c.passes > 0 && c.passes < CALIBRATION_RUNS).length;
+  const zeros = counts.filter((c) => c.passes === 0).length;
+  const solved = counts.filter((c) => c.passes === CALIBRATION_RUNS).length;
+  const scale = (n: number): number => Math.round((n / sampled) * poolSize);
+  const projectedPartial = scale(partial);
+  const projectedZeros = scale(zeros);
+  const projectedZerosAllowed = Math.floor(projectedPartial / 2);
+  const projectedQualifying = projectedPartial + Math.min(projectedZeros, projectedZerosAllowed);
+  const clears = projectedQualifying >= threshold;
+  const statement =
+    `${sampled} of ${poolSize} pool task${poolSize === 1 ? '' : 's'} probed: ${partial} partial ` +
+    `(1 or 2 of ${CALIBRATION_RUNS}), ${zeros} never solved, ${solved} solved every run — projecting ` +
+    `about ${projectedQualifying} qualifying across the pool (${projectedPartial} partial + ` +
+    `${Math.min(projectedZeros, projectedZerosAllowed)} never-solved within the cap); the yardstick ` +
+    `takes ${CALIBRATION_MIN_SELECTED} and the full-calibration threshold is ${threshold} — ` +
+    (clears ? 'clears it' : 'below it');
+
+  return {
+    sampled, poolSize, partial, zeros, solved,
+    projectedPartial, projectedZeros, projectedZerosAllowed, projectedQualifying,
+    threshold, clears, statement,
   };
 }
 

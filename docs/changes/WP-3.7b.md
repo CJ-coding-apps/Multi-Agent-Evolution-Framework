@@ -961,6 +961,42 @@ started it), and a second test seeds a `usage` record and asserts the note says 
 implies (a priced $0.23/task and $4.50 projection; a measured 200,000/task crossing a 300,000
 ceiling; held-out repeats against 90,000), not weakened.
 
+### R5-P5 — a probe prices the calibration before CJ pays for it
+
+Calibrating the whole pool is the expensive step, and it was all-or-nothing: the first
+cost of a redesigned pool was the full run itself. `maf goldens calibrate --probe [n]` measures a
+**seeded sample** of the pool — ten tasks by default, three base runs each, exactly as the full run
+measures them — and projects from that sample what the whole pool would yield.
+
+The sample is deterministic. `selectProbeTasks` draws from the pool's sorted ids with the committed
+`PROBE_SELECTION_SEED` (24301), keeps the first n, and lists them in id order, so the same pool
+always probes the same tasks and re-ordering `splits.json` changes nothing; two probes are
+comparable. `--probe` draws its own tasks, so combining it with `--tasks` is refused (exit 2,
+nothing run), as is a sample larger than the pool.
+
+`projectProbe` applies the selection rule's arithmetic to the sampled rates scaled to the pool:
+partial tasks (1 or 2 of 3) qualify, and never-solved tasks qualify only up to the same cap —
+`floor(projectedPartial / 2)`, at most a third of the kept set — so the projection is the number of
+**raw qualifiers** a full calibration would see, before the 20-task sample. The threshold is
+`CALIBRATION_PROBE_THRESHOLD = 22`, deliberately above `CALIBRATION_MIN_SELECTED` (20): a full run
+must fill the yardstick with margin, not exactly. A projection at or above 22 prints that the full
+calibration is worth paying for and exits 0; below it, the command says not to pay yet and exits 1.
+A crashed attempt voids the projection and exits 1, the same way it vetoes a calibration.
+
+The probe writes **only** `calibration-probe.json` — `kind: "probe"`, the sampled counts, the
+crashed attempts, the projection and (R5-P4's meter) what it cost. It never writes `calibration.json`
+and never touches `splits.json`: a sample is not the measurement a committed split derives its
+`heldOut` from, and the separate file plus the `kind` field make that structurally true rather than
+a promise. The print says both files are unchanged.
+
+Tests: the unit suite pins the draw (same pool and a reversed pool probe the same tasks, the sample
+is a subset-consistent prefix of one shuffle, bad sizes refused) and the projection arithmetic (3
+partial / 6 never-solved / 1 solved of 10, scaled to 50, is 15 + 7 = exactly 22 and clears; a
+weaker sample is 15 and does not; an empty measurement or a pool smaller than the sample is
+refused). The CLI suite runs a real scripted probe on the committed corpus — the base fails every
+sampled task, so the projection is zero, exit 1, the file is written, metered, and `splits.json` is
+byte-identical with no `calibration.json` — and asserts both refusals happen before anything runs.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

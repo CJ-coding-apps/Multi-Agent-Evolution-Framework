@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CALIBRATION_MAX_SELECTED, CALIBRATION_MIN_SELECTED, CALIBRATION_RULE, CALIBRATION_RUNS,
-  CALIBRATION_SELECTION_SEED, CalibrationError, HELD_OUT_RULE, applyCalibration, selectCalibrated,
+  CALIBRATION_MAX_SELECTED, CALIBRATION_MIN_SELECTED, CALIBRATION_PROBE_THRESHOLD, CALIBRATION_RULE,
+  CALIBRATION_RUNS, CALIBRATION_SELECTION_SEED, CalibrationError, HELD_OUT_RULE, PROBE_DEFAULT_TASKS,
+  applyCalibration, projectProbe, selectCalibrated, selectProbeTasks,
 } from '../index.js';
 import type { CalibrationCount, CorpusSplits } from '../index.js';
 
@@ -123,4 +124,70 @@ test('calibration: applying it REPLACES heldOut, retires the old set to train, a
   assert.throws(() => applyCalibration(splits, { ...sel, selected: ['h1'] }),
     /calibration selected h1, which is not in the pool/);
   assert.throws(() => applyCalibration(splits, { ...sel, selected: ['p1', 'p1'] }), /more than once/);
+});
+
+// ─── R5-P5: the probe prices a full calibration from a seeded sample ────────────────────────────
+
+test('R5-P5: a probe draws a seeded, order-independent sample of the pool', () => {
+  const pool = Array.from({ length: 50 }, (_, i) => `pool-${String(i).padStart(2, '0')}`);
+  const drawn = selectProbeTasks(pool);
+  assert.equal(drawn.length, PROBE_DEFAULT_TASKS);
+  assert.equal(new Set(drawn).size, drawn.length, 'no task is measured twice');
+  assert.ok(drawn.every((id) => pool.includes(id)));
+  // The draw is a function of the pool's SET and the committed seed: re-running it, or re-ordering
+  // the pool, measures the same tasks, so two probes are comparable.
+  assert.deepEqual(selectProbeTasks(pool), drawn);
+  assert.deepEqual(selectProbeTasks([...pool].reverse()), drawn);
+  assert.deepEqual([...drawn], [...drawn].sort(), 'listed in id order');
+  // A smaller sample is a subset of the larger draw, so the two never coincide.
+  const nine = selectProbeTasks(pool, 9);
+  assert.equal(nine.length, 9);
+  assert.ok(nine.every((id) => drawn.includes(id)), 'the prefix of the same shuffle');
+  assert.throws(() => selectProbeTasks(pool, 0), /positive whole number/);
+  assert.throws(() => selectProbeTasks(pool, 1.5), /positive whole number/);
+  assert.throws(() => selectProbeTasks(pool, 51), /cannot be drawn from a pool of 50/);
+});
+
+test('R5-P5: the projection scales the sample with the rule and clears only at the threshold', () => {
+  // Of ten sampled tasks: 3 partial, 6 never solved, 1 solved every run. Scaled to a pool of 50:
+  // 15 partial, 30 never solved; the cap allows floor(15/2) = 7, so 15 + 7 = 22 qualify — exactly
+  // the threshold CJ set for paying for a full calibration.
+  const counts = [
+    c('a', 1), c('b', 2), c('c', 1),
+    ...['d', 'e', 'f', 'g', 'h', 'i'].map((id) => c(id, 0)),
+    c('j', 3),
+  ];
+  const p = projectProbe(counts, 50);
+  assert.equal(p.sampled, 10);
+  assert.equal(p.partial, 3);
+  assert.equal(p.zeros, 6);
+  assert.equal(p.solved, 1);
+  assert.equal(p.projectedPartial, 15);
+  assert.equal(p.projectedZeros, 30);
+  assert.equal(p.projectedZerosAllowed, 7);
+  assert.equal(p.projectedQualifying, 22);
+  assert.equal(CALIBRATION_PROBE_THRESHOLD, 22);
+  assert.equal(p.threshold, CALIBRATION_PROBE_THRESHOLD);
+  assert.equal(p.clears, true);
+  assert.match(p.statement,
+    /10 of 50 pool tasks probed: 3 partial \(1 or 2 of 3\), 6 never solved, 1 solved every run/);
+  assert.match(p.statement, /about 22 qualifying across the pool \(15 partial \+ 7 never-solved within the cap\)/);
+  assert.match(p.statement, /the yardstick takes 20 and the full-calibration threshold is 22 — clears it/);
+
+  // A weaker sample: 2 partial of 10 projects 10 partial, the cap allows 5, and 15 is below the
+  // threshold — the pool is refused before it is paid for.
+  const weaker = projectProbe([
+    c('a', 1), c('b', 2),
+    ...['c', 'd', 'e', 'f', 'g', 'h', 'i'].map((id) => c(id, 0)),
+    c('j', 3),
+  ], 50);
+  assert.equal(weaker.projectedQualifying, 15);
+  assert.equal(weaker.clears, false);
+  assert.match(weaker.statement, /about 15 qualifying across the pool \(10 partial \+ 5 never-solved within the cap\)/);
+  assert.match(weaker.statement, /threshold is 22 — below it/);
+
+  // A projection is arithmetic over a sample; it refuses to speak for a pool smaller than the
+  // sample, or for an empty measurement.
+  assert.throws(() => projectProbe([], 50), /measured no tasks/);
+  assert.throws(() => projectProbe([c('a', 1)], 0), /cannot project a pool of 0/);
 });
