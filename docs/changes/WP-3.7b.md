@@ -1032,6 +1032,15 @@ clone: corpus `227cf9f7…` → `b5492729…`; 116 tasks, 60/116 solved, and eve
 outcome are byte-identical — only `corpusSha` and the result's `ranAt` differ. `reference-solutions`
 1/1, the assets mirror 4/4, and the offline baseline test reproduces the new file.
 
+### R4-L4 — the CI check count, as observed
+
+Round 4's report counted 12 check runs. The PR shows 11. At the pushed head `e7b250c` on
+2026-11-13, `gh pr checks 65` and the commit's check-runs endpoint agree — `total_count: 11`, every
+conclusion `success`: build · typecheck · test; e2e · demo · attestation · offline goldens; kuzu
+0.11.3 prebuilt ×4 (Linux arm64/x64, macOS arm64/x64); lint workflows; package · npm pack · install
+· run ×4 (Linux arm64/x64, macOS arm64/x64). What this lane reports is the count read at the head
+that is pushed, not one carried forward.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
