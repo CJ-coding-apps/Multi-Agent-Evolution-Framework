@@ -1123,8 +1123,9 @@ caps: `goldens-offline.test.ts` measured **297.6 s against a 300 s cap**, and
 is a coin toss, not a backstop — the same class as the five-stack test's 120 s and then 900 s
 budgets. Both caps are raised in test-only changes, with no assertion touched: the fresh-clone
 baseline to 600 s (about twice the serial figure; 203 s measured in isolation) and the calibration
-to 450 s (about twice 210.8 s). The five-stack test keeps its 1800 s cap (1160 s measured) and
-stays in WP-3.12's tiering with the rest.
+to 450 s (about twice 210.8 s). The recorded run after the raise measured **305.1 s** and
+**214.8 s**, both inside the new caps. The five-stack test keeps its 1800 s cap (1136.8 s in the
+recorded run) and stays in WP-3.12's tiering with the rest.
 
 ### R5-mutants — each round-5 mechanism, broken on purpose in the compiled `dist/`
 
@@ -1146,26 +1147,26 @@ committed sample closes it, and that assertion is now in `calibration.test.ts`.
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
-  --workspace-concurrency=1 test` at code commit `799137c`: **1806 tests, 1804 pass, 2 skipped,
-  0 fail** (`TEST_RC=0`), across the 25 packages that declare a test script. The three
-  corpus-sized tests measured 1051 s (five stacks), 293 s (fresh-clone baseline) and 191 s
-  (calibrate). Two earlier runs of the same tree are part of the record: the first failed four
-  tests under a host at load ~30 on 16 cores, and each passed in isolation (`@maf/tools` 15/15 in
-  6.5 s, calibrate 6/6 in 108 s, goldens-offline 11/11 in 436 s, five stacks 1/1 in 889 s); the
-  second had exactly one failure, the five-stack test at its then-cap of 900.0 s, with every other
-  test green — one stress iteration measures 148 s, so five are ~740 s. The cap is now 1800 s
-  (`799137c`, test-only; no assertion changed) and the recorded run passes under it at 1051 s.
+  --workspace-concurrency=1 test` at code commit `81ee153` (the round-5 head before this record):
+  **1819 tests, 1817 pass, 2 skipped, 0 fail** (`TEST_RC=0`) in 1416 s across the 25 packages that
+  declare a test script. The three corpus-sized tests measured 1136.8 s (five stacks), 305.1 s
+  (fresh-clone baseline) and 214.8 s (calibrate) — the last two under the caps R5-tests raised to
+  600 s and 450 s. Earlier runs of the lane are kept as history: round 3's recorded run was 1806
+  tests at 1051 s/293 s/191 s on `799137c`, and its two stressed runs are described there (four
+  failures at load ~30 on 16 cores, each green in isolation; then only the five-stack test at its
+  then-cap of 900.0 s, now 1800 s).
 - **Linux (node 22.23.4, `node:22` container)** — `pnpm install --frozen-lockfile`, `pnpm -r
-  build`, then the same serial command over a `git archive` of `799137c`: `INSTALL_RC=0`,
-  `BUILD_RC=0`, **1806 tests, 1804 pass, 2 skipped, 0 fail**, `TEST_RC=0`, zero `not ok` lines.
-  Every count agrees with macOS; the container renders its summary marker as ASCII `#`, the only
-  difference in the logs. The same three tests measured 408 s, 123 s and 85 s there.
+  build`, then the same serial command over a `git archive` of `81ee153`: `LINUX_RC=0`,
+  **1819 tests, 1817 pass, 2 skipped, 0 fail**, zero `not ok` lines. Every count agrees with macOS;
+  the container renders its summary marker as ASCII `#`, the only difference in the logs. The same
+  three tests measured 422.3 s, 116.4 s and 83.4 s there (round 3's run on `799137c` measured
+  1806 tests and 408 s/123 s/85 s).
 - **Guards** — `check:test-scripts` 25 of 27 packages declare a test script (none for
   `@maf/blackboard`, `@maf/lcm-adapter`); `check:build-output` 27/27; `check:workspace-deps` 27
   packages, **94 internal edges, acyclic** (no new link — R2-H1 removed the `@maf/processors`
   dependency); `check:doc-refs` OK (92 references; the quoted leak fixtures sit in a fenced block,
-  so they are not read as citations); `check:package` **199 files**, installed and run,
-  `goldens solved 45/86`.
+  so they are not read as citations); `check:package` **342 files**, installed and run,
+  `goldens solved 60/116` (round 3's row read 199 files and 45/86).
 - **The offline rows above** are the round-2 measurement (`b978d85`, the 16-task corpus) and are
   kept as history: round 3 replaced the corpus and the comparison (the sign-flip gate at N = 5, and
   the pre-run cost projection that now stops a run before its baseline), so the verdict line and
@@ -1178,10 +1179,10 @@ committed sample closes it, and that assertion is now in `calibration.test.ts`.
 
 - **Test tiering (R4-L2 — WP-3.12's lane).** Three corpus-sized tests carry most of the serial
   suite's wall-clock and belong in WP-3.12's opt-in/nightly tier, not in every default sweep:
-  `packages/cli/src/__tests__/native-lifecycle.test.ts` (the five-stack stress test, 1160 s in the
-  round-5 serial run and 408 s in the Linux container, with a 1800 s cap on the test and on the
-  subprocess), `goldens-offline.test.ts` (297.6 s measured; the cap was raised to 600 s, see
-  R5-tests) and `goldens-calibrate.test.ts` (210.8 s measured on the 50-task pool; the cap was
+  `packages/cli/src/__tests__/native-lifecycle.test.ts` (the five-stack stress test, 1136.8 s in the
+  recorded round-5 serial run and 422.3 s in the Linux container, with a 1800 s cap on the test and
+  on the subprocess), `goldens-offline.test.ts` (305.1 s measured; the cap was raised to 600 s, see
+  R5-tests) and `goldens-calibrate.test.ts` (214.8 s measured on the 50-task pool; the cap was
   raised to 450 s). The five-stack cap stays where it is; WP-3.12 names and schedules the tier.
 - **The live row, and the verifier pass before any paid run.** A corpus task the base fails, a round
   whose manifest is not `no_op` and whose rationale cites that task, the manifest taking the gate's
