@@ -1316,3 +1316,49 @@ byte-identical file, a comment-and-whitespace variant, a one-line-edit near-copy
 re-caned for a train task that has none — and every finding names a non-train task as the
 duplicate. The reference proof (`reference-solutions.test.ts`, 50 tasks) passes on the replacement
 set, and the offline baseline and the CLI's full-dispatch e2e both reproduce it.
+
+### R6-M1 (D-57) — the budget is asked after every task, not only before a run
+
+The round-5 verifier measured the defect: a 1.5M-token ceiling was crossed at 3.05M. The loop asked
+the meter before each paid step, so it stopped between steps — but a golden suite is one step that
+pays for dozens of tasks, and nothing inside it ever looked again. `--max-tokens` bound the run's
+first task, not its spend.
+
+**The runner stops itself.** `GoldenRunner` takes an optional `limit: { crossed(): string |
+undefined }` and asks it after every task, not only before the first. A sentence stops the run
+where it is: the task that crossed the ceiling has been paid for, the rest of the suite is never
+dispatched, and the result carries `partial: { reason, completedTasks, totalTasks, statement }`.
+The overshoot is therefore one task, not the remainder of the suite. A limit crossed by the final
+task leaves a whole result — there is no rest to skip, and calling that partial would say a
+complete measurement was short.
+
+**The loop keeps it as spend, not evidence.** A partial suite is returned by `evaluate` without
+being recorded: its short solved list would read to the next round's planner as a regression, and
+compared against a whole baseline it would measure how far the run got rather than the candidate.
+Both the round-0 baseline and a candidate suite stop the session at the point the runner stopped,
+record the round as `budget` with the runner's own sentence, and put the run in
+`report.partialGoldenRun` — what was paid for, marked as not compared. A partial held-out repeat
+skips the verdict instead of scoring it: the counts the test compares would be over different task
+sets (`a held-out run stopped inside the suite (…); the verdict needs every task in every repeat`).
+
+**`evolve` wires the meter into it.** `runnerFor` passes `limit.crossed` as
+`budget.snapshot().exhausted ? statement : undefined`, the same meter the per-call charging feeds,
+so the answer after each task is exactly the spend the dispatch has made.
+
+**The finding's own scenario, measured.** The CLI test replicates the report: six train tasks,
+pass@2, each call charged 10,000 tokens, so a whole baseline is 120,000; the calibration record
+claims a tenth of the real per-task cost, so the projection lets the baseline start; and
+`--max-tokens` is half the real baseline (60,000). The run stopped after task 3 of 6 with 60,000
+tokens spent — the ceiling exactly, none overspent — instead of paying 120,000 and reporting it
+afterwards. `dispatched` was 6 = `completedTasks × 2`: the tasks it never reached were never
+dispatched.
+
+**Tests.** `eval-harness.test.ts` (2): a crossed limit stops after the crossing task with the
+partial statement and the unstarted tasks undispatched; a limit crossed by the final task leaves a
+whole result. `evolver.test.ts` (3): a partial baseline stops the session with
+`partialGoldenRun`, no planner call and nothing recorded; a partial candidate is not compared to a
+whole baseline and does not ship; a partial held-out repeat gives a skipped verdict.
+`eval-commands.test.ts` (1): the measured CLI scenario above. The full-suite run also found that
+three real-`evolve` tests in this file mocked a stack without an `attestor`; R6-H1's contamination
+seam treats an unscannable surface as contamination, so every attempt in those tests was void and
+the gate rejected. Their mocks now carry an empty attestor, as a real stack always does.

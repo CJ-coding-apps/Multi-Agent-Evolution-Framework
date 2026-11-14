@@ -285,6 +285,15 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
           // void, and a contaminated held-out run makes the gate refuse an improvement claim.
           recordedSurfaces: recordedSurfacesFrom(
             runStack.attestor, path.join(mafDir, 'transcripts', `${runId}.jsonl`)),
+          // R6-M1: the budget used to be asked only before a run, so a 1.5M-token ceiling was
+          // crossed at 3.05M by one suite that never looked again. It is asked here after every
+          // task; the overshoot is the task that crossed it, and the result says it is partial.
+          limit: {
+            crossed: () => {
+              const snapshot = budget.snapshot();
+              return snapshot.exhausted ? snapshot.statement : undefined;
+            },
+          },
           securityScore,
         });
 

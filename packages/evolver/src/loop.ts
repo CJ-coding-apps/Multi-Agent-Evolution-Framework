@@ -270,6 +270,11 @@ export interface EvolveReport {
   budget?: BudgetSnapshot;
   /** D-57: the held-out verdict, or the reason the split was not scored. */
   heldOut?: HeldOutReport;
+  /**
+   * R6-M1: the golden run the budget stopped inside — baseline or candidate — with the partial
+   * statement the runner wrote. It is not evidence and no gate compared it; it is what was paid for.
+   */
+  partialGoldenRun?: GoldenSuiteResult;
 }
 
 const CRITIC_SYSTEM_PROMPT = `You are the MAF harness evolution critic. Compare the change manifest against the
@@ -485,6 +490,14 @@ async function evaluateHeldOut(
     .find((r) => r.split !== undefined && r.split !== 'held-out');
   if (wrongSplit !== undefined)
     return skipped(`the held-out runner measured split "${wrongSplit.split}", not "held-out"`);
+  // R6-M1: a repeat the budget stopped inside measured only part of the split. A partial run is
+  // not a shorter measurement — the counts the test compares would be over different task sets.
+  const partialRun = [...baselineRuns, ...candidateRuns].find((r) => r.partial !== undefined);
+  if (partialRun?.partial !== undefined)
+    return skipped(
+      `a held-out run stopped inside the suite (${partialRun.partial.reason}); ` +
+      'the verdict needs every task in every repeat',
+    );
 
   // R2-M3: the gate counts deterministic verdicts only. Judge-scored tasks are scored by the same
   // runner so they can be reported beside it, and are subtracted before anything is compared.
@@ -585,6 +598,10 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   let stopReason: EvolveReport['stopReason'] = 'rounds';
 
   let baseline: GoldenSuiteResult | undefined;
+  // R6-M1: a golden run that stopped inside the suite because the budget was crossed. It is not
+  // evidence (a short solved list reads as a regression), but it is what the operator paid for, so
+  // the report carries it rather than dropping it.
+  let partialGoldenRun: GoldenSuiteResult | undefined;
   // What each golden row this loop caused actually is (R2-L1). Rows with no entry are another
   // session's or another harness's; the prompt calls them `earlier result`, never "rejected".
   const historyLabels = new Map<string, HistoryLabel>();
@@ -672,6 +689,10 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   // the alternative is a loop that keeps proposing from an empty graph and calling that no_op.
   const evaluate = async (harness: HarnessConfig): Promise<GoldenSuiteResult> => {
     const result = await measureGolden(() => opts.runGoldens(harness));
+    // R6-M1: a suite the budget stopped inside is not evidence. Recorded, its short solved list
+    // would tell the next round's planner that the harness regressed; compared, it would measure
+    // two different yardsticks. The caller stops and keeps the run in the report instead.
+    if (result.partial !== undefined) return result;
     if (opts.recordGoldens) {
       try {
         await opts.recordGoldens(result);
@@ -790,6 +811,14 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
         );
         if (stopped !== undefined) return { ...stopped, ...digestErrorField() };
         throw err;
+      }
+      // R6-M1: the budget was crossed inside the baseline suite. There is no whole baseline to
+      // compare against, so the session stops here and the partial run goes in the report.
+      if (baseline.partial !== undefined) {
+        partialGoldenRun = baseline;
+        await record(rec({ outcome: 'budget', note: baseline.partial.statement }));
+        stopReason = 'budget';
+        break;
       }
       // L1: the baseline was just paid for, so it is evidence for THIS round's planner. Without
       // this, round 1 planned from the empty digest it read before running and burned a tick.
@@ -1003,6 +1032,15 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       if (stopped !== undefined) return { ...stopped, ...digestErrorField() };
       throw err;
     }
+    // R6-M1: the budget was crossed inside the candidate suite. A short candidate run compared to
+    // a whole baseline would be a measurement of how far the run got, not of the candidate, so the
+    // gate is not asked and the session stops with the partial run in the report.
+    if (candidateScores.partial !== undefined) {
+      partialGoldenRun = candidateScores;
+      await record(rec({ manifest: finalManifest, outcome: 'budget', note: candidateScores.partial.statement }));
+      stopReason = 'budget';
+      break;
+    }
     const gate = gateEvaluate({
       manifest: finalManifest, candidate: finalCandidate, current: base,
       currentScores: baseline, candidateScores,
@@ -1079,6 +1117,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     rounds, finalHarness: base, ships, stopReason,
     ...digestErrorField(),
     ...(heldOut !== undefined ? { heldOut } : {}),
+    ...(partialGoldenRun !== undefined ? { partialGoldenRun } : {}),
     ...(budget !== undefined ? { budget } : {}),
     ...(usage !== undefined ? { usage } : {}),
   };

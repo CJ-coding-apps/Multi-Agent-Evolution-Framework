@@ -146,6 +146,57 @@ test('runner: isolation — fixture copies get fresh working dirs per attempt', 
   });
 });
 
+// R6-M1: the ceiling used to be asked only before a suite, so one 59-task run could cross a
+// 1.5M-token budget at 3.05M and nothing inside the run ever looked again. It is asked after
+// every task now: the suite stops after the task that crossed it, the result says it is partial,
+// and the tasks it never started are not paid for.
+test('runner: a crossed limit stops inside the suite and the result says how far it got (R6-M1)', async () => {
+  await withCorpus(async (root) => {
+    const tasks: GoldenTask[] = ['a', 'b', 'c', 'd'].map((s) => ({ ...TASK, id: `t-${s}` }));
+    await writeFile(path.join(root, 'corpus.json'), JSON.stringify(tasks), 'utf8');
+
+    let asked = 0;
+    let dispatched = 0;
+    const runner = new GoldenRunner({
+      corpusRoot: root, harnessSha: 'e'.repeat(64), harnessId: 'h5', adapter: 'stub', attempts: 1,
+      dispatch: async (_t, workDir) => { dispatched++; return passDispatch(_t, workDir); },
+      // The first ask (after task 1) is inside the ceiling; the second (after task 2) is not.
+      limit: {
+        crossed: () => (++asked >= 2 ? 'budget exhausted (tokens): spent 1 of 1 tokens' : undefined),
+      },
+    });
+    const r = await runner.run();
+    assert.equal(dispatched, 2, 'the third task was never started');
+    assert.equal(r.tasks.length, 2);
+    assert.deepEqual(r.solvedTaskIds, ['t-a', 't-b'], 'what ran is still scored');
+    assert.equal(r.partial?.completedTasks, 2);
+    assert.equal(r.partial?.totalTasks, 4, 'the ceiling is measured against the whole suite');
+    assert.equal(
+      r.partial?.statement,
+      '2 of 4 tasks ran before the budget was crossed (budget exhausted (tokens): spent 1 of 1 tokens); ' +
+      'the rest of the suite was not started and this result is partial.',
+    );
+  });
+});
+
+// The overshoot is the task that crossed the ceiling, not the one after it: a limit crossed by the
+// final task leaves a whole result, because there is no rest of the suite to skip.
+test('runner: a limit crossed by the final task leaves a whole result (R6-M1)', async () => {
+  await withCorpus(async (root) => {
+    const tasks: GoldenTask[] = ['a', 'b'].map((s) => ({ ...TASK, id: `t-${s}` }));
+    await writeFile(path.join(root, 'corpus.json'), JSON.stringify(tasks), 'utf8');
+
+    let asked = 0;
+    const r = await new GoldenRunner({
+      corpusRoot: root, harnessSha: 'f'.repeat(64), harnessId: 'h6', adapter: 'stub', attempts: 1,
+      dispatch: passDispatch,
+      limit: { crossed: () => (++asked >= 2 ? 'budget exhausted (tokens): spent 1 of 1 tokens' : undefined) },
+    }).run();
+    assert.equal(r.tasks.length, 2, 'both tasks ran');
+    assert.equal(r.partial, undefined, 'nothing was skipped, so the result is not partial');
+  });
+});
+
 // ─── seesaw (pure) ─────────────────────────────────────────────────────────
 
 function suite(solved: string[]): GoldenSuiteResult {

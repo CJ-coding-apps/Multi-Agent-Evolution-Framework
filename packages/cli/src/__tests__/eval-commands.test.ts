@@ -445,6 +445,100 @@ test('R5-P4: a first run projects from the calibration record and says it is mea
   }
 });
 
+// R6-M1 (round-5 finding R5-M1): the budget was asked only before a run, so a 1.5M-token ceiling
+// was crossed at 3.05M and nothing inside the suite looked again. This run is the finding's own
+// scenario: the calibration behind the split under-states a task by ten times, so the projection
+// lets the baseline start, and `--max-tokens` is half what that baseline really costs. The suite
+// must stop after the task that crossed the ceiling, not run to the end and report a total.
+test('R6-M1: a baseline that crosses the ceiling stops after the crossing task, not at the end', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    // Six train tasks keep the test cheap. The rest stay in the pool, so the split is still a
+    // partition of the corpus and `loadSplits` accepts it.
+    const TRAIN = 6;
+    const splits = JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as {
+      train: string[]; heldOut: string[]; pool?: string[];
+    };
+    await writeFile(path.join(corpus, 'splits.json'), `${JSON.stringify({
+      ...splits, train: splits.train.slice(0, TRAIN),
+      pool: [...(splits.pool ?? []), ...splits.train.slice(TRAIN)],
+    }, null, 2)}\n`, 'utf8');
+
+    // What one baseline task really costs: pass@2 is two attempts, each one model call, each
+    // charged 10,000 tokens. What the calibration record claims: a tenth of that per task.
+    const PER_CALL = 10_000;
+    const TRUE_PER_TASK = 2 * PER_CALL;
+    const TRUE_BASELINE = TRAIN * TRUE_PER_TASK;
+    const MAX_TOKENS = TRUE_BASELINE / 2;
+    await calibrateSplitForTest(corpus, {
+      usage: { calls: 60, tokens: (TRUE_PER_TASK / 10) * 50, tasks: 50, attemptsPerTask: 3 },
+      adapter: 'scripted',
+    });
+
+    let dispatched = 0;
+    const adapter = {
+      name: 'scripted',
+      invoke: async (): Promise<AdapterInvokeResult> => ({
+        success: true, output: 'no change', tokensUsed: PER_CALL, toolCallLog: [], exitCode: 0, duration: 0,
+      }),
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+    // The mocked stack's dispatch charges the metered adapter the CLI wrapped around it, so the
+    // budget the runner asks after each task is the spend a real dispatch would have made.
+    t.mock.method(wiring, 'buildRunStack', async (config: StackConfig) => ({
+      adapter: config.adapter,
+      graph: { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph,
+      securityPrompt: '',
+      attestor: { toolCallsForTask: () => [] },
+      dispatchTask: async () => {
+        dispatched++;
+        await config.adapter.invoke({ prompt: 'task', workingDir: root, timeoutMs: 1000 });
+        return 'no change';
+      },
+      close: async () => {},
+    }) as unknown as wiring.RunStack);
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(console, 'error', () => {});
+
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync([
+      'evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted',
+      '--rounds', '1', '--max-tokens', String(MAX_TOKENS),
+    ], { from: 'user' });
+
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1);
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      stopReason: string; ships: number; rounds: { outcome: string; note: string }[];
+      budget: { exhausted: boolean; tokens: number };
+      partialGoldenRun?: { partial?: { completedTasks: number; totalTasks: number; statement: string } };
+    };
+    assert.equal(report.ships, 0, 'no candidate was measured');
+    assert.equal(report.stopReason, 'budget');
+    assert.equal(report.rounds[0]?.outcome, 'budget');
+    assert.match(report.rounds[0]?.note ?? '', /tasks ran before the budget was crossed/);
+
+    const partial = report.partialGoldenRun?.partial;
+    assert.ok(partial !== undefined, 'the run that was paid for is in the report');
+    assert.equal(partial.totalTasks, TRAIN, 'the ceiling is measured against the whole train split');
+    assert.ok(partial.completedTasks > 0 && partial.completedTasks < TRAIN, 'the suite stopped inside itself');
+    assert.equal(dispatched, partial.completedTasks * 2, 'the tasks it never reached were never dispatched');
+    assert.equal(report.budget.exhausted, true);
+    // The overshoot is the task that crossed the ceiling, never the rest of the suite: without the
+    // per-task check this run would have spent `TRUE_BASELINE`, twice the ceiling.
+    assert.ok(report.budget.tokens <= MAX_TOKENS + TRUE_PER_TASK, `spent ${report.budget.tokens} of ${MAX_TOKENS}`);
+    assert.ok(report.budget.tokens < TRUE_BASELINE, 'the whole baseline was not paid for');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // R2-M5 (H5): the smoke run is a measurement like any other, so its target must be a train-split
 // task. A first plan is refused before the critic if it names a held-out id (R2-H2), but a critic
 // revision is smoke-tested without passing that check again — the guard in `runSmoke` is the line
@@ -772,6 +866,7 @@ test('real evolve.ts: a flag-on sensitive candidate is stored, not current, and 
     t.mock.method(wiring, 'buildRunStack', async () => ({
       adapter, graph,
       securityPrompt: '',
+      attestor: { toolCallsForTask: () => [] },
       dispatchTask: async (harness: HarnessConfig) =>
         (harness.roleSet.roles.find((r) => r.role === 'security')?.systemPrompt ?? '').includes('thorough')
           ? 'THOROUGH-ANSWER' : 'NAIVE-ANSWER',
@@ -875,6 +970,9 @@ test('real evolve.ts: an unapproved sensitive candidate never becomes a later ro
     t.mock.method(wiring, 'buildRunStack', async () => ({
       adapter, graph,
       securityPrompt: '',
+      // R6-H1: the runner asks the stack's attestor what the attempt's tool calls recorded. A
+      // stack without one is a surface that cannot be scanned, which voids every attempt.
+      attestor: { toolCallsForTask: () => [] },
       dispatchTask: async (harness: HarnessConfig, role: string, prompt: string, workDir: string) => {
         const rolePrompt = harness.roleSet.roles.find((r) => r.role === role)?.systemPrompt ?? '';
         if (role === 'security' || role === 'reviewer')
@@ -1046,6 +1144,7 @@ test('real evolve.ts (R2-H2): held-out scoring is dispatched through an isolated
         adapter: {} as CliAdapter,
         graph: { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph,
         securityPrompt: '',
+        attestor: { toolCallsForTask: () => [] },
         dispatchTask: async (
           harness: HarnessConfig, role: string, prompt: string, workDir: string,
           _timeoutMs: number, _temperature?: number, goldenTaskId?: string,

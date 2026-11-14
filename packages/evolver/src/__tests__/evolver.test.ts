@@ -2107,6 +2107,69 @@ test('R2-M4 budget: every held-out repeat asks the budget, and exhaustion stops 
   assert.equal(report.budget?.exhausted, true);
 });
 
+// ─── R6-M1: a golden run the budget stopped inside ─────────────────────────
+
+/** A suite that got through `completed` of `total` tasks before the ceiling was crossed. */
+const partialRun = (total: number, completed: number) => ({
+  reason: 'budget exhausted (tokens): spent 1 of 1 tokens',
+  completedTasks: completed,
+  totalTasks: total,
+  statement:
+    `${completed} of ${total} tasks ran before the budget was crossed (budget exhausted (tokens): spent 1 of 1 tokens); ` +
+    'the rest of the suite was not started and this result is partial.',
+});
+
+test('R6-M1: a baseline the budget stopped inside stops the session with a partial report', async () => {
+  let planners = 0;
+  let recorded = 0;
+  const report = await evolve(loopOpts({
+    metaGenerate: async (system, user) => { planners++; return mockMeta([SHIPPING_PLAN])(system, user); },
+    runGoldens: async (h) => ({ ...suite(['t1'], h.sha), partial: partialRun(8, 3) }),
+    recordGoldens: async () => { recorded++; },
+  }));
+  assert.equal(planners, 0, 'nothing is planned from a yardstick that is not whole');
+  assert.equal(recorded, 0, 'a partial run is not evidence for later rounds');
+  assert.equal(report.ships, 0);
+  assert.equal(report.stopReason, 'budget');
+  assert.equal(report.rounds.at(-1)?.outcome, 'budget');
+  assert.match(report.rounds.at(-1)?.note ?? '', /^3 of 8 tasks ran before the budget was crossed/);
+  assert.equal(report.partialGoldenRun?.partial?.completedTasks, 3, 'the run that was paid for is kept');
+  assert.deepEqual(report.partialGoldenRun?.solvedTaskIds, ['t1']);
+});
+
+test('R6-M1: a candidate the budget stopped inside is not compared to a whole baseline', async () => {
+  let runs = 0;
+  let recorded = 0;
+  const candidatePartial = { ...suite(['t1'], 'c'.repeat(64)), partial: partialRun(8, 2) };
+  const report = await evolve(loopOpts({
+    metaGenerate: mockMeta([SHIPPING_PLAN]),
+    runGoldens: async (h) => (++runs === 1 ? suite(['t1'], h.sha) : candidatePartial),
+    recordGoldens: async () => { recorded++; },
+  }));
+  assert.equal(runs, 2, 'the baseline and one candidate were measured');
+  assert.equal(recorded, 1, 'only the whole baseline was recorded as evidence');
+  assert.equal(report.ships, 0, 'a short candidate run cannot ship');
+  assert.equal(report.stopReason, 'budget');
+  assert.equal(report.rounds.at(-1)?.outcome, 'budget');
+  assert.match(report.rounds.at(-1)?.note ?? '', /^2 of 8 tasks ran before the budget was crossed/);
+  assert.ok(report.rounds.at(-1)?.manifest !== undefined, 'the round names the candidate it measured');
+  assert.equal(report.partialGoldenRun, candidatePartial);
+});
+
+test('R6-M1: a held-out repeat the budget stopped inside gives a skipped verdict, never a short one', async () => {
+  const partial = { ...partialRun(20, 5) };
+  const report = await evolve(loopOpts({
+    metaGenerate: improveManifest(),
+    runHeldOut: async (h) => ({
+      ...suite(['t1'], h.sha), split: 'held-out', splitsSha: 'c'.repeat(64), partial,
+    }) as unknown as GoldenSuiteResult,
+  }));
+  assert.equal(report.ships, 1, 'the candidate shipped on the train split');
+  assert.equal(report.heldOut?.gate, undefined, 'no gate was scored over a task set that shrank');
+  assert.match(report.heldOut?.skipped ?? '',
+    /^a held-out run stopped inside the suite \(budget exhausted \(tokens\): spent 1 of 1 tokens\); the verdict needs every task in every repeat$/);
+});
+
 // ─── R2-M1: the projected cost of a golden run ─────────────────────────────
 
 test('R2-M1 projection: no token budget means nothing to project; a first run is estimated high', () => {
