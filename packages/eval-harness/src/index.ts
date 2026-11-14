@@ -27,8 +27,9 @@ export type {
 export {
   CALIBRATION_FILE, CALIBRATION_RUNS, CALIBRATION_MIN_SELECTED, CALIBRATION_MAX_SELECTED,
   CALIBRATION_SELECTION_SEED, CALIBRATION_RULE, CalibrationError, selectCalibrated, applyCalibration,
-  PROBE_FILE, PROBE_DEFAULT_TASKS, PROBE_SELECTION_SEED, CALIBRATION_PROBE_THRESHOLD,
-  selectProbeTasks, projectProbe,
+  PROBE_FILE, PROBE_DEFAULT_TASKS, PROBE_SELECTION_SEED,
+  CALIBRATION_PROBE_CONFIDENCE, CALIBRATION_PROBE_INTERVAL_LEVEL,
+  selectProbeTasks, projectProbe, probePosterior,
 } from './calibration.js';
 export type {
   HeldOutTestRule, HeldOutTaskPasses, HeldOutDelta, HeldOutGateVerdict,

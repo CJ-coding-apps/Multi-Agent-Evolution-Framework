@@ -287,14 +287,21 @@ test('--probe measures a seeded sample, writes only calibration-probe.json, and 
     assert.match(stdout, /10 pool tasks × 3 runs/);
     assert.match(stdout, /10 of 50 pool tasks probed: 0 partial \(1 or 2 of 3\), 10 never solved, 0 solved every run/);
     assert.match(stdout, /projecting about 0 qualifying across the pool/);
-    assert.match(stdout, /threshold is 22 — below it/);
-    assert.match(stderr, /below the 22-task threshold — do not pay for a full calibration yet/);
+    // R6-L1: no qualifier in ten is a 0.0018 chance of reaching 20, printed 0.00.
+    assert.match(stdout, /The sample holds 0 qualifiers/);
+    assert.match(stdout, /puts the pool's count at 0–8 \(80% interval/);
+    assert.match(stdout, /chance it reaches the 20-task floor is 0\.00, against the 0\.80 a full calibration needs — below it/);
+    assert.match(stderr, /a 0\.00 chance the pool reaches the 20-task floor, below the 0\.80 a full calibration needs — do not pay for it yet/);
     assert.match(stderr, /splits\.json and calibration\.json are unchanged/);
 
     const probe = JSON.parse(await readFile(path.join(root, 'tests/goldens/calibration-probe.json'), 'utf8')) as {
       kind: string; runs: number; splitsSha: string; sampledTaskIds: string[];
       tasks: { taskId: string; passes: number; attempts: number }[];
-      errors: unknown[]; projection: { projectedQualifying: number; threshold: number; clears: boolean };
+      errors: unknown[]; projection: {
+        projectedQualifying: number; sampledQualifying: number; clears: boolean;
+        interval: { low: number; high: number; level: number };
+        probabilityReachesYardstick: number; printedProbability: number; yardstick: number; confidence: number;
+      };
       usage?: { tokens: number; tasks: number; calls: number };
     };
     assert.equal(probe.kind, 'probe', 'a probe can never be mistaken for the calibration a split derives from');
@@ -307,8 +314,14 @@ test('--probe measures a seeded sample, writes only calibration-probe.json, and 
     assert.deepEqual(probe.tasks.map((t) => t.taskId).sort(), probe.sampledTaskIds);
     assert.deepEqual(probe.errors, []);
     assert.equal(probe.projection.projectedQualifying, 0);
-    assert.equal(probe.projection.threshold, 22);
     assert.equal(probe.projection.clears, false);
+    // R6-L1: the record carries the posterior the terminal printed, so a reviewer can recompute it.
+    assert.equal(probe.projection.sampledQualifying, 0);
+    assert.deepEqual(probe.projection.interval, { low: 0, high: 8, level: 0.8 });
+    assert.equal(probe.projection.yardstick, 20);
+    assert.equal(probe.projection.confidence, 0.8);
+    assert.equal(probe.projection.printedProbability, 0);
+    assert.ok(probe.projection.probabilityReachesYardstick < 0.002);
     assert.equal(probe.usage?.tasks, 10, 'the probe is metered like the full run');
     assert.ok((probe.usage?.tokens ?? 0) > 0);
 

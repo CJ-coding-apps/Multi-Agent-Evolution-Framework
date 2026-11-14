@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CALIBRATION_MAX_SELECTED, CALIBRATION_MIN_SELECTED, CALIBRATION_PROBE_THRESHOLD, CALIBRATION_RULE,
+  CALIBRATION_MAX_SELECTED, CALIBRATION_MIN_SELECTED, CALIBRATION_PROBE_CONFIDENCE, CALIBRATION_RULE,
   CALIBRATION_RUNS, CALIBRATION_SELECTION_SEED, CalibrationError, HELD_OUT_RULE, PROBE_DEFAULT_TASKS,
-  applyCalibration, projectProbe, selectCalibrated, selectProbeTasks,
+  applyCalibration, probePosterior, projectProbe, selectCalibrated, selectProbeTasks,
 } from '../index.js';
 import type { CalibrationCount, CorpusSplits } from '../index.js';
 
@@ -154,10 +154,9 @@ test('R5-P5: a probe draws a seeded, order-independent sample of the pool', () =
   assert.throws(() => selectProbeTasks(pool, 51), /cannot be drawn from a pool of 50/);
 });
 
-test('R5-P5: the projection scales the sample with the rule and clears only at the threshold', () => {
+test('R5-P5: the projection scales the sample with the rule', () => {
   // Of ten sampled tasks: 3 partial, 6 never solved, 1 solved every run. Scaled to a pool of 50:
-  // 15 partial, 30 never solved; the cap allows floor(15/2) = 7, so 15 + 7 = 22 qualify — exactly
-  // the threshold CJ set for paying for a full calibration.
+  // 15 partial, 30 never solved; the cap allows floor(15/2) = 7, so the point figure is 22.
   const counts = [
     c('a', 1), c('b', 2), c('c', 1),
     ...['d', 'e', 'f', 'g', 'h', 'i'].map((id) => c(id, 0)),
@@ -172,28 +171,79 @@ test('R5-P5: the projection scales the sample with the rule and clears only at t
   assert.equal(p.projectedZeros, 30);
   assert.equal(p.projectedZerosAllowed, 7);
   assert.equal(p.projectedQualifying, 22);
-  assert.equal(CALIBRATION_PROBE_THRESHOLD, 22);
-  assert.equal(p.threshold, CALIBRATION_PROBE_THRESHOLD);
-  assert.equal(p.clears, true);
+  // R6-L1: the sample's own qualifiers are 3 partial + min(6, floor(3/2)) = 4, and that is the
+  // quantity the posterior is asked about.
+  assert.equal(p.sampledQualifying, 4);
+
+  // R5-P4/R6-L1: the point figure is still stated, as "about", beside the posterior.
   assert.match(p.statement,
     /10 of 50 pool tasks probed: 3 partial \(1 or 2 of 3\), 6 never solved, 1 solved every run/);
-  assert.match(p.statement, /about 22 qualifying across the pool \(15 partial \+ 7 never-solved within the cap\)/);
-  assert.match(p.statement, /the yardstick takes 20 and the full-calibration threshold is 22 — clears it/);
+  assert.match(p.statement, /projecting about 22 qualifying across the pool \(15 partial \+ 7 never-solved within the cap\)/);
 
-  // A weaker sample: 2 partial of 10 projects 10 partial, the cap allows 5, and 15 is below the
-  // threshold — the pool is refused before it is paid for.
+  // R6-L1 supersedes round 5's whole-task threshold. Four qualifiers in ten is a 0.5572 chance the
+  // pool reaches 20 (printed 0.56), well under the 0.80 the ruling requires, so it does not clear —
+  // even though its point projection (22) is at the old count threshold.
+  assert.equal(CALIBRATION_PROBE_CONFIDENCE, 0.8);
+  assert.equal(p.confidence, CALIBRATION_PROBE_CONFIDENCE);
+  assert.equal(p.yardstick, CALIBRATION_MIN_SELECTED);
+  assert.equal(p.probabilityReachesYardstick.toFixed(6), '0.557165');
+  assert.equal(p.printedProbability, 0.56);
+  assert.equal(p.clears, false);
+  assert.deepEqual(p.interval, { low: 13, high: 29, level: 0.8 });
+  assert.equal(p.posteriorMean.toFixed(2), '20.67');
+  assert.match(p.statement, /The sample holds 4 qualifiers/);
+  assert.match(p.statement, /puts the pool's count at 13–29 \(80% interval, mean 20\.7\)/);
+  assert.match(p.statement, /chance it reaches the 20-task floor is 0\.56, against the 0\.80 a full calibration needs — below it/);
+
+  // A weaker sample: 2 partial of 10 projects 10 partial, the cap allows 5, and the point figure is
+  // 15. Three qualifiers in ten is a 0.2897 chance of reaching 20.
   const weaker = projectProbe([
     c('a', 1), c('b', 2),
     ...['c', 'd', 'e', 'f', 'g', 'h', 'i'].map((id) => c(id, 0)),
     c('j', 3),
   ], 50);
   assert.equal(weaker.projectedQualifying, 15);
+  assert.equal(weaker.sampledQualifying, 3);
+  assert.equal(weaker.printedProbability, 0.29);
+  assert.deepEqual(weaker.interval, { low: 9, high: 24, level: 0.8 });
   assert.equal(weaker.clears, false);
   assert.match(weaker.statement, /about 15 qualifying across the pool \(10 partial \+ 5 never-solved within the cap\)/);
-  assert.match(weaker.statement, /threshold is 22 — below it/);
+  assert.match(weaker.statement, /chance it reaches the 20-task floor is 0\.29/);
+
+  // The bar the ruling states: five qualifiers in ten prints 0.80 (exact 0.796852) and clears.
+  const five = projectProbe([
+    c('a', 1), c('b', 2), c('c', 1), c('d', 2),
+    ...['e', 'f', 'g', 'h', 'i'].map((id) => c(id, 3)),
+    c('j', 0),
+  ], 50);
+  assert.equal(five.sampledQualifying, 5);
+  assert.equal(five.probabilityReachesYardstick.toFixed(6), '0.796852');
+  assert.equal(five.printedProbability, 0.8);
+  assert.deepEqual(five.interval, { low: 17, high: 33, level: 0.8 });
+  assert.equal(five.clears, true, 'the printed figure is the decision, and "5 of 10" is the bar');
 
   // A projection is arithmetic over a sample; it refuses to speak for a pool smaller than the
   // sample, or for an empty measurement.
   assert.throws(() => projectProbe([], 50), /measured no tasks/);
   assert.throws(() => projectProbe([c('a', 1)], 0), /cannot project a pool of 0/);
+});
+
+// R6-L1: the posterior itself, independent of the projection's plumbing. Conditional on q of a
+// ten-task sample qualifying, a flat prior over the pool's qualifying count Q gives
+// P(Q | q) ∝ C(Q, q)·C(50−Q, 10−q) on Q ∈ [q, 40+q]; these are the exact masses for the ruling's
+// three reference points.
+test('R6-L1: the posterior is exact hypergeometric over a flat prior', () => {
+  const q5 = probePosterior(5, 50, 10, 20);
+  assert.equal(q5.probabilityReachesYardstick.toFixed(6), '0.796852');
+  assert.deepEqual(q5.interval, { low: 17, high: 33, level: 0.8 });
+  assert.equal(q5.mean.toFixed(1), '25.0');
+
+  assert.equal(probePosterior(4, 50, 10, 20).probabilityReachesYardstick.toFixed(6), '0.557165');
+  assert.equal(probePosterior(6, 50, 10, 20).probabilityReachesYardstick.toFixed(6), '0.935132');
+  assert.deepEqual(probePosterior(6, 50, 10, 20).interval, { low: 21, high: 37, level: 0.8 });
+
+  // A sample that holds every pool task is the pool: no uncertainty, and the floor is reached or not.
+  assert.deepEqual(probePosterior(20, 20, 20, 20).interval, { low: 20, high: 20, level: 0.8 });
+  assert.equal(probePosterior(20, 20, 20, 20).probabilityReachesYardstick, 1);
+  assert.equal(probePosterior(1, 20, 20, 20).probabilityReachesYardstick, 0);
 });

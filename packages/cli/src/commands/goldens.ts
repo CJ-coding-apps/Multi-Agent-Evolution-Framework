@@ -13,7 +13,8 @@ import { MemoryGraph } from '@maf/memory-graph';
 import { RoleRegistry, roleSetFromHarness } from '@maf/roles';
 import { createDefaultRegistry } from '@maf/tools';
 import {
-  CALIBRATION_FILE, CALIBRATION_RULE, CALIBRATION_RUNS, GoldenRunner, PROBE_DEFAULT_TASKS, PROBE_FILE,
+  CALIBRATION_FILE, CALIBRATION_PROBE_CONFIDENCE, CALIBRATION_RULE, CALIBRATION_RUNS, GoldenRunner,
+  PROBE_DEFAULT_TASKS, PROBE_FILE,
   ScoreRecorder, ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SPLITS_FILE, applyCalibration,
   assertGoldenCorpus, describeJudge, loadScriptedTasks, loadSplits, makeLlmJudge, projectProbe,
   seesawDecision, selectCalibrated, selectProbeTasks,
@@ -590,7 +591,7 @@ export function registerGoldensCommand(program: Command): void {
     .option('--harness <ref>', 'Base harness to calibrate against (default: current, else the roles file)')
     .option('--runs <n>', `base runs per task (pinned to ${CALIBRATION_RUNS}: the selection rule is pre-registered for that many)`, String(CALIBRATION_RUNS))
     .option('--tasks <ids>', 'Pool task ids to measure, comma-separated (default: the whole pool)', 'pool')
-    .option('--probe [n]', `Measure only a seeded sample of n pool tasks (default ${PROBE_DEFAULT_TASKS}) and project the whole pool; writes ${PROBE_FILE} and never touches ${SPLITS_FILE} or ${CALIBRATION_FILE} (exits 1 below the full-calibration threshold)`, undefined)
+    .option('--probe [n]', `Measure only a seeded sample of n pool tasks (default ${PROBE_DEFAULT_TASKS}), report the posterior for the whole pool, and exit 1 when the chance it reaches the yardstick floor is below ${CALIBRATION_PROBE_CONFIDENCE.toFixed(2)}; writes ${PROBE_FILE} and never touches ${SPLITS_FILE} or ${CALIBRATION_FILE}`, undefined)
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
     .description('Measure the base harness on the held-out task pool, then select the tasks that have headroom into heldOut (writes calibration.json and splits.json; exits 1 when fewer than 10 qualify)')
@@ -692,18 +693,23 @@ export function registerGoldensCommand(program: Command): void {
           process.exitCode = 1;
           return;
         }
+        // R6-L1: the decision is the probability, not a whole-task point estimate. The figure
+        // printed here is the one `clears` used, so the operator can reproduce the call.
+        const chance = probe.projection.printedProbability.toFixed(2);
         if (!probe.projection.clears) {
           console.error(
-            `[maf] calibration probe: projected ${probe.projection.projectedQualifying} qualifying, below the ` +
-            `${probe.projection.threshold}-task threshold — do not pay for a full calibration yet; redesign the pool ` +
-            `and probe again. ${SPLITS_FILE} and ${CALIBRATION_FILE} are unchanged.`,
+            `[maf] calibration probe: a ${chance} chance the pool reaches the ` +
+            `${probe.projection.yardstick}-task floor, below the ${probe.projection.confidence.toFixed(2)} a ` +
+            'full calibration needs — do not pay for it yet; redesign the pool and probe again. ' +
+            `${SPLITS_FILE} and ${CALIBRATION_FILE} are unchanged.`,
           );
           process.exitCode = 1;
           return;
         }
         console.log(
-          `[maf] calibration probe: projects ${probe.projection.projectedQualifying} qualifying, at or above the ` +
-          `${probe.projection.threshold}-task threshold — worth a full calibration. ` +
+          `[maf] calibration probe: a ${chance} chance the pool reaches the ` +
+          `${probe.projection.yardstick}-task floor, at or above the ` +
+          `${probe.projection.confidence.toFixed(2)} a full calibration needs — worth paying for. ` +
           `${SPLITS_FILE} and ${CALIBRATION_FILE} are unchanged.`,
         );
         return;

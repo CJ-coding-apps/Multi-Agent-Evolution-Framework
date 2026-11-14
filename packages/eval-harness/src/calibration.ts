@@ -65,12 +65,18 @@ export const PROBE_DEFAULT_TASKS = 10;
 export const PROBE_SELECTION_SEED = 0x5eed; // 24301
 
 /**
- * R5-P5: the number of raw qualifiers a full calibration should project before CJ pays for one.
- * It is above `CALIBRATION_MIN_SELECTED` (20) on purpose: the full run has to fill the 20-task
- * yardstick with margin, not exactly, or the first task that behaves differently on the day drops
- * it below the floor.
+ * R6-L1 (round-5 finding R5-L1): the probability the probe needs before a full calibration is paid
+ * for. The probe used to print a point estimate and clear at a whole-task count; a sample of ten
+ * cannot state a count, only how likely the pool is to reach one. `0.8` is where "5 of 10 sampled"
+ * lands (exact 0.796852, printed `0.80`), which is the bar CJ set in the round-6 ruling.
  */
-export const CALIBRATION_PROBE_THRESHOLD = 22;
+export const CALIBRATION_PROBE_CONFIDENCE = 0.8;
+
+/**
+ * R6-L1: the credible level of the interval the probe reports. The posterior is exact and
+ * one-dimensional, so the interval is the central 80% — ten per cent in each tail.
+ */
+export const CALIBRATION_PROBE_INTERVAL_LEVEL = 0.8;
 
 export class CalibrationError extends Error {
   constructor(message: string) {
@@ -241,15 +247,22 @@ export function selectProbeTasks(pool: readonly string[], count: number = PROBE_
 
 /**
  * R5-P5: what a probe's sample implies for the whole pool. The probe is a cheap sample of the
- * calibration CJ would pay for, so the projection is deliberately the same arithmetic as
+ * calibration CJ would pay for, so the point projection is deliberately the same arithmetic as
  * `selectCalibrated`, applied to the sampled rates scaled to the pool: partial tasks (1 or 2 of 3)
  * qualify, never-solved tasks qualify only up to the cap that keeps them at most a third of the
- * kept set, and a task solved every run never qualifies. The threshold is
- * `CALIBRATION_PROBE_THRESHOLD`; `clears` says whether a full run is worth paying for.
+ * kept set, and a task solved every run never qualifies.
  *
- * A projection is not a measurement. It is stated as "about", it is rounded to whole tasks, and a
- * sample of ten cannot promise what fifty tasks will do; the point is to refuse an obviously
- * hopeless pool before the full price, not to certify a good one.
+ * R6-L1: a point estimate over-states what ten tasks can say. The projection now carries the
+ * posterior of the pool's qualifying count under a flat prior — the sample of `n` was drawn from
+ * the pool of `N` without replacement, so conditional on a pool count `Q` the sample count is
+ * hypergeometric and `P(Q | q) ∝ C(Q, q)·C(N−Q, n−q)` over `Q ∈ [q, N−n+q]`. The interval is the
+ * central `CALIBRATION_PROBE_INTERVAL_LEVEL`, the probability is the exact mass at or above the
+ * yardstick floor, and `clears` uses the two-decimal figure an operator reads: a probe whose
+ * exact chance is 0.796852 prints 0.80 and proceeds, which is the "5 of 10" bar.
+ *
+ * A projection is still not a measurement. The point figure is stated as "about", and the
+ * posterior assumes the ten sampled tasks are a fair draw of the pool — which is why the draw is
+ * seeded and reviewed, and why the full calibration remains the authority.
  */
 export interface CalibrationProbeProjection {
   /** Pool tasks measured. */
@@ -267,15 +280,80 @@ export interface CalibrationProbeProjection {
   projectedZerosAllowed: number;
   /** Partial + never-solved within the cap: the raw qualifiers a full calibration would see. */
   projectedQualifying: number;
-  threshold: number;
+  /** R6-L1: the sample's own qualifying count, the same rule applied at sample size. */
+  sampledQualifying: number;
+  /** R6-L1: the posterior mean of the pool's qualifying count under the flat prior. */
+  posteriorMean: number;
+  /** R6-L1: the central credible interval for that count. */
+  interval: { low: number; high: number; level: number };
+  /** R6-L1: exact P(pool qualifying count >= the yardstick floor). */
+  probabilityReachesYardstick: number;
+  /** R6-L1: that probability as printed (two decimals) — the figure the decision uses. */
+  printedProbability: number;
+  /** R6-L1: the floor the probability is about (`CALIBRATION_MIN_SELECTED`). */
+  yardstick: number;
+  /** R6-L1: the printed probability a probe must reach to clear. */
+  confidence: number;
   clears: boolean;
   /** One sentence an operator reads before deciding to pay for a full calibration. */
   statement: string;
 }
 
+/** Exact binomial coefficient, for the hypergeometric weights (N ≤ 50 keeps every term < 2^53). */
+function binomial(n: number, k: number): number {
+  if (k < 0 || k > n) return 0;
+  const kk = Math.min(k, n - k);
+  let r = 1;
+  for (let i = 0; i < kk; i++) r = (r * (n - i)) / (i + 1);
+  return Math.round(r);
+}
+
+/**
+ * R6-L1: the posterior of the pool's qualifying count given `q` qualifying in a sample of `n` from
+ * a pool of `N`. Flat prior on `Q ∈ [q, N−n+q]` (a pool can never hold fewer qualifiers than the
+ * sample saw, nor more than the sample plus everything it did not draw), and
+ * `P(Q | q) ∝ C(Q, q)·C(N−Q, n−q)`.
+ */
+export function probePosterior(
+  q: number, poolSize: number, sampled: number, yardstick: number,
+): {
+  mean: number;
+  interval: { low: number; high: number; level: number };
+  probabilityReachesYardstick: number;
+} {
+  const low = Math.max(q, 0);
+  const high = poolSize - sampled + q;
+  const weights: { count: number; weight: number }[] = [];
+  let total = 0;
+  for (let Q = low; Q <= high; Q++) {
+    const weight = binomial(Q, q) * binomial(poolSize - Q, sampled - q);
+    weights.push({ count: Q, weight });
+    total += weight;
+  }
+  const mean = total === 0 ? q : weights.reduce((n, w) => n + w.count * w.weight, 0) / total;
+  const tail = (1 - CALIBRATION_PROBE_INTERVAL_LEVEL) / 2;
+  const quantile = (alpha: number): number => {
+    let cumulative = 0;
+    for (const w of weights) {
+      cumulative += w.weight / total;
+      if (cumulative >= alpha - 1e-12) return w.count;
+    }
+    return high;
+  };
+  const reaching = weights
+    .filter((w) => w.count >= yardstick)
+    .reduce((n, w) => n + w.weight, 0);
+  return {
+    mean,
+    interval: { low: quantile(tail), high: quantile(1 - tail), level: CALIBRATION_PROBE_INTERVAL_LEVEL },
+    probabilityReachesYardstick: total === 0 ? 0 : reaching / total,
+  };
+}
+
 export function projectProbe(
   counts: readonly CalibrationCount[], poolSize: number,
-  threshold: number = CALIBRATION_PROBE_THRESHOLD,
+  confidence: number = CALIBRATION_PROBE_CONFIDENCE,
+  yardstick: number = CALIBRATION_MIN_SELECTED,
 ): CalibrationProbeProjection {
   if (counts.length === 0) throw new CalibrationError('a probe measured no tasks, so it projects nothing');
   if (!Number.isInteger(poolSize) || poolSize < counts.length)
@@ -291,19 +369,33 @@ export function projectProbe(
   const projectedZeros = scale(zeros);
   const projectedZerosAllowed = Math.floor(projectedPartial / 2);
   const projectedQualifying = projectedPartial + Math.min(projectedZeros, projectedZerosAllowed);
-  const clears = projectedQualifying >= threshold;
+  // R6-L1: the sample's own count uses the same cap, so the posterior is asked about the same
+  // quantity the pool projection describes.
+  const sampledQualifying = partial + Math.min(zeros, Math.floor(partial / 2));
+  const posterior = probePosterior(sampledQualifying, poolSize, sampled, yardstick);
+  const printedProbability = Math.round(posterior.probabilityReachesYardstick * 100) / 100;
+  const clears = printedProbability >= confidence;
+  const percent = Math.round(posterior.interval.level * 100);
   const statement =
     `${sampled} of ${poolSize} pool task${poolSize === 1 ? '' : 's'} probed: ${partial} partial ` +
     `(1 or 2 of ${CALIBRATION_RUNS}), ${zeros} never solved, ${solved} solved every run — projecting ` +
     `about ${projectedQualifying} qualifying across the pool (${projectedPartial} partial + ` +
-    `${Math.min(projectedZeros, projectedZerosAllowed)} never-solved within the cap); the yardstick ` +
-    `takes ${CALIBRATION_MIN_SELECTED} and the full-calibration threshold is ${threshold} — ` +
+    `${Math.min(projectedZeros, projectedZerosAllowed)} never-solved within the cap). The sample holds ` +
+    `${sampledQualifying} qualifier${sampledQualifying === 1 ? '' : 's'}, so the posterior puts the pool's ` +
+    `count at ${posterior.interval.low}–${posterior.interval.high} (${percent}% interval, mean ` +
+    `${posterior.mean.toFixed(1)}); the chance it reaches the ${yardstick}-task floor is ` +
+    `${printedProbability.toFixed(2)}, against the ${confidence.toFixed(2)} a full calibration needs — ` +
     (clears ? 'clears it' : 'below it');
 
   return {
     sampled, poolSize, partial, zeros, solved,
     projectedPartial, projectedZeros, projectedZerosAllowed, projectedQualifying,
-    threshold, clears, statement,
+    sampledQualifying,
+    posteriorMean: posterior.mean,
+    interval: posterior.interval,
+    probabilityReachesYardstick: posterior.probabilityReachesYardstick,
+    printedProbability,
+    yardstick, confidence, clears, statement,
   };
 }
 

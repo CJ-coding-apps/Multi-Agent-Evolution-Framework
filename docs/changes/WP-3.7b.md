@@ -1362,3 +1362,40 @@ whole baseline and does not ship; a partial held-out repeat gives a skipped verd
 three real-`evolve` tests in this file mocked a stack without an `attestor`; R6-H1's contamination
 seam treats an unscannable surface as contamination, so every attempt in those tests was void and
 the gate rejected. Their mocks now carry an empty attestor, as a real stack always does.
+
+### R6-L1 (D-57) — the probe reports the chance, and the interval behind it
+
+The round-5 probe printed a point estimate and cleared at a whole-task count (22 qualifying of a
+50-task pool). A sample of ten says nothing that exact: the defect is not the arithmetic, it is
+speaking as though a point estimate were the answer. The probe now reports what ten tasks can
+actually support, and the decision uses the probability CJ's ruling named.
+
+**The posterior.** The ten sampled tasks were drawn from the fifty-task pool without replacement,
+so conditional on the pool's qualifying count `Q` the sample count is hypergeometric and, under a
+flat prior, `P(Q | q) ∝ C(Q, q)·C(N−Q, n−q)` over `Q ∈ [q, N−n+q]`. `probePosterior` computes it in
+exact integer weights (`binomial`; `N ≤ 50` keeps every term below 2^53). The interval is the
+central `CALIBRATION_PROBE_INTERVAL_LEVEL` (80%, ten per cent in each tail), the reported
+probability is the exact mass at or above `CALIBRATION_MIN_SELECTED`, and the sample's own
+qualifying count applies the same cap at sample size (`partial + min(zeros, floor(partial/2))`), so
+the posterior is about the quantity the pool projection describes.
+
+**The decision is the printed figure.** `clears` compares the two-decimal probability an operator
+reads — not the exact one — against `CALIBRATION_PROBE_CONFIDENCE` (0.80). That is deliberate: five
+qualifiers in ten is an exact 0.796852, prints `0.80`, and clears, which is the "≥ 5 of 10" bar the
+ruling states. A probe below it exits 1 with "a 0.56 chance the pool reaches the 20-task floor,
+below the 0.80 a full calibration needs — do not pay for it yet", and both `splits.json` and
+`calibration.json` stay untouched.
+
+**Reference values.** With `N = 50`, `n = 10`, yardstick 20: `q = 3` → 0.289658, interval 9–24;
+`q = 4` → 0.557165, interval 13–29, mean 20.67; `q = 5` → 0.796852, interval 17–33, mean 25.0;
+`q = 6` → 0.935132, interval 21–37. `projectProbe` replaces the old `CALIBRATION_PROBE_THRESHOLD`
+(found in no source or dist file after the change) and carries the posterior in the record, so a
+reviewer can recompute the printed sentence from `calibration-probe.json` alone.
+
+**Tests.** `calibration.test.ts` (1 new, 1 rewritten): the exact masses, intervals and means at the
+four reference counts, plus the degenerate full-sample cases (a sample that is the pool has no
+uncertainty); the projection now asserts `sampledQualifying`, the printed figure and `clears` in
+all three cases — including that the old point estimate of 22 no longer clears while five sampled
+qualifiers do. `goldens-calibrate.test.ts`: the probe's own fixture (ten sampled, all never solved)
+asserts the `0.00` chance, the 0–8 interval and the refusal message, and the record carries the
+posterior it printed.
