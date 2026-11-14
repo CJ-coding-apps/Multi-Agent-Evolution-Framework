@@ -139,6 +139,12 @@ test('R5-P5: a probe draws a seeded, order-independent sample of the pool', () =
   assert.deepEqual(selectProbeTasks(pool), drawn);
   assert.deepEqual(selectProbeTasks([...pool].reverse()), drawn);
   assert.deepEqual([...drawn], [...drawn].sort(), 'listed in id order');
+  // The seed is committed, so the draw itself is pinned: re-seeding it silently would change which
+  // tasks price the calibration, and every other assertion in this test would still pass.
+  assert.deepEqual(drawn, [
+    'pool-03', 'pool-06', 'pool-08', 'pool-21', 'pool-22',
+    'pool-26', 'pool-38', 'pool-42', 'pool-44', 'pool-46',
+  ], 'the committed seed draws this sample');
   // A smaller sample is a subset of the larger draw, so the two never coincide.
   const nine = selectProbeTasks(pool, 9);
   assert.equal(nine.length, 9);

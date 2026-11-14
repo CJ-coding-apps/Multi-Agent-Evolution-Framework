@@ -1043,8 +1043,10 @@ measures them — and projects from that sample what the whole pool would yield.
 The sample is deterministic. `selectProbeTasks` draws from the pool's sorted ids with the committed
 `PROBE_SELECTION_SEED` (24301), keeps the first n, and lists them in id order, so the same pool
 always probes the same tasks and re-ordering `splits.json` changes nothing; two probes are
-comparable. `--probe` draws its own tasks, so combining it with `--tasks` is refused (exit 2,
-nothing run), as is a sample larger than the pool.
+comparable. The test pins the draw for a fifty-id pool as well as its determinism: the invariance
+assertions alone let a changed seed pass, which the mutant sweep found and the pin now kills.
+`--probe` draws its own tasks, so combining it with `--tasks` is refused (exit 2, nothing run), as is
+a sample larger than the pool.
 
 `projectProbe` applies the selection rule's arithmetic to the sampled rates scaled to the pool:
 partial tasks (1 or 2 of 3) qualify, and never-solved tasks qualify only up to the same cap —
@@ -1123,6 +1125,23 @@ budgets. Both caps are raised in test-only changes, with no assertion touched: t
 baseline to 600 s (about twice the serial figure; 203 s measured in isolation) and the calibration
 to 450 s (about twice 210.8 s). The five-stack test keeps its 1800 s cap (1160 s measured) and
 stays in WP-3.12's tiering with the rest.
+
+### R5-mutants — each round-5 mechanism, broken on purpose in the compiled `dist/`
+
+| mutation in `dist/` | first red test |
+| --- | --- |
+| the fixture copy takes `.checks/` and `.reference/` too (`filter: () => true`) | `runner: a hidden check is absent from the agent worktree…` |
+| the checks are never materialized for scoring (`const placed = []`) | the same runner test |
+| the derived-heldOut equality guard is disabled | `splits: a heldOut the calibration record does not derive is refused` |
+| `evolve`'s null-`calibrationSha` refusal is disabled | `maf evolve refuses a split with no calibration behind its heldOut` |
+| `CALIBRATION_PROBE_THRESHOLD` 22 → 20 | `R5-P5: the projection scales the sample with the rule…` |
+| `CONSERVATIVE_CLAUDE_TOKENS_PER_TASK` 150,000 → 100,000 | `R3-M3 projection: dollars and seconds…` |
+| `and` re-added to the spaced-path connectors | `a directory named "Tom and Jerry" is masked whole` |
+| `PROBE_SELECTION_SEED` 24301 → 24302 | survived the first sweep; killed after the draw was pinned (`R5-P5: a probe draws a seeded…`) |
+
+The seed mutant is the one the sweep earned: every invariance assertion still passed, because a
+different constant is just as deterministic and just as order-independent. Only asserting the
+committed sample closes it, and that assertion is now in `calibration.test.ts`.
 
 ## Verification
 
