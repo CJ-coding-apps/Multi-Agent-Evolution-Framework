@@ -96,6 +96,12 @@ export function isDeterministicTask(task: GoldenTask): boolean {
 export interface LoadedSplits extends CorpusSplits {
   /** sha256 over the split definition; results from different splits do not compare. */
   sha: string;
+  /**
+   * R5-P4: the calibration record the pre-registration names, already parsed and proven to hash to
+   * `preRegistration.calibrationSha`. Present exactly when a measurement was named, so a caller can
+   * project a run from what that measurement cost instead of re-reading and re-checking the file.
+   */
+  calibration?: CalibrationRecord;
 }
 
 export class SplitsError extends Error {
@@ -318,5 +324,8 @@ export async function loadSplits(
     preRegistration: { attempts: 'single', selection: CALIBRATION_RULE, calibrationSha },
     train: lists.train, heldOut: lists['held-out'], pool: lists.pool,
   };
-  return { ...splits, sha: computeSplitsSha(splits) };
+  return {
+    ...splits, sha: computeSplitsSha(splits),
+    ...(calibrationRecord !== undefined ? { calibration: calibrationRecord } : {}),
+  };
 }

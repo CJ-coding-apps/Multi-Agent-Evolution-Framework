@@ -18,9 +18,10 @@ import {
   loadScriptedTasks, loadSplits, makeLlmJudge, seesawDecision, selectCalibrated,
 } from '@maf/eval-harness';
 import type {
-  CalibrationCount, CalibrationRecord, CalibrationSelection, GoldenSuiteResult, GoldenTask,
-  LoadedSplits,
+  CalibrationCount, CalibrationRecord, CalibrationSelection, CalibrationUsage, GoldenSuiteResult,
+  GoldenTask, LoadedSplits,
 } from '@maf/eval-harness';
+import { UsageMeter, meterAdapter } from '@maf/evolver';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { RESOLVER_REFS, buildRunStack, harnessDriftNotice, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
@@ -284,6 +285,12 @@ export interface CalibrationOptions {
    * deterministic result instead of paying for one.
    */
   execute: (only: readonly string[]) => Promise<GoldenSuiteResult>;
+  /**
+   * R5-P4: read after `execute` returns — the meter the command wrapped the adapter with, so the
+   * record carries what the measurement cost and a first evolution run can project from it instead
+   * of from a constant. A test that injects a result passes nothing and records no usage.
+   */
+  usage?: () => CalibrationUsage | undefined;
 }
 
 export interface CalibrationOutcome {
@@ -314,6 +321,10 @@ export async function runCalibration(o: CalibrationOptions): Promise<Calibration
   const errors = result.tasks.flatMap((t) => t.attempts
     .filter((a) => a.error !== undefined)
     .map((a) => ({ taskId: t.taskId, attempt: a.attempt, error: a.error as string })));
+  // R5-P4: what the measurement cost, from the meter the caller wrapped the adapter with. Absent
+  // when no meter was supplied (a test's injected result), in which case the record says nothing
+  // about usage rather than inventing a figure.
+  const usage = o.usage?.();
   const measured = selectCalibrated(counts);
   // A crashed attempt is not a measurement: the base may not have run at all. Selecting on it would
   // turn an infrastructure failure into "the base cannot solve this", which is the opposite of what
@@ -333,6 +344,7 @@ export async function runCalibration(o: CalibrationOptions): Promise<Calibration
     runs: CALIBRATION_RUNS, ranAt: result.ranAt,
     ...(result.corpusSha !== undefined ? { corpusSha: result.corpusSha } : {}),
     splitsSha: o.splits.sha, rule: CALIBRATION_RULE, tasks: counts, errors, selection,
+    ...(usage !== undefined ? { usage } : {}),
   };
   const calibrationPath = path.join(o.corpusRoot, CALIBRATION_FILE);
   const calibrationText = `${JSON.stringify(record, null, 2)}\n`;
@@ -528,12 +540,24 @@ export function registerGoldensCommand(program: Command): void {
         ? await resolveGoldensAdapter(opts.judgeAdapter, corpusRoot)
         : agent;
       const judgeModel = opts.judgeModel ?? (judgeAdapter === agent ? opts.model : undefined);
+      // R5-P4: meter the measurement through the same seam an evolution run uses, so the record's
+      // per-task figure is the one a later projection will spend against.
+      const usage = new UsageMeter();
+      const meteredAgent = meterAdapter(agent, usage);
       const outcome = await runCalibration({
         corpusRoot, splits, taskIds, harness: { id: harness.id, sha: harness.sha },
         adapter: { name: agent.name }, ...(opts.model ? { model: opts.model } : {}),
+        usage: () => {
+          const snapshot = usage.snapshot();
+          return {
+            calls: snapshot.calls, tokens: snapshot.tokens, tasks: taskIds.length,
+            attemptsPerTask: CALIBRATION_RUNS,
+            ...(snapshot.usd !== undefined ? { usd: snapshot.usd } : {}),
+          };
+        },
         // The paid path: the base harness, isolated exactly as a gate run is (H2).
         execute: async (only) => (await runGoldenSuite({
-          cwd, corpusRoot, harness, harnessSource: source, agent, only,
+          cwd, corpusRoot, harness, harnessSource: source, agent: meteredAgent, only,
           ...(opts.model ? { model: opts.model } : {}),
           judge: { adapter: judgeAdapter, ...(judgeModel ? { model: judgeModel } : {}) },
           attempts: CALIBRATION_RUNS, runId: makeRunId(crypto.randomUUID()),
@@ -553,6 +577,11 @@ export function registerGoldensCommand(program: Command): void {
       );
       for (const e of record.errors) console.error(`[maf] calibration: ${e.taskId} attempt ${e.attempt + 1} failed: ${e.error}`);
       console.log(`[maf] calibration: wrote ${outcome.path}`);
+      if (record.usage !== undefined && record.usage.tasks > 0)
+        console.log(
+          `[maf] calibration: measured ${record.usage.tokens} tokens over ${record.usage.calls} model calls — ` +
+          `${Math.round(record.usage.tokens / record.usage.tasks)} per task at ${record.usage.attemptsPerTask} runs each`,
+        );
       if (outcome.splitsPath === undefined) {
         console.error(
           `[maf] calibration: nothing was selected — ${selection.reason} ` +

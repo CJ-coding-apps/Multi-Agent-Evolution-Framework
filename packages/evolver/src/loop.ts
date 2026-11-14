@@ -175,6 +175,14 @@ export interface EvolveOptions {
    */
   goldenTaskCounts?: { train: number; heldOut: number };
   /**
+   * R5-P4 (round-4 finding R4-M2): what the committed calibration measured, when the corpus has
+   * one. A session's first golden run has nothing of its own to project from, so it seeds the
+   * per-task figure with this record instead of the conservative constant. It is the same meter's
+   * figure over the same corpus, so it is a measurement rather than a guess — and because
+   * calibration measures three attempts per task while the train run makes two, it errs high.
+   */
+  priorGoldenMeasurement?: GoldenRunMeasurement;
+  /**
    * R3-M3: the run's price, when it has one. A dollar budget cannot project a first golden run
    * without it — the tokens would have no rate — so the caller that sets `maxUsd` supplies it.
    */
@@ -581,7 +589,13 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   // spent. Track what earlier runs this session cost per task, then project the next run from it —
   // or from a conservative estimate when this is the first. A run whose projection crosses the
   // token ceiling is never started; the report says what it would have cost.
-  const goldenMeasured: GoldenRunMeasurement = { tokens: 0, tasks: 0 };
+  const goldenMeasured: GoldenRunMeasurement = {
+    tokens: opts.priorGoldenMeasurement?.tokens ?? 0,
+    tasks: opts.priorGoldenMeasurement?.tasks ?? 0,
+    ...(opts.priorGoldenMeasurement?.usd !== undefined ? { usd: opts.priorGoldenMeasurement.usd } : {}),
+    ...(opts.priorGoldenMeasurement?.elapsedMs !== undefined
+      ? { elapsedMs: opts.priorGoldenMeasurement.elapsedMs } : {}),
+  };
   const spentTokens = (): number =>
     opts.budget?.snapshot().tokens ?? 0;
   const projectGolden = (tasks: number | undefined): GoldenRunProjection | undefined => {

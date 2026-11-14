@@ -43,17 +43,29 @@ export interface BudgetMeter {
  * loop projects `tasks × per-task cost` in **every budget the run has** — tokens, dollars and
  * seconds — and refuses when any one of them is crossed.
  *
- * With no earlier run to measure, the projection uses a conservative constant. The token floor is
- * `CONSERVATIVE_GOLDEN_TOKENS_PER_TASK`, which is more than an order of magnitude above the
- * scripted adapter's measured per-task figure (276 tokens on the committed corpus, 131–654 across
- * tasks), so a scripted run is never projected low. `claude` is a different shape — several role
- * turns plus a tool loop, each turn resending the system prompt, the tool list and the history —
- * and gets its own stated constant, `CONSERVATIVE_CLAUDE_TOKENS_PER_TASK` and
- * `CONSERVATIVE_CLAUDE_SECONDS_PER_TASK`; both are deliberately high so a projection errs toward
- * not starting (the justification is in `docs/changes/WP-3.7b.md`, R3-M3).
+ * R5-P4 (round-4 finding R4-M2): with no earlier run to measure, the projection uses a conservative
+ * constant that comes from the meter, not from a guess. The scripted adapter measured
+ * `MEASURED_SCRIPTED_TOKENS_PER_TASK` per pool task over the committed corpus (3,682,586 tokens
+ * over 745 model calls for 50 tasks at calibration's three attempts each), so the floor is that
+ * figure rounded up:
+ * `CONSERVATIVE_GOLDEN_TOKENS_PER_TASK`. The train suite makes two attempts per task rather than
+ * three, so on the run the loop actually projects this figure errs about 1.5× high — it cannot
+ * under-project the corpus it was measured on, which is what the old 8,000 constant did by 9×.
+ * `claude` is a different
+ * shape — several role turns plus a tool loop, each turn resending the system prompt, the tool list
+ * and the history — and its floor, `CONSERVATIVE_CLAUDE_TOKENS_PER_TASK`, is twice the scripted
+ * figure (and more than twice the scripted measurement), as required. The justifications are in
+ * `docs/changes/WP-3.7b.md`, R3-M3 and R5-P4.
  */
-export const CONSERVATIVE_GOLDEN_TOKENS_PER_TASK = 8_000;
-export const CONSERVATIVE_CLAUDE_TOKENS_PER_TASK = 30_000;
+/**
+ * What `goldens calibrate --adapter scripted` measured on the committed corpus: 3,682,586 tokens
+ * over 745 model calls for 50 pool tasks × 3 attempts. It is recorded as a constant because the
+ * conservative floors below are stated in relation to it, and because the figure the old 276-token
+ * claim came from (raw text length) understated the meter by two orders of magnitude.
+ */
+export const MEASURED_SCRIPTED_TOKENS_PER_TASK = 73_652;
+export const CONSERVATIVE_GOLDEN_TOKENS_PER_TASK = 75_000;
+export const CONSERVATIVE_CLAUDE_TOKENS_PER_TASK = 150_000;
 /** A scripted task measures about 1.4 s (the 86-task baseline runs in about 117 s); 5 s is ~3.5×. */
 export const CONSERVATIVE_GOLDEN_SECONDS_PER_TASK = 5;
 /** A live task is a coder turn, a verifier and a tool loop; two minutes over-estimates a small repo. */

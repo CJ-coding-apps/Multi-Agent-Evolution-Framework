@@ -17,7 +17,7 @@ import {
 import type { GoldenSuiteResult, GoldenTask, LoadedSplits } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
 import { EvolveBudget, HELD_OUT_REPEATS, UsageMeter, evolve, meterAdapter } from '@maf/evolver';
-import type { EvolveOptions, EvolveReport } from '@maf/evolver';
+import type { EvolveOptions, EvolveReport, GoldenRunMeasurement } from '@maf/evolver';
 import { createDefaultRegistry } from '@maf/tools';
 import { createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS } from '@maf/processors';
 import { SecurityReviewGate } from '@maf/git-ops';
@@ -319,6 +319,23 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         return smokeCheck(runnerFor(harness, 1), taskId);
       };
 
+      // R5-P4: a session's first run projects from the committed calibration's own measurement —
+      // the same meter over the same corpus — rather than from a constant. Calibration measured
+      // CALIBRATION_RUNS attempts per task and the train run makes two, so the figure errs high. A
+      // record written before usage was recorded has none, and the loop uses the constant instead.
+      // Only this adapter's own measurement counts: a scripted run's tokens say nothing about what
+      // a live model will spend, so a differing adapter falls back to its constant.
+      const calibrationUsage = splits.calibration?.adapter === adapter.name
+        ? splits.calibration?.usage
+        : undefined;
+      const priorGoldenMeasurement: GoldenRunMeasurement | undefined =
+        calibrationUsage !== undefined && calibrationUsage.tasks > 0
+          ? {
+            tokens: calibrationUsage.tokens, tasks: calibrationUsage.tasks,
+            ...(calibrationUsage.usd !== undefined ? { usd: calibrationUsage.usd } : {}),
+          }
+          : undefined;
+
       // Static registry membership = the allowlist (§10.2; registry-driven, not hardcoded here)
       const processorNames = new Set(createDefaultProcessorRegistry().names());
 
@@ -338,6 +355,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         heldOutSplitsSha: splits.sha,
         // R2-M1: the loop projects each golden run's cost from its task count before starting it.
         goldenTaskCounts: { train: splits.train.length, heldOut: splits.heldOut.length },
+        ...(priorGoldenMeasurement !== undefined ? { priorGoldenMeasurement } : {}),
         // R3-M3: the same price the usage meter uses, so the dollar projection and the dollar
         // meter cannot disagree about what a token costs.
         ...(usdPerMillionTokens !== undefined ? { usdPerMillionTokens } : {}),

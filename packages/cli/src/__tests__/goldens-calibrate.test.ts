@@ -162,13 +162,14 @@ test('a qualified calibration writes the counts and moves the selected pool task
 
     const record = JSON.parse(await readFile(out.path, 'utf8')) as {
       splitsSha: string; harnessSha: string; tasks: { taskId: string; passes: number }[];
-      errors: unknown[]; selection: { selected: string[] };
+      errors: unknown[]; selection: { selected: string[] }; usage?: unknown;
     };
     assert.equal(record.splitsSha, splits.sha, 'the record says which split it was decided against');
     assert.equal(record.harnessSha, 'a'.repeat(64));
     assert.equal(record.tasks.length, 20);
     assert.deepEqual(record.errors, []);
     assert.deepEqual(record.selection.selected, POOL);
+    assert.equal(record.usage, undefined, 'no meter was supplied, so the record claims no measurement');
 
     const next = await loadSplits(root, CORPUS);
     // R4-A3: the calibrated pool REPLACES the yardstick; the old held-out tasks stay in the corpus
@@ -177,6 +178,29 @@ test('a qualified calibration writes the counts and moves the selected pool task
     assert.deepEqual(next.pool, []);
     assert.deepEqual(next.train, ['train-1', ...HELD_OUT]);
     assert.notEqual(next.sha, splits.sha, 'the yardstick changed identity when the held-out set was replaced');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R5-P4: the meter is read after the run and its totals go into the record, so the first evolve
+// run of a session projects from what calibration actually spent rather than from a constant. The
+// figure is per task, because the record is the only thing that survives the session.
+test('R5-P4: the record carries what the measurement cost, per task', async () => {
+  const root = await corpusRoot();
+  try {
+    const splits = await loadSplits(root, CORPUS);
+    const counts: Array<[string, number]> = POOL.map((id, i): [string, number] => [id, i % 2 === 0 ? 1 : 2]);
+    const cost = { calls: 120, tokens: 800_000, tasks: POOL.length, attemptsPerTask: 3, usd: 0.24 };
+    const out = await runCalibration({
+      corpusRoot: root, splits, taskIds: POOL, harness: { id: 'base', sha: 'a'.repeat(64) },
+      adapter: { name: 'stub' }, execute: async () => suite(counts),
+      usage: () => cost,
+    });
+    assert.deepEqual(out.record.usage, cost);
+    const onDisk = JSON.parse(await readFile(out.path, 'utf8')) as { usage?: typeof cost };
+    assert.deepEqual(onDisk.usage, cost, 'the cost is committed with the counts it belongs to');
+    assert.equal(Math.round((onDisk.usage?.tokens ?? 0) / (onDisk.usage?.tasks ?? 1)), 40_000);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

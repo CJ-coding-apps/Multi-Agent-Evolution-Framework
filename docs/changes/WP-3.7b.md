@@ -490,14 +490,14 @@ statistics only — it is not evidence about any model, and it makes no paid cal
 
 The budget was asked before every paid step, but the question was always "have we already spent
 too much?" — which lets the run that crosses the ceiling start, because its cost is unknown until
-it ends. A golden run is a whole suite (29 train tasks in the shipped corpus, 7 held-out, 20 in
+it ends. A golden run is a whole suite (59 train tasks in the shipped corpus, 7 held-out, 50 in
 the pool), so one overshoot is large.
 
 `projectGoldenRun` now answers "will the next run cross a limit?" before it starts:
 
 > `projected = tasks × per-task cost`, where the per-task cost is **measured** from this session's
 > earlier golden runs (tokens spent ÷ tasks run) or, when this is the first, the conservative
-> `CONSERVATIVE_GOLDEN_TOKENS_PER_TASK = 8000`.
+> `CONSERVATIVE_GOLDEN_TOKENS_PER_TASK = 75000` (a measured figure; see R5-P4 below).
 
 The loop calls it before **each** golden run: the round-0 baseline, each round's candidate suite,
 and each of the 5 held-out baseline and 5 held-out candidate repeats. A projected crossing is not
@@ -512,12 +512,12 @@ only happens when the counts are declared, for the same reason.
 
 The test CJ specified is `maf evolve --max-tokens 2000` on the scripted adapter: the stop comes
 **before** the baseline, the printed note is
-`the round-0 baseline was not started: 29 tasks × 8000 tokens each (conservative estimate) projects 232000 tokens; 0 already spent against a 2000-token budget — not started`,
-and `usage.calls` is 0. The loop tests also cover the measured path (a baseline that spends 8000 on
-one task makes the next run's 8000-token projection cross a 9000-token ceiling) and the held-out
-repeats (100 tasks × 1000 measured tokens against a 20000-token ceiling skips before the first
-repeat). The fixtures make the measured cost deliberately different from the 8000-token constant,
-so forcing the estimate path is observable. Mutants: removing the pre-baseline projection check
+`the round-0 baseline was not started: 20 tasks × 75000 tokens each (conservative estimate) projects 1500000 tokens; 0 already spent against a 2000-token budget — not started`,
+and `usage.calls` is 0. The loop tests also cover the measured path (a baseline that spends 200,000
+on one task makes the next run's 200,000-token projection cross a 300,000-token ceiling) and the
+held-out repeats (100 tasks × 1000 measured tokens against a 90000-token ceiling skips before the
+first repeat). The fixtures make the measured cost deliberately different from the 75,000-token
+constant, so forcing the estimate path is observable. Mutants: removing the pre-baseline projection check
 makes the CLI test fail on `usage.calls === 0` (the baseline then runs); always using the constant
 fails three tests — the unit test's measured assertions and both measured-path loop tests — on
 their `(measured …)` statement and per-task figure.
@@ -805,14 +805,19 @@ crossed, in the order wall-clock, tokens, dollars.
 
 With no earlier run to measure, the first-run constants are:
 
-- **tokens, 8000/task** (unchanged). Measured on the committed corpus, the scripted adapter spends
-  **276 tokens/task on average (131–654 across the 86 tasks)**, so the floor is more than an order
-  of magnitude high.
-- **`claude`, 30 000 tokens/task and 120 s/task** (a stated constant, not a measurement). A live
+- **tokens, 75 000/task** (R5-P4; this section originally stated 8000). Measured on the committed
+  corpus, the scripted adapter spends **73,652 tokens/task at calibration's three attempts**
+  (3,682,586 tokens over 745 model calls for 50 pool tasks; about 24,551 an attempt, so a
+  two-attempt train task is about 49,102). The **276 tokens/task (131–654 across the 86 tasks)**
+  figure this section first quoted measured raw text length, not the meter, and understated the
+  cost by two orders of magnitude: the 8000 floor under-projected by about 9×. The floor is the
+  measurement rounded up, so it cannot under-project the corpus it was measured on.
+- **`claude`, 150 000 tokens/task and 120 s/task** (a stated constant, not a measurement). A live
   task is not one completion: it is several role turns plus a tool loop over a small repository,
   and every turn resends the system prompt, the tool list and the history, so the scripted figure
-  says nothing about it. Both numbers are deliberately high — the projection errs toward not
-  starting a run it cannot afford.
+  says nothing about it. R5-P4 requires this floor to be at least twice the scripted measurement;
+  it is, at 2.04× (and exactly twice the scripted floor). Both numbers are deliberately high — the
+  projection errs toward not starting a run it cannot afford.
 - **scripted/generic, 5 s/task.** The 86-task baseline runs in about 117 s (~1.36 s/task), so the
   floor is about 3.5×.
 
@@ -904,6 +909,57 @@ which is the same repo-relative shape the mask keeps elsewhere (it carries no ma
 The connector guard applies only to the first word of the run: a spaced filename in one clause
 (`refused /home/u/my secret notes.txt then stopped`) is still masked whole. Measured mutant: removing
 the guard reddens the new test (1 failing test).
+
+## Round 5 — the round-4 verifier findings
+
+### R5-P4 — the first-run projection is a measurement, and calibration records what it cost (round-4 finding R4-M2)
+
+The pre-run projection's first-run figure was 8000 tokens/task, justified by a "276 tokens/task"
+measurement. That figure was raw text length, not the meter, and it understated the scripted
+adapter by two orders of magnitude. Measured on the committed corpus, `maf goldens calibrate
+--adapter scripted` spent **3,682,586 tokens over 745 model calls for 50 pool tasks × 3 attempts —
+73,652 tokens/task** (about 24,551 an attempt; a two-attempt train task is about 49,102). A 44-task
+baseline therefore projected 352,000 tokens under an 8000 floor and started inside a 400,000-token
+budget while its real cost was about nine times that. The verifier's reproducer is now a test.
+
+The constants (`packages/evolver/src/budget.ts`):
+
+- `MEASURED_SCRIPTED_TOKENS_PER_TASK = 73_652`, recorded so the floors are stated in relation to the
+  measurement rather than to a guess.
+- `CONSERVATIVE_GOLDEN_TOKENS_PER_TASK = 75_000` — the measurement rounded up. Calibration runs
+  three attempts per task while the train baseline runs two, so on the run the loop projects, the
+  figure errs about 1.5× **high**: it cannot under-project the corpus it was measured on. A run that
+  passes the projection therefore overshoots by nothing on that corpus rather than by a task or
+  more, which is what the 8000 floor did.
+- `CONSERVATIVE_CLAUDE_TOKENS_PER_TASK = 150_000` — required to be at least twice the scripted
+  measurement; it is 2.04× the measured figure and exactly twice the scripted floor. A live task is
+  several role turns and a tool loop, so the scripted measurement does not size it; the constant is
+  a stated over-estimate, not a claim.
+- `claude` seconds stay 120 s/task and scripted seconds 5 s/task.
+
+Calibration now records the cost that produced the yardstick. `CalibrationRecord.usage`
+(`{ calls, tokens, tasks, attemptsPerTask, usd? }`) is written by `runCalibration` from a
+`UsageMeter` wrapping the adapter, read after the measured result returns (the `usage` thunk in
+`CalibrationOptions`), and `maf goldens calibrate` prints the total and per-task figure. A test that
+injects a deterministic result supplies no meter and the record claims no usage.
+
+A later session's **first** run then projects from that record instead of from a constant.
+`loadSplits` already parsed `calibration.json` to derive the held-out selection (R5-P3); it now also
+returns the parsed record, and `maf evolve` seeds `priorGoldenMeasurement` from it **only when the
+record's `adapter` is the run's own adapter** — a scripted measurement says nothing about what a
+live model will spend, so a differing adapter falls back to its constant. Three attempts against
+the train run's two make the seeded figure err high again. The loop's `goldenMeasured` starts from
+the seed, so the round note reads `… (measured 20000) …` rather than `(conservative estimate)`.
+
+Tests: `evolver.test.ts` projects a first run from a seeded measurement and refuses it
+(`10 tasks × 40000 tokens each (measured 40000) projects 400000 tokens`); `eval-commands.test.ts`
+runs `maf evolve --max-tokens 400000` against a 44-task train split and asserts `stopReason:
+budget`, the projection note at `44 × 75000`, and `usage.calls === 0` (44 × 8000 would have
+started it), and a second test seeds a `usage` record and asserts the note says `(measured 20000)`;
+`goldens-calibrate.test.ts` asserts the record carries the cost per task and that no meter means no
+`usage`. Three older tests that pinned the 8000 floor were updated with the figures the measurement
+implies (a priced $0.23/task and $4.50 projection; a measured 200,000/task crossing a 300,000
+ceiling; held-out repeats against 90,000), not weakened.
 
 ## Verification
 

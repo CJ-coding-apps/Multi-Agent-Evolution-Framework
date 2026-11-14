@@ -7,6 +7,7 @@ import path from 'node:path';
 import { Command } from 'commander';
 import { CALIBRATION_RULE, HELD_OUT_RULE } from '@maf/eval-harness';
 import { estimateTokens } from '@maf/types';
+import { CONSERVATIVE_GOLDEN_TOKENS_PER_TASK } from '@maf/evolver';
 import type { AdapterInvokeOptions, AdapterInvokeResult, CliAdapter } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { RoleRegistry, harnessRoleSetFromRegistry } from '@maf/roles';
@@ -334,8 +335,8 @@ test('R2-M1 budget: --max-tokens 2000 stops before the baseline, with the projec
     // R2-M1: the projection is printed before the baseline starts, so the stop is before it —
     // not after it has already overspent. With no earlier run to measure, the estimate is used.
     assert.match(report.rounds[0]?.note ?? '', new RegExp(
-      `the round-0 baseline was not started: ${trainCount} tasks × 8000 tokens each ` +
-      `\\(conservative estimate\\) projects ${trainCount * 8000} tokens; ` +
+      `the round-0 baseline was not started: ${trainCount} tasks × ${CONSERVATIVE_GOLDEN_TOKENS_PER_TASK} tokens each ` +
+      `\\(conservative estimate\\) projects ${trainCount * CONSERVATIVE_GOLDEN_TOKENS_PER_TASK} tokens; ` +
       '0 already spent against a 2000-token budget — not started'));
     // R4-A3 (amended by R5-P1): calibration retires the previous held-out tasks into `train`, and
     // the corpus has since grown, so the count is read rather than pinned. What must hold is that
@@ -347,6 +348,97 @@ test('R2-M1 budget: --max-tokens 2000 stops before the baseline, with the projec
     );
     assert.equal(report.usage?.calls, 0, 'nothing was dispatched: the stop happened before the baseline');
     assert.ok(logs.some((l) => l.includes('stop=budget')), logs.join('\n'));
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R5-P4 (round-4 finding R4-M2): the first-run projection must use the corpus's *measured* per-task
+// cost. At 44 tasks, the 8,000-token constant this replaced projected 352,000 tokens — inside a
+// 400,000-token budget, so the baseline started and overspent the budget many times over. The
+// measured floor refuses the same run before a single call.
+test('R5-P4: --max-tokens 400000 does not start a 44-task baseline', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    // The projection is over the train split, so the split is what makes the run 44 tasks. The
+    // tasks beyond the first 44 stay in the corpus as pool tasks, so it is still a partition.
+    const splits = JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as {
+      train: string[]; heldOut: string[]; pool?: string[];
+    };
+    const train = splits.train.slice(0, 44);
+    const pool = [...(splits.pool ?? []), ...splits.train.slice(44)];
+    await writeFile(path.join(corpus, 'splits.json'), JSON.stringify({ ...splits, train, pool }, null, 2), 'utf8');
+    await calibrateSplitForTest(corpus);
+
+    assert.ok(44 * CONSERVATIVE_GOLDEN_TOKENS_PER_TASK > 400_000, 'the measured floor refuses it');
+    assert.ok(44 * 8_000 < 400_000, 'the constant it replaced would have started it');
+
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(console, 'error', () => {});
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync([
+      'evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted', '--rounds', '1', '--max-tokens', '400000',
+    ], { from: 'user' });
+
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1);
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      stopReason: string; rounds: { outcome: string; note: string }[]; usage?: { calls: number };
+    };
+    assert.equal(report.stopReason, 'budget');
+    assert.equal(report.rounds[0]?.outcome, 'budget');
+    assert.match(report.rounds[0]?.note ?? '', new RegExp(
+      `the round-0 baseline was not started: 44 tasks × ${CONSERVATIVE_GOLDEN_TOKENS_PER_TASK} tokens each ` +
+      `\\(conservative estimate\\) projects ${44 * CONSERVATIVE_GOLDEN_TOKENS_PER_TASK} tokens; ` +
+      '0 already spent against a 400000-token budget — not started'));
+    assert.equal(report.usage?.calls, 0, 'no model call: the stop is the projection, not the meter');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R5-P4: when the calibration behind the split recorded what it cost, the first run of a session
+// projects from that measurement rather than from the constant — the same meter over the same
+// corpus — and the note a reader sees says "measured", not "conservative estimate".
+test('R5-P4: a first run projects from the calibration record and says it is measured', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    const splits = JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as { train: string[] };
+    // 1,000,000 tokens over 50 calibrated tasks: 20,000 a task, a figure unlike the 75,000 floor.
+    await calibrateSplitForTest(corpus, {
+      usage: { calls: 120, tokens: 1_000_000, tasks: 50, attemptsPerTask: 3 },
+    });
+    const trainCount = splits.train.length;
+
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(console, 'error', () => {});
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync([
+      'evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted', '--rounds', '1', '--max-tokens', '400000',
+    ], { from: 'user' });
+
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1);
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      stopReason: string; rounds: { outcome: string; note: string }[]; usage?: { calls: number };
+    };
+    assert.equal(report.stopReason, 'budget');
+    assert.match(report.rounds[0]?.note ?? '', new RegExp(
+      `the round-0 baseline was not started: ${trainCount} tasks × 20000 tokens each \\(measured 20000\\) ` +
+      `projects ${trainCount * 20_000} tokens; 0 already spent against a 400000-token budget — not started`));
+    assert.equal(report.usage?.calls, 0, 'no model call: the stop is the projection, not the meter');
   } finally {
     process.exitCode = saved;
     await rm(root, { recursive: true, force: true });

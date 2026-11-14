@@ -16,7 +16,10 @@ export { evolve, HELD_OUT_REPEATS } from './loop.js';
 export type {
   EvolveOptions, EvolveReport, EvolveRoundRecord, HeldOutReport, JudgeScoredHeldOut, SensitiveEvaluation, UnrecordedGolden,
 } from './loop.js';
-export { EvolveBudget, projectGoldenRun, CONSERVATIVE_GOLDEN_TOKENS_PER_TASK } from './budget.js';
+export {
+  EvolveBudget, projectGoldenRun, CONSERVATIVE_GOLDEN_TOKENS_PER_TASK,
+  MEASURED_SCRIPTED_TOKENS_PER_TASK,
+} from './budget.js';
 export type { GoldenRunProjection, GoldenRunMeasurement } from './budget.js';
 export { UsageMeter, meterAdapter } from './usage.js';
 export type { UsageCall, UsageSnapshot, UsageSource } from './usage.js';

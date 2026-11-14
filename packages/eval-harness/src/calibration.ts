@@ -228,6 +228,24 @@ export function applyCalibration(
 }
 
 /**
+ * R5-P4 (round-4 finding R4-M2): what the measurement actually cost, read from the same meter that
+ * charges an evolution run. `tasks` is how many tasks were measured and each was measured
+ * `attemptsPerTask` times, so a later projection can compare the attempt count it is projecting
+ * with the one this figure came from. With a record, a first run projects from the corpus's own
+ * measurement; without one it must use the conservative constant.
+ */
+export interface CalibrationUsage {
+  /** Model calls through the meter — every one, not one per task. */
+  calls: number;
+  tokens: number;
+  /** Tasks measured; `tokens / tasks` is the per-task figure a projection uses. */
+  tasks: number;
+  /** Base runs per task in this measurement (CALIBRATION_RUNS). */
+  attemptsPerTask: number;
+  usd?: number;
+}
+
+/**
  * The committed record of one calibration run. `harnessSha` and `ranAt` make it possible to say
  * which base harness produced these counts, months later; `rule` repeats the selection rule so the
  * file can be audited without reading this source; `selection` records the decision, including what
@@ -253,6 +271,8 @@ export interface CalibrationRecord {
   /** Attempts that ended in an error, by task: a crash is not a measurement. */
   errors: { taskId: string; attempt: number; error: string }[];
   selection: CalibrationSelection;
+  /** R5-P4: what the measurement cost, when the caller metered it. */
+  usage?: CalibrationUsage;
 }
 
 export const CALIBRATION_RULE =
