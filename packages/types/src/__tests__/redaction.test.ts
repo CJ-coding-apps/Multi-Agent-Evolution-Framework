@@ -115,3 +115,19 @@ test('a clause connector between two paths ends the spaced-path run (R3-L4)', ()
   assert.equal(redactEvidenceText('refused /home/u/my secret notes.txt then stopped'),
     'refused [REDACTED:path] then stopped');
 });
+
+// R4-L1: `and` and `or` were treated as clause connectors, but a directory can be named "Tom and
+// Jerry". Ending the run at `and` left the head unclosed and the second half was never a head, so
+// the whole path reached the evidence. They are ordinary path words now; `then` and the rest still
+// end a run.
+test('a directory named "Tom and Jerry" is masked whole (R4-L1)', () => {
+  assert.equal(redactEvidenceText('read /Users/Tom and Jerry/secret.txt'),
+    'read [REDACTED:path]');
+  assert.equal(redactEvidenceText('read /Users/Tom or Jerry/secret.txt'),
+    'read [REDACTED:path]');
+  assert.equal(redactEvidenceText('read /Users/Tom and Jerry/secret.txt then stopped'),
+    'read [REDACTED:path] then stopped', 'then still ends the run');
+  // Prose that happens to contain "and" after a bare path is still prose: no file-naming or
+  // separating word follows within the run, so nothing beyond the head is swallowed.
+  assert.equal(redactEvidenceText('denied /etc/passwd and more'), 'denied [REDACTED:path] and more');
+});

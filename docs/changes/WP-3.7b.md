@@ -997,6 +997,20 @@ refused). The CLI suite runs a real scripted probe on the committed corpus — t
 sampled task, so the projection is zero, exit 1, the file is written, metered, and `splits.json` is
 byte-identical with no `calibration.json` — and asserts both refusals happen before anything runs.
 
+### R4-L1 — `and` and `or` are path words, not clause connectors
+
+R3-L4's guard ends a spaced-path run at a clause connector, and it listed `and` and `or` beside
+`then`, `but`, `so` and `yet`. But a directory may be named after anything: `read
+/Users/Tom and Jerry/secret.txt` ended the run at `and`, leaving `/Users/Tom` as a head that names
+no file, while `Jerry/secret.txt` never matched a head at all — the whole path reached the evidence
+unredacted. Both words are ordinary path words now; the guard keeps `then`, `but`, `so` and `yet`,
+none of which plausibly opens a path segment. Prose is not over-swallowed: after a bare path,
+`denied /etc/passwd and more` has no file-naming or separating word within the run, so only the
+head is masked.
+
+Tests: the `and` and `or` forms are masked whole, `then` still ends the run, and the prose case
+still masks only the head. `@maf/types` 56/56 and the evolver's leak screen 85/85.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

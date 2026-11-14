@@ -115,7 +115,10 @@ const NAMES_FILE = /\.[A-Za-z0-9]{1,8}(?::\d+)?$/;
 const MAX_SPACED_WORDS = 3;
 // R3-L4: a clause connector ends the path. `wrote /tmp/x then src/foo.ts was read` names two
 // things; `then` cannot be a directory, and swallowing it (with the next path) lost the prose.
-const SPACED_CONNECTORS = new Set(['then', 'and', 'but', 'or', 'so', 'yet']);
+// R4-L1: `and` and `or` are NOT connectors here — a directory can be named "Tom and Jerry", and
+// ending the run at `and` left `/Users/Tom` unclosed while `Jerry/secret.txt` was never even a
+// head, so the whole path leaked. The remaining words cannot plausibly open a path segment.
+const SPACED_CONNECTORS = new Set(['then', 'but', 'so', 'yet']);
 
 function spacedPathTail(text: string, from: number, head: string): number | undefined {
   const headNamesFile = NAMES_FILE.test(head);
