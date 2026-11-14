@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -86,6 +86,49 @@ test('runner: failing dispatcher marks task failed without crashing the suite', 
     const r = await runner.run();
     assert.deepEqual(r.solvedTaskIds, []);
     assert.match(r.tasks[0]?.attempts[0]?.error ?? '', /boom/);
+  });
+});
+
+// R5-P1: the pool's acceptance checks live under `.checks/` and must never reach the worktree the
+// agent edits — a visible test is what made the pool too easy. The runner copies them in only after
+// the diff has been taken, so this test watches both halves: the dispatcher sees neither `.checks/`
+// nor the check file, and the `test-script` verifier still finds and passes it. Without the second
+// half every pool task would be silently unsolvable, which the scripted baseline cannot notice —
+// its pool tasks fail by design, with or without a check to fail against.
+test('runner: a hidden check is absent from the agent worktree and runs for scoring (R5-P1)', async () => {
+  await withCorpus(async (root) => {
+    const repo = path.join(root, 'fixtures/hello');
+    await mkdir(path.join(repo, '.checks'), { recursive: true });
+    await writeFile(path.join(repo, '.checks/check.js'),
+      "const assert = require('node:assert');\nconst { value } = require('./impl');\nassert.equal(value(), 42);\n",
+      'utf8');
+    const task: GoldenTask = {
+      ...TASK,
+      hiddenChecks: ['.checks/check.js'],
+      verifiers: [{ kind: 'test-script', command: 'node', args: ['check.js'], expectExit: 0 }],
+    };
+    await writeFile(path.join(root, 'corpus.json'), JSON.stringify([task]), 'utf8');
+    await execFileAsync('git', ['add', '-A'], { cwd: repo });
+    await execFileAsync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'checks'], { cwd: repo });
+
+    const seen: string[] = [];
+    const runner = new GoldenRunner({
+      corpusRoot: root, harnessSha: 'c'.repeat(64), harnessId: 'h3', adapter: 'stub', attempts: 1,
+      dispatch: async (_t, workDir) => {
+        for (const name of ['.checks', 'check.js']) {
+          try {
+            await access(path.join(workDir, name));
+            seen.push(name);
+          } catch { /* absent, as it must be */ }
+        }
+        await writeFile(path.join(workDir, 'impl.js'), 'exports.value = () => 42;\n', 'utf8');
+        return 'wrote impl';
+      },
+    });
+    const r = await runner.run();
+    assert.deepEqual(seen, [], 'the worktree the agent edits holds no check');
+    assert.deepEqual(r.solvedTaskIds, ['t-hello'], 'the scorer materialized the check and it passed');
+    assert.equal(r.tasks[0]?.attempts[0]?.outcomes[0]?.passed, true);
   });
 });
 

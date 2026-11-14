@@ -923,7 +923,12 @@ has been taken, the runner copies each check to its path below the worktree root
 still resolves the fixture's own modules), runs the verifiers, and removes them again. The task text
 states the requirement and never points at a test. A task that declares `hiddenChecks` cannot also
 declare `mustNotModify`, because its checks are not in the worktree to protect; the corpus validator
-refuses the pair.
+refuses the pair. Both halves now have a test of their own: `eval-harness.test.ts` commits a
+`.checks/check.js`, has the dispatcher look for `.checks/` and `check.js` in its worktree and write a
+passing `impl.js`, and asserts that the agent saw neither name while the `test-script` verifier still
+ran the materialized check and passed. The half a passing check does not prove is the half that
+matters most: a missing copy-in would make every pool task silently unsolvable, and the scripted
+baseline cannot notice because its pool tasks fail by design either way.
 
 **Fifty tasks.** The 15 new pool tasks need more than a one-line fix: five span two files
 (invoice+money, segments+router, transitions+machine, env+config, url+links), five are small
