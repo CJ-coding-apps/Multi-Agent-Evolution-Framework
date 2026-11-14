@@ -958,6 +958,27 @@ pool task (61 solved of 116). Its stand-in now reports the tokens available befo
 it allows: a genuinely failing plausible fix. The baseline is 60 of 116 again, with all fifty pool
 tasks failing by construction; corpus sha `227cf9f7…`.
 
+### R5-P3 — the held-out set is the one its calibration derives (round-4 finding R4-M1)
+
+The gate may only score a yardstick that came from a measurement. `loadSplits` now parses the
+`calibration.json` the split's preRegistration names, recomputes `selectCalibrated(counts)` with the
+same seed, the same three-run rule and the same twenty-task cap this build implements, and refuses
+unless the result equals `heldOut` exactly, order included. A reviewed edit that swaps one task for
+another is no longer a valid split; the refusal names both sets and says to re-run `maf goldens
+calibrate`.
+
+A split with `calibrationSha: null` is refused by `evolve` before the stack is built, the adapter is
+resolved or a token is spent: a yardstick with no measurement behind it was hand-picked, however
+sensible it looks. `goldens run` reads no split and is unaffected.
+
+Tests: a hand-edited `heldOut` (one task swapped) is refused at load; a null sha with the seed's
+hand-picked held-out tasks is refused by the command with exit 2 and nothing built. Splits and
+calibration 13/13, eval-harness 65/65. The CLI suites that drive `evolve` for real now hand it a
+corpus copy carrying a synthetic record for its own split, marked `harnessId: test-fixture`, so no
+test data is written into the repository's calibration. The budget test's train-side pin (44) moved
+to the 59 R5-P1's growth produced, and now asserts what its comment claims: the split is still a
+partition of the corpus, no task lost when a yardstick moves.
+
 ### R5-P4 — the first-run projection is a measurement, and calibration records what it cost (round-4 finding R4-M2)
 
 The pre-run projection's first-run figure was 8000 tokens/task, justified by a "276 tokens/task"
