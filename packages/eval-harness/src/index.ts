@@ -4,11 +4,16 @@ export type { VerifierContext, VerifierOutcome } from './verifiers.js';
 export { runVerifier, runVerifiers, checkUnmodified } from './verifiers.js';
 export type {
   TaskDispatcher, GoldenRunnerOptions, GoldenSuiteResult, GoldenTaskResult,
-  AttemptResult, SeesawDecision,
+  AttemptResult, SeesawDecision, RecordedSurface, GoldenRunLimit, ContaminatedAttempt,
 } from './GoldenRunner.js';
 export { GoldenRunner, seesawDecision } from './GoldenRunner.js';
 export { ScoreRecorder } from './ScoreRecorder.js';
 export { computeCorpusSha } from './corpusSha.js';
+export type { HiddenStoreFile } from './hiddenStore.js';
+export {
+  HIDDEN_STORE_FILE, CANARY_PREFIX, hiddenStorePath, hiddenStoreMarkers, findHiddenMarkers,
+  loadHiddenStore, readHiddenFile, hiddenPaths, canaryToken, injectCanary, encodeHidden, decodeHidden,
+} from './hiddenStore.js';
 export type { CorpusSplits, LoadedSplits, SplitName } from './splits.js';
 export { SPLITS_FILE, MIN_HELD_OUT, SplitsError, computeSplitsSha, isDeterministicTask, isJudgeScored, loadSplits } from './splits.js';
 export type {

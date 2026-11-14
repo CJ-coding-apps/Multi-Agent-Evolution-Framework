@@ -27,6 +27,7 @@ import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { ensureMafDir } from '../ensureMafDir.js';
 import { RESOLVER_REFS, buildRunStack, harnessDriftNotice, resolveCorpusRoot, resolveRunHarness } from '../wiring.js';
 import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
+import { recordedSurfacesFrom } from '../goldenSurfaces.js';
 import type { PolicyChoice } from '../wiring.js';
 import { loadHarnessFile, locateStoredHarness } from './harness.js';
 
@@ -180,6 +181,10 @@ export async function runGoldenSuite(o: GoldenSuiteOptions): Promise<{ result: G
           return stack.dispatchTask(o.harness, task.role, task.prompt, workDir, timeoutMs, temperature, task.id);
         },
         llmJudge: { verdict: makeLlmJudge(o.judge, o.cwd), disclosure: describeJudge(agent, judge) },
+        // R6-H1: a hidden check or reference read during the run reaches the record here — the tool
+        // calls the dispatch attested (a `test.run` script lives in the input) and the transcripts.
+        recordedSurfaces: recordedSurfacesFrom(
+          stack.attestor, path.join(evalDir, 'transcripts', `${o.runId}.jsonl`)),
         securityScore: async (diff) => {
           if (!diff.trim()) return 'none';
           const gate = new SecurityReviewGate({

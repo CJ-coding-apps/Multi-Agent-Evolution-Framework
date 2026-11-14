@@ -1769,6 +1769,37 @@ test('D-57 held-out: a broad gain over twenty tasks clears the exact stratified 
     assert.notEqual((r as { split?: string }).split, 'held-out', 'a held-out result was recorded');
 });
 
+test('R6-H1: one contaminated held-out attempt makes the gate refuse an improvement', async () => {
+  // The same gain the test above clears, with one candidate attempt voided for reading a hidden
+  // check. The counts would otherwise still clear the test; the gate must refuse anyway.
+  const clean = heldOutRunner(CURRENT, {
+    base: [['t1', 't2', 't3']], candidate: [['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8']],
+  });
+  let candidateRuns = 0;
+  const runHeldOut = async (h: HarnessConfig): Promise<GoldenSuiteResult> => {
+    const r = await clean(h);
+    if (h.sha !== CURRENT.sha && ++candidateRuns === 1)
+      return {
+        ...r,
+        contamination: {
+          attempts: [{ taskId: 't4', attempt: 1, evidence: ['the final assistant output'] }],
+          statement: '1 attempt was voided; this result cannot support an improvement claim.',
+        },
+      };
+    return r;
+  };
+  const report = await evolve(loopOpts({
+    metaGenerate: improveManifest(), runHeldOut, heldOutSplitsSha: SPLITS_SHA,
+  }));
+  const held = report.heldOut!;
+  assert.equal(held.gate!.improved, false, 'a contaminated session cannot claim an improvement');
+  assert.match(held.gate!.reason ?? '', /hidden check or reference was read/);
+  assert.equal(held.contamination?.attempts.length, 1);
+  assert.match(held.contamination?.attempts[0]?.evidence.join('\n') ?? '', /final assistant output/);
+  assert.match(held.statement, /no improvement — a hidden check or reference was read/);
+  assert.match(held.contamination?.statement ?? '', /refuses an improvement claim/);
+});
+
 test('D-57 held-out: no gain is no improvement, and the report says why', async () => {
   const solved = ['t1', 't2'];
   const report = await evolve(loopOpts({

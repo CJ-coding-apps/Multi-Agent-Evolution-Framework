@@ -917,8 +917,11 @@ the guard reddens the new test (1 failing test).
 The round-4 verdict put a 60–80% chance on fewer than 20 of the 35 pool tasks qualifying: a
 one-function fix with a visible test is too easy, so the yardstick would not exist. Three changes.
 
-**Hidden checks.** A task's acceptance test moves into the fixture's `.checks/` directory, which the
-golden runner leaves out of the worktree it hands the agent. After the agent finishes and the diff
+**Hidden checks.** (Superseded by R6-H1: the fixture's `.checks/` directory was readable by the
+agent's own code, so the checks now live in an encoded store and are decoded only after the agent
+has stopped. The behaviour described in this paragraph — out of the worktree, copied in for scoring,
+removed again — is otherwise unchanged.) A task's acceptance test moves into the fixture's
+`.checks/` directory, which the golden runner leaves out of the worktree it hands the agent. After the agent finishes and the diff
 has been taken, the runner copies each check to its path below the worktree root (so `node test.js`
 still resolves the fixture's own modules), runs the verifiers, and removes them again. The task text
 states the requirement and never points at a test. A task that declares `hiddenChecks` cannot also
@@ -1195,3 +1198,59 @@ committed sample closes it, and that assertion is now in `calibration.test.ts`.
   them; R2-H1 removed it. The CLI already depends on `@maf/processors` and hands the refs to the
   loop as `defaultBundleRefs`, so `@maf/evolver` stays where it was and `pnpm-lock.yaml` is
   untouched. `check:workspace-deps` measures 27 packages, 94 internal edges, acyclic.
+
+## Round 6 — the round-5 verifier findings
+
+### R6-H1 (D-57) — hidden checks are no longer plain files, and a read that reaches the record voids the attempt
+
+The round-5 verifier read a pool task's hidden check during a run: a `test.run` script found the
+corpus through `/proc/<pid>/cwd`, read `fixtures/pool-lru/.checks/test.js`, and printed it. The
+check was in the fixture the runner copied for the agent, so the agent's own code could read it. The
+verifier's fix is detection plus cheap prevention; sandboxing is 0.7.0's.
+
+**Not on disk during the run.** Every hidden check and reference is now stored gzip-compressed and
+base64-encoded in one file, `tests/goldens/hidden-store.json` (`{version: 1, encoding:
+'gzip+base64', checks: {taskId: {rel: encoded}}, references: …}`), mirrored byte-for-byte into
+`packages/cli/assets/goldens/hidden-store.json`. The plaintext `.checks/` and `.reference/`
+directories are gone from both fixture trees. A run decodes a task's checks into a fresh directory
+(`mkdtemp`, mode `0700`) only after the attempt's agent session has ended — the dispatcher has
+returned and its process group is dead — scores there, and removes it in a `finally`. The store is
+built by `scripts/build-hidden-store.mjs` (`--from-fixtures`, `build`, `extract`), which imports the
+package's own encoder so the writer and the reader cannot disagree about the format. It holds 50
+check files for 50 tasks and 73 reference files for 65 tasks, 48 302 bytes; every decoded file is a
+canary line followed by the original text, verified against the removed plaintext before the
+deletion. The corpus sha covers the decoded checks (it always did), so `computeCorpusSha` now reads
+them from the store, and the offline baseline was regenerated: `corpusSha` `b5492729…` →
+`1c2d1506…`, solved unchanged at 60/116.
+
+**Hidden markers, and a record that is scanned.** Every hidden file's first line carries
+`maf-hidden-canary-<16 hex>`, derived from the task id and the fixture-relative path. After each
+attempt the runner scans the final answer, every tool call the run attested (input and
+stdout/stderr — where a `test.run` script and its output live), the run's transcript, and the
+worktree the attempt leaves, for any canary and for the store's own file name. A hit voids the
+attempt: it is scored as a failure with `contaminated: {evidence}` and no verifier is run against it.
+`goldens run` and `evolve` wire the attested calls and the run's transcript through
+`recordedSurfacesFrom` (`packages/cli/src/goldenSurfaces.ts`); the runner adds the answer and the
+worktree. A contaminated held-out attempt makes the gate refuse an improvement claim: `evaluateHeldOut`
+overrides the stratified verdict to `improved: false` with a reason naming each voided attempt, and
+the report carries `contamination` beside the gate.
+
+**The limit, stated plainly** (also in `docs/SECURITY.md`, *Hidden evaluation material is detected,
+not sandboxed*): with no sandbox, any file the agent's code can read it can also read. The encoded
+store is a file on the same disk and a determined program can decode it, or find the decoded copy
+while another check is scored. The canary scan detects a read that reaches the record — the output,
+a tool call, the transcript, the worktree — and stops casual snooping; it cannot see a program that
+reads the material and never lets the text reach a recorded surface. That remains out of scope until
+0.7.0.
+
+**Tests.** `contamination.test.ts` (5): the `/proc/<pid>/cwd` shape (a check and its canary in the
+final output), a canary in a tool call's stdout, the store's name in the record, a canary written
+into the final worktree — each voids the attempt and appears in the session report — and a clean
+attempt that still passes and records no canary. `evolver.test.ts` adds: the same broad gain that
+clears the exact test, with one contaminated candidate attempt, is `improved: false`. The
+golden-runner R5-P1 test and `reference-solutions.test.ts` now read the store; the reference proof
+still passes all 50 tasks (and refuses a fixture that ships a plaintext hidden directory).
+
+**Mutants** (applied to the compiled `dist/`, observed red, reversed): `hiddenStoreMarkers()` → `[]`
+(canary scan off) reddens 4; skipping the contaminated early return (scoring it normally) reddens 4;
+the gate taking the stratified verdict unconditionally reddens 5, the new test among them.

@@ -25,6 +25,7 @@ import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
 import type { RunStack } from '../wiring.js';
 import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
+import { recordedSurfacesFrom } from '../goldenSurfaces.js';
 import { resolveGoldensHarness } from './goldens.js';
 
 /**
@@ -279,6 +280,11 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
             verdict: makeLlmJudge({ adapter: meteredAdapter, ...(opts.model ? { model: opts.model } : {}) }, cwd),
             disclosure: describeJudge(agent, agent),
           },
+          // R6-H1: a hidden check or reference read during an attempt reaches the record here —
+          // the calls the dispatch attested and the run's transcript. A contaminated attempt is
+          // void, and a contaminated held-out run makes the gate refuse an improvement claim.
+          recordedSurfaces: recordedSurfacesFrom(
+            runStack.attestor, path.join(mafDir, 'transcripts', `${runId}.jsonl`)),
           securityScore,
         });
 

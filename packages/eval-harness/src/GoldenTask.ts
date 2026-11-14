@@ -32,12 +32,12 @@ export interface GoldenTask {
    */
   mustNotModify?: string[];
   /**
-   * WP-3.7b R5-P1: acceptance checks the agent never sees. Each entry is a fixture-relative path
-   * below `.checks/`. The runner leaves the whole directory out of the worktree it hands the
-   * agent, and copies each file in — at its path below `.checks/` — only after the agent has
-   * finished and the diff has been taken. The task text must state the requirement, never the
-   * test: a visible test turns a fix into copying an answer, which is what made the pool too easy
-   * to calibrate.
+   * WP-3.7b R5-P1, R6-H1: acceptance checks the agent never sees. Each entry is a path below
+   * `.checks/` that keys the encoded hidden store (`hidden-store.json`); it is not a file in the
+   * fixture. The runner decodes the check into a private directory only after the agent has
+   * finished and the diff has been taken, scores there, and removes it. The task text must state
+   * the requirement, never the test: a visible test turns a fix into copying an answer, which is
+   * what made the pool too easy to calibrate.
    */
   hiddenChecks?: string[];
   provenance: GoldenProvenance;

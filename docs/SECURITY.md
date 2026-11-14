@@ -837,3 +837,31 @@ does not exist.
 The permission levels are the registry's — the same `ToolPlugin.permissionLevel` the run builds its
 tool surface from — and `maf evolve` passes the map in from `createDefaultRegistry()`, so the gate
 cannot disagree with the tools it is judging.
+
+### Hidden evaluation material is detected, not sandboxed
+
+A held-out or pool task's acceptance checks and reference solutions must not reach the agent being
+measured: an agent that can read the test can pass it without doing the work, and the score is what
+the whole evaluation is for. maf keeps them out of the worktree the agent edits, and since 0.6.0 they
+are not plain files in the repository either: `tests/goldens/hidden-store.json` holds each one
+gzip-compressed and base64-encoded, and a run decodes a task's checks into a fresh directory owned by
+that run (mode `0700`, under the system temporary directory) only after the attempt's agent session
+has ended and its process group is gone. Scoring runs there, and the directory is removed in a
+`finally`.
+
+That is cheap prevention for a casual attempt, not a boundary for a determined program. **There is no
+sandbox until 0.7.0: any file the agent's code can read, it can also read.** The encoded store is a
+file on the same disk, and code running as your user can open and decode it, or find the decoded copy
+while another check is being scored. Nothing in 0.6.0 prevents that.
+
+What maf can do is **detect a read that reaches the record, and void the attempt**. Every hidden check
+and reference carries a unique canary (`maf-hidden-canary-…`) on its first line that is not a valid
+part of the program otherwise. After each attempt the runner scans the final answer, every tool call
+the run attested (its input and its stdout/stderr — where a `test.run` script and its output live),
+the run's transcript, and the worktree the attempt leaves, for any canary and for the encoded store's
+own name. A hit voids the attempt: it is scored as a failure, marked `contaminated` with the evidence,
+and listed in the session report; **one contaminated attempt in a held-out gate session makes the
+gate refuse an improvement claim**, whatever the counts say. This catches a read that reaches the
+record and stops casual snooping. It cannot see a program that reads the material and never lets the
+text reach any surface maf records — that remains out of scope until the sandbox exists, stated here
+rather than implied.

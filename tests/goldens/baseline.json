@@ -1,7 +1,7 @@
 {
   "harnessSha": "3124b5a9d019624e7e6e6a5d9983244a442eeeb15050f2867c66fd806b618379",
   "harnessId": "legacy-default",
-  "corpusSha": "b5492729f546fccffc4168851e3df6bd6cb6f948163abc932b93b3bf427597c8",
+  "corpusSha": "1c2d1506109b3c6368776fb52535dae260056c40effcf10130aec20d383e9964",
   "attempts": 2,
   "adapter": "scripted",
   "judge": {

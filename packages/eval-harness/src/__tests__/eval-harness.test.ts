@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   GoldenRunner, GoldenCorpusError, assertGoldenCorpus, seesawDecision, runVerifier,
+  encodeHidden, injectCanary, HIDDEN_STORE_FILE,
 } from '../index.js';
 import type { GoldenTask, GoldenSuiteResult, VerifierContext } from '../index.js';
 
@@ -89,27 +90,28 @@ test('runner: failing dispatcher marks task failed without crashing the suite', 
   });
 });
 
-// R5-P1: the pool's acceptance checks live under `.checks/` and must never reach the worktree the
-// agent edits — a visible test is what made the pool too easy. The runner copies them in only after
-// the diff has been taken, so this test watches both halves: the dispatcher sees neither `.checks/`
-// nor the check file, and the `test-script` verifier still finds and passes it. Without the second
-// half every pool task would be silently unsolvable, which the scripted baseline cannot notice —
-// its pool tasks fail by design, with or without a check to fail against.
+// R5-P1 / R6-H1: the pool's acceptance checks must never reach the worktree the agent edits — a
+// visible test is what made the pool too easy — and they are not plain files in the fixture either.
+// This test watches both halves: the fixture tree holds no `.checks/`, the dispatcher sees neither
+// `.checks/` nor the check file, and the `test-script` verifier still finds and passes the check
+// decoded from the store. Without the second half every pool task would be silently unsolvable,
+// which the scripted baseline cannot notice — its pool tasks fail by design, with or without a
+// check to fail against.
 test('runner: a hidden check is absent from the agent worktree and runs for scoring (R5-P1)', async () => {
   await withCorpus(async (root) => {
     const repo = path.join(root, 'fixtures/hello');
-    await mkdir(path.join(repo, '.checks'), { recursive: true });
-    await writeFile(path.join(repo, '.checks/check.js'),
-      "const assert = require('node:assert');\nconst { value } = require('./impl');\nassert.equal(value(), 42);\n",
-      'utf8');
     const task: GoldenTask = {
       ...TASK,
       hiddenChecks: ['.checks/check.js'],
       verifiers: [{ kind: 'test-script', command: 'node', args: ['check.js'], expectExit: 0 }],
     };
+    const check = "const assert = require('node:assert');\nconst { value } = require('./impl');\nassert.equal(value(), 42);\n";
+    await writeFile(path.join(root, HIDDEN_STORE_FILE), JSON.stringify({
+      version: 1, encoding: 'gzip+base64',
+      checks: { [task.id]: { '.checks/check.js': encodeHidden(injectCanary(check, task.id, '.checks/check.js')) } },
+      references: {},
+    }), 'utf8');
     await writeFile(path.join(root, 'corpus.json'), JSON.stringify([task]), 'utf8');
-    await execFileAsync('git', ['add', '-A'], { cwd: repo });
-    await execFileAsync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'checks'], { cwd: repo });
 
     const seen: string[] = [];
     const runner = new GoldenRunner({

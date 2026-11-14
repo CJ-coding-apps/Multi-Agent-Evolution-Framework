@@ -1,7 +1,9 @@
 import type { PermissionLevel, RunId } from '@maf/types';
 import type { HarnessConfig, ProcessorRef } from '@maf/harness-config';
 import { HELD_OUT_RULE, stratifiedGate } from '@maf/eval-harness';
-import type { GoldenSuiteResult, HeldOutGateVerdict, HeldOutTaskPasses } from '@maf/eval-harness';
+import type {
+  ContaminatedAttempt, GoldenSuiteResult, HeldOutGateVerdict, HeldOutTaskPasses,
+} from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { digestEvidence, heldOutScrubber, isEmptyDigest } from './digester.js';
 import type { UsageSnapshot } from './usage.js';
@@ -217,6 +219,11 @@ export interface HeldOutReport {
    * scored (see `skipped`).
    */
   gate?: HeldOutGateVerdict;
+  /**
+   * R6-H1: held-out attempts voided for reading hidden material. Present when there were any; the
+   * gate's verdict is then `improved: false` whatever the counts say.
+   */
+  contamination?: { attempts: ContaminatedAttempt[]; statement: string };
   statement: string;
   /** Present when the split was not scored, with the reason. */
   skipped?: string;
@@ -493,7 +500,29 @@ async function evaluateHeldOut(
   const perTask: HeldOutTaskPasses[] = deterministicIds.map((taskId) => ({
     taskId, base: passes(baselineRuns, taskId), candidate: passes(candidateRuns, taskId),
   }));
-  const gate = stratifiedGate(perTask, HELD_OUT_RULE);
+  // R6-H1: a hidden check or reference read during a held-out attempt is already scored as a
+  // failure by the runner. It also voids the gate's claim: a candidate cannot improve by reading
+  // the answers, and the counts cannot say which attempts were clean. One contaminated attempt in
+  // the session makes the gate refuse an improvement outright.
+  const contamination = (['baseline', 'candidate'] as const).flatMap((phase) =>
+    (phase === 'baseline' ? baselineRuns : candidateRuns)
+      .flatMap((r) => (r.contamination?.attempts ?? []).map((a) => ({ phase, ...a }))));
+  const measured = stratifiedGate(perTask, HELD_OUT_RULE);
+  const gate: HeldOutGateVerdict = contamination.length === 0 ? measured : {
+    ...measured,
+    improved: false,
+    reason: `a hidden check or reference was read during the held-out session — ${contamination
+      .map((c) => `${c.phase} ${c.taskId} attempt ${c.attempt} (${c.evidence.join('; ')})`)
+      .join('; ')}`,
+  };
+  const contaminationReport = contamination.length === 0
+    ? undefined
+    : {
+      attempts: contamination.map(({ taskId, attempt, evidence }) => ({ taskId, attempt, evidence })),
+      statement:
+        `${contamination.length} held-out attempt${contamination.length === 1 ? ' was' : 's were'} ` +
+        'voided for reading hidden material; the gate refuses an improvement claim.',
+    };
   const judgeIds = [...judgeScored].filter((id) => baselineRuns[0]!.tasks.some((t) => t.taskId === id)).sort();
   const judgeScoredReport: JudgeScoredHeldOut | undefined = judgeIds.length === 0
     ? undefined
@@ -522,6 +551,7 @@ async function evaluateHeldOut(
     candidateScores,
     ...(judgeScoredReport !== undefined ? { judgeScored: judgeScoredReport } : {}),
     gate,
+    ...(contaminationReport !== undefined ? { contamination: contaminationReport } : {}),
     statement:
       `held-out: ${gate.H} deterministic task${gate.H === 1 ? '' : 's'} × ${repeats} single attempts each — ${perTaskText}; ` +
       `S = ${gate.S}; p = ${gate.p} (exact one-sided stratified permutation over ${gate.H} hypergeometric tasks); ` +

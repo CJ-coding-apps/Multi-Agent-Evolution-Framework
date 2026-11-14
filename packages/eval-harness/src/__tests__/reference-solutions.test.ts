@@ -1,16 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { assertGoldenCorpus, runVerifiers } from '../index.js';
+import {
+  assertGoldenCorpus, hiddenPaths, loadHiddenStore, readHiddenFile, runVerifiers,
+} from '../index.js';
 
-// ORACLE (WP-3.7b R5-P2): every hidden-check task is proven both solvable and failing, offline.
-// The unmodified fixture must fail the checks the runner copies in, and a shipped `.reference/`
-// solution must pass them. Neither artifact is visible to the agent: `.checks/` is materialized
-// only after the agent finishes, and `.reference/` never enters a run at all. A task whose check
-// no verifier runs, whose reference is missing, or whose reference does not actually pass is a
-// task that cannot be calibrated honestly, so it cannot be committed.
+// ORACLE (WP-3.7b R5-P2, R6-H1): every hidden-check task is proven both solvable and failing,
+// offline. The unmodified fixture must fail the checks the runner decodes, and the task's stored
+// reference solution must pass them. Neither artifact is a plain file the agent can read: both live
+// in the encoded hidden store, and the runner decodes a task's checks into a private directory
+// only after the agent has finished. A task whose check no verifier runs, whose reference is
+// missing, or whose reference does not actually pass is a task that cannot be calibrated honestly,
+// so it cannot be committed.
 
 const CORPUS = path.resolve(__dirname, '../../../../tests/goldens');
 const NEVER_IN_WORKTREE = new Set(['.checks', '.reference']);
@@ -20,23 +23,25 @@ interface Staged {
   cleanup: () => Promise<void>;
 }
 
-/** A fixture copy as the agent sees it: everything but `.checks/` and `.reference/`. */
-async function stage(fixtureDir: string, withReference: boolean): Promise<Staged> {
+/** A fixture copy as the agent sees it: no hidden directory exists in the fixture at all. */
+async function stage(fixtureDir: string): Promise<Staged> {
   const dir = await mkdtemp(path.join(tmpdir(), 'maf-reference-'));
   await cp(fixtureDir, dir, {
     recursive: true,
     filter: (src) => !path.relative(fixtureDir, src).split(path.sep).some((seg) => NEVER_IN_WORKTREE.has(seg)),
   });
-  if (withReference) await cp(path.join(fixtureDir, '.reference'), dir, { recursive: true });
   return { dir, cleanup: async () => { await rm(dir, { recursive: true, force: true }); } };
 }
 
-/** Copy each hidden check to the path below `.checks/` where the task's verifier runs it. */
-async function placeChecks(fixtureDir: string, dir: string, checks: readonly string[]): Promise<void> {
-  for (const rel of checks) {
-    const target = path.join(dir, rel.slice('.checks/'.length));
+/** Write stored files at their path below their hidden directory (`dir` is the fixture root). */
+async function place(
+  store: Awaited<ReturnType<typeof loadHiddenStore>>, section: 'checks' | 'references',
+  taskId: string, dir: string,
+): Promise<void> {
+  for (const rel of hiddenPaths(store, section, taskId)) {
+    const target = path.join(dir, rel.slice(`.${section === 'checks' ? 'checks' : 'reference'}/`.length));
     await mkdir(path.dirname(target), { recursive: true });
-    await copyFile(path.join(fixtureDir, rel), target);
+    await writeFile(target, readHiddenFile(store, section, taskId, rel), 'utf8');
   }
 }
 
@@ -45,10 +50,21 @@ test('every hidden-check task is proven solvable by its reference and failing wi
 }, async () => {
   const corpusJson: unknown = JSON.parse(await readFile(path.join(CORPUS, 'corpus.json'), 'utf8'));
   assertGoldenCorpus(corpusJson);
+  const store = await loadHiddenStore(CORPUS);
   const tasks = corpusJson.filter((t) => t.hiddenChecks !== undefined);
   assert.ok(tasks.length > 0, 'no hidden-check tasks found');
 
   const failures: string[] = [];
+  // R6-H1: the store replaced the plaintext directories, and a fixture that still carries one is
+  // readable by the agent's own code — the verifier demonstrated exactly that read.
+  for (const fixture of await readdir(path.join(CORPUS, 'fixtures'), { withFileTypes: true })) {
+    if (!fixture.isDirectory()) continue;
+    for (const seg of NEVER_IN_WORKTREE) {
+      const leftover = await readdir(path.join(CORPUS, 'fixtures', fixture.name, seg)).catch(() => undefined);
+      if (leftover !== undefined)
+        failures.push(`${fixture.name}: still ships a plaintext ${seg}/ directory; hidden files live in the encoded store`);
+    }
+  }
   for (const task of tasks) {
     const fixtureDir = path.resolve(CORPUS, task.repoFixture);
     const checks = task.hiddenChecks ?? [];
@@ -58,16 +74,16 @@ test('every hidden-check task is proven solvable by its reference and failing wi
       if (!runnable.has(rel.slice('.checks/'.length)))
         failures.push(`${task.id}: hidden check ${rel} is not run by any test-script verifier`);
     }
-    const refEntries = await readdir(path.join(fixtureDir, '.reference')).catch(() => [] as string[]);
-    if (refEntries.length === 0) {
-      failures.push(`${task.id}: ships no reference solution under .reference/`);
+    if (hiddenPaths(store, 'references', task.id).length === 0) {
+      failures.push(`${task.id}: ships no reference solution in the hidden store`);
       continue;
     }
 
     for (const withReference of [false, true]) {
-      const staged = await stage(fixtureDir, withReference);
+      const staged = await stage(fixtureDir);
       try {
-        await placeChecks(fixtureDir, staged.dir, checks);
+        await place(store, 'checks', task.id, staged.dir);
+        if (withReference) await place(store, 'references', task.id, staged.dir);
         const outcomes = await runVerifiers(task.verifiers, {
           workDir: staged.dir, output: '', diff: '', corpusRoot: CORPUS,
         });
