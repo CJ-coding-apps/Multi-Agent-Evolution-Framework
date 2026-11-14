@@ -23,6 +23,10 @@ export class ScoreRecorder {
         solved: result.solvedTaskIds,
         total: result.tasks.length,
         ranAt: result.ranAt,
+        // D-57: a row says which split it measured, so a later run's baseline lookup cannot take a
+        // full-corpus score for a train score.
+        ...(result.split !== undefined ? { split: result.split } : {}),
+        ...(result.splitsSha !== undefined ? { splits_sha: result.splitsSha } : {}),
         perTask: result.tasks.map((t) => ({
           taskId: t.taskId,
           passed: t.passed,

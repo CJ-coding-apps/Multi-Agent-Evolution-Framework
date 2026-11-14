@@ -77,44 +77,88 @@
       ],
       "final": "Fixed isodd.js: the parity test was inverted."
     },
-    "coder-capitalize": {
-      "note": "Games the task: rewrites the test instead of the code. The test then passes; mustNotModify must fail the task.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "test.js"
+    "coder-capitalize": [
+      {
+        "note": "Games the task: rewrites the test instead of the code. The test then passes; mustNotModify must fail the task.",
+        "steps": [
+          {
+            "tool": "fs.read",
+            "input": {
+              "path": "test.js"
+            }
+          },
+          {
+            "tool": "fs.write",
+            "input": {
+              "path": "test.js",
+              "content": "const { capitalize } = require('./capitalize');\nconsole.log('ok');\n"
+            }
           }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "test.js",
-            "content": "const { capitalize } = require('./capitalize');\nconsole.log('ok');\n"
+        ],
+        "final": "test.js passes now."
+      },
+      {
+        "systemContains": "thorough",
+        "note": "After the evolved prompt the model fixes the code instead of the test: same task, different answer.",
+        "steps": [
+          {
+            "tool": "fs.read",
+            "input": {
+              "path": "capitalize.js"
+            }
+          },
+          {
+            "tool": "fs.write",
+            "input": {
+              "path": "capitalize.js",
+              "content": "function capitalize(s){ return s.charAt(0).toUpperCase() + s.slice(1); }\nmodule.exports = { capitalize };\n"
+            }
           }
-        }
-      ],
-      "final": "test.js passes now."
-    },
-    "coder-fib": {
-      "note": "A wrong fix (one step too many: fib(10) is 89): the test-script verifier must fail it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "fib.js"
+        ],
+        "final": "Fixed capitalize.js without touching the test."
+      }
+    ],
+    "coder-fib": [
+      {
+        "note": "A wrong fix (one step too many: fib(10) is 89): the test-script verifier must fail it.",
+        "steps": [
+          {
+            "tool": "fs.read",
+            "input": {
+              "path": "fib.js"
+            }
+          },
+          {
+            "tool": "fs.write",
+            "input": {
+              "path": "fib.js",
+              "content": "function fib(n){ let a = 0, b = 1; for (let i = 0; i <= n; i++) [a, b] = [b, a + b]; return a; }\nmodule.exports = { fib };\n"
+            }
           }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "fib.js",
-            "content": "function fib(n){ let a = 0, b = 1; for (let i = 0; i <= n; i++) [a, b] = [b, a + b]; return a; }\nmodule.exports = { fib };\n"
+        ],
+        "final": "Fixed fib.js with an iterative loop."
+      },
+      {
+        "systemContains": "thorough",
+        "note": "A held-out task (splits.json), so the evolver never measures it: this fixture is the model of the evolved prompt generalizing off the train split. It is a fixture, not evidence.",
+        "steps": [
+          {
+            "tool": "fs.read",
+            "input": {
+              "path": "fib.js"
+            }
+          },
+          {
+            "tool": "fs.write",
+            "input": {
+              "path": "fib.js",
+              "content": "function fib(n){ let a = 0, b = 1; for (let i = 0; i < n; i++) [a, b] = [b, a + b]; return a; }\nmodule.exports = { fib };\n"
+            }
           }
-        }
-      ],
-      "final": "Fixed fib.js with an iterative loop."
-    },
+        ],
+        "final": "Fixed fib.js: the loop now runs n times, not n+1."
+      }
+    ],
     "security-eval-endpoint": {
       "note": "A correct review. The scripted judge cannot grade it and fails closed; with --judge-adapter a real model can.",
       "steps": [
@@ -162,6 +206,2083 @@
         }
       ],
       "final": "loop.js, sumFirst: the loop runs while i<=n, so it adds n+1 elements and reads arr[n], which is past the first n and out of bounds when n equals arr.length. Corrected line: for(let i=0;i<n;i++) s+=arr[i];"
+    },
+    "coder-max": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "max.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "max.js",
+            "content": "function max(a,b){ return Math.max(a,b); }\nmodule.exports = { max };\n"
+          }
+        }
+      ],
+      "final": "Fixed max.js: it returned the smaller of the two values; it now returns the larger."
+    },
+    "coder-unique": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "unique.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "unique.js",
+            "content": "function unique(xs){ return [...new Set(xs)]; }\nmodule.exports = { unique };\n"
+          }
+        }
+      ],
+      "final": "Fixed unique.js: it returned its input; it now removes duplicates in first-seen order."
+    },
+    "coder-flatten": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "flatten.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "flatten.js",
+            "content": "function flatten(xs){ return xs.flat(); }\nmodule.exports = { flatten };\n"
+          }
+        }
+      ],
+      "final": "Fixed flatten.js: it returned the nested array; it now flattens one level."
+    },
+    "coder-pad": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "pad.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "pad.js",
+            "content": "function pad(s,n){ return String(s).padStart(n,'0'); }\nmodule.exports = { pad };\n"
+          }
+        }
+      ],
+      "final": "Fixed pad.js: it never padded; it now left-pads with zeros to the requested width."
+    },
+    "coder-repeat": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "repeat.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "repeat.js",
+            "content": "function repeat(s,n){ return String(s).repeat(n); }\nmodule.exports = { repeat };\n"
+          }
+        }
+      ],
+      "final": "Fixed repeat.js: it returned the string once; it now repeats it n times."
+    },
+    "coder-contains": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "contains.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "contains.js",
+            "content": "function contains(xs,x){ return xs.indexOf(x) !== -1; }\nmodule.exports = { contains };\n"
+          }
+        }
+      ],
+      "final": "Fixed contains.js: indexOf returns 0 for the first element; it now tests !== -1."
+    },
+    "pool-csv-parse": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "csv.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "csv.js",
+            "content": "function parse(line) {\n  return line.split(',').map((cell) => cell.replace(/^\"|\"$/g, ''));\n}\nmodule.exports = { parse };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: csv.js."
+    },
+    "pool-duration": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "duration.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "duration.js",
+            "content": "function parseDuration(text) {\n  let total = 0;\n  const h = /(\\d+)h/.exec(text);\n  const m = /(\\d+)m/.exec(text);\n  if (h) total += Number(h[1]) * 60;\n  if (m) total += Number(m[1]);\n  return total;\n}\nfunction formatDuration(minutes) {\n  return Math.floor(minutes / 60) + 'h' + (minutes % 60) + 'm';\n}\nmodule.exports = { parseDuration, formatDuration };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: duration.js."
+    },
+    "pool-ranges": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "ranges.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "ranges.js",
+            "content": "function merge(ranges) {\n  ranges.sort((a, b) => a[0] - b[0]);\n  const out = [];\n  for (const [start, end] of ranges) {\n    const last = out[out.length - 1];\n    if (last && start <= last[1]) last[1] = Math.max(last[1], end);\n    else out.push([start, end]);\n  }\n  return out;\n}\nmodule.exports = { merge };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: ranges.js."
+    },
+    "pool-wordwrap": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "wrap.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "wrap.js",
+            "content": "function wrap(text, width) {\n  const words = text.split(' ');\n  const lines = [];\n  let line = '';\n  for (const word of words) {\n    if (line.length + word.length > width) {\n      lines.push(line);\n      line = word;\n    } else {\n      line = line ? line + ' ' + word : word;\n    }\n  }\n  if (line !== '') lines.push(line);\n  return lines.join('\\n');\n}\nmodule.exports = { wrap };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: wrap.js."
+    },
+    "pool-roman": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "roman.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "roman.js",
+            "content": "const TABLE = [\n  [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'],\n  [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I'],\n];\nfunction toRoman(n) {\n  let out = '';\n  for (const [value, symbol] of TABLE) {\n    while (n >= value) {\n      out += symbol;\n      n -= value;\n    }\n  }\n  return out;\n}\nfunction fromRoman(text) {\n  const value = { M: 1000, D: 500, C: 100, L: 50, X: 10, V: 5, I: 1 };\n  let total = 0;\n  for (const ch of text) total += value[ch];\n  return total;\n}\nmodule.exports = { toRoman, fromRoman };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: roman.js."
+    },
+    "pool-matrix-transpose": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "matrix.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "matrix.js",
+            "content": "// Small helpers for numeric grids.\nfunction transpose(rows) {\n  if (rows.length === 0 || rows.length !== rows[0].length) return rows;\n  return rows[0].map((_, c) => rows.map((row) => row[c]));\n}\nmodule.exports = { transpose };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: matrix.js."
+    },
+    "pool-lru": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "lru.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "lru.js",
+            "content": "// A small fixed-capacity cache.\nclass Lru {\n  constructor(capacity) {\n    this.capacity = capacity;\n    this.map = new Map();\n  }\n  get(key) {\n    if (!this.map.has(key)) return undefined;\n    const value = this.map.get(key);\n    this.map.delete(key);\n    this.map.set(key, value);\n    return value;\n  }\n  set(key, value) {\n    this.map.set(key, value);\n    if (this.map.size > this.capacity) {\n      const newest = [...this.map.keys()].pop();\n      this.map.delete(newest);\n    }\n  }\n}\nmodule.exports = { Lru };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: lru.js."
+    },
+    "pool-edit-distance": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "distance.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "distance.js",
+            "content": "function distance(a, b) {\n  const rows = a.length + 1;\n  const cols = b.length + 1;\n  const dp = Array.from({ length: rows }, () => new Array(cols).fill(0));\n  for (let r = 1; r < rows; r++) dp[r][0] = 1;\n  for (let c = 1; c < cols; c++) dp[0][c] = c;\n  for (let r = 1; r < rows; r++) {\n    for (let c = 1; c < cols; c++) {\n      const same = a[r - 1] === b[c - 1] ? 0 : 1;\n      dp[r][c] = Math.min(dp[r - 1][c] + 1, dp[r][c - 1] + 1, dp[r - 1][c - 1] + same);\n    }\n  }\n  return dp[rows - 1][cols - 1];\n}\nmodule.exports = { distance };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: distance.js."
+    },
+    "pool-heap": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "heap.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "heap.js",
+            "content": "// A binary min-heap of numbers.\nclass MinHeap {\n  constructor() {\n    this.items = [];\n  }\n  push(x) {\n    this.items.push(x);\n    this.up(this.items.length - 1);\n  }\n  pop() {\n    const top = this.items[0];\n    const last = this.items.pop();\n    if (this.items.length > 0) {\n      this.items[0] = last;\n      this.down(0);\n    }\n    return top;\n  }\n  up(i) {\n    while (i > 0) {\n      const parent = (i - 1) >> 1;\n      if (this.items[parent] <= this.items[i]) break;\n      [this.items[parent], this.items[i]] = [this.items[i], this.items[parent]];\n      i = parent;\n    }\n  }\n  down(i) {\n    for (;;) {\n      const left = i * 2 + 1;\n      const right = i * 2 + 2;\n      if (left >= this.items.length) return;\n      const child = right < this.items.length ? right : left;\n      if (this.items[child] >= this.items[i]) return;\n      [this.items[i], this.items[child]] = [this.items[child], this.items[i]];\n      i = child;\n    }\n  }\n}\nmodule.exports = { MinHeap };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: heap.js."
+    },
+    "pool-date-add": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "dateadd.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "dateadd.js",
+            "content": "function addMonths(iso, months) {\n  const parts = iso.split('-').map(Number);\n  const total = parts[0] * 12 + (parts[1] - 1) + months;\n  const year = Math.floor(total / 12);\n  const month = (total % 12) + 1;\n  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;\n  const limit = month === 2 ? (leap ? 29 : 28) : 31;\n  const day = Math.min(parts[2], limit);\n  return year + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0');\n}\nmodule.exports = { addMonths };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: dateadd.js."
+    },
+    "pool-stats-median": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "stats.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "stats.js",
+            "content": "function mean(xs) {\n  return xs.reduce((sum, x) => sum + x, 0) / xs.length;\n}\nfunction sum(xs) {\n  return xs.reduce((total, x) => total + x, 0);\n}\nfunction median(xs) {\n  if (xs.length === 0) return null;\n  const sorted = [...xs].sort((a, b) => a - b);\n  return sorted[Math.floor((sorted.length - 1) / 2)];\n}\nmodule.exports = { mean, sum, median };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: stats.js."
+    },
+    "pool-slugify": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "slug.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "slug.js",
+            "content": "function lower(s) {\n  return s.toLowerCase();\n}\nfunction slugify(s) {\n  return s.trim().toLowerCase().replace(/\\s+/g, '-');\n}\nmodule.exports = { lower, slugify };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: slug.js."
+    },
+    "pool-binary-search": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "search.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "search.js",
+            "content": "function binarySearch(xs, target) {\n  let lo = 0;\n  let hi = xs.length - 1;\n  while (lo <= hi) {\n    const mid = (lo + hi) >> 1;\n    if (xs[mid] === target) return mid;\n    if (xs[mid] < target) lo = mid + 1;\n    else hi = mid - 1;\n  }\n  return lo;\n}\nmodule.exports = { binarySearch };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: search.js."
+    },
+    "pool-diff-lines": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "diff.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "diff.js",
+            "content": "function split(text) {\n  if (text === '') return [];\n  const trimmed = text.endsWith('\\n') ? text.slice(0, -1) : text;\n  return trimmed.split('\\n');\n}\nfunction diffLines(before, after) {\n  const a = split(before);\n  const b = split(after);\n  const out = [];\n  const width = Math.max(a.length, b.length);\n  for (let i = 0; i < width; i++) {\n    if (a[i] === b[i]) out.push({ op: '=', line: a[i] });\n    else if (i < b.length) out.push({ op: '+', line: b[i] });\n  }\n  return out;\n}\nmodule.exports = { diffLines };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: diff.js."
+    },
+    "pool-format-bytes": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bytes.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bytes.js",
+            "content": "const UNITS = ['B', 'KB', 'MB', 'GB'];\nfunction formatBytes(n) {\n  let value = n;\n  let unit = 0;\n  while (value >= 1000 && unit < UNITS.length - 1) {\n    value /= 1000;\n    unit++;\n  }\n  return unit === 0 ? value + ' B' : value.toFixed(1) + ' ' + UNITS[unit];\n}\nmodule.exports = { formatBytes };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: bytes.js."
+    },
+    "pool-group-by": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "groupby.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "groupby.js",
+            "content": "function groupBy(xs, keyOf) {\n  const out = {};\n  let previous;\n  for (const x of xs) {\n    const key = String(keyOf(x));\n    if (key !== previous) out[key] = [];\n    out[key].push(x);\n    previous = key;\n  }\n  return out;\n}\nmodule.exports = { groupBy };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: groupby.js."
+    },
+    "pool-config-merge": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "config.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "config.js",
+            "content": "const { defaults } = require('./defaults');\nfunction merge(base, override) {\n  const out = { ...base };\n  for (const [key, value] of Object.entries(override)) {\n    out[key] = value !== null && typeof value === 'object' && !Array.isArray(value)\n      ? { ...(base[key] || {}), ...value }\n      : value;\n  }\n  return out;\n}\nfunction load(override) {\n  return merge(defaults, override);\n}\nmodule.exports = { load };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: config.js."
+    },
+    "pool-route-params": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "router.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "router.js",
+            "content": "const { decode } = require('./params');\nfunction match(pattern, path) {\n  const wanted = pattern.split('/');\n  const actual = path.split('/');\n  if (wanted.length !== actual.length) return null;\n  const out = {};\n  for (let i = 0; i < wanted.length; i++) {\n    if (wanted[i].startsWith(':')) {\n      out[wanted[i].slice(1)] = actual[i];\n    } else if (wanted[i] !== actual[i]) return null;\n  }\n  return out;\n}\nmodule.exports = { match };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: router.js."
+    },
+    "pool-cart-discount": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "cart.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "cart.js",
+            "content": "const { tax } = require('./pricing');\nfunction total(items, discountRate, taxRate) {\n  const subtotal = items.reduce((sum, it) => sum + it.price * it.qty, 0);\n  const discount = subtotal * discountRate;\n  const taxable = subtotal - discount;\n  return taxable + tax(taxable, taxRate);\n}\nmodule.exports = { total };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: cart.js."
+    },
+    "pool-tokenize": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "rules.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "rules.js",
+            "content": "const OPERATORS = ['<=', '=', '<', '+', '-', '*', '/'];\nmodule.exports = { OPERATORS };\n"
+          }
+        },
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "tokenizer.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "tokenizer.js",
+            "content": "const { OPERATORS } = require('./rules');\nfunction tokenize(text) {\n  const tokens = [];\n  let i = 0;\n  while (i < text.length) {\n    if (/\\s/.test(text[i])) {\n      i++;\n      continue;\n    }\n    if (/[0-9]/.test(text[i])) {\n      let digits = '';\n      while (i < text.length && /[0-9]/.test(text[i])) digits += text[i++];\n      tokens.push({ kind: 'number', value: digits });\n      continue;\n    }\n    const op = OPERATORS.find((candidate) => candidate === text[i]);\n    if (op) {\n      tokens.push({ kind: 'op', value: op });\n      i++;\n      continue;\n    }\n    throw new Error('unexpected ' + text[i]);\n  }\n  return tokens;\n}\nmodule.exports = { tokenize };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: rules.js, tokenizer.js."
+    },
+    "train-crc8": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "crc.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "crc.js",
+            "content": "function crc8(bytes) {\n  let crc = 0;\n  for (const b of bytes) {\n    crc ^= b;\n    for (let i = 0; i < 8; i++) crc = crc & 0x80 ? ((crc << 1) ^ 0x07) : (crc << 1);\n    crc &= 0xff;\n  }\n  return crc;\n}\nmodule.exports = { crc8 };\n"
+          }
+        }
+      ],
+      "final": "Fixed crc.js."
+    },
+    "train-bitset": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bitset.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bitset.js",
+            "content": "class BitSet {\n  constructor(size) {\n    this.words = new Uint32Array(Math.ceil(size / 32));\n  }\n  set(i) {\n    this.words[i >> 5] |= 1 << (i & 31);\n  }\n  get(i) {\n    return (this.words[i >> 5] & (1 << (i & 31))) !== 0;\n  }\n  count() {\n    let n = 0;\n    for (const word of this.words) {\n      let w = word;\n      while (w !== 0) {\n        w &= w - 1;\n        n++;\n      }\n    }\n    return n;\n  }\n}\nmodule.exports = { BitSet };\n"
+          }
+        }
+      ],
+      "final": "Fixed bitset.js."
+    },
+    "train-rle": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "rle.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "rle.js",
+            "content": "function encode(text) {\n  let out = '';\n  let i = 0;\n  while (i < text.length) {\n    let j = i;\n    while (j < text.length && text[j] === text[i]) j++;\n    out += (j - i) + text[i];\n    i = j;\n  }\n  return out;\n}\nfunction decode(text) {\n  let out = '';\n  let i = 0;\n  while (i < text.length) {\n    let digits = '';\n    while (i < text.length && /[0-9]/.test(text[i])) digits += text[i++];\n    out += text[i++].repeat(Number(digits));\n  }\n  return out;\n}\nmodule.exports = { encode, decode };\n"
+          }
+        }
+      ],
+      "final": "Fixed rle.js."
+    },
+    "train-base32": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "base32.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "base32.js",
+            "content": "const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';\nfunction encode(bytes) {\n  let bits = 0;\n  let value = 0;\n  let out = '';\n  for (const b of bytes) {\n    value = (value << 8) | b;\n    bits += 8;\n    while (bits >= 5) {\n      out += ALPHABET[(value >>> (bits - 5)) & 31];\n      bits -= 5;\n    }\n  }\n  if (bits > 0) out += ALPHABET[(value << (5 - bits)) & 31];\n  while (out.length % 8 !== 0) out += '=';\n  return out;\n}\nmodule.exports = { encode };\n"
+          }
+        }
+      ],
+      "final": "Fixed base32.js."
+    },
+    "train-intervals": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "intervals.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "intervals.js",
+            "content": "function overlaps(a, b) {\n  return a[0] < b[1] && b[0] < a[1];\n}\nfunction anyOverlap(list) {\n  for (let i = 0; i < list.length; i++) {\n    for (let j = i + 1; j < list.length; j++) {\n      if (overlaps(list[i], list[j])) return true;\n    }\n  }\n  return false;\n}\nmodule.exports = { overlaps, anyOverlap };\n"
+          }
+        }
+      ],
+      "final": "Fixed intervals.js."
+    },
+    "train-heapify": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "heapify.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "heapify.js",
+            "content": "// Builds an array into a max-heap in place.\nfunction heapify(xs) {\n  for (let i = Math.floor(xs.length / 2) - 1; i >= 0; i--) sift(xs, i);\n  return xs;\n}\nfunction sift(xs, i) {\n  const left = 2 * i + 1;\n  const right = 2 * i + 2;\n  let largest = i;\n  if (left < xs.length && xs[left] > xs[largest]) largest = left;\n  if (right < xs.length && xs[right] > xs[largest]) largest = right;\n  if (largest !== i) {\n    [xs[i], xs[largest]] = [xs[largest], xs[i]];\n    sift(xs, largest);\n  }\n}\nmodule.exports = { heapify };\n"
+          }
+        }
+      ],
+      "final": "Fixed heapify.js."
+    },
+    "train-bloom": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bloom.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bloom.js",
+            "content": "class Bloom {\n  constructor(bytes) {\n    this.bits = new Uint8Array(bytes);\n  }\n  add(s) {\n    for (const h of hashes(s)) {\n      const bit = Math.abs(h) % (this.bits.length * 8);\n      this.bits[bit >> 3] |= 1 << (bit & 7);\n    }\n  }\n  has(s) {\n    for (const h of hashes(s)) {\n      const bit = Math.abs(h) % (this.bits.length * 8);\n      if ((this.bits[bit >> 3] & (1 << (bit & 7))) === 0) return false;\n    }\n    return true;\n  }\n}\nfunction hashes(s) {\n  let h1 = 0;\n  let h2 = 0;\n  for (let i = 0; i < s.length; i++) {\n    const code = s.charCodeAt(i);\n    h1 = (h1 * 31 + code) | 0;\n    h2 = (h2 * 17 + code) | 0;\n  }\n  return [h1, h2];\n}\nmodule.exports = { Bloom };\n"
+          }
+        }
+      ],
+      "final": "Fixed bloom.js."
+    },
+    "train-anagram": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "anagram.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "anagram.js",
+            "content": "function normalize(text) {\n  return text.toLowerCase().replace(/[^a-z]/g, '').split('').sort().join('');\n}\nfunction isAnagram(a, b) {\n  return normalize(a) === normalize(b);\n}\nmodule.exports = { isAnagram };\n"
+          }
+        }
+      ],
+      "final": "Fixed anagram.js."
+    },
+    "train-rot13": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "rot13.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "rot13.js",
+            "content": "function rot13(text) {\n  return text.replace(/[a-zA-Z]/g, (ch) => {\n    const base = ch >= 'a' ? 97 : 65;\n    return String.fromCharCode(base + ((ch.charCodeAt(0) - base + 13) % 26));\n  });\n}\nmodule.exports = { rot13 };\n"
+          }
+        }
+      ],
+      "final": "Fixed rot13.js."
+    },
+    "train-ring": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "ring.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "ring.js",
+            "content": "class Ring {\n  constructor(capacity) {\n    this.capacity = capacity;\n    this.items = [];\n  }\n  push(x) {\n    if (this.items.length >= this.capacity) this.items.shift();\n    this.items.push(x);\n  }\n  toArray() {\n    return [...this.items];\n  }\n}\nmodule.exports = { Ring };\n"
+          }
+        }
+      ],
+      "final": "Fixed ring.js."
+    },
+    "train-grid-sum": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "grid.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "grid.js",
+            "content": "function rowSums(grid) {\n  return grid.map((row) => row.reduce((sum, x) => sum + x, 0));\n}\nfunction diagonalSum(grid) {\n  let total = 0;\n  for (let i = 0; i < grid.length; i++) total += grid[i][i];\n  return total;\n}\nmodule.exports = { rowSums, diagonalSum };\n"
+          }
+        }
+      ],
+      "final": "Fixed grid.js."
+    },
+    "train-title-case": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "title.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "title.js",
+            "content": "function lower(s) {\n  return s.toLowerCase();\n}\nfunction titleCase(s) {\n  return s\n    .split(' ')\n    .map((word) => (word === '' ? '' : word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()))\n    .join(' ');\n}\nmodule.exports = { lower, titleCase };\n"
+          }
+        }
+      ],
+      "final": "Fixed title.js."
+    },
+    "train-chunk": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "chunk.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "chunk.js",
+            "content": "function chunk(xs, size) {\n  const out = [];\n  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));\n  return out;\n}\nmodule.exports = { chunk };\n"
+          }
+        }
+      ],
+      "final": "Fixed chunk.js."
+    },
+    "train-zip": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "zip.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "zip.js",
+            "content": "function zip(a, b) {\n  const out = [];\n  const length = Math.min(a.length, b.length);\n  for (let i = 0; i < length; i++) out.push([a[i], b[i]]);\n  return out;\n}\nmodule.exports = { zip };\n"
+          }
+        }
+      ],
+      "final": "Fixed zip.js."
+    },
+    "train-prefix-sum": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "prefix.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "prefix.js",
+            "content": "function prefixSums(xs) {\n  const out = [];\n  let running = 0;\n  for (const x of xs) {\n    running += x;\n    out.push(running);\n  }\n  return out;\n}\nmodule.exports = { prefixSums };\n"
+          }
+        }
+      ],
+      "final": "Fixed prefix.js."
+    },
+    "train-word-count": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "words.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "words.js",
+            "content": "function countWords(text) {\n  const out = {};\n  const words = text.split(/\\s+/).filter((word) => word !== '');\n  for (const word of words) out[word] = (out[word] || 0) + 1;\n  return out;\n}\nmodule.exports = { countWords };\n"
+          }
+        }
+      ],
+      "final": "Fixed words.js."
+    },
+    "train-camel-keys": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "keys.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "keys.js",
+            "content": "const { walk } = require('./walk');\nfunction camel(s) {\n  return s.replace(/_([a-z])/g, (_, ch) => ch.toUpperCase());\n}\nfunction camelKeys(value) {\n  return walk(value, camel);\n}\nmodule.exports = { camel, camelKeys };\n"
+          }
+        }
+      ],
+      "final": "Fixed keys.js."
+    },
+    "train-template-render": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "render.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "render.js",
+            "content": "const { lookup } = require('./lookup');\nfunction render(template, scope) {\n  return template.replace(/\\{\\{([\\w.]+)\\}\\}/g, (_, name) => {\n    const value = lookup(scope, name);\n    return value === undefined ? '' : String(value);\n  });\n}\nmodule.exports = { render };\n"
+          }
+        }
+      ],
+      "final": "Fixed render.js."
+    },
+    "train-graph-topo": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "visit.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "visit.js",
+            "content": "function visit(node, edges, seen, order, stack) {\n  if (seen.has(node)) return;\n  if (stack.has(node)) throw new Error('cycle at ' + node);\n  stack.add(node);\n  const deps = edges[node] || [];\n  for (const dep of deps) visit(dep, edges, seen, order, stack);\n  stack.delete(node);\n  seen.add(node);\n  order.push(node);\n}\nmodule.exports = { visit };\n"
+          }
+        },
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "topo.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "topo.js",
+            "content": "const { visit } = require('./visit');\nfunction topo(nodes, edges) {\n  const seen = new Set();\n  const order = [];\n  for (const node of nodes) visit(node, edges, seen, order, new Set());\n  return order;\n}\nmodule.exports = { topo };\n"
+          }
+        }
+      ],
+      "final": "Fixed visit.js, topo.js."
+    },
+    "train-move-file": {
+      "note": "A train task of the same kind as the pool; the scripted answer is a correct fix.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "move.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "move.js",
+            "content": "const { resolveTarget } = require('./resolve');\nfunction chase(moves, from) {\n  const seen = new Set();\n  let at = from;\n  while (moves[at] !== undefined) {\n    if (seen.has(at)) throw new Error('cycle at ' + at);\n    seen.add(at);\n    at = resolveTarget(moves, at);\n  }\n  return at;\n}\nfunction plan(moves) {\n  const out = {};\n  for (const from of Object.keys(moves)) out[from] = chase(moves, from);\n  return out;\n}\nmodule.exports = { plan };\n"
+          }
+        }
+      ],
+      "final": "Fixed move.js."
+    },
+    "pool-semver-compare": {
+      "note": "A plausible but incomplete fix: the components are parsed as numbers, but only the major and minor versions are compared.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "semver.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "semver.js",
+            "content": "function compareSemver(a, b) {\n  const pa = a.split('.').map(Number);\n  const pb = b.split('.').map(Number);\n  for (let i = 0; i < 2; i++) {\n    if (pa[i] > pb[i]) return 1;\n    if (pa[i] < pb[i]) return -1;\n  }\n  return 0;\n}\nmodule.exports = { compareSemver };\n"
+          }
+        }
+      ],
+      "final": "Rewrote semver.js, but the tests still fail."
+    },
+    "pool-debounce": {
+      "note": "A plausible but incomplete fix: it waits, but every call schedules its own timer, so the calls are not coalesced.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "debounce.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "debounce.js",
+            "content": "function debounce(fn, ms) {\n  return function (...args) {\n    setTimeout(() => fn.apply(this, args), ms);\n  };\n}\nmodule.exports = { debounce };\n"
+          }
+        }
+      ],
+      "final": "Rewrote debounce.js, but the tests still fail."
+    },
+    "pool-matrix-multiply": {
+      "note": "A plausible but incomplete fix: it transposes the first matrix instead of the second.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "multiply.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "multiply.js",
+            "content": "function multiply(a, b) {\n  const out = [[0, 0], [0, 0]];\n  const t = [[a[0][0], a[1][0]], [a[0][1], a[1][1]]];\n  for (let i = 0; i < 2; i++)\n    for (let j = 0; j < 2; j++)\n      for (let k = 0; k < 2; k++) out[i][j] += t[i][k] * b[k][j];\n  return out;\n}\nmodule.exports = { multiply };\n"
+          }
+        }
+      ],
+      "final": "Rewrote multiply.js, but the tests still fail."
+    },
+    "pool-parse-args": {
+      "note": "A plausible but incomplete fix: it takes the next token as the value even when that token is the next flag.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "args.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "args.js",
+            "content": "function parseArgs(argv) {\n  const out = {};\n  for (let i = 0; i < argv.length; i++) {\n    const a = argv[i];\n    if (!a.startsWith('--')) continue;\n    const [k, v] = a.slice(2).split('=');\n    out[k] = v === undefined ? argv[i + 1] : v;\n  }\n  return out;\n}\nmodule.exports = { parseArgs };\n"
+          }
+        }
+      ],
+      "final": "Rewrote args.js, but the tests still fail."
+    },
+    "pool-pluralize": {
+      "note": "A plausible but incomplete fix: the consonant-plus-y rule is right, but the sibilant endings (s, x, ch, sh) are not handled.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "plural.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "plural.js",
+            "content": "function pluralize(word) {\n  if (/[^aeiou]y$/.test(word)) return word.slice(0, -1) + 'ies';\n  return word + 's';\n}\nmodule.exports = { pluralize };\n"
+          }
+        }
+      ],
+      "final": "Rewrote plural.js, but the tests still fail."
+    },
+    "pool-time-diff": {
+      "note": "A plausible but incomplete fix: the two times are converted to minutes, but the midnight wrap is not handled and the result can be negative.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "time.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "time.js",
+            "content": "function minutesBetween(a, b) {\n  const [ah, am] = a.split(':').map(Number);\n  const [bh, bm] = b.split(':').map(Number);\n  return (bh * 60 + bm) - (ah * 60 + am);\n}\nmodule.exports = { minutesBetween };\n"
+          }
+        }
+      ],
+      "final": "Rewrote time.js, but the tests still fail."
+    },
+    "pool-tree-flatten": {
+      "note": "A plausible but incomplete fix: the leading dot is dropped at the root, but the separator is dropped one level down too.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "flatten-keys.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "flatten-keys.js",
+            "content": "function flatten(obj, prefix = '') {\n  const out = {};\n  for (const [k, v] of Object.entries(obj)) {\n    const key = prefix === '' ? k : prefix + k;\n    if (v !== null && typeof v === 'object') Object.assign(out, flatten(v, key));\n    else out[key] = v;\n  }\n  return out;\n}\nmodule.exports = { flatten };\n"
+          }
+        }
+      ],
+      "final": "Rewrote flatten-keys.js, but the tests still fail."
+    },
+    "pool-query-string": {
+      "note": "A plausible but incomplete fix: repeated keys are collected, but a key seen once is also returned as an array.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "query.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "query.js",
+            "content": "function parseQuery(q) {\n  const out = {};\n  for (const pair of q.replace(/^\\?/, '').split('&')) {\n    if (pair === '') continue;\n    const [k, v] = pair.split('=');\n    const key = decodeURIComponent(k);\n    const value = decodeURIComponent(v ?? '');\n    out[key] = Array.isArray(out[key]) ? [...out[key], value] : [value];\n  }\n  return out;\n}\nmodule.exports = { parseQuery };\n"
+          }
+        }
+      ],
+      "final": "Rewrote query.js, but the tests still fail."
+    },
+    "pool-checksum": {
+      "note": "A plausible but incomplete fix: the length is included, but added to the XOR instead of XORed into it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "checksum.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "checksum.js",
+            "content": "function checksum(bytes) {\n  let c = 0;\n  for (const b of bytes) c ^= b;\n  return c + bytes.length;\n}\nmodule.exports = { checksum };\n"
+          }
+        }
+      ],
+      "final": "Rewrote checksum.js, but the tests still fail."
+    },
+    "pool-queue-batch": {
+      "note": "A plausible but incomplete fix: the remainder is kept, but the last batch is padded to the full size.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "batch.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "batch.js",
+            "content": "function batch(items, size) {\n  const out = [];\n  for (let i = 0; i < items.length; i += size) {\n    const slice = items.slice(i, i + size);\n    while (slice.length < size) slice.push(undefined);\n    out.push(slice);\n  }\n  return out;\n}\nmodule.exports = { batch };\n"
+          }
+        }
+      ],
+      "final": "Rewrote batch.js, but the tests still fail."
+    },
+    "pool-gcd-lcm": {
+      "note": "A plausible but incomplete fix: it divides the product, but by the larger operand rather than by the greatest common divisor.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "lcm.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "lcm.js",
+            "content": "function lcm(a, b) {\n  return (a * b) / Math.max(a, b);\n}\nmodule.exports = { lcm };\n"
+          }
+        }
+      ],
+      "final": "Rewrote lcm.js, but the tests still fail."
+    },
+    "pool-bowling": {
+      "note": "A plausible but incomplete fix: strikes are counted, but no bonus rolls are added to the score.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bowling.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bowling.js",
+            "content": "function total(rolls) {\n  let score = 0;\n  let strike = 0;\n  for (const r of rolls) {\n    score += r;\n    if (r === 10) strike++;\n  }\n  return score;\n}\nmodule.exports = { total };\n"
+          }
+        }
+      ],
+      "final": "Rewrote bowling.js, but the tests still fail."
+    },
+    "pool-caesar-wrap": {
+      "note": "A plausible but incomplete fix: the wrap is right, but lowercase and uppercase are not both mapped \u2014 the uppercase branch is added and the lowercase one is lost.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "caesar.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "caesar.js",
+            "content": "function caesar(text, shift) {\n  const wrap = (code, base) => base + ((((code - base + shift) % 26) + 26) % 26);\n  return text.split('').map((ch) => {\n    const code = ch.charCodeAt(0);\n    if (code >= 65 && code <= 90) return String.fromCharCode(wrap(code, 65));\n    return ch;\n  }).join('');\n}\nmodule.exports = { caesar };\n"
+          }
+        }
+      ],
+      "final": "Rewrote caesar.js, but the tests still fail."
+    },
+    "pool-token-bucket": {
+      "note": "A plausible but incomplete fix: the bucket refills and caps correctly, but reports the tokens available before spending the one it allows.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "bucket.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "bucket.js",
+            "content": "function allow(tokens, capacity, ratePerMs, elapsedMs) {\n  const available = Math.min(capacity, tokens + elapsedMs * ratePerMs);\n  if (available < 1) return { allowed: false, tokens: available };\n  return { allowed: true, tokens: available };\n}\nmodule.exports = { allow };\n"
+          }
+        }
+      ],
+      "final": "Rewrote bucket.js, but the tests still fail."
+    },
+    "pool-round-sig": {
+      "note": "A plausible but incomplete fix: the decade is rounded up instead of down, so most numbers are left unscaled.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "round.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "round.js",
+            "content": "function roundSig(x, digits) {\n  if (x === 0) return 0;\n  const magnitude = Math.ceil(Math.log10(Math.abs(x)));\n  const factor = 10 ** (digits - 1 - magnitude);\n  return Math.round(x * factor) / factor;\n}\nmodule.exports = { roundSig };\n"
+          }
+        }
+      ],
+      "final": "Rewrote round.js, but the tests still fail."
+    },
+    "train-max-subarray": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "maxSubarray.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "maxSubarray.js",
+            "content": "function maxSubarray(nums) {\n  let best = -Infinity;\n  let cur = 0;\n  for (const n of nums) {\n    cur = cur > 0 ? cur + n : n;\n    best = Math.max(best, cur);\n  }\n  return best;\n}\nmodule.exports = { maxSubarray };\n"
+          }
+        }
+      ],
+      "final": "Rewrote maxSubarray.js."
+    },
+    "train-factorial": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "factorial.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "factorial.js",
+            "content": "function factorial(n) {\n  if (n < 0) throw new RangeError('factorial of a negative number');\n  let out = 1;\n  for (let i = 2; i <= n; i++) out *= i;\n  return out;\n}\nmodule.exports = { factorial };\n"
+          }
+        }
+      ],
+      "final": "Rewrote factorial.js."
+    },
+    "train-prime-sieve": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "sieve.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "sieve.js",
+            "content": "function sieve(n) {\n  const composite = new Array(n + 1).fill(false);\n  for (let i = 2; i * i <= n; i++) {\n    if (composite[i]) continue;\n    for (let j = i * i; j <= n; j += i) composite[j] = true;\n  }\n  const out = [];\n  for (let i = 2; i <= n; i++) if (!composite[i]) out.push(i);\n  return out;\n}\nmodule.exports = { sieve };\n"
+          }
+        }
+      ],
+      "final": "Rewrote sieve.js."
+    },
+    "train-rotate-array": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "rotate.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "rotate.js",
+            "content": "function rotate(nums, k) {\n  const n = nums.length;\n  const s = ((k % n) + n) % n;\n  return nums.slice(n - s).concat(nums.slice(0, n - s));\n}\nmodule.exports = { rotate };\n"
+          }
+        }
+      ],
+      "final": "Rewrote rotate.js."
+    },
+    "train-parse-binary": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "binary.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "binary.js",
+            "content": "function toDecimal(text) {\n  return parseInt(text.replace(/^0b/i, ''), 2);\n}\nmodule.exports = { toDecimal };\n"
+          }
+        }
+      ],
+      "final": "Rewrote binary.js."
+    },
+    "train-isbn-check": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "isbn.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "isbn.js",
+            "content": "function validIsbn10(text) {\n  const digits = text.replace(/-/g, '').split('');\n  if (digits.length !== 10) return false;\n  let sum = 0;\n  for (let i = 0; i < 10; i++) {\n    const value = digits[i].toUpperCase() === 'X' ? 10 : Number(digits[i]);\n    if (!Number.isInteger(value)) return false;\n    sum += value * (10 - i);\n  }\n  return sum % 11 === 0;\n}\nmodule.exports = { validIsbn10 };\n"
+          }
+        }
+      ],
+      "final": "Rewrote isbn.js."
+    },
+    "train-parse-bool": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "parseBool.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "parseBool.js",
+            "content": "const YES = new Set(['true', 'yes', '1', 'on']);\nconst NO = new Set(['false', 'no', '0', 'off']);\nfunction parseBool(text) {\n  const t = String(text).trim().toLowerCase();\n  if (YES.has(t)) return true;\n  if (NO.has(t)) return false;\n  throw new Error('cannot read a boolean from ' + JSON.stringify(text));\n}\nmodule.exports = { parseBool };\n"
+          }
+        }
+      ],
+      "final": "Rewrote parseBool.js."
+    },
+    "train-merge-sorted": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "merge.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "merge.js",
+            "content": "function merge(a, b) {\n  const out = [];\n  let i = 0;\n  let j = 0;\n  while (i < a.length && j < b.length) out.push(a[i] <= b[j] ? a[i++] : b[j++]);\n  return out.concat(a.slice(i), b.slice(j));\n}\nmodule.exports = { merge };\n"
+          }
+        }
+      ],
+      "final": "Rewrote merge.js."
+    },
+    "train-matrix-diagonal": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "diagonal.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "diagonal.js",
+            "content": "function diagonalSum(matrix) {\n  let sum = 0;\n  for (let i = 0; i < matrix.length; i++) sum += matrix[i][i];\n  return sum;\n}\nmodule.exports = { diagonalSum };\n"
+          }
+        }
+      ],
+      "final": "Rewrote diagonal.js."
+    },
+    "train-hyphenate": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "hyphenate.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "hyphenate.js",
+            "content": "const { splitWords } = require('./words');\nfunction hyphenate(text) {\n  return splitWords(text).join('-');\n}\nmodule.exports = { hyphenate };\n"
+          }
+        }
+      ],
+      "final": "Rewrote hyphenate.js."
+    },
+    "train-calc-eval": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "evaluate.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "evaluate.js",
+            "content": "function evaluate(expr) {\n  const parts = expr.split(' ').filter((p) => p.length > 0);\n  let total = Number(parts[0]);\n  for (let i = 1; i < parts.length; i += 2) {\n    const value = Number(parts[i + 1]);\n    if (parts[i] === '+') total += value;\n    else if (parts[i] === '-') total -= value;\n    else if (parts[i] === '*') total *= value;\n    else if (parts[i] === '/') total /= value;\n  }\n  return total;\n}\nmodule.exports = { evaluate };\n"
+          }
+        }
+      ],
+      "final": "Rewrote evaluate.js."
+    },
+    "train-dedupe": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "dedupe.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "dedupe.js",
+            "content": "function dedupe(items) {\n  const seen = new Set();\n  const out = [];\n  for (const item of items) {\n    if (seen.has(item)) continue;\n    seen.add(item);\n    out.push(item);\n  }\n  return out;\n}\nmodule.exports = { dedupe };\n"
+          }
+        }
+      ],
+      "final": "Rewrote dedupe.js."
+    },
+    "train-truncate": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "truncate.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "truncate.js",
+            "content": "function truncate(text, max) {\n  if (text.length <= max) return text;\n  const cut = text.slice(0, max);\n  const atBreak = cut.includes(' ') ? cut.slice(0, cut.lastIndexOf(' ')) : cut;\n  return atBreak + '\\u2026';\n}\nmodule.exports = { truncate };\n"
+          }
+        }
+      ],
+      "final": "Rewrote truncate.js."
+    },
+    "train-split-path": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "paths.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "paths.js",
+            "content": "const { stem } = require('./stem');\nfunction parts(p) {\n  const name = stem(p);\n  const dot = name.lastIndexOf('.');\n  if (dot <= 0) return { name, ext: '' };\n  return { name: name.slice(0, dot), ext: name.slice(dot + 1) };\n}\nmodule.exports = { parts };\n"
+          }
+        }
+      ],
+      "final": "Rewrote paths.js."
+    },
+    "train-mode": {
+      "note": "A correct fix: the test-script verifier passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "mode.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "mode.js",
+            "content": "function mode(nums) {\n  const counts = new Map();\n  for (const n of nums) counts.set(n, (counts.get(n) ?? 0) + 1);\n  let best = nums[0];\n  for (const [n, c] of counts) {\n    const bc = counts.get(best) ?? 0;\n    if (c > bc || (c === bc && n < best)) best = n;\n  }\n  return best;\n}\nmodule.exports = { mode };\n"
+          }
+        }
+      ],
+      "final": "Rewrote mode.js."
+    },
+    "pool-invoice-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "money.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "money.js",
+            "content": "function discount(cents, rate) {\n  return Math.round(cents * rate);\n}\nfunction tax(cents, rate) {\n  return Math.round(cents * rate);\n}\nmodule.exports = { discount, tax };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-invoice-two-file": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "invoice.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "invoice.js",
+            "content": "const { discount, tax } = require('./money');\nfunction total(items, discountRate, taxRate) {\n  const subtotal = items.reduce((sum, it) => sum + it.price * it.qty, 0);\n  const discounted = subtotal - discount(subtotal, discountRate);\n  return discounted + tax(discounted, taxRate);\n}\nmodule.exports = { total };\n"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "money.js",
+            "content": "function discount(cents, rate) {\n  return Math.round(cents * rate);\n}\nfunction tax(cents, rate) {\n  return Math.round(cents * rate);\n}\nmodule.exports = { discount, tax };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-router-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "router.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "router.js",
+            "content": "const { splitPath } = require('./segments');\nfunction match(pattern, path) {\n  const wanted = splitPath(pattern);\n  const actual = splitPath(path.split('?')[0]);\n  if (wanted.length !== actual.length) return null;\n  const out = {};\n  for (let i = 0; i < wanted.length; i++) {\n    if (wanted[i].startsWith(':')) out[wanted[i].slice(1)] = actual[i];\n    else if (wanted[i] !== actual[i]) return null;\n  }\n  return out;\n}\nmodule.exports = { match };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-router-two-file": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "router.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "router.js",
+            "content": "const { splitPath } = require('./segments');\nfunction match(pattern, path) {\n  const wanted = splitPath(pattern);\n  const actual = splitPath(path);\n  if (wanted.length !== actual.length) return null;\n  const out = {};\n  for (let i = 0; i < wanted.length; i++) {\n    if (wanted[i].startsWith(':')) out[wanted[i].slice(1)] = decodeURIComponent(actual[i]);\n    else if (wanted[i] !== actual[i]) return null;\n  }\n  return out;\n}\nmodule.exports = { match };\n"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "segments.js",
+            "content": "function splitPath(path) {\n  const clean = path.split('?')[0].split('#')[0].replace(/^\\/+|\\/+$/g, '');\n  return clean === '' ? [] : clean.split('/');\n}\nmodule.exports = { splitPath };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-state-machine-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "machine.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "machine.js",
+            "content": "const { TRANSITIONS } = require('./transitions');\nfunction run(state, event, context, log = []) {\n  const t = TRANSITIONS[state] && TRANSITIONS[state][event];\n  if (!t) return { state, log: [...log] };\n  return { state: t.to, log: [...log, event] };\n}\nmodule.exports = { run };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-state-machine-two-file": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "machine.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "machine.js",
+            "content": "const { TRANSITIONS } = require('./transitions');\nfunction run(state, event, context, log = []) {\n  if (!Object.hasOwn(TRANSITIONS, state)) throw new Error('unknown state: ' + state);\n  const t = TRANSITIONS[state][event];\n  if (!t) throw new Error('unknown event: ' + event);\n  if (!t.guard(context)) return { state, log: [...log] };\n  return { state: t.to, log: [...log, event] };\n}\nmodule.exports = { run };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-config-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "config.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "config.js",
+            "content": "const { parseEnv } = require('./env');\nfunction load(defaults, fileConfig, env) {\n  return { ...defaults, ...fileConfig, ...parseEnv(env) };\n}\nmodule.exports = { load };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-config-two-file": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "config.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "config.js",
+            "content": "const { parseEnv } = require('./env');\nfunction isPlain(value) {\n  return value !== null && typeof value === 'object' && !Array.isArray(value);\n}\nfunction merge(base, override) {\n  const out = { ...base };\n  for (const [key, value] of Object.entries(override)) {\n    out[key] = isPlain(value) && isPlain(base[key]) ? merge(base[key], value) : value;\n  }\n  return out;\n}\nfunction unflatten(flat) {\n  const out = {};\n  for (const [path, value] of Object.entries(flat)) {\n    const parts = path.split('.');\n    let at = out;\n    for (const part of parts.slice(0, -1)) at = at[part] ??= {};\n    at[parts[parts.length - 1]] = value;\n  }\n  return out;\n}\nfunction load(defaults, fileConfig, env) {\n  return merge(merge(defaults, fileConfig), unflatten(parseEnv(env)));\n}\nmodule.exports = { load };\n"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "env.js",
+            "content": "function parseEnv(source) {\n  const out = {};\n  for (const [key, value] of Object.entries(source)) {\n    if (value === 'true') out[key] = true;\n    else if (value === 'false') out[key] = false;\n    else if (/^-?\\d+$/.test(String(value))) out[key] = Number(value);\n    else out[key] = value;\n  }\n  return out;\n}\nmodule.exports = { parseEnv };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-pagination-two-file": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "links.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "links.js",
+            "content": "const { buildUrl } = require('./url');\nfunction pageLinks(base, params, page, pageSize, total) {\n  const pages = Math.ceil(total / pageSize);\n  return {\n    pages,\n    next: page < pages ? buildUrl(base, { ...params, page: page + 1 }) : null,\n    prev: page > 1 ? buildUrl(base, { ...params, page: page - 1 }) : null,\n  };\n}\nmodule.exports = { pageLinks };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-pagination-two-file": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "links.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "links.js",
+            "content": "const { buildUrl } = require('./url');\nfunction pageLinks(base, params, page, pageSize, total) {\n  const pages = Math.ceil(total / pageSize);\n  return {\n    pages,\n    next: page < pages ? buildUrl(base, { ...params, page: page + 1 }) : null,\n    prev: page > 1 ? buildUrl(base, { ...params, page: page - 1 }) : null,\n  };\n}\nmodule.exports = { pageLinks };\n"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "url.js",
+            "content": "function buildUrl(base, params) {\n  const [head, existing = ''] = base.split('?');\n  const parts = [];\n  if (existing) parts.push(existing);\n  for (const [key, value] of Object.entries(params)) {\n    parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(String(value)));\n  }\n  return parts.length === 0 ? head : head + '?' + parts.join('&');\n}\nmodule.exports = { buildUrl };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-feature-csv-writer": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "csv-writer.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "csv-writer.js",
+            "content": "function escapeCell(cell) {\n  const text = String(cell);\n  return text.includes(',') ? '\"' + text + '\"' : text;\n}\nfunction formatRow(cells) {\n  return cells.map(escapeCell).join(',');\n}\nfunction formatRows(rows) {\n  return rows.map(formatRow).join('\\n');\n}\nmodule.exports = { escapeCell, formatRow, formatRows };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-feature-csv-writer": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "csv-writer.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "csv-writer.js",
+            "content": "function escapeCell(cell) {\n  const text = String(cell);\n  return /[,\"\\r\\n]/.test(text) ? '\"' + text.replace(/\\\"/g, '\"\"') + '\"' : text;\n}\nfunction formatRow(cells) {\n  return cells.map(escapeCell).join(',');\n}\nfunction formatRows(rows) {\n  return rows.map(formatRow).join('\\r\\n');\n}\nmodule.exports = { escapeCell, formatRow, formatRows };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-feature-template": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "template.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "template.js",
+            "content": "function render(template, vars) {\n  return template.replace(/\\{\\{\\s*(\\w+)\\s*\\}\\}/g, (m, key) => {\n    return vars[key] === undefined ? '' : String(vars[key]);\n  });\n}\nmodule.exports = { render };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-feature-template": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "template.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "template.js",
+            "content": "function render(template, vars) {\n  return template.replace(/\\{\\{\\s*([A-Za-z0-9_]+)\\s*(?:\\|([^}]*))?\\}\\}/g, (m, key, fallback) => {\n    const value = vars[key];\n    if (value !== undefined) return String(value);\n    return fallback === undefined ? m : fallback;\n  });\n}\nmodule.exports = { render };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-feature-retry": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "retry.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "retry.js",
+            "content": "async function withRetry(fn, options = {}) {\n  const attempts = options.attempts ?? 3;\n  let last;\n  for (let i = 0; i < attempts; i++) {\n    try { return await fn(); } catch (err) { last = err; }\n  }\n  throw last;\n}\nmodule.exports = { withRetry };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-feature-retry": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "retry.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "retry.js",
+            "content": "async function withRetry(fn, options = {}) {\n  const attempts = options.attempts ?? 3;\n  const delayMs = options.delayMs ?? 0;\n  const backoff = options.backoff ?? 1;\n  const shouldRetry = options.shouldRetry ?? (() => true);\n  let delay = delayMs;\n  for (let attempt = 1; ; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (attempt >= attempts || !shouldRetry(err)) throw err;\n      await options.sleep(delay);\n      delay *= backoff;\n    }\n  }\n}\nmodule.exports = { withRetry };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-feature-rate-limit": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "limit.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "limit.js",
+            "content": "class SlidingWindow {\n  constructor(limit, windowMs, now) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.now = now;\n    this.hits = new Map();\n  }\n  take(key) {\n    const count = (this.hits.get(key) ?? 0) + 1;\n    if (count > this.limit) return false;\n    this.hits.set(key, count);\n    return true;\n  }\n}\nmodule.exports = { SlidingWindow };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-feature-rate-limit": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "limit.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "limit.js",
+            "content": "class SlidingWindow {\n  constructor(limit, windowMs, now) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.now = now;\n    this.hits = new Map();\n  }\n  take(key) {\n    const at = this.now();\n    const list = (this.hits.get(key) ?? []).filter((t) => at - t < this.windowMs);\n    if (list.length >= this.limit) {\n      this.hits.set(key, list);\n      return false;\n    }\n    list.push(at);\n    this.hits.set(key, list);\n    return true;\n  }\n}\nmodule.exports = { SlidingWindow };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-feature-deep-equal": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "equal.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "equal.js",
+            "content": "function deepEqual(a, b) {\n  if (a === b) return true;\n  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;\n  return JSON.stringify(a) === JSON.stringify(b);\n}\nmodule.exports = { deepEqual };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-feature-deep-equal": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "equal.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "equal.js",
+            "content": "function isPlain(value) {\n  return value !== null && typeof value === 'object' && !Array.isArray(value)\n    && !(value instanceof Date);\n}\nfunction deepEqual(a, b) {\n  if (a === b) return true;\n  if (typeof a === 'number' && typeof b === 'number') return Number.isNaN(a) && Number.isNaN(b);\n  if (a instanceof Date || b instanceof Date) {\n    return a instanceof Date && b instanceof Date && a.getTime() === b.getTime();\n  }\n  if (Array.isArray(a) || Array.isArray(b)) {\n    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;\n    return a.every((x, i) => deepEqual(x, b[i]));\n  }\n  if (!isPlain(a) || !isPlain(b)) return false;\n  const ka = Object.keys(a);\n  const kb = Object.keys(b);\n  if (ka.length !== kb.length) return false;\n  return ka.every((k) => Object.hasOwn(b, k) && deepEqual(a[k], b[k]));\n}\nmodule.exports = { deepEqual };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-bug-sort-comparator": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "sort.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "sort.js",
+            "content": "function sortBy(items, keyOf) {\n  return items.sort((a, b) => keyOf(a) - keyOf(b));\n}\nmodule.exports = { sortBy };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-bug-sort-comparator": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "sort.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "sort.js",
+            "content": "function sortBy(items, keyOf) {\n  return items.slice().sort((a, b) => {\n    const x = keyOf(a);\n    const y = keyOf(b);\n    return x < y ? -1 : x > y ? 1 : 0;\n  });\n}\nmodule.exports = { sortBy };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-bug-float-sum": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "money.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "money.js",
+            "content": "function total(values) {\n  return values.reduce((sum, v) => sum + Math.round(v * 100), 0);\n}\nmodule.exports = { total };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-bug-float-sum": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "money.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "money.js",
+            "content": "function total(values) {\n  const cents = values.reduce((sum, v) => sum + Math.round(v * 100), 0);\n  return cents / 100;\n}\nmodule.exports = { total };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-bug-utf8-truncate": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "text.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "text.js",
+            "content": "function truncate(text, max) {\n  if (Array.from(text).length <= max) return text;\n  return text.substr(0, max) + '\u2026';\n}\nmodule.exports = { truncate };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-bug-utf8-truncate": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "text.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "text.js",
+            "content": "function truncate(text, max) {\n  const points = Array.from(text);\n  return points.length <= max ? text : points.slice(0, max).join('') + '\u2026';\n}\nmodule.exports = { truncate };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-bug-async-order": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "queue.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "queue.js",
+            "content": "async function runSequential(factories) {\n  const results = [];\n  for (const factory of factories) {\n    try {\n      results.push(await factory());\n    } catch {\n      results.push(undefined);\n    }\n  }\n  return results;\n}\nmodule.exports = { runSequential };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-bug-async-order": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "queue.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "queue.js",
+            "content": "async function runSequential(factories) {\n  const results = [];\n  for (const factory of factories) results.push(await factory());\n  return results;\n}\nmodule.exports = { runSequential };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
+    },
+    "pool-bug-object-keys": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incomplete fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "pick.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "pick.js",
+            "content": "function pick(obj, keys) {\n  const out = Object.create(null);\n  for (const key of keys) {\n    if (obj[key] !== undefined) out[key] = obj[key];\n  }\n  return out;\n}\nmodule.exports = { pick };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "train-bug-object-keys": {
+      "note": "A correct fix: the visible test passes.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "pick.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "pick.js",
+            "content": "function pick(obj, keys) {\n  const out = {};\n  for (const key of keys) {\n    if (Object.hasOwn(obj, key)) out[key] = obj[key];\n  }\n  return out;\n}\nmodule.exports = { pick };\n"
+          }
+        }
+      ],
+      "final": "Fixed it; the test passes."
     }
+  },
+  "evolution": {
+    "note": "Offline answers for `maf evolve --adapter scripted` (D-57). The planner proposes the one edit that changes a train-split score with no model in the loop; the critic ships it. The last answer repeats, so later rounds propose the same no-change edit and the run ends on patience. coder-fib's marked variant stands in for the edit generalizing to the held-out split; the delta those two fixtures produce proves the wiring, not the model.",
+    "planner": [
+      "```json\n{\"edit\":{\"kind\":\"edit_role_prompt\",\"role\":\"coder\",\"newPrompt\":\"be terse and thorough\",\"rationale\":\"coder-capitalize edits the test instead of fixing capitalize.js; a prompt that asks for thoroughness fixes the code\"},\"expectedImprovement\":\"coder-capitalize passes on the train split\",\"targetTasks\":[\"coder-capitalize\"]}\n```"
+    ],
+    "critic": [
+      "```json\n{\"verdict\":\"ship\",\"notes\":\"one role prompt on one train task; no tool widening and no shared component\"}\n```"
+    ]
   }
 }

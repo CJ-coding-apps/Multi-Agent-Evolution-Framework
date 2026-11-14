@@ -1,0 +1,14 @@
+const assert = require('node:assert/strict');
+const { pageLinks } = require('./links');
+const r = pageLinks('https://x.test/items?sort=name', { q: 'a b' }, 2, 10, 25);
+assert.equal(r.pages, 3);
+assert.equal(r.prev, 'https://x.test/items?sort=name&q=a%20b&page=1');
+assert.equal(r.next, 'https://x.test/items?sort=name&q=a%20b&page=3');
+const last = pageLinks('https://x.test/items', {}, 3, 10, 25);
+assert.equal(last.prev, 'https://x.test/items?page=2');
+assert.equal(last.next, null);
+const first = pageLinks('https://x.test/items', { q: 'x' }, 1, 10, 5);
+assert.equal(first.pages, 1);
+assert.equal(first.prev, null);
+assert.equal(first.next, null);
+console.log('ok');

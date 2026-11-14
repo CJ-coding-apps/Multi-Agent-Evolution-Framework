@@ -16,6 +16,7 @@ import { registerGoldensCommand } from '../commands/goldens.js';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { runInit } from '../commands/init.js';
 import { cliOnlyAdapter, collector, driveRun, needsLcm, registryOf } from './runFixture.js';
+import { calibrateSplitForTest } from './calibratedCorpus.js';
 
 // ORACLE (S6 HIGH-1(d), MED-R2-1). The drift notice is the ruled replacement for round 1's silent
 // ignore: once a harness is pinned, every command that dispatches it says — in one line — that the
@@ -40,6 +41,8 @@ interface Project {
   root: string;
   mafDir: string;
   rolesPath: string;
+  /** A calibrated copy of the seed corpus — `evolve` refuses a split with no measurement. */
+  corpus: string;
   /** The harness CURRENT is pinned to, when it is. */
   pinnedSha?: string;
 }
@@ -55,14 +58,20 @@ async function project(opts: { pin: boolean }): Promise<Project> {
   await runInit({ dir: root, out: collector() });
   const mafDir = path.join(root, '.maf');
   const rolesPath = path.join(mafDir, 'roles.yaml');
-  if (!opts.pin) return { root, mafDir, rolesPath };
+  // R5-P3: `evolve` refuses a split whose heldOut was not derived from a committed calibration.
+  // The demo repo gets a copy of the seed corpus that carries the synthetic record for its split,
+  // so the notice under test is reachable — `goldens run` reads no split.
+  const corpus = path.join(root, 'tests', 'goldens');
+  await cp(SEED, corpus, { recursive: true });
+  await calibrateSplitForTest(corpus);
+  if (!opts.pin) return { root, mafDir, rolesPath, corpus };
   const store = new HarnessStore(mafDir);
   const pinned = store.mint(await harnessRoleSetFromRegistry(
     await RoleRegistry.fromYamlOrDefault(rolesPath, mafDir, createDefaultRegistry()),
   ), 'pinned');
   await store.save(pinned);
   await store.setCurrent(pinned.sha);
-  return { root, mafDir, rolesPath, pinnedSha: pinned.sha };
+  return { root, mafDir, rolesPath, corpus, pinnedSha: pinned.sha };
 }
 
 /** A user's edit the pinned harness does not hold: the tester loses `fs.write` (round 2's own case). */
@@ -182,7 +191,7 @@ test('maf goldens run prints the drift notice once when a pinned harness differs
 
 test('maf evolve prints the drift notice once when a pinned harness differs, and never otherwise', async (t) => {
   const evolveArgs = (p: Project, extra: readonly string[] = []) =>
-    ['evolve', '--dir', p.root, '--corpus', SEED, '--adapter', 'scripted', '--rounds', '1', '--patience', '1', ...extra];
+    ['evolve', '--dir', p.root, '--corpus', p.corpus, '--adapter', 'scripted', '--rounds', '1', '--patience', '1', ...extra];
   const projects: Project[] = [];
   try {
     const drifting = await project({ pin: true });

@@ -1,7 +1,7 @@
 {
   "harnessSha": "3124b5a9d019624e7e6e6a5d9983244a442eeeb15050f2867c66fd806b618379",
   "harnessId": "legacy-default",
-  "corpusSha": "912f22db4579af646a7362769982892fec5174fd3aa323744fa8b767647989d3",
+  "corpusSha": "b5492729f546fccffc4168851e3df6bd6cb6f948163abc932b93b3bf427597c8",
   "attempts": 2,
   "adapter": "scripted",
   "judge": {
@@ -217,6 +217,88 @@
       ]
     },
     {
+      "taskId": "coder-repeat",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed repeat.js: it returned the string once; it now repeats it n times.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed repeat.js: it returned the string once; it now repeats it n times.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-contains",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed contains.js: indexOf returns 0 for the first element; it now tests !== -1.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed contains.js: indexOf returns 0 for the first element; it now tests !== -1.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
       "taskId": "coder-fib",
       "role": "coder",
       "passed": false,
@@ -254,6 +336,170 @@
             }
           ],
           "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "coder-max",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed max.js: it returned the smaller of the two values; it now returns the larger.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed max.js: it returned the smaller of the two values; it now returns the larger.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-unique",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed unique.js: it returned its input; it now removes duplicates in first-seen order.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed unique.js: it returned its input; it now removes duplicates in first-seen order.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-flatten",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed flatten.js: it returned the nested array; it now flattens one level.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed flatten.js: it returned the nested array; it now flattens one level.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-pad",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed pad.js: it never padded; it now left-pads with zeros to the requested width.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed pad.js: it never padded; it now left-pads with zeros to the requested width.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
         }
       ]
     },
@@ -380,13 +626,3669 @@
           "passed": false
         }
       ]
+    },
+    {
+      "taskId": "pool-csv-parse",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: csv.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: csv.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-duration",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: duration.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: duration.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-ranges",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: ranges.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: ranges.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-wordwrap",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: wrap.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: wrap.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-roman",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: roman.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: roman.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-matrix-transpose",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: matrix.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: matrix.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-lru",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: lru.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: lru.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-edit-distance",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: distance.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: distance.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-heap",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: heap.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: heap.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-date-add",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: dateadd.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: dateadd.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-stats-median",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: stats.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: stats.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-slugify",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: slug.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: slug.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-binary-search",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: search.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: search.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-diff-lines",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: diff.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: diff.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-format-bytes",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: bytes.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: bytes.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-group-by",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: groupby.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: groupby.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-config-merge",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: config.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: config.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-route-params",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: router.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: router.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-cart-discount",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: cart.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: cart.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-tokenize",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: rules.js, tokenizer.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: rules.js, tokenizer.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-semver-compare",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote semver.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote semver.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-debounce",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote debounce.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote debounce.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-matrix-multiply",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote multiply.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote multiply.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-parse-args",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote args.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote args.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-pluralize",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote plural.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote plural.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-time-diff",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote time.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote time.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-tree-flatten",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote flatten-keys.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote flatten-keys.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-query-string",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote query.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote query.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-checksum",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote checksum.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote checksum.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-queue-batch",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote batch.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote batch.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-gcd-lcm",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote lcm.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote lcm.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bowling",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote bowling.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote bowling.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-caesar-wrap",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote caesar.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote caesar.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-token-bucket",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote bucket.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote bucket.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-round-sig",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote round.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote round.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-crc8",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed crc.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed crc.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-bitset",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed bitset.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed bitset.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-rle",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed rle.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed rle.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-base32",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed base32.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed base32.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-intervals",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed intervals.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed intervals.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-heapify",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed heapify.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed heapify.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-bloom",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed bloom.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed bloom.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-anagram",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed anagram.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed anagram.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-rot13",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed rot13.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed rot13.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-ring",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed ring.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed ring.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-grid-sum",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed grid.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed grid.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-title-case",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed title.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed title.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-chunk",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed chunk.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed chunk.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-zip",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed zip.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed zip.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-prefix-sum",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed prefix.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed prefix.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-word-count",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed words.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed words.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-camel-keys",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed keys.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed keys.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-template-render",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed render.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed render.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-graph-topo",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed visit.js, topo.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed visit.js, topo.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-move-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed move.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed move.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-max-subarray",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote maxSubarray.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote maxSubarray.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-factorial",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote factorial.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote factorial.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-prime-sieve",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote sieve.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote sieve.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-rotate-array",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote rotate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote rotate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-parse-binary",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote binary.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote binary.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-isbn-check",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote isbn.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote isbn.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-parse-bool",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote parseBool.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote parseBool.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-merge-sorted",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote merge.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote merge.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-matrix-diagonal",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote diagonal.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote diagonal.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-hyphenate",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote hyphenate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote hyphenate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-calc-eval",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote evaluate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote evaluate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-dedupe",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote dedupe.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote dedupe.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-truncate",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote truncate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote truncate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-split-path",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote paths.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote paths.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-mode",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote mode.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote mode.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-invoice-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-invoice-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-router-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-router-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-state-machine-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-state-machine-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-config-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-config-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-pagination-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-pagination-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-csv-writer",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-csv-writer",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-template",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-template",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-retry",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-retry",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-rate-limit",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-rate-limit",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-deep-equal",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-deep-equal",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-sort-comparator",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-sort-comparator",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-float-sum",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-float-sum",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-utf8-truncate",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-utf8-truncate",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-async-order",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-async-order",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-object-keys",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "node exited 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-object-keys",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "node exited 0"
+            }
+          ],
+          "passed": true
+        }
+      ]
     }
   ],
   "solvedTaskIds": [
     "coder-sum",
     "coder-reverse",
     "coder-clamp",
-    "coder-isodd"
+    "coder-isodd",
+    "coder-repeat",
+    "coder-contains",
+    "coder-max",
+    "coder-unique",
+    "coder-flatten",
+    "coder-pad",
+    "train-crc8",
+    "train-bitset",
+    "train-rle",
+    "train-base32",
+    "train-intervals",
+    "train-heapify",
+    "train-bloom",
+    "train-anagram",
+    "train-rot13",
+    "train-ring",
+    "train-grid-sum",
+    "train-title-case",
+    "train-chunk",
+    "train-zip",
+    "train-prefix-sum",
+    "train-word-count",
+    "train-camel-keys",
+    "train-template-render",
+    "train-graph-topo",
+    "train-move-file",
+    "train-max-subarray",
+    "train-factorial",
+    "train-prime-sieve",
+    "train-rotate-array",
+    "train-parse-binary",
+    "train-isbn-check",
+    "train-parse-bool",
+    "train-merge-sorted",
+    "train-matrix-diagonal",
+    "train-hyphenate",
+    "train-calc-eval",
+    "train-dedupe",
+    "train-truncate",
+    "train-split-path",
+    "train-mode",
+    "train-invoice-two-file",
+    "train-router-two-file",
+    "train-state-machine-two-file",
+    "train-config-two-file",
+    "train-pagination-two-file",
+    "train-feature-csv-writer",
+    "train-feature-template",
+    "train-feature-retry",
+    "train-feature-rate-limit",
+    "train-feature-deep-equal",
+    "train-bug-sort-comparator",
+    "train-bug-float-sum",
+    "train-bug-utf8-truncate",
+    "train-bug-async-order",
+    "train-bug-object-keys"
   ],
-  "ranAt": "2026-11-09T02:04:43.113Z"
+  "ranAt": "2026-11-14T01:25:36.054Z"
 }

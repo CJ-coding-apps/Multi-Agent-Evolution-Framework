@@ -1,21 +1,29 @@
 import crypto from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { makeRunId, refusePrototypeKey } from '@maf/types';
+import { readApprovalRecords, writeApprovalRecord } from '../approval.js';
+import type { ApprovalRecord } from '../approval.js';
 import type { AdapterName, CliAdapter, PermissionLevel } from '@maf/types';
 import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
-import { GoldenRunner, ScoreRecorder, describeJudge, makeLlmJudge } from '@maf/eval-harness';
-import type { GoldenSuiteResult, GoldenTask } from '@maf/eval-harness';
+import { effectiveTier, roleSetFromHarness } from '@maf/roles';
+import {
+  GoldenRunner, SCRIPTED_ADAPTER_NAME, ScoreRecorder, ScriptedAdapter, describeJudge,
+  isJudgeScored, loadScriptedBundle, loadSplits, makeLlmJudge,
+} from '@maf/eval-harness';
+import type { GoldenSuiteResult, GoldenTask, LoadedSplits } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
-import { evolve } from '@maf/evolver';
-import type { EvolveOptions, EvolveReport } from '@maf/evolver';
+import { EvolveBudget, HELD_OUT_REPEATS, UsageMeter, evolve, meterAdapter } from '@maf/evolver';
+import type { EvolveOptions, EvolveReport, GoldenRunMeasurement } from '@maf/evolver';
 import { createDefaultRegistry } from '@maf/tools';
-import { createDefaultProcessorRegistry } from '@maf/processors';
+import { createDefaultProcessorRegistry, DEFAULT_BUNDLE_REFS } from '@maf/processors';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { createAdapterRegistry, resolveAdapter } from '../AdapterRegistry.js';
 import { buildRunStack, resolveCorpusRoot } from '../wiring.js';
+import type { RunStack } from '../wiring.js';
 import { DEFAULT_MAF_CONFIG } from '../config/ConfigLoader.js';
 import { resolveGoldensHarness } from './goldens.js';
 
@@ -29,9 +37,31 @@ export async function smokeCheck(runner: { run(only?: readonly string[]): Promis
   if (error) throw new Error(error);
 }
 
+/**
+ * R2-M5 (H5): the smoke run is a measurement, so its target has to be a train-split task like every
+ * other paid run. A plan is checked against the split before the critic (R2-H2), but the critic may
+ * replace it with a revision, and the revision is smoke-tested without passing that check again —
+ * so this is the last line before a held-out task would be spent on a candidate.
+ */
+export function assertSmokeTarget(taskId: string, trainTaskIds: readonly string[]): void {
+  if (!trainTaskIds.includes(taskId))
+    throw new Error(`smoke task "${taskId}" is not in the train split; the evolver may not measure a held-out task`);
+}
+
 interface EvolveCliOpts {
   adapter: string; model?: string; dir: string; corpus: string; harness?: string;
   rounds: string; patience: string; policy: string; approveSensitive: boolean; allowUngoverned?: boolean;
+  maxSeconds?: string; maxTokens?: string; maxUsd?: string; usdPerMillionTokens?: string;
+  heldOutRepeats?: string;
+}
+
+/** A positive number from a flag, refused by name rather than silently ignored (D-57). */
+function positiveNumber(raw: string | undefined, flag: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0)
+    throw new Error(`${flag} must be a positive number, got "${raw}"`);
+  return n;
 }
 
 /** What a test may replace. The real registry and streams are the defaults. */
@@ -47,7 +77,7 @@ export interface EvolveDeps {
 }
 
 export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): void {
-  program
+  const evolveCommand = program
     .command('evolve')
     .description('AEGIS-lite harness evolution over the golden corpus (experimental; drives a live adapter, claude by default; never in the serving path)')
     .option('-a, --adapter <name>', 'Meta-agent adapter', 'claude')
@@ -63,13 +93,19 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       'Spend to evaluate edits to safety-adjacent roles (security/reviewer) in full (critic, smoke, '
       + 'goldens) instead of archiving them unevaluated; the verdict is still needs-approval and the '
       + 'candidate is stored, not made current, and applied only by a human with '
-      + '`maf harness set-current <candidateSha>` (WP-3.7 will add `maf evolve approve` as a shortcut); '
+      + '`maf evolve approve <id>` (or `maf harness set-current <sha>`); '
       + 'does not approve a tool widening',
       false,
     )
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
-    // `maf evolve approve <id>` was never this command's: commander would treat `approve` and `<id>`
-    // as surplus arguments and start a whole evolution run, spending money on a typo (M1).
+    .option('--max-seconds <n>', 'Wall-clock budget for the whole evolution run (D-57)')
+    .option('--max-tokens <n>', 'Token budget for the whole evolution run; spend is estimated from characters (D-57)')
+    .option('--max-usd <n>', 'Dollar budget; requires --usd-per-million-tokens so spend can be priced (D-57)')
+    .option('--usd-per-million-tokens <n>', 'Price used to turn the token estimate into dollars (D-57)')
+    .option('--held-out-repeats <n>', `Times each harness is scored on the held-out split (pre-registered at ${HELD_OUT_REPEATS}; D-57)`)
+    // A positional here is a typo, not an intent: commander would otherwise start a whole evolution
+    // run and spend money on it (M1). `approve` is a real subcommand now — see below — not an excess
+    // argument.
     .allowExcessArguments(false)
     .action(async (opts: EvolveCliOpts, cmd: Command) => {
       const cwd = path.resolve(opts.dir);
@@ -77,14 +113,103 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       const corpusRoot = await resolveCorpusRoot(cwd, opts.corpus);
       const runId = makeRunId(crypto.randomUUID());
 
+      // D-57: the loop is bounded in wall-clock, tokens and dollars, and the report states what it
+      // spent. A budget flag that cannot be honoured is refused before anything is paid for.
+      let maxWallClockMs: number | undefined;
+      let maxTokens: number | undefined;
+      let maxUsd: number | undefined;
+      let usdPerMillionTokens: number | undefined;
+      let heldOutRepeats: number | undefined;
+      try {
+        const seconds = positiveNumber(opts.maxSeconds, '--max-seconds');
+        maxWallClockMs = seconds === undefined ? undefined : Math.round(seconds * 1000);
+        maxTokens = positiveNumber(opts.maxTokens, '--max-tokens');
+        maxUsd = positiveNumber(opts.maxUsd, '--max-usd');
+        usdPerMillionTokens = positiveNumber(opts.usdPerMillionTokens, '--usd-per-million-tokens');
+        if (maxUsd !== undefined && usdPerMillionTokens === undefined)
+          throw new Error('--max-usd needs --usd-per-million-tokens: without a price the dollar spend cannot be computed');
+        // R2-H3: the held-out verdict is a repeated measurement. Refuse an unusable count here, before
+        // the first round, rather than paying for a run that cannot state a verdict.
+        if (opts.heldOutRepeats !== undefined) {
+          const n = Number(opts.heldOutRepeats);
+          if (n !== HELD_OUT_REPEATS)
+            throw new Error(
+              `--held-out-repeats must be ${HELD_OUT_REPEATS}: the run count is part of the pre-registered ` +
+              `held-out test (alpha, the minimum task count and the decision live in splits.json), so a ` +
+              `different count is a different test (got "${opts.heldOutRepeats}")`,
+            );
+          heldOutRepeats = n;
+        }
+      } catch (err) {
+        console.error(`[maf] evolve: ${err instanceof Error ? err.message : String(err)}`);
+        process.exitCode = 2;
+        return;
+      }
+      const budget = new EvolveBudget({
+        ...(maxWallClockMs !== undefined ? { maxWallClockMs } : {}),
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
+        ...(maxUsd !== undefined ? { maxUsd } : {}),
+      });
+
       const store = new HarnessStore(mafDir);
       // The harness `goldens run` would measure, so a fresh clone evolves from the one it evaluates.
       const { harness: base } = await resolveGoldensHarness(mafDir, opts.harness);
       console.log(`[maf] evolve ${runId} | base: ${base.id} (${shortSha(base.sha)}) | rounds=${opts.rounds} patience=${opts.patience}`);
 
-      const adapter = await resolveAdapter(opts.adapter, deps.adapters ?? createAdapterRegistry());
-      const stack = await buildRunStack({
-        cwd, mafDir, adapter, runId,
+      // WP-3.9 G5: a corpus file, through the shared reviver like `goldens run` reads it. Read
+      // before the adapter resolves: the scripted backend's answers live beside the corpus.
+      const corpus: GoldenTask[] = JSON.parse(
+        await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'), refusePrototypeKey,
+      );
+
+      // D-57: the corpora are two. The evolver only ever sees `train`; the survivor is scored on
+      // `held-out` at the end, and that score is reported as a delta against the baseline's.
+      // A split that is not a partition, or that names a task this corpus does not have, is
+      // refused here before anything is opened or paid for.
+      let splits: LoadedSplits;
+      try {
+        splits = await loadSplits(corpusRoot, corpus);
+      } catch (err) {
+        console.error(`[maf] evolve: ${err instanceof Error ? err.message : String(err)}`);
+        process.exitCode = 2;
+        return;
+      }
+
+      // R5-P3 (round-4 finding R4-M1): the held-out gate may only score a yardstick derived from a
+      // committed calibration. A split with no measurement behind it — hand-picked held-out tasks,
+      // however reasonable — is refused before anything is opened or paid for.
+      if (splits.preRegistration.calibrationSha === null) {
+        console.error(
+          '[maf] evolve: the split names no calibration measurement (preRegistration.calibrationSha ' +
+          'is null), so its held-out set was not derived from one and the gate cannot score it. ' +
+          'Run `maf goldens calibrate` to measure the pool and write the yardstick it selects.',
+        );
+        process.exitCode = 2;
+        return;
+      }
+
+      // The scripted stand-in is built from this corpus's scripts (D-14). The registry's bare
+      // `scripted` adapter has no scripts, so `evolve --adapter scripted` could not answer its own
+      // first task. Only that bare one is replaced: a caller-injected adapter (a test's map, or a
+      // mocked `resolveAdapter`) is already scripted, and resolving first is what proves it.
+      let adapter: CliAdapter = await resolveAdapter(opts.adapter, deps.adapters ?? createAdapterRegistry());
+      if (opts.adapter === SCRIPTED_ADAPTER_NAME && deps.adapters === undefined && adapter instanceof ScriptedAdapter) {
+        const bundle = await loadScriptedBundle(corpusRoot, corpus);
+        adapter = new ScriptedAdapter(bundle.tasks, bundle.evolution);
+      }
+
+      // R2-H4: every model call this run makes — role turns and tool-loop turns, the planner, the
+      // critic, the judge, the security gate and LCM summaries — goes through the adapter, so the
+      // meter wraps it once and the budget is fed per call. A backend that reports usage is
+      // believed; where it reports nothing the charge is a bytes-based estimate.
+      const usage = new UsageMeter(usdPerMillionTokens);
+      const meteredAdapter = meterAdapter(adapter, usage, (call) => {
+        budget.addTokens(call.tokens, call.source);
+        if (call.usd !== undefined) budget.addUsd(call.usd, call.usdSource ?? 'estimated');
+      });
+
+      const stackConfig: Parameters<typeof buildRunStack>[0] = {
+        cwd, mafDir, adapter: meteredAdapter, runId,
         // D-49, F7: the same resolution `run` and `goldens` take.
         policy: { value: opts.policy, typed: cmd.getOptionValueSource('policy') === 'cli' },
         harnessSha: base.sha, headless: true, ...(opts.model ? { model: opts.model } : {}),
@@ -92,15 +217,25 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         // WP-3.2 F12: the stack takes resolved settings. `evolve` reads no `maf.config`, so the
         // shipped defaults are its resolution — one object, not a second set of constants here.
         lcm: DEFAULT_MAF_CONFIG.lcm,
-      });
+      };
+      const stack = await buildRunStack(stackConfig);
 
-      // WP-3.9 G5: a corpus file, through the shared reviver like `goldens run` reads it.
-      const corpus: GoldenTask[] = JSON.parse(
-        await readFile(path.join(corpusRoot, 'corpus.json'), 'utf8'), refusePrototypeKey,
-      );
+      // R2-H2: the held-out score must leave no trace the next digest can read. Its stack is a
+      // second one whose graph is a throwaway directory — the dispatcher, policy engine and
+      // process hooks write their GoldenResult/PolicyEvent/Failure nodes there, never into
+      // `.maf/memory.kuzu`. Roles, prompts, policy and transcripts still come from `mafDir`.
+      let heldOutStack: RunStack | undefined;
+      let heldOutGraphDir: string | undefined;
+      const stackForHeldOut = async (): Promise<RunStack> => {
+        if (heldOutStack !== undefined) return heldOutStack;
+        heldOutGraphDir = await mkdtemp(path.join(tmpdir(), 'maf-heldout-'));
+        heldOutStack = await buildRunStack({ ...stackConfig, graphDir: heldOutGraphDir });
+        return heldOutStack;
+      };
 
       const metaGenerate = async (systemPrompt: string, userPrompt: string): Promise<string> => {
-        const result = await adapter.invoke({
+        // The metering adapter charges the call; a second charge here would count it twice.
+        const result = await meteredAdapter.invoke({
           prompt: userPrompt, systemPrompt,
           workingDir: cwd, timeoutMs: 300_000,
           maxOutputBytes: 256 * 1024,
@@ -113,7 +248,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       const securityScore = async (diff: string): Promise<'none' | 'low' | 'medium' | 'high' | 'critical'> => {
         if (!diff.trim()) return 'none';
         const gate = new SecurityReviewGate({
-          adapter, projectRoot: cwd, securityPrompt: stack.securityPrompt,
+          adapter: meteredAdapter, projectRoot: cwd, securityPrompt: stack.securityPrompt,
           ...(opts.model ? { model: opts.model } : {}),
         });
         const res = await gate.reviewDiff(diff);
@@ -124,17 +259,24 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       };
 
       const agent = { adapter: adapter.name, ...(opts.model ? { model: opts.model } : {}) };
-      const runnerFor = (harness: HarnessConfig, attempts: number) =>
+      const runnerFor = (
+        harness: HarnessConfig, attempts: number, split?: { name: 'train' | 'held-out'; sha: string },
+        runStack: RunStack = stack,
+      ) =>
         new GoldenRunner({
           corpusRoot, harnessSha: harness.sha, harnessId: harness.id,
           attempts, temperature: 0,
-          dispatch: (task, workDir, { timeoutMs, temperature }) =>
+          ...(split !== undefined ? { split } : {}),
+          dispatch: async (task, workDir, { timeoutMs, temperature }) => {
             // L5: the corpus task id travels with the dispatch, so a refusal's `PolicyEvent` names
             // the task whose score it belongs to.
-            stack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature, task.id),
+            // D-57 (R2-H4): the dispatch is charged by the metering adapter every model call it
+            // makes, tool-loop turns and injected context included — not once per task here.
+            return runStack.dispatchTask(harness, task.role, task.prompt, workDir, timeoutMs, temperature, task.id);
+          },
           ...agent,
           llmJudge: {
-            verdict: makeLlmJudge({ adapter, ...(opts.model ? { model: opts.model } : {}) }, cwd),
+            verdict: makeLlmJudge({ adapter: meteredAdapter, ...(opts.model ? { model: opts.model } : {}) }, cwd),
             disclosure: describeJudge(agent, agent),
           },
           securityScore,
@@ -146,9 +288,53 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       // digests.
       const scoreRecorder = new ScoreRecorder(stack.graph, runId);
 
-      const runGoldensFor = (harness: HarnessConfig): Promise<GoldenSuiteResult> => runnerFor(harness, 2).run();
+      // D-57: everything the evolver measures is the train split. The held-out split is measured
+      // only by `runHeldOut`, only at the end, and never recorded as evidence.
+      // R4-A2 states the unit: train scoring is pass@2 (a task counts if either of two attempts
+      // passes), which is the evolver's own yardstick for choosing candidates, not the gate's
+      // measurement. The gate's unit is the single attempt, below.
+      const runGoldensFor = (harness: HarnessConfig): Promise<GoldenSuiteResult> =>
+        runnerFor(harness, 2, { name: 'train', sha: splits.sha }).run(splits.train);
 
-      const runSmoke = (harness: HarnessConfig, taskId: string) => smokeCheck(runnerFor(harness, 1), taskId);
+      // R2-H2: on the isolated stack, so a refusal or a gate failure during a held-out attempt
+      // writes to the throwaway graph, not to the one the next digest reads.
+      // R4-A2: one attempt per task per repeat. `heldOutRepeats` (10) repeats are therefore ten
+      // single attempts, and `evaluateHeldOut` counts how many of them passed — the same unit
+      // calibration measures, so a task is never "harder" in one stage than in the other because
+      // one gave it two tries and the other one.
+      const runHeldOut = async (harness: HarnessConfig): Promise<GoldenSuiteResult> =>
+        runnerFor(harness, 1, { name: 'held-out', sha: splits.sha }, await stackForHeldOut())
+          .run(splits.heldOut);
+
+      // R2-M3: a held-out task with an llm-judge verifier is a model's opinion. It is still run,
+      // so the report can show it beside the gate, but it is subtracted before anything is
+      // compared — a candidate that improves only where a judge said so has not improved.
+      const corpusById = new Map(corpus.map((t) => [t.id, t]));
+      const judgeScoredHeldOut = splits.heldOut.filter((id) => isJudgeScored(corpusById.get(id)!));
+
+      const runSmoke = (harness: HarnessConfig, taskId: string) => {
+        // A smoke run is a measurement too. The first plan is refused earlier if it names a task
+        // outside the train split (R2-H2), but a critic revision reaches the smoke unchecked.
+        assertSmokeTarget(taskId, splits.train);
+        return smokeCheck(runnerFor(harness, 1), taskId);
+      };
+
+      // R5-P4: a session's first run projects from the committed calibration's own measurement —
+      // the same meter over the same corpus — rather than from a constant. Calibration measured
+      // CALIBRATION_RUNS attempts per task and the train run makes two, so the figure errs high. A
+      // record written before usage was recorded has none, and the loop uses the constant instead.
+      // Only this adapter's own measurement counts: a scripted run's tokens say nothing about what
+      // a live model will spend, so a differing adapter falls back to its constant.
+      const calibrationUsage = splits.calibration?.adapter === adapter.name
+        ? splits.calibration?.usage
+        : undefined;
+      const priorGoldenMeasurement: GoldenRunMeasurement | undefined =
+        calibrationUsage !== undefined && calibrationUsage.tasks > 0
+          ? {
+            tokens: calibrationUsage.tokens, tasks: calibrationUsage.tasks,
+            ...(calibrationUsage.usd !== undefined ? { usd: calibrationUsage.usd } : {}),
+          }
+          : undefined;
 
       // Static registry membership = the allowlist (§10.2; registry-driven, not hardcoded here)
       const processorNames = new Set(createDefaultProcessorRegistry().names());
@@ -161,6 +347,22 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         metaGenerate,
         graph: stack.graph,
         runGoldens: runGoldensFor,
+        // D-57: the evolver plans from the train split only, and the survivor is scored against
+        // the held-out split N times each — with the delta and noise floor in the report. Judge-
+        // scored held-out tasks are named so the loop can report them beside, never in, the gate.
+        splitName: 'train',
+        runHeldOut,
+        heldOutSplitsSha: splits.sha,
+        // R2-M1: the loop projects each golden run's cost from its task count before starting it.
+        goldenTaskCounts: { train: splits.train.length, heldOut: splits.heldOut.length },
+        ...(priorGoldenMeasurement !== undefined ? { priorGoldenMeasurement } : {}),
+        // R3-M3: the same price the usage meter uses, so the dollar projection and the dollar
+        // meter cannot disagree about what a token costs.
+        ...(usdPerMillionTokens !== undefined ? { usdPerMillionTokens } : {}),
+        ...(judgeScoredHeldOut.length > 0 ? { heldOutJudgeScored: judgeScoredHeldOut } : {}),
+        ...(heldOutRepeats !== undefined ? { heldOutRepeats } : {}),
+        budget,
+        usage,
         recordGoldens: deps.recordGoldens ?? ((result) => scoreRecorder.record(result)),
         // Amendment item 2: the rounds were silent, and six live rounds of `no_op` looked like a
         // planner preference. Each round now says what it did and why, including "no evidence".
@@ -171,12 +373,24 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
           await store.setCurrent(candidate.sha);
           console.log(`[maf] SHIP ${candidate.id} (${shortSha(candidate.sha)}) — improves ${improvements.join(', ')}`);
         },
-        // M1: a candidate a human has to apply is saved but not made current. The evaluation is in
-        // the round record; CURRENT moves only when the human runs `maf harness set-current`.
-        storeCandidate: async (candidate) => {
+        // M1 (R2-M1): a candidate a human has to apply is saved but not made current, and the
+        // store records what an approval needs to check — the session that minted it and the base
+        // it was measured against. CURRENT moves only when a human approves or set-currents it.
+        storeCandidate: async (candidate, _evaluation, base) => {
           await store.save(candidate);
-          console.log(`[maf] STORED ${candidate.id} (${shortSha(candidate.sha)}) — not current; apply it with \`maf harness set-current ${candidate.sha}\``);
+          await writeApprovalRecord(store.dir, {
+            id: candidate.id, sha: candidate.sha, baseSha: base.sha, session: String(runId),
+          });
+          console.log(
+            `[maf] STORED ${candidate.id} (${shortSha(candidate.sha)}) — not current; apply it with ` +
+            `\`maf evolve approve ${String(runId)}/${candidate.id}\` or \`maf harness set-current ${candidate.sha}\``,
+          );
         },
+        // §7: which tier each role actually runs on under this adapter, so the gate can refuse an
+        // edit that could not reach it (`maxToolIterations` on a cli-tier role changes nothing).
+        // The candidate cannot change a role's tier, so the base's answer holds for it too.
+        roleTiers: new Map(roleSetFromHarness(base.roleSet).roles.map((r) => [r.role, effectiveTier(r, adapter)])),
+        adapterName: adapter.name,
         roleCatalog: base.roleSet.roles.map((r) => ({
           role: r.role, description: r.description ?? '', allowedTools: r.allowedTools,
           ...(r.model ? { model: r.model } : {}),
@@ -188,10 +402,20 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
           createDefaultRegistry().getAll().map((t): [string, PermissionLevel] => [String(t.id), t.permissionLevel]),
         ),
         knownProcessorNames: processorNames,
+        // R2-H1: the default bundle lives in `@maf/processors`; the CLI already depends on it, so
+        // it hands the refs to the evolver rather than the evolver taking a dependency for them.
+        defaultBundleRefs: DEFAULT_BUNDLE_REFS,
         judgeOnlyTaskIds: new Set(corpus
           .filter((t) => t.verifiers.every((v) => v.kind === 'llm-judge'))
           .map((t) => t.id)),
         ...(opts.approveSensitive ? { approveSensitive: true } : {}),
+        // R2-H2: the digest is fenced to the train split — by row (`split`/`splits_sha`), by task
+        // id, and by scrubbing every corpus id outside it from free text.
+        evidenceScope: {
+          trainTaskIds: new Set(splits.train),
+          splitsSha: splits.sha,
+          corpusTaskIds: new Set(corpus.map((t) => t.id)),
+        },
       };
 
       // L2: the stack is released however the loop ends — a throw from the loop used to leave the
@@ -202,15 +426,122 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         report = await evolve(evolveOptions);
       } finally {
         await stack.close();
+        // R2-H2: the held-out stack and its throwaway graph go with the run.
+        if (heldOutStack !== undefined) await heldOutStack.close();
+        if (heldOutGraphDir !== undefined) await rm(heldOutGraphDir, { recursive: true, force: true });
       }
 
       const reportPath = path.join(mafDir, 'evolve', `${runId}.json`);
       await mkdir(path.dirname(reportPath), { recursive: true });
       await writeFile(reportPath, JSON.stringify(report, null, 2), 'utf8');
       console.log(`[maf] evolve done: ships=${report.ships} stop=${report.stopReason} → ${reportPath}`);
+      // D-57: what it spent and what the held-out split said, in the terminal as well as the report.
+      if (report.budget !== undefined) console.log(`[maf] ${report.budget.statement}`);
+      // R2-H4: every model call the run made, and whether each figure was reported or estimated.
+      if (report.usage !== undefined) console.log(`[maf] ${report.usage.statement}`);
+      if (report.heldOut !== undefined) console.log(`[maf] ${report.heldOut.statement}`);
       if (report.error !== undefined) {
         // The run did not evolve to a stopping condition; the report above is what it paid for.
         console.error(`[maf] evolve stopped: ${report.error}`);
+        process.exitCode = 1;
+      }
+    });
+
+
+type ApprovalResolution =
+  | { ok: true; id: string; sha: string }
+  | { ok: false; refusal: string };
+
+/**
+ * R2-M1: resolve what `evolve approve <candidate>` may apply. It accepts a 64-hex sha, or
+ * `<session>/<id>`, or an id that exactly one session claims — and only for a candidate the store
+ * recorded as held for approval. A candidate is applied only while CURRENT still names the harness
+ * it was measured against; the refusal names both shas.
+ */
+async function resolveApproval(store: HarnessStore, requested: string): Promise<ApprovalResolution> {
+  const records = await readApprovalRecords(store.dir);
+  const current = await store.current();
+  const qualified = (r: ApprovalRecord) => `${r.session}/${r.id}`;
+
+  let record: ApprovalRecord | undefined;
+  if (/^[0-9a-f]{64}$/.test(requested)) {
+    record = records.find((r) => r.sha === requested);
+    if (record === undefined) {
+      const stored = await store.tryLoad(requested).catch(() => undefined);
+      return {
+        ok: false,
+        refusal: stored === undefined
+          ? `no harness ${requested} is stored. Candidates are stored by \`maf evolve\` under .maf/harnesses; list them with \`maf harness list\`.`
+          : `harness ${shortSha(requested)} (${stored.id}) is stored but was not held for approval: it was not measured as a sensitive candidate, so apply it with \`maf harness set-current ${requested}\` if you mean it.`,
+      };
+    }
+  } else {
+    const slash = requested.indexOf('/');
+    const [session, id] = slash === -1 ? [undefined, requested] : [requested.slice(0, slash), requested.slice(slash + 1)];
+    const matches = records.filter((r) => r.id === id && (session === undefined || r.session === session));
+    if (matches.length === 0) {
+      const stored = session === undefined ? await store.tryLoad(id).catch(() => undefined) : undefined;
+      return {
+        ok: false,
+        refusal: stored !== undefined
+          ? `harness ${id} is stored but was not held for approval: it was not measured as a sensitive candidate, so apply it with \`maf harness set-current ${stored.sha}\` if you mean it.`
+          : `no stored needs-approval candidate ${requested}. Candidates are written by \`maf evolve\` and named \`<session>/<id>\`; \`maf harness list\` shows what is stored.`,
+      };
+    }
+    // Two sessions evolving from the same base mint the same id. An id that names more than one
+    // stored candidate is refused, with every qualified name, rather than applying one of them.
+    if (matches.length > 1)
+      return {
+        ok: false,
+        refusal: `candidate id "${id}" is ambiguous: ${matches.map(qualified).join(', ')}. ` +
+          'Give `<session>/<id>` or the sha.',
+      };
+    record = matches[0];
+  }
+
+  // Every branch above either returns a refusal or sets `record`; this satisfies the compiler
+  // (and would fail closed if a later branch forgot to).
+  if (record === undefined) return { ok: false, refusal: `no stored needs-approval candidate ${requested}` };
+
+  if (current?.sha !== record.baseSha)
+    return {
+      ok: false,
+      refusal: `candidate ${record.id} was measured against base ${shortSha(record.baseSha)}, but ` +
+        `CURRENT is ${current === undefined ? 'nothing (no harness is current)' : `${current.id} (${shortSha(current.sha)})`}. ` +
+        'Applying it would ship a harness whose improvement was measured against another base; ' +
+        `re-run the evolution, or pin the base with \`maf harness set-current ${record.baseSha}\` first.`,
+    };
+  return { ok: true, id: record.id, sha: record.sha };
+}
+
+  // §7: "sensitive candidates are stored and `maf evolve approve <id>` ships one." The loop stores
+  // a needs-approval candidate and deliberately leaves CURRENT alone (M1); this is the human half.
+  // It makes the same single write `maf harness set-current <sha>` makes, so a candidate applied
+  // either way lands identically. Nothing is spent: no adapter is built and no run starts.
+  // The working directory is `evolve`'s own `-d`, read through `optsWithGlobals`. Commander parses an
+  // option typed after a subcommand name against the *parent's* options, so a `-d` declared here as
+  // well never receives the value: its default is what `opts().dir` shows. One declaration, one value.
+  evolveCommand
+    .command('approve <candidate>')
+    .description('Apply a stored needs-approval candidate (session/id or sha) by making it CURRENT. Spends nothing and starts no run')
+    .action(async (candidate: string, _opts: unknown, cmd: Command) => {
+      const dir = (cmd.optsWithGlobals() as { dir?: string }).dir ?? process.cwd();
+      const store = new HarnessStore(path.join(path.resolve(dir), '.maf'));
+      try {
+        const resolved = await resolveApproval(store, candidate);
+        if (!resolved.ok) {
+          console.error(`[maf] evolve approve: ${resolved.refusal}`);
+          process.exitCode = 2;
+          return;
+        }
+        // Exactly `set-current <sha>`: one write, the same one `maf harness set-current` makes.
+        await store.setCurrent(resolved.sha);
+        console.log(`[maf] APPROVED ${resolved.id} (${shortSha(resolved.sha)}) — now current for this project`);
+      } catch (err) {
+        // A refused snapshot (an older legacy-default that the next plain run would re-mint over),
+        // a tampered file, an unreadable approval record or a corrupt CURRENT: say so and fail,
+        // never half-apply.
+        console.error(`[maf] evolve approve: ${err instanceof Error ? err.message : String(err)}`);
         process.exitCode = 1;
       }
     });

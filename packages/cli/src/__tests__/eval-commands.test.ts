@@ -5,6 +5,9 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
+import { CALIBRATION_RULE, HELD_OUT_RULE } from '@maf/eval-harness';
+import { estimateTokens } from '@maf/types';
+import { CONSERVATIVE_GOLDEN_TOKENS_PER_TASK } from '@maf/evolver';
 import type { AdapterInvokeOptions, AdapterInvokeResult, CliAdapter } from '@maf/types';
 import type { MemoryGraph } from '@maf/memory-graph';
 import { RoleRegistry, harnessRoleSetFromRegistry } from '@maf/roles';
@@ -12,11 +15,13 @@ import { createDefaultRegistry } from '@maf/tools';
 import * as wiring from '../wiring.js';
 import * as AdapterRegistry from '../AdapterRegistry.js';
 import { HarnessStore } from '@maf/harness-config';
-import type { HarnessConfig } from '@maf/harness-config';
+import type { HarnessConfig, HarnessRoleSet } from '@maf/harness-config';
 import { registerGoldensCommand, resolveGoldensHarness } from '../commands/goldens.js';
-import { registerEvolveCommand } from '../commands/evolve.js';
+import { assertSmokeTarget, registerEvolveCommand } from '../commands/evolve.js';
+import { readApprovalRecords, writeApprovalRecord } from '../approval.js';
 import { registerHarnessCommand } from '../commands/harness.js';
 import { messageOf } from './runFixture.js';
+import { calibrateSplitForTest } from './calibratedCorpus.js';
 
 // ORACLE: verifier F3 and F11 — `goldens run` and `evolve` take `--allow-ungoverned` to the stack
 // they dispatch through (on an adapter that cannot run the in-process loop, every writer task is
@@ -42,8 +47,17 @@ async function freshClone(): Promise<{ root: string; defaultSha: string }> {
   const name = (await readdir(path.join(from, 'harnesses'))).find((n) => /^default-[0-9a-f]{64}\.json$/.test(n));
   assert.ok(name, 'the repository commits a default harness');
   await cp(path.join(from, 'harnesses', name), path.join(to, 'harnesses', name));
+  // R5-P3: `evolve` refuses a split with no calibration behind its heldOut. The clone gets a copy
+  // of the seed corpus whose split names a synthetic record that derives it, so the gate is
+  // exercisable offline. `goldens run` reads no split and is unaffected.
+  const corpus = path.join(root, 'tests', 'goldens');
+  await cp(SEED, corpus, { recursive: true });
+  await calibrateSplitForTest(corpus);
   return { root, defaultSha: name.slice('default-'.length, -'.json'.length) };
 }
+
+/** The corpus `freshClone` calibrated; `evolve` reads a split, so it gets this one, not SEED. */
+const cloneCorpus = (root: string): string => path.join(root, 'tests', 'goldens');
 
 /** Stops `buildRunStack` at its first line, keeping what it was asked for, and keeps what the commands log. */
 function stopAtStack(t: TestContext): { stacks: StackConfig[]; logs: string[] } {
@@ -71,7 +85,7 @@ async function drive(register: (program: Command) => void, args: string[]): Prom
 }
 
 const goldens = (root: string, ...extra: string[]) => ['goldens', 'run', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', ...extra];
-const evolve = (root: string, ...extra: string[]) => ['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', ...extra];
+const evolve = (root: string, ...extra: string[]) => ['evolve', '--dir', root, '--corpus', cloneCorpus(root), '--adapter', 'scripted', ...extra];
 
 test('goldens run and evolve take --allow-ungoverned to the stack they dispatch through, and only when typed', async (t) => {
   const { root } = await freshClone();
@@ -88,27 +102,432 @@ test('goldens run and evolve take --allow-ungoverned to the stack they dispatch 
   }
 });
 
-// M1(b): `maf evolve approve <sha>` is WP-3.7's command and does not exist yet. Typing it must be
-// refused rather than read as `evolve` with surplus arguments and start a paid round.
-test('maf evolve refuses a positional argument instead of starting a run (M1)', async (t) => {
+// M1 (§7): a sensitive candidate is stored, not made current, and `maf evolve approve <id>` ships
+// it. Approve is a real subcommand — a positional to plain `evolve` is still refused (M1b) so a
+// typo cannot buy a round — and approving spends nothing: no adapter is built and no run starts.
+// An intact stored candidate becomes CURRENT through the same write `maf harness set-current` makes;
+// an unknown name is refused and moves nothing; R2-M1: only a stored needs-approval candidate is
+// applied, an id two sessions claim is refused, and a candidate whose base has moved is refused.
+test('maf evolve approve applies only a stored needs-approval candidate (R2-M1)', async (t) => {
   const resolved: string[] = [];
   t.mock.method(AdapterRegistry, 'resolveAdapter', async (name: string) => {
     resolved.push(name);
     throw new Error('adapter built');
   });
-  const program = new Command();
-  program.exitOverride();
-  registerEvolveCommand(program);
-  let error: unknown;
+  const logs: string[] = [];
+  const errors: string[] = [];
+  t.mock.method(console, 'log', (...parts: unknown[]) => { logs.push(parts.map(String).join(' ')); });
+  t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-evolve-approve-'));
+  const saved = process.exitCode;
+  process.exitCode = 0;
   try {
-    await program.parseAsync(['evolve', 'approve', 'abc123'], { from: 'user' });
-  } catch (err: unknown) {
-    error = err;
+    // A positional on the parent is still an excess argument (M1b), never a run.
+    const parent = new Command().exitOverride();
+    registerEvolveCommand(parent);
+    let excess: unknown;
+    try {
+      await parent.parseAsync(['evolve', 'abc123'], { from: 'user' });
+    } catch (err: unknown) {
+      excess = err;
+    }
+    assert.equal((excess as { code?: string } | undefined)?.code, 'commander.excessArguments');
+
+    const store = new HarnessStore(path.join(root, '.maf'));
+    const roles = (prompt: string): HarnessRoleSet => ({
+      version: 1, defaultRole: 'coder', roles: [{ role: 'coder', systemPrompt: prompt, allowedTools: ['fs.read'] }],
+    });
+    // CURRENT: the base two sessions both evolved from.
+    const base = store.mint(roles('base'), 'legacy-default');
+    await store.save(base);
+    await store.setCurrent(base.sha);
+    assert.equal((await store.current())?.sha, base.sha);
+
+    const approve = async (ref: string): Promise<void> => {
+      process.exitCode = 0;
+      const program = new Command().exitOverride();
+      registerEvolveCommand(program);
+      await program.parseAsync(['evolve', 'approve', ref, '-d', root], { from: 'user' });
+    };
+
+    // Saved but never held for approval: `maf harness set-current` is the way to apply it.
+    const plain = store.mint(roles('plain edit'), 'legacy-default-e1');
+    await store.save(plain);
+    await approve(plain.id);
+    assert.equal(process.exitCode, 2, 'a harness that was not held for approval is refused');
+    assert.ok(errors.some((l) => l.includes('was not held for approval')), errors.join('\n'));
+    assert.equal((await store.current())?.sha, base.sha, 'a refused approval moves nothing');
+
+    // Two sessions, same id, different candidates.
+    const one = store.mint(roles('session one edit'), 'legacy-default-e1');
+    const two = store.mint(roles('session two edit'), 'legacy-default-e1');
+    await store.save(one);
+    await store.save(two);
+    await writeApprovalRecord(store.dir, { id: one.id, sha: one.sha, baseSha: base.sha, session: 'run-1' });
+    await writeApprovalRecord(store.dir, { id: two.id, sha: two.sha, baseSha: base.sha, session: 'run-2' });
+    await approve(one.id);
+    assert.equal(process.exitCode, 2, 'an id two sessions claim is refused');
+    assert.ok(errors.some((l) => l.includes('ambiguous') && l.includes('run-1/legacy-default-e1') && l.includes('run-2/legacy-default-e1')), errors.join('\n'));
+    assert.equal((await store.current())?.sha, base.sha);
+
+    // A qualified name resolves it; the approval is exactly a set-current of that sha.
+    await approve(`run-2/${two.id}`);
+    assert.equal((await store.current())?.sha, two.sha, 'CURRENT names the approved candidate');
+    assert.ok(logs.some((l) => l.includes(`[maf] APPROVED ${two.id}`)), logs.join('\n'));
+
+    // CURRENT has moved since that candidate was measured: applying it would ship an improvement
+    // measured against another harness.
+    await approve(`run-1/${one.id}`);
+    assert.equal(process.exitCode, 2, 'a candidate whose base has moved is refused');
+    assert.ok(
+      errors.some((l) => l.includes(`measured against base ${base.sha.slice(0, 8)}`) && l.includes(`CURRENT is ${two.id}`)),
+      errors.join('\n'),
+    );
+    assert.equal((await store.current())?.sha, two.sha, 'a refused approval moves nothing');
+
+    // An unknown name, and an unknown sha, are refusals too.
+    await approve('no-such-candidate');
+    assert.equal(process.exitCode, 2);
+    assert.ok(errors.some((l) => l.includes('no stored needs-approval candidate no-such-candidate')), errors.join('\n'));
+    await approve('f'.repeat(64));
+    assert.equal(process.exitCode, 2);
+    assert.ok(errors.some((l) => l.includes(`no harness ${'f'.repeat(64)} is stored`)), errors.join('\n'));
+
+    assert.deepEqual(resolved, [], 'approving builds no adapter and starts no run');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
   }
-  assert.ok(error instanceof Error, 'the command refused the argument');
-  assert.equal((error as { code?: string }).code, 'commander.excessArguments');
-  assert.notEqual((error as { exitCode?: number }).exitCode, 0);
-  assert.deepEqual(resolved, [], 'no adapter was built for a command that does not exist');
+});
+
+test('maf evolve refuses a --held-out-repeats the test was not pre-registered for, before anything is spent (R3-G3)', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const { stacks } = stopAtStack(t);
+    const errors: string[] = [];
+    t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--held-out-repeats', '3'), { from: 'user' });
+    assert.equal(process.exitCode, 2, 'a count the test was not pre-registered for is refused, non-zero');
+    assert.ok(
+      errors.some((l) => l.includes('--held-out-repeats must be 10')),
+      errors.join('\n'),
+    );
+    assert.deepEqual(stacks, [], 'no stack, no round, no money');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('maf evolve refuses a held-out gate resting on fewer than minHeldOut deterministic tasks (R2-M2)', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    // A split whose held-out side is one task: a gate that cannot tell an improvement from a coin
+    // toss. The floor is declared in the file, so this is a visible edit a reviewer can see.
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    const corpusJson = JSON.parse(await readFile(path.join(corpus, 'corpus.json'), 'utf8')) as { id: string }[];
+    await writeFile(path.join(corpus, 'splits.json'), JSON.stringify({
+      version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
+      preRegistration: { attempts: 'single', selection: CALIBRATION_RULE, calibrationSha: null },
+      train: corpusJson.map((t) => t.id).filter((id) => id !== 'coder-fib'),
+      heldOut: ['coder-fib'],
+    }), 'utf8');
+
+    const { stacks } = stopAtStack(t);
+    const errors: string[] = [];
+    t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted'], { from: 'user' });
+    assert.equal(process.exitCode, 2, 'an unmeasurable yardstick is refused, non-zero');
+    assert.ok(
+      errors.some((l) => l.includes('1 deterministically scored task') && l.includes('minHeldOut is 5')),
+      errors.join('\n'),
+    );
+    assert.deepEqual(stacks, [], 'no stack, no round, no money');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R5-P3 (round-4 finding R4-M1): the gate may only score a yardstick derived from a committed
+// measurement. The seed split names no calibration (`calibrationSha: null`) and its held-out tasks
+// were hand-picked; `evolve` refuses it before the stack exists, rather than scoring a set nobody
+// measured.
+test('maf evolve refuses a split with no calibration behind its heldOut (R5-P3)', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    const splits = JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as {
+      preRegistration: { calibrationSha: string | null };
+    };
+    assert.equal(splits.preRegistration.calibrationSha, null, 'the seed split has no measurement');
+
+    const { stacks } = stopAtStack(t);
+    const errors: string[] = [];
+    t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted'], { from: 'user' });
+    assert.equal(process.exitCode, 2, 'a yardstick with no measurement is refused, non-zero');
+    assert.ok(
+      errors.some((l) => l.includes('calibrationSha') && l.includes('is null') && l.includes('maf goldens calibrate')),
+      errors.join('\n'),
+    );
+    assert.deepEqual(stacks, [], 'no stack, no round, no money');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('R2-M1 budget: --max-tokens 2000 stops before the baseline, with the projection printed', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    // R5-P3: the seed split names no calibration, so `evolve` refuses it before the projection.
+    // The copy gets the synthetic record its heldOut must be derived from, so this measures budget.
+    await calibrateSplitForTest(corpus);
+    // The projection is over the train split, so the figure is read from the split rather than
+    // pinned: growing the corpus is not a regression in this test.
+    const split = JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as {
+      train: string[]; heldOut: string[]; pool?: string[];
+    };
+    const trainCount = split.train.length;
+    const logs: string[] = [];
+    t.mock.method(console, 'log', (...parts: unknown[]) => { logs.push(parts.map(String).join(' ')); });
+    t.mock.method(console, 'error', () => {});
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync([
+      'evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted', '--rounds', '1', '--max-tokens', '2000',
+    ], { from: 'user' });
+
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1);
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      stopReason: string; ships: number; rounds: { outcome: string; note: string; manifest?: unknown }[];
+      budget?: { exhausted: boolean; tokens: number }; usage?: { calls: number };
+    };
+    assert.equal(report.stopReason, 'budget');
+    assert.equal(report.ships, 0);
+    // R2-M1: nothing was spent, so the meter did not trip — the projection is what stopped the
+    // run. `stopReason` still says `budget`, because that is the limit the run could not start over.
+    assert.equal(report.budget?.exhausted, false);
+    assert.equal(report.budget?.tokens, 0);
+    assert.equal(report.rounds.length, 1, 'the round that could not continue is the only one recorded');
+    assert.equal(report.rounds[0]?.outcome, 'budget');
+    assert.equal(report.rounds[0]?.manifest, undefined, 'no manifest exists: the planner never ran');
+    // R2-M1: the projection is printed before the baseline starts, so the stop is before it —
+    // not after it has already overspent. With no earlier run to measure, the estimate is used.
+    assert.match(report.rounds[0]?.note ?? '', new RegExp(
+      `the round-0 baseline was not started: ${trainCount} tasks × ${CONSERVATIVE_GOLDEN_TOKENS_PER_TASK} tokens each ` +
+      `\\(conservative estimate\\) projects ${trainCount * CONSERVATIVE_GOLDEN_TOKENS_PER_TASK} tokens; ` +
+      '0 already spent against a 2000-token budget — not started'));
+    // R4-A3 (amended by R5-P1): calibration retires the previous held-out tasks into `train`, and
+    // the corpus has since grown, so the count is read rather than pinned. What must hold is that
+    // moving tasks between sides never drops one: the split stays a partition of the corpus.
+    const corpusIds = (JSON.parse(await readFile(path.join(corpus, 'corpus.json'), 'utf8')) as { id: string }[]);
+    assert.equal(
+      new Set([...split.train, ...split.heldOut, ...(split.pool ?? [])]).size, corpusIds.length,
+      'R4-A3: calibrating moves tasks between sides; it never loses one',
+    );
+    assert.equal(report.usage?.calls, 0, 'nothing was dispatched: the stop happened before the baseline');
+    assert.ok(logs.some((l) => l.includes('stop=budget')), logs.join('\n'));
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R5-P4 (round-4 finding R4-M2): the first-run projection must use the corpus's *measured* per-task
+// cost. At 44 tasks, the 8,000-token constant this replaced projected 352,000 tokens — inside a
+// 400,000-token budget, so the baseline started and overspent the budget many times over. The
+// measured floor refuses the same run before a single call.
+test('R5-P4: --max-tokens 400000 does not start a 44-task baseline', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    // The projection is over the train split, so the split is what makes the run 44 tasks. The
+    // tasks beyond the first 44 stay in the corpus as pool tasks, so it is still a partition.
+    const splits = JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as {
+      train: string[]; heldOut: string[]; pool?: string[];
+    };
+    const train = splits.train.slice(0, 44);
+    const pool = [...(splits.pool ?? []), ...splits.train.slice(44)];
+    await writeFile(path.join(corpus, 'splits.json'), JSON.stringify({ ...splits, train, pool }, null, 2), 'utf8');
+    await calibrateSplitForTest(corpus);
+
+    assert.ok(44 * CONSERVATIVE_GOLDEN_TOKENS_PER_TASK > 400_000, 'the measured floor refuses it');
+    assert.ok(44 * 8_000 < 400_000, 'the constant it replaced would have started it');
+
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(console, 'error', () => {});
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync([
+      'evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted', '--rounds', '1', '--max-tokens', '400000',
+    ], { from: 'user' });
+
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1);
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      stopReason: string; rounds: { outcome: string; note: string }[]; usage?: { calls: number };
+    };
+    assert.equal(report.stopReason, 'budget');
+    assert.equal(report.rounds[0]?.outcome, 'budget');
+    assert.match(report.rounds[0]?.note ?? '', new RegExp(
+      `the round-0 baseline was not started: 44 tasks × ${CONSERVATIVE_GOLDEN_TOKENS_PER_TASK} tokens each ` +
+      `\\(conservative estimate\\) projects ${44 * CONSERVATIVE_GOLDEN_TOKENS_PER_TASK} tokens; ` +
+      '0 already spent against a 400000-token budget — not started'));
+    assert.equal(report.usage?.calls, 0, 'no model call: the stop is the projection, not the meter');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R5-P4: when the calibration behind the split recorded what it cost, the first run of a session
+// projects from that measurement rather than from the constant — the same meter over the same
+// corpus — and the note a reader sees says "measured", not "conservative estimate".
+test('R5-P4: a first run projects from the calibration record and says it is measured', async (t) => {
+  const { root } = await freshClone();
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  try {
+    const corpus = path.join(root, 'corpus');
+    await cp(SEED, corpus, { recursive: true });
+    const splits = JSON.parse(await readFile(path.join(corpus, 'splits.json'), 'utf8')) as { train: string[] };
+    // 1,000,000 tokens over 50 calibrated tasks: 20,000 a task, a figure unlike the 75,000 floor.
+    await calibrateSplitForTest(corpus, {
+      usage: { calls: 120, tokens: 1_000_000, tasks: 50, attemptsPerTask: 3 },
+    });
+    const trainCount = splits.train.length;
+
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(console, 'error', () => {});
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync([
+      'evolve', '--dir', root, '--corpus', corpus, '--adapter', 'scripted', '--rounds', '1', '--max-tokens', '400000',
+    ], { from: 'user' });
+
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1);
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      stopReason: string; rounds: { outcome: string; note: string }[]; usage?: { calls: number };
+    };
+    assert.equal(report.stopReason, 'budget');
+    assert.match(report.rounds[0]?.note ?? '', new RegExp(
+      `the round-0 baseline was not started: ${trainCount} tasks × 20000 tokens each \\(measured 20000\\) ` +
+      `projects ${trainCount * 20_000} tokens; 0 already spent against a 400000-token budget — not started`));
+    assert.equal(report.usage?.calls, 0, 'no model call: the stop is the projection, not the meter');
+  } finally {
+    process.exitCode = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R2-M5 (H5): the smoke run is a measurement like any other, so its target must be a train-split
+// task. A first plan is refused before the critic if it names a held-out id (R2-H2), but a critic
+// revision is smoke-tested without passing that check again — the guard in `runSmoke` is the line
+// this test stands on: with it removed, the held-out id below reaches the dispatcher.
+test('smoke refuses a held-out target reached through a critic revision (R2-M5/H5)', async (t) => {
+  const HE = 'coder-fib';
+  assert.throws(() => assertSmokeTarget(HE, ['coder-sum']), /not in the train split/);
+  assert.doesNotThrow(() => assertSmokeTarget('coder-sum', ['coder-sum']));
+
+  const { root } = await freshClone();
+  try {
+    const dispatched: (string | undefined)[] = [];
+    const usageRequests: (boolean | undefined)[] = [];
+    let stacks = 0;
+    let plannerCalls = 0;
+    let criticCalls = 0;
+    t.mock.method(wiring, 'buildRunStack', async () => {
+      stacks++;
+      return {
+        adapter: {} as CliAdapter,
+        graph: { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph,
+        securityPrompt: '',
+        dispatchTask: async (
+          _harness: HarnessConfig, _role: string, _prompt: string, _workDir: string,
+          _timeoutMs: number, _temperature?: number, goldenTaskId?: string,
+        ) => {
+          dispatched.push(goldenTaskId);
+          return 'no change';
+        },
+        close: async () => {},
+      } as unknown as wiring.RunStack;
+    });
+    const manifest = (target: string) => '```json\n' + JSON.stringify({
+      edit: { kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'r' },
+      expectedImprovement: target, targetTasks: [target],
+    }) + '\n```';
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        // R3-M4: the planner and the critic are single `invoke` calls; the metered wrapper must
+        // ask the backend for its usage on each, exactly as it does on a role turn.
+        usageRequests.push(o.reportUsage);
+        const systemPrompt = o.systemPrompt ?? '';
+        let output: string;
+        if (systemPrompt.includes('MAF harness evolution planner')) {
+          plannerCalls++;
+          // The first plan is in the train split; the critic asks for a revision, and the revision
+          // names a held-out task.
+          output = plannerCalls === 1 ? manifest('coder-sum') : manifest(HE);
+        } else if (systemPrompt.includes('critic')) {
+          criticCalls++;
+          output = criticCalls === 1
+            ? '```json\n{"verdict":"revise","notes":"aim at a different task"}\n```'
+            : '```json\n{"verdict":"ship","notes":"ok"}\n```';
+        } else {
+          output = '```json\n{"passed":false,"rationale":"no"}\n```';
+        }
+        return { success: true, output, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+    t.mock.method(console, 'log', () => {});
+
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--rounds', '1', '--patience', '1'), { from: 'user' });
+
+    assert.equal(plannerCalls, 2, 'the revision asked for by the critic ran');
+    assert.ok(usageRequests.length >= 4, 'the planner and the critic reached the metered adapter');
+    assert.deepEqual(usageRequests, usageRequests.map(() => true),
+      'R3-M4: each single call asked the backend for its usage');
+    assert.equal(dispatched.filter((id) => id === HE).length, 0, 'the held-out task was never dispatched');
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      ships: number; rounds: { outcome: string; note: string }[];
+    };
+    assert.equal(report.ships, 0);
+    assert.equal(report.rounds[0]?.outcome, 'smoke-failed');
+    assert.match(report.rounds[0]?.note ?? '', /is not in the train split/);
+    assert.equal(stacks, 1, 'no survivor, so the held-out split was never scored');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // ORACLE (WP-3.9 round 2, G4): `maf evolve` hands the evolver the registry's tool ids and the
@@ -154,7 +573,7 @@ test('maf evolve refuses an unknown tool id at the invariant stage, naming the k
     const program = new Command();
     program.exitOverride();
     registerEvolveCommand(program);
-    await program.parseAsync(['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', cloneCorpus(root), '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
 
     const reportDir = path.join(root, '.maf', 'evolve');
     const reports = (await readdir(reportDir)).filter((n) => n.endsWith('.json'));
@@ -213,7 +632,7 @@ test('maf evolve gives the gate each tool\'s registry permission: fs.write widen
     const program = new Command();
     program.exitOverride();
     registerEvolveCommand(program);
-    await program.parseAsync(['evolve', '--dir', root, '--corpus', SEED, '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', cloneCorpus(root), '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
 
     const reportDir = path.join(root, '.maf', 'evolve');
     const reports = (await readdir(reportDir)).filter((n) => n.endsWith('.json'));
@@ -234,6 +653,63 @@ test('maf evolve gives the gate each tool\'s registry permission: fs.write widen
     assert.match(report.rounds[0]?.note ?? '', /b4-write-tool-widening/);
     assert.match(report.rounds[0]?.gate?.reason ?? '', /"fs\.write"/, 'the refusal names the tool it would have granted');
     assert.equal(calls.filter((s) => s.includes('critic')).length, 0, 'refused before any further model call');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ORACLE (WP-3.7 §7): the loop's tier rule is only as good as the map `maf evolve` hands it, and
+// nothing proved that wiring — deleting the two options at the call site left the whole suite
+// green. The adapter here has no `sendTurn`, so every role runs on the cli tier, where the
+// in-process loop's `maxToolIterations` is never read; the edit can only be refused there. The
+// command runs end to end (real registry, loop and gate), so the refusal is the product's.
+test('maf evolve refuses a budget edit that cannot reach its role\'s tier (§7)', async (t) => {
+  const MANIFEST = '```json\n' + JSON.stringify({
+    edit: { kind: 'tune_role_budgets', role: 'coder', maxToolIterations: 3 },
+    expectedImprovement: 'x', targetTasks: ['coder-sum'],
+  }) + '\n```';
+
+  const { root } = await freshClone();
+  try {
+    const calls: string[] = [];
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        calls.push(o.systemPrompt ?? '');
+        return { success: true, output: MANIFEST, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+    t.mock.method(console, 'log', () => {});
+
+    const graph = {
+      run: async () => [], addNode: async () => 'id', addEdge: async () => 'e',
+    } as unknown as MemoryGraph;
+    t.mock.method(wiring, 'buildRunStack', async () => ({
+      adapter, graph,
+      securityPrompt: '',
+      dispatchTask: async () => 'done',
+      close: () => {},
+    }) as unknown as wiring.RunStack);
+
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(['evolve', '--dir', root, '--corpus', cloneCorpus(root), '--adapter', 'scripted', '--rounds', '1', '--patience', '1'], { from: 'user' });
+
+    const reportDir = path.join(root, '.maf', 'evolve');
+    const reports = (await readdir(reportDir)).filter((n) => n.endsWith('.json'));
+    assert.equal(reports.length, 1, 'the command wrote one report');
+    const report = JSON.parse(await readFile(path.join(reportDir, reports[0]!), 'utf8')) as {
+      rounds: { outcome: string; note: string; gate?: { verdict: string; stage?: string; reason: string } }[];
+      ships: number;
+    };
+    assert.equal(report.ships, 0);
+    assert.equal(report.rounds[0]?.outcome, 'reject');
+    assert.equal(report.rounds[0]?.gate?.stage, 'b-proposal-relevance',
+      'refused at proposal, before the critic, the smoke test or a golden run');
+    assert.match(report.rounds[0]?.gate?.reason ?? '', /runs on the cli tier under adapter "scripted"/);
+    assert.equal(calls.filter((s) => s.includes('critic')).length, 0, 'no critic call after the refusal');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -330,8 +806,15 @@ test('real evolve.ts: a flag-on sensitive candidate is stored, not current, and 
     assert.ok(await store.tryLoad(sha), 'candidate is in the harness store');
     assert.equal((await store.current())?.sha, before, 'CURRENT did not move');
     assert.notEqual((await store.current())?.sha, sha);
-    assert.ok(logs.some((l) => l.includes('[maf] STORED') && l.includes(`maf harness set-current ${sha}`)),
-      'STORED line names set-current');
+    // R2-M1: the line names the approval path that now exists — the qualified id — beside the
+    // raw set-current escape, which never was the approval rule.
+    const records = await readApprovalRecords(store.dir);
+    assert.equal(records.length, 1, 'storing wrote one approval record');
+    assert.equal(records[0]!.sha, sha);
+    assert.equal(records[0]!.baseSha, before, 'the record remembers the base it was measured against');
+    assert.ok(logs.some((l) => l.includes('[maf] STORED') && l.includes(`maf evolve approve ${records[0]!.session}/${records[0]!.id}`)),
+      'STORED line names the qualified approval');
+    assert.ok(logs.some((l) => l.includes(`maf harness set-current ${sha}`)), 'STORED line still names set-current');
     assert.ok(!logs.some((l) => l.includes('[maf] SHIP')), 'no SHIP line');
 
     const harnessProgram = new Command();
@@ -442,11 +925,202 @@ test('real evolve.ts: an unapproved sensitive candidate never becomes a later ro
       h.roleSet.roles.find((r) => r.role === role)?.systemPrompt;
     assert.equal(promptOf(current, 'security'), promptOf(base, 'security'),
       'the shipped harness did not carry the unread security prompt');
-    assert.equal(current.id, `${base.id}-r2`, 'round 2 started from the pre-round-1 base');
+    // §7 bounds the id: each minted candidate is `<root>-e<n>`, so it stays rooted at the base
+    // whatever round it came from (the old `${base.id}-r${round}` grew a segment per round).
+    assert.match(current.id, /^legacy-default-e\d+$/, 'the shipped id is rooted at the pre-round-1 base');
     assert.ok(promptOf(current, 'coder')?.includes('thorough'), 'the ship is the coder edit');
     assert.ok(await store.tryLoad(storedSha), 'the sensitive candidate is still there for a human');
     assert.equal(logs.filter((l) => l.includes('[maf] SHIP')).length, 1, 'exactly one ship');
     assert.equal(logs.filter((l) => l.includes('[maf] STORED')).length, 1, 'exactly one store');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R2-H4: the budget used to charge one estimate per golden task, so every tool-loop turn, every
+// planner and critic call, the judge, the security gate and every injected context went uncounted —
+// the audit measured an undercount of about 60×. The metering adapter wraps the run's adapter, and
+// the report carries the count.
+test('real evolve.ts (R2-H4): every model call is counted, estimated from the bytes sent', async (t) => {
+  const MANIFEST = '```json\n' + JSON.stringify({
+    edit: { kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'r' },
+    expectedImprovement: 'x', targetTasks: ['coder-sum'],
+  }) + '\n```';
+
+  const { root } = await freshClone();
+  try {
+    const exchanges: { sent: string; received: string }[] = [];
+    const adapter = {
+      name: 'scripted',
+      capabilities: () => ({
+        supportsStreaming: false, supportsToolCalling: false, supportsWorktrees: false,
+        inProcessLoop: false, maxConcurrentTasks: 1, nativePlugins: [],
+      }),
+      isAvailable: async () => true,
+      stream: async function* () { /* unused */ },
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        const systemPrompt = o.systemPrompt ?? '';
+        let output: string;
+        if (systemPrompt.includes('MAF harness evolution planner')) {
+          output = exchanges.filter((e) => e.sent.includes('planner')).length === 0
+            ? MANIFEST : '```json\n{"no_op":true}\n```';
+        } else if (systemPrompt.includes('critic')) {
+          output = '```json\n{"verdict":"ship","notes":"ok"}\n```';
+        } else if (systemPrompt.includes('security')) {
+          output = '```json\n{"findings":[],"summary":"none","passed":true}\n```';
+        } else {
+          output = `answer for: ${o.prompt.slice(0, 40)}`;
+        }
+        exchanges.push({ sent: `${systemPrompt}\n${o.prompt}`, received: output });
+        return { success: true, output, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+
+    // Every role dispatch is one opaque model call through whatever adapter the stack was built
+    // with — which is the metered wrapper, so the turn is counted exactly as a real one would be.
+    t.mock.method(wiring, 'buildRunStack', async (cfg: StackConfig) => ({
+      adapter: cfg.adapter,
+      graph: { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph,
+      securityPrompt: 'security',
+      dispatchTask: async (
+        _h: HarnessConfig, _role: string, prompt: string, _workDir: string, _timeoutMs: number,
+      ) => (await cfg.adapter.invoke({
+        prompt, systemPrompt: 'role prompt', workingDir: root, timeoutMs: 1_000,
+      })).output,
+      close: async () => {},
+    }) as unknown as wiring.RunStack);
+
+    t.mock.method(console, 'log', () => {});
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--rounds', '1', '--patience', '1'), { from: 'user' });
+
+    const reportDir = path.join(root, '.maf', 'evolve');
+    const [file] = await readdir(reportDir);
+    const report = JSON.parse(await readFile(path.join(reportDir, file!), 'utf8')) as {
+      usage?: { calls: number; tokens: number; reportedTokens: number; estimatedTokens: number; statement: string };
+      budget?: { tokens: number };
+    };
+    const usage = report.usage;
+    assert.ok(usage, 'the report carries the usage figures');
+    assert.ok(exchanges.length > 4, 'planner, critic, security and role calls all happened');
+    assert.equal(usage!.calls, exchanges.length, 'every model call is counted, not one per task');
+
+    // What the bytes say, computed independently from what each call sent and received.
+    const bytesBased = exchanges.reduce((n, e) => n + estimateTokens(e.sent) + estimateTokens(e.received), 0);
+    assert.ok(
+      Math.abs(usage!.tokens - bytesBased) / bytesBased < 0.1,
+      `counted ${usage!.tokens} tokens against ${bytesBased} bytes-based (${exchanges.length} calls)`,
+    );
+    assert.equal(usage!.reportedTokens, 0, 'the fake adapter reports nothing, so nothing is claimed as reported');
+    assert.equal(report.budget?.tokens, usage!.tokens, 'the budget is fed from the meter, not from a second count');
+    assert.equal(usage!.estimatedTokens, usage!.tokens);
+    assert.match(usage!.statement, /estimated/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R2-H2, second path: held-out scoring runs through the dispatcher, and the dispatcher's policy
+// engine and security hooks write `PolicyEvent` and `Failure` nodes into whatever graph they were
+// given. On the project graph those rows are the next session's evidence — the exact leak that lets
+// a planner aim at the yardstick. So the held-out measurement must be dispatched through a SECOND
+// stack whose graph is not the project's.
+test('real evolve.ts (R2-H2): held-out scoring is dispatched through an isolated graph', async (t) => {
+  const { root } = await freshClone();
+  try {
+    // The committed split, not a copy of it: the corpus grows, the rule does not (R2-M2).
+    const HE = new Set<string>(
+      (JSON.parse(await readFile(path.join(REPO, 'tests/goldens/splits.json'), 'utf8')) as { heldOut: string[] }).heldOut,
+    );
+    const calls: StackConfig[] = [];
+    const dispatched: { stack: number; task?: string }[] = [];
+    let built = 0;
+    let plannerCalls = 0;
+    t.mock.method(wiring, 'buildRunStack', async (cfg: StackConfig) => {
+      calls.push(cfg);
+      const index = ++built;
+      return {
+        adapter: {} as CliAdapter,
+        graph: { run: async () => [], addNode: async () => 'id', addEdge: async () => 'e' } as unknown as MemoryGraph,
+        securityPrompt: '',
+        dispatchTask: async (
+          harness: HarnessConfig, role: string, prompt: string, workDir: string,
+          _timeoutMs: number, _temperature?: number, goldenTaskId?: string,
+        ) => {
+          dispatched.push({ stack: index, ...(goldenTaskId !== undefined ? { task: goldenTaskId } : {}) });
+          // The coder edit's improvement is grounded in a test-script task: one candidate must ship
+          // for a survivor to exist and the held-out split to be scored at all.
+          const rolePrompt = harness.roleSet.roles.find((r) => r.role === role)?.systemPrompt ?? '';
+          if (rolePrompt.includes('thorough') && prompt.includes('Fix sum.js')) {
+            await writeFile(path.join(workDir, 'sum.js'),
+              'function sum(a,b){ return a + b; }\nmodule.exports = { sum };\n');
+            return 'fixed sum.js';
+          }
+          return 'no change';
+        },
+        close: async () => {},
+      } as unknown as wiring.RunStack;
+    });
+    const adapter = {
+      name: 'scripted',
+      invoke: async (o: AdapterInvokeOptions): Promise<AdapterInvokeResult> => {
+        const systemPrompt = o.systemPrompt ?? '';
+        let output: string;
+        if (systemPrompt.includes('MAF harness evolution planner')) {
+          plannerCalls++;
+          output = plannerCalls === 1
+            ? '```json\n' + JSON.stringify({
+              edit: { kind: 'edit_role_prompt', role: 'coder', newPrompt: 'be thorough and systematic', rationale: 'r' },
+              expectedImprovement: 'coder-sum', targetTasks: ['coder-sum'],
+            }) + '\n```'
+            : '```json\n{"no_op":true}\n```';
+        } else if (systemPrompt.includes('critic')) {
+          output = '```json\n{"verdict":"ship","notes":"ok"}\n```';
+        } else {
+          output = '```json\n{"passed":false,"rationale":"no"}\n```';
+        }
+        return { success: true, output, toolCallLog: [], exitCode: 0, duration: 0 };
+      },
+    } as unknown as CliAdapter;
+    t.mock.method(AdapterRegistry, 'resolveAdapter', async () => adapter);
+    t.mock.method(console, 'log', () => {});
+
+    const program = new Command();
+    program.exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--rounds', '2', '--patience', '1'), { from: 'user' });
+
+    assert.equal(calls.length, 2, 'a second stack is built for the held-out split');
+    const [project, heldOut] = calls;
+    assert.equal(project?.graphDir, undefined, 'the project stack keeps .maf/memory.kuzu');
+    assert.ok(heldOut?.graphDir !== undefined && heldOut.graphDir !== path.join(root, '.maf'),
+      'the held-out stack writes its graph somewhere else');
+
+    const projectTasks = dispatched.filter((d) => d.stack === 1).map((d) => d.task);
+    assert.ok(projectTasks.every((id) => id === undefined || !HE.has(id)),
+      'the project stack never dispatched a held-out task');
+    const heldTasks = dispatched.filter((d) => d.stack === 2).map((d) => d.task);
+    assert.ok(heldTasks.length > 0, 'the held-out split was actually scored');
+    assert.ok(heldTasks.every((id) => id !== undefined && HE.has(id)),
+      `every isolated dispatch is a held-out task: ${heldTasks.join(', ')}`);
+    // R4-A2: one attempt per task per repeat, so the gate's unit is the single attempt — ten
+    // repeats of every held-out task for each harness, not two attempts apiece.
+    assert.equal(heldTasks.length, HE.size * 10 * 2,
+      'ten single attempts per held-out task per harness (base and candidate), not pass@2');
+
+    // R2-M3: the two judge-scored held-out tasks ran, and the report says they are beside the
+    // gate, never in it — the deterministic denominator is five.
+    const reports = (await readdir(path.join(root, '.maf/evolve'))).filter((n) => n.endsWith('.json'));
+    const report = JSON.parse(await readFile(path.join(root, '.maf/evolve', reports[0]!), 'utf8')) as {
+      heldOut?: { statement: string; baselineScores: number[]; judgeScored?: { taskIds: string[] } };
+    };
+    assert.ok(report.heldOut, 'the report carries a held-out verdict');
+    assert.deepEqual(report.heldOut.judgeScored?.taskIds, ['review-off-by-one', 'security-sql-concat']);
+    assert.equal(report.heldOut.baselineScores.length, 10, 'each harness is scored ten times (R3-G3/R4-A1)');
+    assert.match(report.heldOut.statement, /never counted \(review-off-by-one, security-sql-concat\)/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

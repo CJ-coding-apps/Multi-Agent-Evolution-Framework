@@ -11,12 +11,13 @@ import type {
 import { HarnessStore } from '@maf/harness-config';
 import { MemoryGraph } from '@maf/memory-graph';
 import { PLANNER_SYSTEM_PROMPT } from '@maf/evolver';
-import { ScriptedAdapter } from '@maf/eval-harness';
+import { CALIBRATION_RULE, HELD_OUT_RULE, ScriptedAdapter } from '@maf/eval-harness';
 import type { ScriptedTask } from '@maf/eval-harness';
 import { createDemoFixture } from '../commands/inprocessDemo.js';
 import { registerEvolveCommand } from '../commands/evolve.js';
 import { runInit } from '../commands/init.js';
 import { collector, needsLcm } from './runFixture.js';
+import { calibrateSplitForTest } from './calibratedCorpus.js';
 
 // ORACLE (WP-3.7a MED-4). The original defect was in this CLI wiring: `evolve.ts` built the loop
 // without `recordGoldens`, so every run it paid for was thrown away. Five planted bugs survived the
@@ -64,9 +65,13 @@ interface Project {
 }
 
 /**
- * A demo project with one golden task. Its script reads `sum.js` and then tries to write `.env`,
- * which the built-in policy denies — so the golden run leaves a `PolicyEvent` behind, and the task
- * is unsolved. The score is incidental; the records are the point.
+ * A demo project with six golden tasks: the measured `coder-sum`, whose script reads `sum.js` and
+ * then tries to write `.env` (which the built-in policy denies, so the run leaves a `PolicyEvent`
+ * behind and the task is unsolved), and five `coder-heldout-*` twins that D-57 puts on the other
+ * side of the split. Five is not decoration: R2-M2 refuses a gate resting on fewer deterministically
+ * scored held-out tasks. The held-out ones are never dispatched here — no candidate ships on
+ * identical scores — but the split must be a partition. The score is incidental; the records are
+ * the point.
  */
 async function project(): Promise<Project> {
   const container = await mkdtemp(path.join(tmpdir(), 'maf-evolve-evidence-'));
@@ -75,18 +80,40 @@ async function project(): Promise<Project> {
 
   const corpus = path.join(root, 'corpus');
   await mkdir(path.join(corpus, 'fixtures'), { recursive: true });
-  await mkdir(path.join(corpus, 'fixtures', 'coder-sum'), { recursive: true });
-  for (const file of ['sum.js', 'test.js']) {
-    await writeFile(
-      path.join(corpus, 'fixtures', 'coder-sum', file),
-      await readFile(path.join(SEED, 'fixtures', 'coder-sum', file), 'utf8'),
-      'utf8',
-    );
+  const heldOutIds = [1, 2, 3, 4, 5].map((n) => `coder-heldout-${n}`);
+  for (const fixture of ['coder-sum', ...heldOutIds]) {
+    await mkdir(path.join(corpus, 'fixtures', fixture), { recursive: true });
+    for (const file of ['sum.js', 'test.js']) {
+      await writeFile(
+        path.join(corpus, 'fixtures', fixture, file),
+        await readFile(path.join(SEED, 'fixtures', 'coder-sum', file), 'utf8'),
+        'utf8',
+      );
+    }
   }
-  const corpusJson = JSON.parse(await readFile(path.join(SEED, 'corpus.json'), 'utf8')) as Array<{ id: string }>;
-  const task = corpusJson.find((t) => t.id === 'coder-sum');
+  const corpusJson = JSON.parse(await readFile(path.join(SEED, 'corpus.json'), 'utf8')) as Array<Record<string, unknown>>;
+  const task = corpusJson.find((t) => t['id'] === 'coder-sum');
   assert.ok(task, 'the seed corpus has coder-sum');
-  await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([task]), 'utf8');
+  const heldOut = heldOutIds.map((id) => ({
+    ...task,
+    id,
+    prompt: `Fix sum.js so test.js passes (the held-out check ${id}).`,
+    repoFixture: `fixtures/${id}`,
+  }));
+  await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([task, ...heldOut]), 'utf8');
+  // D-57: the evolver refuses to start without a committed partition, and R2-M2 refuses one whose
+  // held-out side cannot carry a gate. R5-P3: the heldOut set must be the selection a committed
+  // calibration derives, so the project gets the synthetic record for exactly this split.
+  await writeFile(
+    path.join(corpus, 'splits.json'),
+    JSON.stringify({
+      version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
+      preRegistration: { attempts: 'single', selection: CALIBRATION_RULE, calibrationSha: null },
+      train: ['coder-sum'], heldOut: heldOutIds,
+    }),
+    'utf8',
+  );
+  await calibrateSplitForTest(corpus);
 
   return { root, mafDir: path.join(root, '.maf'), corpus };
 }
@@ -162,7 +189,8 @@ test('MED-4: maf evolve records its golden runs, writes policy evidence and prin
     const shas = new Set(rows.map((r) => r.harness_sha));
     assert.equal(shas.size, 2, 'the candidate was recorded under its own sha');
     assert.ok(shas.has(base.sha), 'one row is the base the loop started from');
-    assert.ok(rows.some((r) => r.harnessId.endsWith('-r1') && r.harness_sha !== base.sha),
+    // §7 bounds the id (`<root>-e<n>`), so the candidate row is the one minted off the base.
+    assert.ok(rows.some((r) => /-e\d+$/.test(r.harnessId) && r.harness_sha !== base.sha),
       'the candidate row names the candidate harness');
 
     // M12: the policy engine was built without the graph as its recorder, so a denial left nothing.

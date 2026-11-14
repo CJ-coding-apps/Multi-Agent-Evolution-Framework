@@ -1,9 +1,11 @@
 import type { PermissionLevel, RunId } from '@maf/types';
-import type { HarnessConfig } from '@maf/harness-config';
-import type { GoldenSuiteResult } from '@maf/eval-harness';
+import type { HarnessConfig, ProcessorRef } from '@maf/harness-config';
+import { HELD_OUT_RULE, stratifiedGate } from '@maf/eval-harness';
+import type { GoldenSuiteResult, HeldOutGateVerdict, HeldOutTaskPasses } from '@maf/eval-harness';
 import type { MemoryGraph } from '@maf/memory-graph';
-import { digestEvidence, isEmptyDigest } from './digester.js';
-import type { Digest } from './digester.js';
+import { digestEvidence, heldOutScrubber, isEmptyDigest } from './digester.js';
+import type { UsageSnapshot } from './usage.js';
+import type { Digest, EvidenceScope } from './digester.js';
 import { applyEdit, ManifestError } from './edits.js';
 import type { ChangeManifest } from './edits.js';
 import {
@@ -12,12 +14,14 @@ import {
 import type { CurrentHarnessStatus, HistoryLabel, MetaGenerate, RoleCatalogEntry } from './planner.js';
 import { gateEvaluate, gateStatic } from './gate.js';
 import type { GateDecision, GateVeto } from './gate.js';
+import { projectGoldenRun } from './budget.js';
+import type { BudgetMeter, BudgetSnapshot, GoldenRunMeasurement, GoldenRunProjection } from './budget.js';
 
 export interface EvolveRoundRecord {
   round: number;
   manifest?: ChangeManifest;
   gate?: GateDecision;
-  outcome: 'ship' | 'reject' | 'no-op' | 'needs-approval' | 'planner-error' | 'smoke-failed' | 'critic-reject' | 'record-failed';
+  outcome: 'ship' | 'reject' | 'no-op' | 'needs-approval' | 'planner-error' | 'smoke-failed' | 'critic-reject' | 'record-failed' | 'budget';
   note: string;
   /**
    * The evaluation a flag-on sensitive edit paid for and did not act on (WP-3.9 K1). The ruling
@@ -38,6 +42,18 @@ export interface SensitiveEvaluation {
    * `candidateScores` is what the run measured; it is not in the graph, so the report says so.
    */
   unrecorded?: true;
+}
+
+/**
+ * A golden run the loop paid for whose result could not be written as evidence (WP-3.7b R3-L3).
+ * The candidate case keeps its measured scores in the round's `evaluation`; a baseline failure has
+ * no round to attach them to, so the partial report carries them here instead of dropping them.
+ */
+export interface UnrecordedGolden {
+  harnessId: string;
+  harnessSha: string;
+  scores: GoldenSuiteResult;
+  unrecorded: true;
 }
 
 export interface EvolveOptions {
@@ -72,7 +88,9 @@ export interface EvolveOptions {
    * `maf harness set-current <candidateSha>`; applying it is the human's act, so this callback must
    * not move CURRENT. Absent (tests, embedders) means nothing is stored.
    */
-  storeCandidate?: (candidate: HarnessConfig, evaluation: SensitiveEvaluation) => Promise<void>;
+  storeCandidate?: (
+    candidate: HarnessConfig, evaluation: SensitiveEvaluation, base: HarnessConfig,
+  ) => Promise<void>;
   roleCatalog: RoleCatalogEntry[];
   knownToolIds: ReadonlySet<string>;
   /**
@@ -83,6 +101,13 @@ export interface EvolveOptions {
    */
   toolPermissions: ReadonlyMap<string, PermissionLevel>;
   knownProcessorNames: ReadonlySet<string>;
+  /**
+   * The bundle dispatch uses for a harness with an empty `processorBundles` (R2-H1). The caller
+   * that depends on `@maf/processors` supplies it, so the evolver does not need that link; absent,
+   * `add_processor` on such a harness is refused and a writer candidate it cannot prove keeps
+   * security-gate/secret-redact is rejected rather than assumed safe.
+   */
+  defaultBundleRefs?: readonly ProcessorRef[];
   knownModels?: ReadonlySet<string>;
   safetyAdjacentRoles?: ReadonlySet<string>;
   judgeOnlyTaskIds?: ReadonlySet<string>;
@@ -95,6 +120,113 @@ export interface EvolveOptions {
    * operator whatever this says.
    */
   approveSensitive?: boolean;
+  /**
+   * The effective tier each role runs on under the adapter this run uses (WP-3.7 §7). The loop
+   * cannot compute it — `effectiveTier` needs the adapter — so the caller resolves it once and the
+   * gate refuses an edit that cannot reach its target role's tier. Absent (tests, embedders) skips
+   * that rule rather than guessing.
+   */
+  roleTiers?: ReadonlyMap<string, 'cli' | 'in-process'>;
+  /** The adapter's name, for the refusal's reason when an edit cannot reach the tier. */
+  adapterName?: string;
+  /**
+   * D-57: `runGoldens` measures one split of the corpus, and a golden row from a different split
+   * (a full-corpus `goldens run`, a row from before the split existed) is not this run's baseline.
+   * Set it and history rows must say the same, or the loop measures its own baseline.
+   */
+  splitName?: 'train' | 'held-out';
+  /**
+   * D-57: the yardstick the evolver may not see. Called after the rounds, twice per harness, and
+   * its result is NEVER passed to `recordGoldens` — the held-out tasks must not enter the evidence
+   * graph the planner reads, or they are no longer held out.
+   */
+  runHeldOut?: (harness: HarnessConfig) => Promise<GoldenSuiteResult>;
+  /** D-57: sha of the split definition the held-out runner measures, for the report. */
+  heldOutSplitsSha?: string;
+  /**
+   * R3-G3: how many times each harness is scored on the held-out split. The run count is part of the
+   * pre-registered test (`splits.json`), so it defaults to that count and any other value is
+   * refused rather than clamped. See `evaluateHeldOut`.
+   */
+  heldOutRepeats?: number;
+  /**
+   * R2-M3: held-out task ids whose verdict comes from a model (`llm-judge`). They run with the
+   * rest of the split so their results are reported beside the gate, but they are never counted
+   * toward it: a model's opinion is not a measurement, and a candidate that improves only where a
+   * judge said so has not improved the yardstick.
+   */
+  heldOutJudgeScored?: string[];
+  /**
+   * R2-H2: the line the evolver may not cross. With it set, the digest carries only rows that say
+   * `train`, task ids in those rows are restricted to the train split, and free text is scrubbed of
+   * every other corpus id — so a prior full-corpus `goldens run`, or a previous session's held-out
+   * refusals, cannot reach the planner. The loop also refuses a plan that targets a non-train task
+   * and scrubs its own round notes, so the record carries none either.
+   */
+  evidenceScope?: EvidenceScope;
+  /** D-57: the meter. The loop asks it before every round and before every step that costs money. */
+  budget?: BudgetMeter;
+  /**
+   * R2-M1: how many tasks each golden run measures. With this and a token budget the loop projects
+   * `tasks × per-task cost` before a run starts — the measured cost of this session's earlier runs,
+   * or a conservative estimate for the first — and refuses to start one that would cross the
+   * ceiling. Without it the projection has no size to multiply and the caller's budget check is the
+   * only one, which is what the pre-D-57 callers relied on.
+   */
+  goldenTaskCounts?: { train: number; heldOut: number };
+  /**
+   * R5-P4 (round-4 finding R4-M2): what the committed calibration measured, when the corpus has
+   * one. A session's first golden run has nothing of its own to project from, so it seeds the
+   * per-task figure with this record instead of the conservative constant. It is the same meter's
+   * figure over the same corpus, so it is a measurement rather than a guess — and because
+   * calibration measures three attempts per task while the train run makes two, it errs high.
+   */
+  priorGoldenMeasurement?: GoldenRunMeasurement;
+  /**
+   * R3-M3: the run's price, when it has one. A dollar budget cannot project a first golden run
+   * without it — the tokens would have no rate — so the caller that sets `maxUsd` supplies it.
+   */
+  usdPerMillionTokens?: number;
+  /**
+   * R2-H4: the model-call meter the caller feeds. The loop only snapshots it into the report, so
+   * every figure the run spent — calls, tokens and dollars, each marked reported or estimated —
+   * travels with the report instead of living only in the terminal.
+   */
+  usage?: { snapshot(): UsageSnapshot };
+}
+
+/** D-57: what a held-out evaluation measured, and the sentence the report carries. */
+export interface HeldOutReport {
+  splitsSha?: string;
+  /** How many times each harness was scored — the repetition is what makes noise measurable. */
+  repeats: number;
+  baseline: GoldenSuiteResult[];
+  candidate?: GoldenSuiteResult[];
+  /** Solved-task count per baseline repeat, in order — the figures the verdict used. */
+  baselineScores: number[];
+  /** Solved-task count per candidate repeat, in order. */
+  candidateScores?: number[];
+  /**
+   * R2-M3: the judge-scored held-out tasks, reported beside the gate and never counted in the
+   * scores above. Present only when the split has any.
+   */
+  judgeScored?: JudgeScoredHeldOut;
+  /**
+   * R3-G3/R4-A1: the pre-registered test's verdict — every task's two pass counts and k_t, S, the
+   * exact one-sided stratified permutation p-value and the decision. Absent when the split was not
+   * scored (see `skipped`).
+   */
+  gate?: HeldOutGateVerdict;
+  statement: string;
+  /** Present when the split was not scored, with the reason. */
+  skipped?: string;
+}
+
+export interface JudgeScoredHeldOut {
+  taskIds: string[];
+  /** Solved judge-scored tasks per baseline repeat, in order — beside the gate, not in it. */
+  baselineScores: number[];
+  candidateScores?: number[];
 }
 
 export interface EvolveReport {
@@ -105,10 +237,32 @@ export interface EvolveReport {
    * `record-failed` is a stop the caller must report (WP-3.7a L2): a golden run was paid for and
    * its result could not be written as evidence. The report still carries every round up to that
    * point; `error` says what could not be recorded and how many rounds completed.
+   *
+   * R2-L3: `rounds` is the ordinary end — `maxRounds` was reached with no budget set and no
+   * patience trip. It used to be reported as `budget`, which was the initialiser's value, not a
+   * measurement; with real budget flags that made a finished run look like a stopped one.
    */
-  stopReason: 'budget' | 'patience' | 'record-failed';
+  stopReason: 'rounds' | 'budget' | 'patience' | 'record-failed';
+  /** R2-H4: every model call the run made, as counted by the caller's meter. */
+  usage?: UsageSnapshot;
   /** Present exactly when `stopReason` is `record-failed`. */
   error?: string;
+  /**
+   * WP-3.7b R3-L3: when the BASELINE run's own write failed, the scores it measured are kept here,
+   * marked `unrecorded`, as a candidate's are kept in the round's `evaluation`. They are not in the
+   * graph; the report is the only copy.
+   */
+  unrecordedBaseline?: UnrecordedGolden;
+  /**
+   * WP-3.7 §7: digest reads that failed during this run, deduplicated. The loop kept going on a
+   * thinner digest — a missing read must not abort a run the operator is paying for — and this is
+   * how the degradation is reported instead of passing silently.
+   */
+  digestErrors?: string[];
+  /** D-57: what the run spent, against what it was allowed to spend. */
+  budget?: BudgetSnapshot;
+  /** D-57: the held-out verdict, or the reason the split was not scored. */
+  heldOut?: HeldOutReport;
 }
 
 const CRITIC_SYSTEM_PROMPT = `You are the MAF harness evolution critic. Compare the change manifest against the
@@ -147,8 +301,12 @@ async function recordRound(
   });
 }
 
-function baselineFromHistory(history: Digest['goldenHistory'], harness: HarnessConfig): GoldenSuiteResult | undefined {
-  const row = history.find((h) => h.harnessSha === harness.sha);
+function baselineFromHistory(
+  history: Digest['goldenHistory'], harness: HarnessConfig, split?: 'train' | 'held-out',
+): GoldenSuiteResult | undefined {
+  // D-57: a row measured on another split (or on the whole corpus) is not this run's baseline.
+  const row = history.find((h) => h.harnessSha === harness.sha
+    && (split === undefined || h.split === split));
   if (!row) return undefined;
   return {
     harnessSha: row.harnessSha, harnessId: row.harnessId,
@@ -159,8 +317,10 @@ function baselineFromHistory(history: Digest['goldenHistory'], harness: HarnessC
 /** What the planner is told about the harness in force (MED-3): the base, never a candidate. */
 function currentStatus(
   digest: Digest, base: HarnessConfig, baseline: GoldenSuiteResult | undefined,
+  split?: 'train' | 'held-out',
 ): CurrentHarnessStatus {
-  const row = digest.goldenHistory.find((h) => h.harnessSha === base.sha);
+  const row = digest.goldenHistory.find((h) => h.harnessSha === base.sha
+    && (split === undefined || h.split === split));
   if (row !== undefined) {
     return { id: base.id, sha: base.sha, solved: row.solved, total: row.total, failed: row.failed };
   }
@@ -192,12 +352,30 @@ class RecordFailedError extends Error {
 /**
  * The partial report a `RecordFailedError` produces, or undefined for any other error (which keeps
  * propagating). Every round already paid for is in `rounds`; the harness in force is `base`.
+ *
+ * `unrecordedBaseline` is set only by the baseline call site (R3-L3): that run was paid for and its
+ * scores would otherwise exist nowhere. A candidate failure passes nothing — its round already
+ * carries the evaluation.
  */
 function recordFailureReport(
   err: unknown, rounds: EvolveRoundRecord[], base: HarnessConfig, ships: number,
+  unrecordedBaseline?: GoldenSuiteResult,
 ): EvolveReport | undefined {
   if (!(err instanceof RecordFailedError)) return undefined;
-  return { rounds, finalHarness: base, ships, stopReason: 'record-failed', error: err.message };
+  return {
+    rounds, finalHarness: base, ships, stopReason: 'record-failed',
+    error: err.message + (unrecordedBaseline === undefined
+      ? ''
+      : ' — its measured scores are kept in this report (unrecorded)'),
+    ...(unrecordedBaseline === undefined ? {} : {
+      unrecordedBaseline: {
+        harnessId: unrecordedBaseline.harnessId,
+        harnessSha: unrecordedBaseline.harnessSha,
+        scores: unrecordedBaseline,
+        unrecorded: true as const,
+      },
+    }),
+  };
 }
 
 const CRASH_OK = (e: unknown): e is Error => e instanceof Error;
@@ -212,11 +390,159 @@ function sensitiveRoleOf(
 }
 
 /**
+ * R3-G3/R4-A1: the held-out run count — single attempts per task — is pre-registered in
+ * `splits.json`, not chosen per session.
+ */
+export const HELD_OUT_REPEATS = HELD_OUT_RULE.runs;
+
+/**
+ * R2-H3: the solved-task count a single held-out run measures. The verdict is computed from these
+ * counts (see `evaluateHeldOut`), so what counts as "solved" is decided in exactly one place.
+ */
+function heldOutScore(run: GoldenSuiteResult, judgeScored: ReadonlySet<string>): number {
+  return run.solvedTaskIds.filter((id) => !judgeScored.has(id)).length;
+}
+
+/**
+ * D-57 (R3-G3, revised by R4-A1): score the harness that survived on the held-out split, N = the
+ * pre-registered run count single attempts each, count how many of those attempts each harness
+ * passed each task, and hand the per-task counts to the exact one-sided stratified permutation
+ * test. The test pools every attempt of a task — k_t = base + candidate — so the within-task
+ * evidence is used instead of two extreme repeats: min−max detected a real gain about 11% of the
+ * time, the round-3 sign-flip test 19%, and the stratified test at N = 10 on 20 tasks about 91%
+ * for the specified effect.
+ *
+ * Returns undefined when the caller wired no held-out runner; every other reason for not scoring is
+ * carried in `skipped` so the report says why rather than staying silent.
+ *
+ * These runs are deliberately NOT passed to `recordGoldens`: a held-out task in the evidence graph
+ * is a held-out task the next round's planner reads, and then it is not held out.
+ */
+async function evaluateHeldOut(
+  opts: EvolveOptions, base: HarnessConfig, finalHarness: HarnessConfig, ships: number,
+  projectGolden: (tasks: number | undefined) => GoldenRunProjection | undefined,
+  measureGolden: <T extends GoldenSuiteResult>(run: () => Promise<T>) => Promise<T>,
+): Promise<HeldOutReport | undefined> {
+  const runHeldOut = opts.runHeldOut;
+  if (runHeldOut === undefined) return undefined;
+
+  const repeats = opts.heldOutRepeats ?? HELD_OUT_REPEATS;
+  const judgeScored = new Set(opts.heldOutJudgeScored ?? []);
+  const skipped = (reason: string): HeldOutReport => ({
+    ...(opts.heldOutSplitsSha !== undefined ? { splitsSha: opts.heldOutSplitsSha } : {}),
+    repeats,
+    baseline: [],
+    baselineScores: [],
+    statement: `held-out: not scored — ${reason}`,
+    skipped: reason,
+  });
+
+  if (ships === 0)
+    return skipped('no candidate shipped, so there is no survivor to score on the held-out split');
+  if (opts.budget?.snapshot().exhausted === true)
+    return skipped('the budget was exhausted before the held-out evaluation');
+
+  const baselineRuns: GoldenSuiteResult[] = [];
+  const candidateRuns: GoldenSuiteResult[] = [];
+  // R2-M4: every repeat is a paid golden run. The budget is asked before each one, so an
+  // exhausted run does not start repeat N+1 after N blew the ceiling; what was already paid for
+  // is named in the skip reason rather than silently discarded.
+  const overBudgetAfter = (phase: string, done: number): HeldOutReport | undefined =>
+    opts.budget?.snapshot().exhausted === true
+      ? skipped(`the budget was exhausted after ${done} of ${repeats} ${phase} repeat${repeats === 1 ? '' : 's'}; the verdict needs all ${repeats}`)
+      : undefined;
+  // R2-M1: each repeat is a whole held-out suite, so its cost is projected before it starts, not
+  // discovered after it has crossed the ceiling.
+  const projectionStops = (phase: string, i: number): HeldOutReport | undefined => {
+    const projection = projectGolden(opts.goldenTaskCounts?.heldOut);
+    return projection?.exceeds === true
+      ? skipped(`${phase} repeat ${i + 1} was not started: ${projection.statement}`)
+      : undefined;
+  };
+  try {
+    // Baseline first, then the survivor — the same split, the same runner, N times each.
+    for (let i = 0; i < repeats; i++) {
+      const stop = overBudgetAfter('baseline', i) ?? projectionStops('baseline', i);
+      if (stop !== undefined) return stop;
+      baselineRuns.push(await measureGolden(() => runHeldOut(base)));
+    }
+    for (let i = 0; i < repeats; i++) {
+      const stop = overBudgetAfter('candidate', i) ?? projectionStops('candidate', i);
+      if (stop !== undefined) return stop;
+      candidateRuns.push(await measureGolden(() => runHeldOut(finalHarness)));
+    }
+  } catch (err) {
+    return skipped(`the held-out run failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const wrongSplit = [...baselineRuns, ...candidateRuns]
+    .find((r) => r.split !== undefined && r.split !== 'held-out');
+  if (wrongSplit !== undefined)
+    return skipped(`the held-out runner measured split "${wrongSplit.split}", not "held-out"`);
+
+  // R2-M3: the gate counts deterministic verdicts only. Judge-scored tasks are scored by the same
+  // runner so they can be reported beside it, and are subtracted before anything is compared.
+  const baselineScores = baselineRuns.map((r) => heldOutScore(r, judgeScored));
+  const candidateScores = candidateRuns.map((r) => heldOutScore(r, judgeScored));
+  // The test's unit is the task, not the run: for every deterministic held-out task, how many of the
+  // N single attempts each harness passed it. `solvedTaskIds` is the same "solved" the rest of the
+  // harness uses, and the attempt count is one (R4-A2) so the two harnesses are measured alike.
+  const deterministicIds = baselineRuns[0]!.tasks
+    .map((t) => t.taskId).filter((id) => !judgeScored.has(id)).sort();
+  const passes = (runs: GoldenSuiteResult[], id: string): number =>
+    runs.filter((r) => r.solvedTaskIds.includes(id)).length;
+  const perTask: HeldOutTaskPasses[] = deterministicIds.map((taskId) => ({
+    taskId, base: passes(baselineRuns, taskId), candidate: passes(candidateRuns, taskId),
+  }));
+  const gate = stratifiedGate(perTask, HELD_OUT_RULE);
+  const judgeIds = [...judgeScored].filter((id) => baselineRuns[0]!.tasks.some((t) => t.taskId === id)).sort();
+  const judgeScoredReport: JudgeScoredHeldOut | undefined = judgeIds.length === 0
+    ? undefined
+    : {
+      taskIds: judgeIds,
+      baselineScores: baselineRuns.map((r) => r.solvedTaskIds.filter((id) => judgeScored.has(id)).length),
+      candidateScores: candidateRuns.map((r) => r.solvedTaskIds.filter((id) => judgeScored.has(id)).length),
+    };
+  const judgePart = judgeScoredReport === undefined
+    ? ''
+    : `; judge-scored held-out reported beside, never counted (${judgeScoredReport.taskIds.join(', ')}) — ` +
+      `baseline solved ${judgeScoredReport.baselineScores.map((n) => `${n}/${judgeScoredReport.taskIds.length}`).join(', ')}, ` +
+      `candidate solved ${(judgeScoredReport.candidateScores ?? []).map((n) => `${n}/${judgeScoredReport.taskIds.length}`).join(', ')}`;
+  const splitsSha = opts.heldOutSplitsSha ?? candidateRuns[0]!.splitsSha ?? baselineRuns[0]!.splitsSha;
+  // Every figure the decision used is in the sentence: per-task pass counts for both harnesses,
+  // the task's k_t, its delta, S, and the exact p-value.
+  const perTaskText = gate.deltas
+    .map((d) => `${d.taskId} ${d.base}/${repeats}→${d.candidate}/${repeats} (k=${d.k}, ${d.d >= 0 ? '+' : ''}${d.d})`)
+    .join(', ');
+  return {
+    ...(splitsSha !== undefined ? { splitsSha } : {}),
+    repeats,
+    baseline: baselineRuns,
+    candidate: candidateRuns,
+    baselineScores,
+    candidateScores,
+    ...(judgeScoredReport !== undefined ? { judgeScored: judgeScoredReport } : {}),
+    gate,
+    statement:
+      `held-out: ${gate.H} deterministic task${gate.H === 1 ? '' : 's'} × ${repeats} single attempts each — ${perTaskText}; ` +
+      `S = ${gate.S}; p = ${gate.p} (exact one-sided stratified permutation over ${gate.H} hypergeometric tasks); ` +
+      (gate.improved ? 'improvement' : `no improvement — ${gate.reason}`) +
+      judgePart,
+  };
+}
+
+/**
  * The AEGIS-lite evolution loop (plan §6.2). Selective invocation: no_digest
  * signal, planner no-op, empty candidates, and smoke crashes all end rounds
  * cheaply; only gate-approved candidates ever reach onShip.
  */
 export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
+  // R3-G3: the run count is part of the pre-registered test, so a different one is a different test.
+  if (opts.heldOutRepeats !== undefined && opts.heldOutRepeats !== HELD_OUT_REPEATS)
+    throw new Error(
+      `held-out repeats are pre-registered at ${HELD_OUT_REPEATS} (D-57): a different count changes ` +
+      `the test the p-value is computed for, not just its precision (got ${opts.heldOutRepeats})`,
+    );
+
   let base = opts.baseHarness;
   const maxRounds = opts.maxRounds ?? 10;
   const patience = opts.patience ?? 3;
@@ -224,18 +550,98 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   const rounds: EvolveRoundRecord[] = [];
   let idle = 0;
   let ships = 0;
-  let stopReason: EvolveReport['stopReason'] = 'budget';
+  // R2-L3: the loop's ordinary end is `rounds`; only a budget check that actually tripped says
+  // `budget`. The old initialiser made every run without a budget flag claim one.
+  let stopReason: EvolveReport['stopReason'] = 'rounds';
 
   let baseline: GoldenSuiteResult | undefined;
   // What each golden row this loop caused actually is (R2-L1). Rows with no entry are another
   // session's or another harness's; the prompt calls them `earlier result`, never "rejected".
   const historyLabels = new Map<string, HistoryLabel>();
 
+  // WP-3.7 §7: candidate ids must not grow. The old id was `${base.id}-r${round}`, and `base`
+  // becomes the candidate on a ship, so a run that shipped k times produced `default-r1-r1-r1…`,
+  // longer with every round and every later run. A candidate is now `<root>-e<n>`: the root is the
+  // base's id with any previous counter stripped and a hard length cap, and the counter continues
+  // from where this base left off, so ids stay short within a session's chain.
+  //
+  // R2-L5: they are NOT unique across sessions. Two sessions that start from the same base both
+  // mint `<root>-e1`, each for a different candidate, and both records are saved under their own
+  // run. That is safe because `maf evolve approve <id>` refuses an id more than one session claims
+  // and requires `<session>/<id>` to resolve it — the collision is the check's input, not a bug to
+  // paper over by folding a session into the id.
+  const idRoot = base.id.replace(/-e\d+$/, '').slice(0, 64);
+  let idSeq = Number(/-e(\d+)$/.exec(base.id)?.[1] ?? 0);
+  const nextCandidateId = (): string => `${idRoot}-e${++idSeq}`;
+
+  // Digest reads that failed (WP-3.7 §7): collected, reported, never fatal.
+  const digestErrors = new Set<string>();
+  const scrub = heldOutScrubber(opts.evidenceScope);
+  const readDigest = async (): Promise<Digest> => {
+    const digest = await digestEvidence(opts.graph, undefined, opts.evidenceScope);
+    for (const e of digest.errors) digestErrors.add(e);
+    return digest;
+  };
+  const digestErrorField = (): Pick<EvolveReport, 'digestErrors'> =>
+    digestErrors.size === 0 ? {} : { digestErrors: [...digestErrors] };
+
+  // R2-M1: a golden run is a whole suite, and the budget checks only see what has already been
+  // spent. Track what earlier runs this session cost per task, then project the next run from it —
+  // or from a conservative estimate when this is the first. A run whose projection crosses the
+  // token ceiling is never started; the report says what it would have cost.
+  const goldenMeasured: GoldenRunMeasurement = {
+    tokens: opts.priorGoldenMeasurement?.tokens ?? 0,
+    tasks: opts.priorGoldenMeasurement?.tasks ?? 0,
+    ...(opts.priorGoldenMeasurement?.usd !== undefined ? { usd: opts.priorGoldenMeasurement.usd } : {}),
+    ...(opts.priorGoldenMeasurement?.elapsedMs !== undefined
+      ? { elapsedMs: opts.priorGoldenMeasurement.elapsedMs } : {}),
+  };
+  const spentTokens = (): number =>
+    opts.budget?.snapshot().tokens ?? 0;
+  const projectGolden = (tasks: number | undefined): GoldenRunProjection | undefined => {
+    // A caller that gave no task counts has no projection to make; not even a snapshot is taken,
+    // so the budget is asked exactly as often as it was before this check existed.
+    if (tasks === undefined || opts.goldenTaskCounts === undefined) return undefined;
+    const snapshot = opts.budget?.snapshot();
+    if (snapshot === undefined) return undefined;
+    const { limits } = snapshot;
+    // R3-M3: every budget the run has is projected, not only tokens. A run is refused when ANY of
+    // them would be crossed; a budget that was not set has nothing to project.
+    if (limits.maxTokens === undefined && limits.maxUsd === undefined && limits.maxWallClockMs === undefined)
+      return undefined;
+    return projectGoldenRun({
+      tasks,
+      spentTokens: snapshot.tokens,
+      ...(limits.maxTokens !== undefined ? { maxTokens: limits.maxTokens } : {}),
+      ...(limits.maxUsd !== undefined ? { maxUsd: limits.maxUsd, spentUsd: snapshot.usd ?? 0 } : {}),
+      ...(opts.usdPerMillionTokens !== undefined ? { usdPerMillionTokens: opts.usdPerMillionTokens } : {}),
+      ...(limits.maxWallClockMs !== undefined
+        ? { maxWallClockMs: limits.maxWallClockMs, spentMs: snapshot.elapsedMs }
+        : {}),
+      ...(opts.adapterName !== undefined ? { adapter: opts.adapterName } : {}),
+      ...(goldenMeasured.tasks > 0 ? { measured: goldenMeasured } : {}),
+    });
+  };
+  /** Measure a golden run's spend and size, so the next projection uses this session's data. */
+  const measureGolden = async <T extends GoldenSuiteResult>(run: () => Promise<T>): Promise<T> => {
+    if (opts.goldenTaskCounts === undefined) return run();
+    const before = opts.budget?.snapshot();
+    const result = await run();
+    const after = opts.budget?.snapshot();
+    goldenMeasured.tokens += Math.max(0, (after?.tokens ?? 0) - (before?.tokens ?? 0));
+    if (before?.usd !== undefined && after?.usd !== undefined)
+      goldenMeasured.usd = (goldenMeasured.usd ?? 0) + Math.max(0, after.usd - before.usd);
+    if (before !== undefined && after !== undefined)
+      goldenMeasured.elapsedMs = (goldenMeasured.elapsedMs ?? 0) + Math.max(0, after.elapsedMs - before.elapsedMs);
+    goldenMeasured.tasks += result.tasks.length;
+    return result;
+  };
+
   // Every golden run the loop pays for is evidence for the rounds after it (WP-3.7 amendment 1).
   // Recording before returning means the next digest reads it; a throw is not swallowed, because
   // the alternative is a loop that keeps proposing from an empty graph and calling that no_op.
   const evaluate = async (harness: HarnessConfig): Promise<GoldenSuiteResult> => {
-    const result = await opts.runGoldens(harness);
+    const result = await measureGolden(() => opts.runGoldens(harness));
     if (opts.recordGoldens) {
       try {
         await opts.recordGoldens(result);
@@ -256,6 +662,10 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
   for (let round = 0; round < maxRounds; round++) {
     const rec = (r: Omit<EvolveRoundRecord, 'round'>): EvolveRoundRecord => ({ round, ...r });
     const record = async (r: EvolveRoundRecord): Promise<void> => {
+      // R2-H2: a note can quote a refusal, an error message or a manifest, and any of those can
+      // name a task id. The round record is evidence for the planner, so it is scrubbed before it
+      // is surfaced or stored — not after.
+      r.note = scrub(r.note);
       rounds.push(r);
       opts.onRound?.(r);
       // Recording is best-effort: a graph hiccup must never abort evolution (L4).
@@ -267,13 +677,41 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       }
     };
 
+    // D-57: the budget is asked before anything this round costs. An exhausted run records the
+    // round it could not start, so the report says what stopped it rather than looking patient.
+    const spentAtRoundTop = opts.budget?.snapshot();
+    if (spentAtRoundTop?.exhausted === true) {
+      await record(rec({ outcome: 'budget', note: spentAtRoundTop.statement }));
+      stopReason = 'budget';
+      break;
+    }
+
+    // R2-M4: every paid step asks the budget immediately before it starts, not once per round.
+    // The round-top check alone let a run that overspent on its own baseline (or on the planner)
+    // still start the critic, and a held-out run could start repeat N+1 after N blew the budget.
+    // Returns true when the caller must stop: the round is recorded as `budget` and the loop ends.
+    const stopIfOverBudget = async (
+      note: string, partial: { manifest?: ChangeManifest } = {},
+    ): Promise<boolean> => {
+      const spent = opts.budget?.snapshot();
+      if (spent?.exhausted !== true) return false;
+      await record(rec({
+        outcome: 'budget',
+        note: `${note}; ${spent.statement}`,
+        ...(partial.manifest !== undefined ? { manifest: partial.manifest } : {}),
+      }));
+      stopReason = 'budget';
+      return true;
+    };
+
     // Every gate stage that is free (WP-3.9 G3/G4): the candidate is built and the invariants and
     // widening rule are asked, with no model call and no evaluation. Called as soon as a manifest
     // exists and again on the final one, because a critic revision can introduce either defect.
     const freeCheck = (m: ChangeManifest): { candidate: HarnessConfig } | { veto: GateVeto } => {
       let candidate: HarnessConfig;
       try {
-        candidate = applyEdit(base, m.edit, `${base.id}-r${round + 1}`);
+        candidate = applyEdit(base, m.edit, nextCandidateId(),
+          opts.defaultBundleRefs !== undefined ? { defaultBundleRefs: opts.defaultBundleRefs } : {});
       } catch (err) {
         // An edit the harness cannot express is a malformed candidate, not a reason to abort the
         // loop; the invariant stage is where a refusal belongs, and it names what it refused.
@@ -286,31 +724,51 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
         knownToolIds: opts.knownToolIds,
         toolPermissions: opts.toolPermissions,
         knownProcessorNames: opts.knownProcessorNames,
+        ...(opts.defaultBundleRefs !== undefined ? { defaultBundleRefs: opts.defaultBundleRefs } : {}),
         safetyAdjacentRoles: safetyAdjacent,
         approveSensitive: opts.approveSensitive === true,
         ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
+        ...(opts.roleTiers ? { roleTiers: opts.roleTiers } : {}),
+        ...(opts.adapterName !== undefined ? { adapterName: opts.adapterName } : {}),
       });
       return veto ? { veto } : { candidate };
     };
 
     // ── 1. Digester ──
-    let digest = await digestEvidence(opts.graph);
-    if (round === 0) baseline = baselineFromHistory(digest.goldenHistory, base);
+    let digest = await readDigest();
+    if (round === 0) baseline = baselineFromHistory(digest.goldenHistory, base, opts.splitName);
     if (!baseline) {
+      // R2-M4: the round-0 baseline is a paid golden run of its own, not part of a round's suite.
+      if (await stopIfOverBudget('the budget was exhausted before the round-0 baseline')) break;
+      // R2-M1: the check above sees what has been spent; this one sees what the run will cost.
+      const baselineProjection = projectGolden(opts.goldenTaskCounts?.train);
+      if (baselineProjection?.exceeds === true) {
+        await record(rec({
+          outcome: 'budget',
+          note: `the round-0 baseline was not started: ${baselineProjection.statement}`,
+        }));
+        stopReason = 'budget';
+        break;
+      }
       try {
         baseline = await evaluate(base);
       } catch (err) {
-        const stopped = recordFailureReport(err, rounds, base, ships);
-        if (stopped !== undefined) return stopped;
+        // R3-L3: this is the baseline's own run, so `err.result` is the baseline's measured result —
+        // the one the partial report keeps (marked unrecorded) rather than dropping.
+        const stopped = recordFailureReport(
+          err, rounds, base, ships, err instanceof RecordFailedError ? err.result : undefined,
+        );
+        if (stopped !== undefined) return { ...stopped, ...digestErrorField() };
         throw err;
       }
       // L1: the baseline was just paid for, so it is evidence for THIS round's planner. Without
       // this, round 1 planned from the empty digest it read before running and burned a tick.
-      digest = await digestEvidence(opts.graph);
+      digest = await readDigest();
     }
-    const current = currentStatus(digest, base, baseline);
+    const current = currentStatus(digest, base, baseline, opts.splitName);
 
     // ── 2. Planner ──
+    if (await stopIfOverBudget('the budget was exhausted before the planner')) break;
     let manifest: ChangeManifest | undefined;
     try {
       const response = await opts.metaGenerate(
@@ -339,6 +797,24 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       }));
       if (idle >= patience) { stopReason = 'patience'; break; }
       continue;
+    }
+
+    // R2-H2: a plan that names a task outside the train split is refused before it is recorded or
+    // measured. The planner can only do that if a held-out id reached it — which is the defect this
+    // rule defends against — and echoing it into the round record would move the leak, not stop it.
+    // The note says what happened without repeating the id.
+    if (opts.evidenceScope !== undefined) {
+      const offSplit = manifest.targetTasks.filter((id) => !opts.evidenceScope!.trainTaskIds.has(id));
+      if (offSplit.length > 0) {
+        idle++;
+        await record(rec({
+          outcome: 'planner-error',
+          note: `plan targets ${offSplit.length} task(s) outside the train split; a held-out task is ` +
+            'not something the evolver may name or measure',
+        }));
+        if (idle >= patience) { stopReason = 'patience'; break; }
+        continue;
+      }
     }
 
     // ── 3. Pre-evaluation approval routing (§6.3: approve BEFORE evaluation spend) ──
@@ -377,11 +853,15 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
 
     // ── 4. Critic (one revision allowed) — BEFORE building/smoking a candidate,
     //       so step 5 smoke-tests the FINAL (possibly revised) manifest (L5). ──
+    // R2-M4: the critic is a model call like any other; it does not start over budget either.
+    if (await stopIfOverBudget('the budget was exhausted before the critic', { manifest })) break;
     let critic = parseCriticVerdict(await opts.metaGenerate(
       CRITIC_SYSTEM_PROMPT,
       `Evidence:\n${JSON.stringify(digest)}\n\nManifest:\n${JSON.stringify(manifest, null, 2)}`,
     ));
     if (critic.verdict === 'revise') {
+      // R2-M4: the revision is a second planner call; it also does not start over budget.
+      if (await stopIfOverBudget('the budget was exhausted before the critic revision', { manifest })) break;
       const revised = await opts.metaGenerate(
         PLANNER_SYSTEM_PROMPT,
         buildPlannerUserPrompt(
@@ -431,6 +911,13 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       continue;
     }
     const finalCandidate = finalCheck.candidate;
+    // D-57: the smoke test spends adapter time; the budget is asked before it, not after.
+    const spentBeforeSmoke = opts.budget?.snapshot();
+    if (spentBeforeSmoke?.exhausted === true) {
+      await record(rec({ manifest: finalManifest, outcome: 'budget', note: spentBeforeSmoke.statement }));
+      stopReason = 'budget';
+      break;
+    }
     try {
       const smokeTarget = finalManifest.targetTasks[0];
       if (smokeTarget) await opts.runSmoke(finalCandidate, smokeTarget);
@@ -445,6 +932,24 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     }
 
     // ── 6. Gate (mandatory, deterministic) ──
+    // D-57: the golden suite is the expensive step. The budget is asked immediately before it, so
+    // an exhausted run does not spend on a candidate whose result it would then have to discard.
+    const spentBeforeGoldens = opts.budget?.snapshot();
+    if (spentBeforeGoldens?.exhausted === true) {
+      await record(rec({ manifest: finalManifest, outcome: 'budget', note: spentBeforeGoldens.statement }));
+      stopReason = 'budget';
+      break;
+    }
+    // R2-M1: the candidate suite is a whole golden run too; project it before paying for it.
+    const candidateProjection = projectGolden(opts.goldenTaskCounts?.train);
+    if (candidateProjection?.exceeds === true) {
+      await record(rec({
+        manifest: finalManifest, outcome: 'budget',
+        note: `the candidate golden run was not started: ${candidateProjection.statement}`,
+      }));
+      stopReason = 'budget';
+      break;
+    }
     let candidateScores: GoldenSuiteResult;
     try {
       candidateScores = await evaluate(finalCandidate);
@@ -465,7 +970,7 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
         }));
       }
       const stopped = recordFailureReport(err, rounds, base, ships);
-      if (stopped !== undefined) return stopped;
+      if (stopped !== undefined) return { ...stopped, ...digestErrorField() };
       throw err;
     }
     const gate = gateEvaluate({
@@ -474,10 +979,13 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
       knownToolIds: opts.knownToolIds,
       toolPermissions: opts.toolPermissions,
       knownProcessorNames: opts.knownProcessorNames,
+      ...(opts.defaultBundleRefs !== undefined ? { defaultBundleRefs: opts.defaultBundleRefs } : {}),
       safetyAdjacentRoles: safetyAdjacent,
       approveSensitive: opts.approveSensitive === true,
       ...(opts.knownModels ? { knownModels: opts.knownModels } : {}),
       ...(opts.judgeOnlyTaskIds ? { judgeOnlyTaskIds: opts.judgeOnlyTaskIds } : {}),
+      ...(opts.roleTiers ? { roleTiers: opts.roleTiers } : {}),
+      ...(opts.adapterName !== undefined ? { adapterName: opts.adapterName } : {}),
     });
 
     // K1: a sensitive edit reaches this point only with the flag, and the gate returns
@@ -497,7 +1005,9 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     let storeNote = '';
     if (evaluation !== undefined && opts.storeCandidate !== undefined) {
       try {
-        await opts.storeCandidate(finalCandidate, evaluation);
+        // R2-M1: the base the candidate was measured against rides along, so a human's later
+        // approval can refuse a candidate whose comparison base has since moved.
+        await opts.storeCandidate(finalCandidate, evaluation, base);
         storeNote = `; candidate ${finalCandidate.sha} stored, not current — apply it with \`maf harness set-current ${finalCandidate.sha}\``;
       } catch (err) {
         storeNote = `; candidate ${finalCandidate.sha} could not be stored: ${err instanceof Error ? err.message : String(err)}`;
@@ -531,5 +1041,15 @@ export async function evolve(opts: EvolveOptions): Promise<EvolveReport> {
     if (idle >= patience) { stopReason = 'patience'; break; }
   }
 
-  return { rounds, finalHarness: base, ships, stopReason };
+  // D-57: the held-out verdict, measured after the loop and never recorded as evidence.
+  const heldOut = await evaluateHeldOut(opts, opts.baseHarness, base, ships, projectGolden, measureGolden);
+  const budget = opts.budget?.snapshot();
+  const usage = opts.usage?.snapshot();
+  return {
+    rounds, finalHarness: base, ships, stopReason,
+    ...digestErrorField(),
+    ...(heldOut !== undefined ? { heldOut } : {}),
+    ...(budget !== undefined ? { budget } : {}),
+    ...(usage !== undefined ? { usage } : {}),
+  };
 }

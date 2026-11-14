@@ -1,4 +1,4 @@
-import { cp, mkdtemp, rm, readFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { snapshotDiff, runIsolatedGit } from '@maf/git-ops';
@@ -39,6 +39,13 @@ export interface GoldenSuiteResult {
   model?: string;
   /** Who judged the llm-judge verifiers; absent when no judge was wired (they then fail closed). */
   judge?: JudgeDisclosure;
+  /**
+   * D-57: the split this run measured, named in the result. A full-corpus run (the `goldens run`
+   * default, and every result written before the split existed) names none.
+   */
+  split?: 'train' | 'held-out';
+  /** D-57: sha of the split definition. Results from different splits do not compare. */
+  splitsSha?: string;
   tasks: GoldenTaskResult[];
   /** Task ids that passed. */
   solvedTaskIds: string[];
@@ -73,6 +80,8 @@ export interface GoldenRunnerOptions {
     verdict: NonNullable<VerifierContext['llmJudge']>;
     disclosure: JudgeDisclosure;
   };
+  /** D-57: stamped on every result this runner emits (the caller still names the ids to run()). */
+  split?: { name: 'train' | 'held-out'; sha: string };
 }
 
 export class GoldenRunner {
@@ -89,6 +98,13 @@ export class GoldenRunner {
   /** Runs the corpus, or only the tasks named in `only` (each must be in the corpus). */
   async run(only?: readonly string[]): Promise<GoldenSuiteResult> {
     const corpus = await this.loadCorpus();
+    // D-57: a split-scoped runner must be given that split's ids. Without this a caller that
+    // forgot them would measure the whole corpus and stamp it `train` — a result that names a
+    // split it did not measure, and a held-out task silently spent on the evolver.
+    if (this.opts.split !== undefined && only === undefined)
+      throw new Error(
+        `goldens: a ${this.opts.split.name} runner must be given the split's task ids; run(only) was called without them.`,
+      );
     const corpusSha = await computeCorpusSha(this.opts.corpusRoot, corpus);
     const missing = (only ?? []).filter((id) => !corpus.some((t) => t.id === id));
     if (missing.length > 0) {
@@ -107,6 +123,7 @@ export class GoldenRunner {
       adapter: this.opts.adapter,
       ...(this.opts.model !== undefined ? { model: this.opts.model } : {}),
       ...(this.opts.llmJudge ? { judge: this.opts.llmJudge.disclosure } : {}),
+      ...(this.opts.split ? { split: this.opts.split.name, splitsSha: this.opts.split.sha } : {}),
       tasks,
       solvedTaskIds: tasks.filter((t) => t.passed).map((t) => t.taskId),
       ranAt: new Date().toISOString(),
@@ -136,7 +153,7 @@ export class GoldenRunner {
     const workDir = path.join(workRoot, 'repo');
     const fixtureDir = path.join(this.opts.corpusRoot, task.repoFixture);
     try {
-      await cp(fixtureDir, workDir, { recursive: true });
+      await cp(fixtureDir, workDir, { recursive: true, filter: (src) => !isChecksOrReference(fixtureDir, src) });
       const baseline = await initBaselineRepo(workDir);
       const output = await this.opts.dispatch(task, workDir, {
         temperature: this.opts.temperature ?? 0,
@@ -148,11 +165,21 @@ export class GoldenRunner {
       const protectedFiles = task.mustNotModify && task.mustNotModify.length > 0
         ? [await checkUnmodified(workDir, fixtureDir, task.mustNotModify)]
         : [];
-      const outcomes = [...protectedFiles, ...await runVerifiers(task.verifiers, {
-        workDir, output, diff, corpusRoot: this.opts.corpusRoot,
-        ...(this.opts.securityScore ? { securityScore: this.opts.securityScore } : {}),
-        ...(this.opts.llmJudge ? { llmJudge: this.opts.llmJudge.verdict } : {}),
-      })];
+      // R5-P1: the acceptance checks are copied in only now — after the agent has stopped and the
+      // diff has been taken — so nothing the agent wrote can read, edit or pass by copying them.
+      const placed = await materializeHiddenChecks(workDir, fixtureDir, task.hiddenChecks ?? []);
+      let outcomes: VerifierOutcome[];
+      try {
+        outcomes = [...protectedFiles, ...await runVerifiers(task.verifiers, {
+          workDir, output, diff, corpusRoot: this.opts.corpusRoot,
+          ...(this.opts.securityScore ? { securityScore: this.opts.securityScore } : {}),
+          ...(this.opts.llmJudge ? { llmJudge: this.opts.llmJudge.verdict } : {}),
+        })];
+      } finally {
+        // Remove the checks again as soon as scoring ends: the work dir is discarded anyway, but
+        // a verifier that runs after this one must not see them either.
+        await Promise.all(placed.map((p) => rm(p, { force: true })));
+      }
       return { attempt, output, outcomes, passed: outcomes.every((o) => o.passed) };
     } catch (err) {
       return {
@@ -163,6 +190,38 @@ export class GoldenRunner {
       await rm(workRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   }
+}
+
+/**
+ * `.checks/` holds a task's hidden acceptance checks and `.reference/` its proof solution
+ * (R5-P1/P2). Neither is ever copied into the worktree the agent edits: the checks are placed
+ * only after the agent has finished, and the reference exists only for the offline proof.
+ */
+const NEVER_IN_WORKTREE = new Set(['.checks', '.reference']);
+
+function isChecksOrReference(fixtureDir: string, source: string): boolean {
+  return path.relative(fixtureDir, source).split(path.sep).some((seg) => NEVER_IN_WORKTREE.has(seg));
+}
+
+/**
+ * Copies each hidden check into the worktree at the path below `.checks/`, so a check written as
+ * `.checks/test.js` lands at `test.js` and keeps resolving the fixture's own modules. Returns the
+ * paths it placed, for removal once scoring ends.
+ */
+async function materializeHiddenChecks(
+  workDir: string, fixtureDir: string, checks: readonly string[],
+): Promise<string[]> {
+  const root = path.resolve(workDir);
+  const placed: string[] = [];
+  for (const rel of checks) {
+    const target = path.resolve(root, rel.slice('.checks/'.length));
+    if (!target.startsWith(root + path.sep))
+      throw new Error(`goldens: hidden check ${JSON.stringify(rel)} escapes the work dir.`);
+    await mkdir(path.dirname(target), { recursive: true });
+    await copyFile(path.join(fixtureDir, rel), target);
+    placed.push(target);
+  }
+  return placed;
 }
 
 // A baseline the runner creates itself, with a fixed identity and timestamp so the

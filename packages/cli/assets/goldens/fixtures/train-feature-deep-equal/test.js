@@ -1,0 +1,12 @@
+const assert = require('node:assert/strict');
+const { deepEqual } = require('./equal');
+assert.equal(deepEqual({ a: 1, b: [1, 2] }, { b: [1, 2], a: 1 }), true);
+assert.equal(deepEqual([1, 2], [1, 2]), true);
+assert.equal(deepEqual(NaN, NaN), true);
+assert.equal(deepEqual(new Date(0), new Date(0)), true);
+assert.equal(deepEqual({ a: 1 }, { a: '1' }), false);
+assert.equal(deepEqual([1], [1, 2]), false);
+assert.equal(deepEqual({ a: undefined }, {}), false);
+assert.equal(deepEqual(null, {}), false);
+assert.equal(deepEqual(new Date(0), new Date(1)), false);
+console.log('ok');

@@ -1,0 +1,11 @@
+const assert = require('node:assert/strict');
+const { Lru } = require('./lru');
+const cache = new Lru(2);
+cache.set('a', 1);
+cache.set('b', 2);
+assert.equal(cache.get('a'), 1);
+cache.set('c', 3);
+assert.equal(cache.get('b'), undefined);
+assert.equal(cache.get('a'), 1);
+assert.equal(cache.get('c'), 3);
+console.log('ok');

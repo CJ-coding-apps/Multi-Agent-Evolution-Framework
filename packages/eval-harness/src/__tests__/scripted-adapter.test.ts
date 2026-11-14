@@ -7,7 +7,7 @@ import type { AdapterInvokeOptions, TurnMessage } from '@maf/types';
 import { parseSecurityOutput } from '@maf/git-ops';
 import {
   ScriptedAdapter, SCRIPTED_JUDGE_RATIONALE, JUDGE_SYSTEM_PROMPT, judgePrompt, parseJudgeVerdict,
-  loadScriptedTasks,
+  loadScriptedBundle, loadScriptedTasks,
 } from '../index.js';
 import type { GoldenTask, ScriptedTask } from '../index.js';
 
@@ -111,6 +111,89 @@ test('scripts are written per corpus task id and served by the prompt the model 
     await assert.rejects(() => loadScriptedTasks(root, corpus), /script "zzz" names no task in the corpus/);
     await writeFile(path.join(root, 'scripted.json'), JSON.stringify({ version: 1, tasks: { a: { steps: [{ tool: 1 }], final: 'x' } } }), 'utf8');
     await assert.rejects(() => loadScriptedTasks(root, corpus), /step 0 needs a string "tool"/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a task prompt may have a variant per role prompt, and the marked variant wins when it matches', async () => {
+  const base: ScriptedTask = { prompt: 'Fix A.', steps: [], final: 'base answer' };
+  const thorough: ScriptedTask = { ...base, systemContains: 'thorough', final: 'thorough answer' };
+  // Order in the file must not decide it: the default is first here and still loses to a match.
+  const adapter = new ScriptedAdapter([base, thorough]);
+  const ask = (systemPrompt: string) => adapter.invoke(opts({ prompt: 'Fix A.', systemPrompt }));
+  assert.equal((await ask('be terse')).output, 'base answer');
+  assert.equal((await ask('be terse and thorough')).output, 'thorough answer');
+  assert.equal((await ask('be thorough')).output, 'thorough answer');
+  // A marker that does not match falls back to the unmarked script, not to silence.
+  assert.equal((await ask('be concise')).output, 'base answer');
+  assert.equal((await adapter.sendTurn([{ kind: 'user', text: 'Fix A.' }], opts({ systemPrompt: 'be thorough' }))).text,
+    'thorough answer', 'the in-process tier answers the same way');
+
+  // With only a marked variant, a non-matching role prompt is a named error, not a wrong answer.
+  const onlyMarked = new ScriptedAdapter([thorough]);
+  const res = await onlyMarked.invoke(opts({ prompt: 'Fix A.', systemPrompt: 'be terse' }));
+  assert.equal(res.success, false);
+  assert.match(res.output, /no script for "Fix A\." matches this role prompt/);
+});
+
+test('two scripts for one prompt need distinct markers; a repeated marker is refused', () => {
+  const a: ScriptedTask = { prompt: 'Fix A.', steps: [], final: 'x' };
+  assert.throws(() => new ScriptedAdapter([a, a]), /two scripts answer the same prompt/);
+  assert.throws(() => new ScriptedAdapter([{ ...a, systemContains: 'm' }, { ...a, systemContains: 'm' }]),
+    /for the same system-prompt marker "m"/);
+  assert.doesNotThrow(() => new ScriptedAdapter([a, { ...a, systemContains: 'm' }]));
+});
+
+test('the evolution loop is answered from the file: planner answers in order, the last one repeats', async () => {
+  const evolution = { planner: ['plan 1', 'plan 2'], critic: ['verdict'] };
+  const adapter = new ScriptedAdapter([], evolution);
+  const ask = (systemPrompt: string) =>
+    adapter.invoke(opts({ prompt: 'anything', systemPrompt: systemPrompt + ' and the rest of the prompt' }));
+  assert.equal((await ask('You are the MAF harness evolution planner.')).output, 'plan 1');
+  assert.equal((await ask('You are the MAF harness evolution planner.')).output, 'plan 2');
+  assert.equal((await ask('You are the MAF harness evolution planner.')).output, 'plan 2', 'the last answer repeats');
+  assert.equal((await ask('You are the MAF harness evolution critic.')).output, 'verdict');
+  assert.equal((await ask('You are the MAF harness evolution critic.')).output, 'verdict');
+  // The kinds are on the record, so a run can be audited against the file.
+  assert.deepEqual(adapter.exchanges.map((e) => e.kind), ['planner', 'planner', 'planner', 'critic', 'critic']);
+});
+
+test('an unscripted planner call throws, naming the file section that is missing', async () => {
+  const bare = new ScriptedAdapter([]);
+  await assert.rejects(
+    () => bare.invoke(opts({ prompt: 'x', systemPrompt: 'You are the MAF harness evolution planner. ...' })),
+    /no script; add an "evolution\.planner" answer to scripted\.json/,
+  );
+});
+
+test('the script file carries variants and the evolution answers, and refuses malformed ones', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'maf-scripts-evo-'));
+  const task: GoldenTask = {
+    id: 'a', prompt: 'Do A.', repoFixture: 'fixtures/a', role: 'coder',
+    verifiers: [{ kind: 'diff-match', mustContain: [], mustNotContain: [] }],
+    provenance: { source: 'human-decision', ref: 'test' },
+  };
+  const write = (body: unknown) => writeFile(path.join(root, 'scripted.json'), JSON.stringify(body), 'utf8');
+  try {
+    await write({ version: 1, tasks: { a: [
+      { steps: [], final: 'base' },
+      { systemContains: 'thorough', steps: [], final: 'thorough' },
+    ] }, evolution: { planner: ['p'], critic: ['c'] } });
+    const bundle = await loadScriptedBundle(root, [task]);
+    assert.deepEqual(bundle.tasks.map((t) => [t.final, t.systemContains]), [['base', undefined], ['thorough', 'thorough']]);
+    assert.deepEqual(bundle.evolution, { planner: ['p'], critic: ['c'] });
+
+    // Without an evolution section the bundle is just the task scripts (goldens run does not evolve).
+    await write({ version: 1, tasks: { a: { steps: [], final: 'base' } } });
+    assert.equal((await loadScriptedBundle(root, [task])).evolution, undefined);
+
+    await write({ version: 1, tasks: { a: { systemContains: '', steps: [], final: 'x' } } });
+    await assert.rejects(() => loadScriptedBundle(root, [task]), /"systemContains" must be a non-empty string/);
+    await write({ version: 1, tasks: { a: { steps: [], final: 'x' } }, evolution: { planner: [] } });
+    await assert.rejects(() => loadScriptedBundle(root, [task]), /"evolution\.planner" must be a non-empty array/);
+    await write({ version: 1, tasks: { a: { steps: [], final: 'x' } }, evolution: { planner: ['p'] } });
+    await assert.rejects(() => loadScriptedBundle(root, [task]), /"evolution\.critic" must be a non-empty array/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

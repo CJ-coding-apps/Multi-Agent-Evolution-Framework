@@ -75,12 +75,85 @@ export function redactText(text: string, extra: readonly RegExp[] = []): string 
  *    have a body. The POSIX form does not take a leading `//`, so a URL after `https:` is not read
  *    as a path.
  *
+ *    An unquoted path may contain spaces (`C:\Program Files\…`), and stopping at the first one
+ *    leaves the tail behind — a refusal reason is free text, so nothing bounds the path but the
+ *    path itself (WP-3.7b R3-L2). The generic pattern continues over a space-separated token that
+ *    still carries a separator (`b/secret.txt`, `Files\x\key.pem`). `maskSpacedPaths` covers the
+ *    other shape, a spaced filename whose last word carries only an extension
+ *    (`/home/u/my secret notes.txt`).
+ *
+ *    R2-L2: that continuation used to run to the last filename-looking word in the sentence, so
+ *    `policy denied /etc/passwd for coder see policy.yaml` masked the prose too. It now crosses at
+ *    most three words and ends at the first path-shaped word; and a head that already names a file
+ *    (`/home/u/x.js:3`) continues only when a later word carries a separator. A refusal with a path,
+ *    then at most two prose words, then a filename is still masked — over-masking, never a leak.
+ *
  * Covered prefixes: `/…`, `C:\…`, `C:/…` and `\\server\share\…`.
  */
-const ABSOLUTE_PATH_PATTERNS: ReadonlyArray<{ label: string; re: RegExp }> = [
-  { label: 'path', re: /(["'])(?:[A-Za-z]:[\\/]|\\\\|\/)[^"'\n]*\1/g },
-  { label: 'path', re: /(?:^|(?<=[\s"'(=:`]))(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^\s"']*/g },
+const QUOTED_PATH_PATTERN: { label: string; re: RegExp } = {
+  label: 'path', re: /(["'])(?:[A-Za-z]:[\\/]|\\\\|\/)[^"'\n]*\1/g,
+};
+
+const UNQUOTED_PATH_PATTERNS: ReadonlyArray<{ label: string; re: RegExp }> = [
+  {
+    label: 'path',
+    re: /(?:^|(?<=[\s"'(=:`]))(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^\s"']*(?:[^\S\r\n]+[^\s"']*[\\/][^\s"']*)*/g,
+  },
 ];
+
+/**
+ * R2-L2: the spaced-path continuation. A head (`/home/u`, `C:\Users\x`) is followed by up to three
+ * whitespace-separated words; the run ends at the first word that is itself path-shaped (carries a
+ * separator or a file extension) and masks through it. A run that reaches the cap without such a
+ * word is prose and masks nothing beyond the head, which the generic pattern handles on its own.
+ * When the head already names a file, the continuation is accepted only if it carries a separator
+ * — `/home/u/x.js:3 in test.js` names one path and some prose, not a path with spaces.
+ */
+const SPACED_PATH_HEAD = /(?:^|(?<=[\s"'(=:`]))(?:[A-Za-z]:[\\/]|\\\\|\/(?!\/))[^\s"'\n]*/g;
+const SPACED_WORD = /[^\S\r\n]+([^\s"'\n]+)/y;
+const NAMES_FILE = /\.[A-Za-z0-9]{1,8}(?::\d+)?$/;
+const MAX_SPACED_WORDS = 3;
+// R3-L4: a clause connector ends the path. `wrote /tmp/x then src/foo.ts was read` names two
+// things; `then` cannot be a directory, and swallowing it (with the next path) lost the prose.
+// R4-L1: `and` and `or` are NOT connectors here — a directory can be named "Tom and Jerry", and
+// ending the run at `and` left `/Users/Tom` unclosed while `Jerry/secret.txt` was never even a
+// head, so the whole path leaked. The remaining words cannot plausibly open a path segment.
+const SPACED_CONNECTORS = new Set(['then', 'but', 'so', 'yet']);
+
+function spacedPathTail(text: string, from: number, head: string): number | undefined {
+  const headNamesFile = NAMES_FILE.test(head);
+  let pos = from;
+  let tail: number | undefined;
+  let carriesSeparator = false;
+  for (let i = 0; i < MAX_SPACED_WORDS; i++) {
+    SPACED_WORD.lastIndex = pos;
+    const word = SPACED_WORD.exec(text);
+    if (word === null) break;
+    const end = pos + word[0].length;
+    const token = word[1]!;
+    if (i === 0 && SPACED_CONNECTORS.has(token.toLowerCase())) break;
+    if (/[\\/]/.test(token)) carriesSeparator = true;
+    if (NAMES_FILE.test(token) || /[\\/]/.test(token)) { tail = end; break; }
+    pos = end;
+  }
+  if (tail === undefined) return undefined;
+  return headNamesFile && !carriesSeparator ? undefined : tail;
+}
+
+/** Mask each spaced path in `text` from its head through the word that ends it (R2-L2). */
+function maskSpacedPaths(text: string): string {
+  let out = '';
+  let copied = 0;
+  for (const match of text.matchAll(SPACED_PATH_HEAD)) {
+    const start = match.index ?? 0;
+    if (start < copied) continue;
+    const tail = spacedPathTail(text, start + match[0].length, match[0]);
+    if (tail === undefined) continue;
+    out += `${text.slice(copied, start)}[REDACTED:path]`;
+    copied = tail;
+  }
+  return out + text.slice(copied);
+}
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -121,7 +194,11 @@ function relativizeToRoots(text: string, roots: readonly string[]): string {
  */
 export function redactEvidenceText(text: string, repoRoots: readonly string[] = []): string {
   let out = relativizeToRoots(text, repoRoots);
-  for (const p of ABSOLUTE_PATH_PATTERNS) out = out.replace(p.re, `[REDACTED:${p.label}]`);
+  // Quoted first: the quotes are the path's boundary, so a quoted path is never handed to the
+  // spaced-path reader.
+  out = out.replace(QUOTED_PATH_PATTERN.re, `[REDACTED:${QUOTED_PATH_PATTERN.label}]`);
+  out = maskSpacedPaths(out);
+  for (const p of UNQUOTED_PATH_PATTERNS) out = out.replace(p.re, `[REDACTED:${p.label}]`);
   return redactText(out);
 }
 
