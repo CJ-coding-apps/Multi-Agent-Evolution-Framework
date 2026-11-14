@@ -1355,7 +1355,7 @@
       "final": "Rewrote caesar.js, but the tests still fail."
     },
     "pool-token-bucket": {
-      "note": "A plausible but incomplete fix: the bucket refills, but capping it at capacity also spends the token that was just allowed.",
+      "note": "A plausible but incomplete fix: the bucket refills and caps correctly, but reports the tokens available before spending the one it allows.",
       "steps": [
         {
           "tool": "fs.read",
@@ -1367,7 +1367,7 @@
           "tool": "fs.write",
           "input": {
             "path": "bucket.js",
-            "content": "function allow(tokens, capacity, ratePerMs, elapsedMs) {\n  const refilled = tokens + elapsedMs * ratePerMs;\n  if (refilled > capacity) return { allowed: true, tokens: capacity - 1 };\n  if (refilled < 1) return { allowed: false, tokens: refilled };\n  return { allowed: true, tokens: refilled - 1 };\n}\nmodule.exports = { allow };\n"
+            "content": "function allow(tokens, capacity, ratePerMs, elapsedMs) {\n  const available = Math.min(capacity, tokens + elapsedMs * ratePerMs);\n  if (available < 1) return { allowed: false, tokens: available };\n  return { allowed: true, tokens: available };\n}\nmodule.exports = { allow };\n"
           }
         }
       ],
