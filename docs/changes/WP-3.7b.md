@@ -1011,6 +1011,27 @@ head is masked.
 Tests: the `and` and `or` forms are masked whole, `then` still ends the run, and the prose case
 still masks only the head. `@maf/types` 56/56 and the evolver's leak screen 85/85.
 
+### R4-L3 — the debounce check drives an injected clock, not the host's
+
+`pool-debounce` asks for `debounce(fn, ms, schedule, cancel)` and gives the reason in the prompt:
+`schedule` and `cancel` are injected (setTimeout/clearTimeout by default) "so it never touches the
+real clock in a test." The hidden check touched it anyway: it opened a 20 ms window on the real
+timers and asserted in a 60 ms one, so a loaded host could reach the assertion before the timer and
+fail a correct solution for the machine's speed. The check now owns a clock — a `now`, a
+handle-keyed map of pending timers, and `advance(ms)` that fires everything due at or before the
+target in deadline-then-handle order. Nothing waits on wall time.
+
+It exercises the contract, not a happy path: the three-call burst fires nothing synchronously,
+nothing at 19 ms and once at 20 ms with the LAST call's arguments and `this`; a call after the fire
+opens a fresh window; and a call inside a window restarts it — the original deadline passes
+silently, one timer remains pending, and it fires 20 ms after the last call. The unmodified fixture
+still fails (exit 1, `not called synchronously`), so the task is still a task; the reference passes.
+
+`.checks/` is in the corpus sha, so the committed scripted baseline was regenerated from a fresh
+clone: corpus `227cf9f7…` → `b5492729…`; 116 tasks, 60/116 solved, and every task's attempts and
+outcome are byte-identical — only `corpusSha` and the result's `ranAt` differ. `reference-solutions`
+1/1, the assets mirror 4/4, and the offline baseline test reproduces the new file.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
