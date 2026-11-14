@@ -1442,3 +1442,33 @@ refused under the key that signed it. The calibration tests now exercise a signe
 end — `runCalibration` signs before hashing, `calibrateSplitForTest` signs what it writes — and the
 existing `calibrate` fixture still exits 1 with its counts because the signature changes nothing
 about the rule.
+
+## Round 6 verification
+
+- **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
+  --workspace-concurrency=1 test` at `b94f876`: **1835 tests, 1833 pass, 2 skipped, 0 fail**
+  (`TEST_RC=0`) across the 25 packages that declare a test script. The three corpus-sized tests
+  measured 1075.8 s (five stacks), 258.5 s (fresh-clone baseline) and 178.3 s (calibrate) — all
+  inside the 1800 s, 600 s and 450 s caps. Round 5's run at `098cc44` was 1819 tests; the 16 new
+  ones are R6-H1's six (five contamination tests and the gate's refusal), R6-H2's two
+  duplicate-guard tests, R6-M1's six, R6-L1's posterior test and R6-L2's splits test.
+- **Linux (node 22.23.4, `node:22` container)** — `pnpm install --frozen-lockfile`, `pnpm -r
+  build`, then the same serial command over a `git archive` of `b94f876`: `INSTALL_RC=0`,
+  `BUILD_RC=0`, `TEST_RC=0`, **1835 tests, 1833 pass, 2 skipped, 0 fail**, zero `not ok` lines.
+  Every count agrees with macOS; the three corpus-sized tests measured 465.9 s, 112.1 s and
+  74.7 s there. The container renders its summary marker as ASCII `#` and its test names as TAP,
+  which is the only difference in the logs.
+- **Guards** — `check:test-scripts`, `check:build-output`, `check:workspace-deps`, `check:doc-refs`
+  and the new `check:heldout-duplicates` all pass; the duplicate guard compares 57 held-out/pool
+  tasks against 59 train tasks and reports the closest unrelated file pair at 0.821, below its 0.9
+  floor. `check:package`: **220 files**, installed and run, `goldens solved 60/116` (round 5's row
+  read 342; the plaintext `.checks/` and `.reference/` trees are gone from the package, replaced by
+  the one encoded store).
+- **Mutants** — five round-6 mechanisms were broken on the compiled `dist/`, observed red, and
+  reversed (the restored files compared byte-for-byte by sha256): never asking `limit.crossed()`
+  reddens the runner's partial-result test; letting a partial run be recorded and compared reddens
+  two evolver tests; deciding the probe on the exact probability instead of the printed figure
+  reddens the projection test at the `q = 5` case (0.796852 < 0.80, while its printed 0.80 clears);
+  accepting any signature and accepting an unsigned record each redden the R6-L2 splits test.
+  R6-H1's three (markers off, contaminated attempt scored normally, gate ignoring contamination)
+  were recorded with that commit.
