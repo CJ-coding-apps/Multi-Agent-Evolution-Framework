@@ -30,7 +30,9 @@ function lcmLoads(): boolean {
 }
 const needsLcm = {
   skip: lcmLoads() || process.env['CI'] ? false : 'better-sqlite3 does not load on this host (CI runs this)',
-  timeout: 240_000,
+  // R5: the 50-task pool × 3 measured 191 s when this cap was set and 210.8 s in the round-5
+  // serial run; 450 s is about twice the serial figure, so the cap stays a backstop.
+  timeout: 450_000,
 };
 
 async function freshClone(): Promise<string> {

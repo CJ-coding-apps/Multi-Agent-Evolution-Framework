@@ -1113,6 +1113,17 @@ conclusion `success`: build · typecheck · test; e2e · demo · attestation · 
 · run ×4 (Linux arm64/x64, macOS arm64/x64). What this lane reports is the count read at the head
 that is pushed, not one carried forward.
 
+### R5-tests — two caps sat on their measurements, so they are backstops again
+
+The round-5 serial run passed, but two corpus-sized tests finished within a few seconds of their
+caps: `goldens-offline.test.ts` measured **297.6 s against a 300 s cap**, and
+`goldens-calibrate.test.ts` measured **210.8 s against 240 s**. A cap that close to the measurement
+is a coin toss, not a backstop — the same class as the five-stack test's 120 s and then 900 s
+budgets. Both caps are raised in test-only changes, with no assertion touched: the fresh-clone
+baseline to 600 s (about twice the serial figure; 203 s measured in isolation) and the calibration
+to 450 s (about twice 210.8 s). The five-stack test keeps its 1800 s cap (1160 s measured) and
+stays in WP-3.12's tiering with the rest.
+
 ## Verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
@@ -1148,12 +1159,11 @@ that is pushed, not one carried forward.
 
 - **Test tiering (R4-L2 — WP-3.12's lane).** Three corpus-sized tests carry most of the serial
   suite's wall-clock and belong in WP-3.12's opt-in/nightly tier, not in every default sweep:
-  `packages/cli/src/__tests__/native-lifecycle.test.ts` (the five-stack stress test, 1051 s on the
-  recording macOS host and 408 s in the Linux container, with a 1800 s cap on the test and on the
-  subprocess), `goldens-offline.test.ts` (300 s cap; 293 s measured) and
-  `goldens-calibrate.test.ts` (240 s cap; 191 s measured on the 50-task pool; the R5-P5 probe adds
-  about 24 s). The caps are backstops above the measurements, not budgets, and this branch does not
-  change them; WP-3.12 names and schedules the tier.
+  `packages/cli/src/__tests__/native-lifecycle.test.ts` (the five-stack stress test, 1160 s in the
+  round-5 serial run and 408 s in the Linux container, with a 1800 s cap on the test and on the
+  subprocess), `goldens-offline.test.ts` (297.6 s measured; the cap was raised to 600 s, see
+  R5-tests) and `goldens-calibrate.test.ts` (210.8 s measured on the 50-task pool; the cap was
+  raised to 450 s). The five-stack cap stays where it is; WP-3.12 names and schedules the tier.
 - **The live row, and the verifier pass before any paid run.** A corpus task the base fails, a round
   whose manifest is not `no_op` and whose rationale cites that task, the manifest taking the gate's
   verdict, K1 folded in, applied with `maf harness set-current <sha>`, on real `claude`. The
