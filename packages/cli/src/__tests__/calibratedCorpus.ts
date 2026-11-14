@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { CALIBRATION_RULE, selectCalibrated } from '@maf/eval-harness';
+import { CALIBRATION_RULE, selectCalibrated, signCalibration } from '@maf/eval-harness';
 import type { CalibrationUsage } from '@maf/eval-harness';
 
 /**
@@ -25,13 +25,15 @@ export async function calibrateSplitForTest(
     preRegistration: Record<string, unknown>;
   };
   const counts = splits.heldOut.map((taskId) => ({ taskId, passes: 1, attempts: 3 }));
-  const record = {
+  // R6-L2: `loadSplits` refuses an unsigned measurement, so the fixture signs with the same
+  // default the command uses (the development key, since the environment names none).
+  const record = signCalibration({
     version: 1, harnessId: 'test-fixture', harnessSha: 'a'.repeat(64),
     adapter: opts.adapter ?? 'scripted', runs: 3,
     ranAt: '2026-11-13T00:00:00.000Z', splitsSha: 'test-fixture', rule: CALIBRATION_RULE,
     tasks: counts, errors: [], selection: selectCalibrated(counts),
     ...(opts.usage !== undefined ? { usage: opts.usage } : {}),
-  };
+  });
   const text = `${JSON.stringify(record, null, 2)}\n`;
   await writeFile(path.join(corpusRoot, 'calibration.json'), text, 'utf8');
   splits.preRegistration['calibrationSha'] = createHash('sha256').update(text, 'utf8').digest('hex');

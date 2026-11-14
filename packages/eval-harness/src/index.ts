@@ -23,10 +23,12 @@ export type { CorpusSplits, LoadedSplits, SplitName } from './splits.js';
 export { SPLITS_FILE, MIN_HELD_OUT, SplitsError, computeSplitsSha, isDeterministicTask, isJudgeScored, loadSplits } from './splits.js';
 export type {
   CalibrationCount, CalibrationSelection, CalibrationRecord, CalibrationUsage, CalibrationProbeProjection,
+  UnsignedCalibrationRecord, CalibrationCheck,
 } from './calibration.js';
 export {
   CALIBRATION_FILE, CALIBRATION_RUNS, CALIBRATION_MIN_SELECTED, CALIBRATION_MAX_SELECTED,
   CALIBRATION_SELECTION_SEED, CALIBRATION_RULE, CalibrationError, selectCalibrated, applyCalibration,
+  signCalibration, verifyCalibration,
   PROBE_FILE, PROBE_DEFAULT_TASKS, PROBE_SELECTION_SEED,
   CALIBRATION_PROBE_CONFIDENCE, CALIBRATION_PROBE_INTERVAL_LEVEL,
   selectProbeTasks, projectProbe, probePosterior,

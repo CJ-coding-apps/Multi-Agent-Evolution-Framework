@@ -1399,3 +1399,46 @@ all three cases — including that the old point estimate of 22 no longer clears
 qualifiers do. `goldens-calibrate.test.ts`: the probe's own fixture (ten sampled, all never solved)
 asserts the `0.00` chance, the 0–8 interval and the refusal message, and the record carries the
 posterior it printed.
+
+### R6-L2 (D-57) — the measurement the yardstick derives from is signed
+
+`calibration.json` is the only place the held-out set's counts and selection live, and
+`preRegistration.calibrationSha` pins its bytes. That pin is not a barrier: whoever edits the
+counts can recompute the sha in the same edit. The round-5 finding is that the yardstick's
+provenance rested on a hash the editor controls.
+
+**The signature does not.** The record is now signed before it is written, with the attestation
+key and by the bundle rule: HMAC-SHA256 over the record's RFC 8785 canonical JSON, keyed by
+`MAF_SIGNING_KEY` when it is set and the public development key otherwise, with the key named in a
+signed `keySource` field. The signature is inside the bytes `calibrationSha` hashes, so the split
+still pins the exact file and the signature covers the counts the split derives from. Two new
+exports carry that rule — `signPayload`/`verifyPayload` in `@maf/attestation`, the same
+`signedBytes` and `signingKey` as `signBundle`, so the records and the bundles cannot drift apart
+in what they sign or which key they use.
+
+**Every reader refuses, not just `evolve`.** The check is in `loadSplits`, beside the sha check, so
+no consumer — `evolve`, `goldens run`, a second `calibrate` — can read an unsigned or altered
+measurement as if it were the one the split names. A record that is not an object, carries no
+signature, names no `keySource`, or whose signature does not verify under the key in force (or
+whose `keySource` claims a different key from the one that signed it) is a `SplitsError` naming
+the file and the fix: the held-out set can only come from a measurement `maf goldens calibrate`
+signed. The loader takes an optional `signing` argument for a test or a caller with its own key;
+it defaults to the same rule as the bundles.
+
+**The operator is told when the key is public.** A record signed with the development key is
+still verifiable — that is what makes a calibration runnable on a machine with no key — but a
+forged record under a public key is indistinguishable from a real one, so `maf goldens calibrate`
+prints that limit on stderr and the record names `keySource: "dev"`.
+
+**Scope.** The probe's record (`calibration-probe.json`) is deliberately not signed. It selects
+nothing and no split derives from it; signing it would suggest it is evidence of a measurement,
+which the file's own `kind: "probe"` exists to deny.
+
+**Tests.** `splits.test.ts` (1): the signed record loads; the same record with the signature
+removed is refused even under a sha computed to match it; altering a count and recomputing the
+split's sha is refused; a record signed with an environment key is refused under the development
+key and accepted when that key is supplied; a record whose `keySource` was changed to `"dev"` is
+refused under the key that signed it. The calibration tests now exercise a signed record end to
+end — `runCalibration` signs before hashing, `calibrateSplitForTest` signs what it writes — and the
+existing `calibrate` fixture still exits 1 with its counts because the signature changes nothing
+about the rule.

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   CALIBRATION_RULE, GoldenRunner, HELD_OUT_RULE, SplitsError, computeSplitsSha, loadSplits,
-  selectCalibrated,
+  selectCalibrated, signCalibration,
 } from '../index.js';
 import type { CorpusSplits, GoldenTask } from '../index.js';
 
@@ -141,11 +141,11 @@ test('splits: every way a split can fail to be a partition is refused', async ()
 /** A calibration record whose counts select exactly `ids`, for a split that names it. */
 function calibrationRecord(ids: readonly string[]): string {
   const counts = ids.map((taskId) => ({ taskId, passes: 1, attempts: 3 }));
-  return `${JSON.stringify({
+  return `${JSON.stringify(signCalibration({
     version: 1, harnessId: 'split-test', harnessSha: 'a'.repeat(64), adapter: 'scripted', runs: 3,
     ranAt: '2026-11-13T00:00:00.000Z', splitsSha: 'split-test', rule: CALIBRATION_RULE,
     tasks: counts, errors: [], selection: selectCalibrated(counts),
-  }, null, 2)}\n`;
+  }), null, 2)}\n`;
 }
 
 test('splits: the calibration a split names is the one on disk, byte for byte (R4-A4)', async () => {
@@ -172,6 +172,73 @@ test('splits: the calibration a split names is the one on disk, byte for byte (R
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// R6-L2 (round-5 finding R5-L2): the sha a split names pins the record's bytes, but an editor can
+// recompute it. The signature is the part they cannot reproduce, so a named measurement must carry
+// one, and it must verify under the key in force when the split is read.
+test('R6-L2: a named calibration must be signed, unaltered, and signed with the key doing the check', async () => {
+  const unsigned = {
+    version: 1 as const, harnessId: 'split-test', harnessSha: 'a'.repeat(64), adapter: 'scripted',
+    runs: 3, ranAt: '2026-11-13T00:00:00.000Z', splitsSha: 'split-test', rule: CALIBRATION_RULE,
+    tasks: five.map((taskId) => ({ taskId, passes: 1, attempts: 3 })), errors: [],
+    selection: selectCalibrated(five.map((taskId) => ({ taskId, passes: 1, attempts: 3 }))),
+  };
+  /** Write `record` as the measurement, with the split naming its exact bytes, and try to load. */
+  const attempt = async (
+    make: () => object, signing?: Parameters<typeof loadSplits>[2],
+  ): Promise<{ ok: boolean; message?: string }> => {
+    const root = await mkdtemp(path.join(tmpdir(), 'maf-splits-signed-'));
+    try {
+      const text = `${JSON.stringify(make(), null, 2)}\n`;
+      const sha = createHash('sha256').update(text, 'utf8').digest('hex');
+      const file: CorpusSplits = {
+        version: 1, minHeldOut: 5, gate: HELD_OUT_RULE,
+        preRegistration: { ...PRE, calibrationSha: sha }, train: rest, heldOut: five,
+      };
+      await writeFile(path.join(root, 'splits.json'), JSON.stringify(file), 'utf8');
+      await writeFile(path.join(root, 'calibration.json'), text, 'utf8');
+      await loadSplits(root, CORPUS, signing);
+      return { ok: true };
+    } catch (err: unknown) {
+      assert.ok(err instanceof SplitsError, `not a SplitsError: ${String(err)}`);
+      return { ok: false, message: err.message };
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  // The signed record is the one that loads — the fixture above proves it, but not that a *missing*
+  // signature is refused rather than ignored.
+  assert.deepEqual(await attempt(() => signCalibration(unsigned)), { ok: true });
+  const noSignature = await attempt(() => unsigned);
+  assert.equal(noSignature.ok, false, 'an unsigned record is refused even when the sha matches it');
+  assert.match(noSignature.message ?? '', /carries no signature/);
+
+  // Altering a count and recomputing the split's sha is the attack the sha alone cannot stop.
+  const signed = signCalibration(unsigned);
+  const altered = await attempt(() => ({
+    ...signed,
+    tasks: signed.tasks.map((t, i) => (i === 0 ? { ...t, passes: 2 } : t)),
+  }));
+  assert.equal(altered.ok, false, 'an altered record is refused under the sha it was altered to');
+  assert.match(altered.message ?? '', /signature does not match/);
+
+  // The key matters: a record signed with an environment key does not verify under the dev key,
+  // and does verify when that key is supplied.
+  const own = signCalibration(unsigned, { secret: 'a-key-of-my-own' });
+  assert.equal(own.keySource, 'env');
+  const wrongKey = await attempt(() => own);
+  assert.equal(wrongKey.ok, false, 'a record signed with MAF_SIGNING_KEY is not evidence under the dev key');
+  assert.match(wrongKey.message ?? '', /signature does not match/);
+  assert.deepEqual(await attempt(() => own, { secret: 'a-key-of-my-own' }), { ok: true });
+
+  // A record that claims the development key but was signed with an environment key is refused
+  // even when the checker holds the environment key: the claim is part of what is signed.
+  const relabelled = { ...own, keySource: 'dev' };
+  const lie = await attempt(() => relabelled, { secret: 'a-key-of-my-own' });
+  assert.equal(lie.ok, false, 'a false keySource claim does not pass');
+  assert.match(lie.message ?? '', /signature does not match/);
 });
 
 // R5-P3 (round-4 finding R4-M1): `heldOut` is the selection the committed counts and rule produce.

@@ -1,3 +1,5 @@
+import type { KeySource, SigningOptions } from '@maf/attestation';
+import { signPayload, verifyPayload } from '@maf/attestation';
 import type { CorpusSplits } from './splits.js';
 
 /**
@@ -481,6 +483,68 @@ export interface CalibrationRecord {
   selection: CalibrationSelection;
   /** R5-P4: what the measurement cost, when the caller metered it. */
   usage?: CalibrationUsage;
+  /** R6-L2: which key signed this record; inside the signed bytes. */
+  keySource?: KeySource;
+  /** R6-L2: HMAC-SHA256 over the record's canonical JSON less this field. */
+  signature?: string;
+}
+
+/** A record as `runCalibration` writes it: everything but the signature, which `signCalibration` adds. */
+export type UnsignedCalibrationRecord = Omit<CalibrationRecord, 'signature'>;
+
+/**
+ * R6-L2 (round-5 finding R5-L2): sign the measurement with the attestation key, by the bundle
+ * rule — one HMAC over the RFC 8785 form, keyed by `MAF_SIGNING_KEY` or, when unset, the public
+ * development key, which `keySource` then names.
+ *
+ * The split already pins this record's bytes through `preRegistration.calibrationSha`, but anyone
+ * who edits the counts can recompute that sha. The signature is what they cannot recompute: it is
+ * the one thing in this corpus that needs a key the editor does not have.
+ */
+export function signCalibration(
+  record: UnsignedCalibrationRecord, signing: SigningOptions = {},
+): CalibrationRecord {
+  // First pass for the keySource, second over the record that carries it, so the claim is signed.
+  const { keySource } = signPayload(record, signing);
+  const complete: UnsignedCalibrationRecord = { ...record, keySource };
+  return { ...complete, signature: signPayload(complete, signing).signature };
+}
+
+export interface CalibrationCheck {
+  valid: boolean;
+  /** The key that signed it, when the signature matched. */
+  keySource?: KeySource;
+  /** Why it is not valid, as a sentence. Absent when it is. */
+  reason?: string;
+}
+
+/**
+ * Whether a record read from disk carries a signature this key reproduces. A record with no
+ * signature is refused outright: every `calibration.json` this build writes has one, so an
+ * unsigned one was not written by a calibration run.
+ */
+export function verifyCalibration(
+  record: unknown, signing: SigningOptions = {},
+): CalibrationCheck {
+  if (record === null || typeof record !== 'object' || Array.isArray(record))
+    return { valid: false, reason: 'the record is not a JSON object' };
+  const fields = record as Record<string, unknown>;
+  const { signature, ...payload } = fields;
+  if (typeof signature !== 'string')
+    return {
+      valid: false,
+      reason: 'the record carries no signature — a calibration written by this build is signed',
+    };
+  if (payload['keySource'] === undefined)
+    return { valid: false, reason: 'the record names no keySource, so its claim about its key is absent' };
+  if (!verifyPayload(payload, signature, payload['keySource'], signing))
+    return {
+      valid: false,
+      reason: 'the signature does not match the record\'s content under the key this check used ' +
+        '(MAF_SIGNING_KEY, or the public development key when it is unset), or the record claims ' +
+        'a different key from the one that signed it',
+    };
+  return { valid: true, keySource: payload['keySource'] as KeySource };
 }
 
 export const CALIBRATION_RULE =

@@ -67,6 +67,9 @@ test('calibrate measures the whole pool 3 times with the scripted adapter and re
     assert.match(stdout, /50 pool tasks × 3 runs/);
     assert.match(stdout, /50 never solved in 3, 0 solved every run \(no headroom\), 0 partial/);
     assert.match(stderr, /nothing was selected — only 0 tasks qualified/);
+    // R6-L2: with no MAF_SIGNING_KEY the record is signed with the public development key, and the
+    // command says so rather than letting a forgeable signature read as evidence.
+    assert.match(stderr, /signed with the public development key/);
     assert.equal(await readFile(path.join(root, 'tests/goldens/splits.json'), 'utf8'), splitsBefore,
       'splits.json is untouched when nothing qualifies');
 
@@ -74,8 +77,12 @@ test('calibrate measures the whole pool 3 times with the scripted adapter and re
       version: number; runs: number; ranAt: string; rule: string; harnessSha: string;
       tasks: { taskId: string; passes: number; attempts: number }[];
       selection: { selected: string[]; qualified: boolean };
+      keySource?: string; signature?: string;
     };
     assert.equal(record.version, 1);
+    // R6-L2: the measurement is signed, and names the key that signed it.
+    assert.equal(record.keySource, 'dev');
+    assert.match(record.signature ?? '', /^[0-9a-f]{64}$/);
     assert.equal(record.runs, 3);
     assert.match(record.ranAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(record.tasks.length, 50);

@@ -1,12 +1,13 @@
 import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import type { SigningOptions } from '@maf/attestation';
 import { canonicalJson } from '@maf/harness-config';
 import { refusePrototypeKey } from '@maf/types';
 import type { GoldenTask } from './GoldenTask.js';
 import { HELD_OUT_RULE } from './significance.js';
 import type { HeldOutTestRule } from './significance.js';
-import { CALIBRATION_FILE, CALIBRATION_RULE, selectCalibrated } from './calibration.js';
+import { CALIBRATION_FILE, CALIBRATION_RULE, selectCalibrated, verifyCalibration } from './calibration.js';
 import type { CalibrationRecord, CalibrationSelection } from './calibration.js';
 
 /**
@@ -130,6 +131,12 @@ export function computeSplitsSha(splits: CorpusSplits): string {
  */
 export async function loadSplits(
   corpusRoot: string, corpus: readonly GoldenTask[],
+  /**
+   * R6-L2: the key a named calibration must verify under. Defaults to the same rule the bundles
+   * use — `MAF_SIGNING_KEY`, else the public development key — so a corpus signed on a developer
+   * machine loads there, and a corpus signed with a real key loads where that key is set.
+   */
+  signing: SigningOptions = { secret: process.env['MAF_SIGNING_KEY'] },
 ): Promise<LoadedSplits> {
   const file = path.join(corpusRoot, SPLITS_FILE);
   let raw: string;
@@ -240,6 +247,17 @@ export async function loadSplits(
     const recorded = record !== null && typeof record === 'object' ? record as Record<string, unknown> : undefined;
     if (recorded === undefined || recorded['version'] !== 1 || !Array.isArray(recorded['tasks']))
       throw new SplitsError(`${CALIBRATION_FILE}: version must be 1 and tasks must be an array of counts.`);
+    // R6-L2 (round-5 finding R5-L2): the sha above pins the bytes, but whoever edits the counts can
+    // recompute it. The signature is what they cannot: it needs the key, and every record this
+    // build writes carries one. Refused here, so no consumer — `evolve` included — can read an
+    // unsigned or altered measurement as if it were the one the split names.
+    const check = verifyCalibration(recorded, signing);
+    if (!check.valid)
+      throw new SplitsError(
+        `${CALIBRATION_FILE}: ${check.reason}. The held-out set can only come from a measurement ` +
+        '`maf goldens calibrate` signed with MAF_SIGNING_KEY (or, on a development machine, the ' +
+        'public development key it then names in keySource).',
+      );
     calibrationRecord = recorded as unknown as CalibrationRecord;
   }
   const known = new Set(corpus.map((t) => t.id));

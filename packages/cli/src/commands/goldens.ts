@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { componentId } from '@maf/attestation';
+import type { SigningOptions } from '@maf/attestation';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { makeRunId, refusePrototypeKey } from '@maf/types';
 import type { CliAdapter, RunId, RunStatus } from '@maf/types';
@@ -17,7 +18,7 @@ import {
   PROBE_DEFAULT_TASKS, PROBE_FILE,
   ScoreRecorder, ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SPLITS_FILE, applyCalibration,
   assertGoldenCorpus, describeJudge, loadScriptedTasks, loadSplits, makeLlmJudge, projectProbe,
-  seesawDecision, selectCalibrated, selectProbeTasks,
+  seesawDecision, selectCalibrated, selectProbeTasks, signCalibration,
 } from '@maf/eval-harness';
 import type {
   CalibrationCount, CalibrationProbeProjection, CalibrationRecord, CalibrationSelection,
@@ -298,6 +299,12 @@ export interface CalibrationOptions {
    * of from a constant. A test that injects a result passes nothing and records no usage.
    */
   usage?: () => CalibrationUsage | undefined;
+  /**
+   * R6-L2: the key the record is signed with. Defaults to the rule bundles use — `MAF_SIGNING_KEY`,
+   * else the public development key, which the record then names in `keySource`. A test passes one
+   * to prove the signature is the attestation's, not a constant.
+   */
+  signing?: SigningOptions;
 }
 
 export interface CalibrationOutcome {
@@ -355,14 +362,16 @@ export async function runCalibration(o: CalibrationOptions): Promise<Calibration
     }
     : measured;
 
-  const record: CalibrationRecord = {
+  // R6-L2: the record is signed before its bytes are hashed, so the sha a split names covers the
+  // signature too and `loadSplits` can refuse an unsigned or altered measurement.
+  const record = signCalibration({
     version: 1, harnessId: o.harness.id, harnessSha: o.harness.sha, adapter: o.adapter.name,
     ...(o.model !== undefined ? { model: o.model } : {}),
     runs: CALIBRATION_RUNS, ranAt: result.ranAt,
     ...(result.corpusSha !== undefined ? { corpusSha: result.corpusSha } : {}),
     splitsSha: o.splits.sha, rule: CALIBRATION_RULE, tasks: counts, errors, selection,
     ...(usage !== undefined ? { usage } : {}),
-  };
+  }, o.signing ?? { secret: process.env['MAF_SIGNING_KEY'] });
   const calibrationPath = path.join(o.corpusRoot, CALIBRATION_FILE);
   const calibrationText = `${JSON.stringify(record, null, 2)}\n`;
   await writeFile(calibrationPath, calibrationText, 'utf8');
@@ -732,6 +741,14 @@ export function registerGoldensCommand(program: Command): void {
       );
       for (const e of record.errors) console.error(`[maf] calibration: ${e.taskId} attempt ${e.attempt + 1} failed: ${e.error}`);
       console.log(`[maf] calibration: wrote ${outcome.path}`);
+      // R6-L2: the record says which key signed it; a development key is public, so a forged
+      // record under it is indistinguishable from this one. Say so where the operator can see it.
+      if (record.keySource === 'dev')
+        console.error(
+          '[maf] calibration: the record was signed with the public development key ' +
+          '(MAF_SIGNING_KEY is unset or is that key), and names it in keySource — anyone can forge ' +
+          'a record under that key. Set MAF_SIGNING_KEY before treating this measurement as evidence.',
+        );
       if (record.usage !== undefined && record.usage.tasks > 0)
         console.log(
           `[maf] calibration: measured ${record.usage.tokens} tokens over ${record.usage.calls} model calls — ` +
