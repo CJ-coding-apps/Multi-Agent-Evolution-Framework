@@ -11,8 +11,9 @@ export { ScoreRecorder } from './ScoreRecorder.js';
 export { computeCorpusSha } from './corpusSha.js';
 export type { DuplicateFinding, DuplicateKind, DuplicateReport } from './heldoutDuplicates.js';
 export {
-  NEAR_COPY_THRESHOLD, SIMILARITY_MIN_TOKENS, findHeldOutDuplicates, normalizeSource,
-  tokenSimilarity, withoutCanary,
+  NEAR_COPY_MIN_SHARED_GRAMS, NEAR_COPY_REVIEW_THRESHOLD, NEAR_COPY_THRESHOLD, SHINGLE_SIZE,
+  findHeldOutDuplicates, identifierTokens, normalizeSource, sequenceSimilarity, sharedShingles,
+  shingles, withoutCanary,
 } from './heldoutDuplicates.js';
 export type { HiddenStoreFile } from './hiddenStore.js';
 export {

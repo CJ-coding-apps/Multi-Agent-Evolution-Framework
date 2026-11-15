@@ -1,7 +1,7 @@
 {
   "harnessSha": "3124b5a9d019624e7e6e6a5d9983244a442eeeb15050f2867c66fd806b618379",
   "harnessId": "legacy-default",
-  "corpusSha": "74733b1e259bb67ae112dd05c5b9f92db41b63a3b89535be9f9dd57555b17ad0",
+  "corpusSha": "a639569cc271a5027d6e1b8c31252bebf379cf8211b780237697d947d61d9f56",
   "attempts": 2,
   "adapter": "scripted",
   "judge": {
@@ -1155,30 +1155,30 @@
       ]
     },
     {
-      "taskId": "pool-route-params",
+      "taskId": "pool-color-hex",
       "role": "coder",
       "passed": false,
       "attempts": [
         {
           "attempt": 0,
-          "output": "Attempted a fix: router.js.",
+          "output": "Attempted a fix: channels.js.",
           "outcomes": [
             {
               "kind": "test-script",
               "passed": false,
-              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"name\",\"a%20b\"]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"name\",\"a b\"]],\"c\":\"Object\"}"
+              "detail": "assertion 5: deepEqual saw {\"t\":\"o\",\"v\":[[\"r\",1],[\"g\",2],[\"b\",3],[\"a\",1]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"r\",1],[\"g\",2],[\"b\",3],[\"a\",0.5]],\"c\":\"Object\"}"
             }
           ],
           "passed": false
         },
         {
           "attempt": 1,
-          "output": "Attempted a fix: router.js.",
+          "output": "Attempted a fix: channels.js.",
           "outcomes": [
             {
               "kind": "test-script",
               "passed": false,
-              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"name\",\"a%20b\"]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"name\",\"a b\"]],\"c\":\"Object\"}"
+              "detail": "assertion 5: deepEqual saw {\"t\":\"o\",\"v\":[[\"r\",1],[\"g\",2],[\"b\",3],[\"a\",1]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"r\",1],[\"g\",2],[\"b\",3],[\"a\",0.5]],\"c\":\"Object\"}"
             }
           ],
           "passed": false
@@ -1186,30 +1186,30 @@
       ]
     },
     {
-      "taskId": "pool-cart-discount",
+      "taskId": "pool-json-pointer",
       "role": "coder",
       "passed": false,
       "attempts": [
         {
           "attempt": 0,
-          "output": "Attempted a fix: cart.js.",
+          "output": "Attempted a fix: steps.js.",
           "outcomes": [
             {
               "kind": "test-script",
               "passed": false,
-              "detail": "assertion 2: equal saw 1079.1, expected 1079"
+              "detail": "hidden check: the check script stopped: Error: no such path: \"a/b\""
             }
           ],
           "passed": false
         },
         {
           "attempt": 1,
-          "output": "Attempted a fix: cart.js.",
+          "output": "Attempted a fix: steps.js.",
           "outcomes": [
             {
               "kind": "test-script",
               "passed": false,
-              "detail": "assertion 2: equal saw 1079.1, expected 1079"
+              "detail": "hidden check: the check script stopped: Error: no such path: \"a/b\""
             }
           ],
           "passed": false

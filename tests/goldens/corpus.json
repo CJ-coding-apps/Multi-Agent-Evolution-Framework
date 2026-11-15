@@ -731,9 +731,9 @@
     ]
   },
   {
-    "id": "pool-route-params",
-    "repoFixture": "fixtures/pool-route-params",
-    "prompt": "Implement `match(pattern, path)` in router.js: split both on `/`; a segment of the pattern starting with `:` captures that path segment, percent-decoded exactly once; every other segment must match literally; a length mismatch or a literal mismatch returns null, otherwise return the object of captured parameters.",
+    "id": "pool-color-hex",
+    "repoFixture": "fixtures/pool-color-hex",
+    "prompt": "Implement `parseColor(text)` in color.js, returning `{ r, g, b, a }` or null. Accept `#rgb` and `#rrggbb` hex notation (case-insensitive, surrounding whitespace ignored); a three-digit hex expands each digit by doubling it, so `#abc` is `{r: 170, g: 187, b: 204}`. Accept `rgb(r, g, b)` and `rgba(r, g, b, alpha)` function notation with whitespace after the commas allowed; `r`, `g` and `b` are integers from 0 to 255 and `alpha` is a number from 0 to 1. A three-channel color has `a: 1`. Anything else — an unsupported notation, an out-of-range channel, a hex length other than 3 or 6, a non-string input — returns null.",
     "role": "coder",
     "verifiers": [
       {
@@ -747,16 +747,16 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "round-3 pool, authored 2026-11-12 (two-file)"
+      "ref": "round-7 pool replacement, authored 2026-11-14"
     },
     "hiddenChecks": [
       ".checks/test.js"
     ]
   },
   {
-    "id": "pool-cart-discount",
-    "repoFixture": "fixtures/pool-cart-discount",
-    "prompt": "`total(items, discountRate, taxRate)` in cart.js returns an integer number of cents. The subtotal is the sum of `price * qty`. Apply the discount to the subtotal, rounding the discount to the nearest cent; apply tax to the already-discounted amount, rounding the tax to the nearest cent; return the sum. The current code computes both on the undiscounted subtotal.",
+    "id": "pool-json-pointer",
+    "repoFixture": "fixtures/pool-json-pointer",
+    "prompt": "Implement `resolve(doc, pointer)` in pointer.js, following RFC 6901 JSON Pointer. An empty pointer returns `doc` whole. Otherwise the pointer must start with `/`; the remaining text is split on `/` into segments, and each segment is unescaped in this order: `~1` becomes `/` first, then `~0` becomes `~`. Walk `doc` one segment at a time; a segment that is not an own property of the current value means the path does not exist. Throw an Error whose message matches `/invalid pointer/` when the pointer does not start with `/`, and an Error whose message matches `/no such path/` when a segment is missing. Array elements are addressed by their numeric index.",
     "role": "coder",
     "verifiers": [
       {
@@ -770,7 +770,7 @@
     ],
     "provenance": {
       "source": "human-decision",
-      "ref": "round-3 pool, authored 2026-11-12 (two-file)"
+      "ref": "round-7 pool replacement, authored 2026-11-14"
     },
     "hiddenChecks": [
       ".checks/test.js"

@@ -644,44 +644,6 @@
       ],
       "final": "Attempted a fix: config.js."
     },
-    "pool-route-params": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "router.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "router.js",
-            "content": "const { decode } = require('./params');\nfunction match(pattern, path) {\n  const wanted = pattern.split('/');\n  const actual = path.split('/');\n  if (wanted.length !== actual.length) return null;\n  const out = {};\n  for (let i = 0; i < wanted.length; i++) {\n    if (wanted[i].startsWith(':')) {\n      out[wanted[i].slice(1)] = actual[i];\n    } else if (wanted[i] !== actual[i]) return null;\n  }\n  return out;\n}\nmodule.exports = { match };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix: router.js."
-    },
-    "pool-cart-discount": {
-      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
-      "steps": [
-        {
-          "tool": "fs.read",
-          "input": {
-            "path": "cart.js"
-          }
-        },
-        {
-          "tool": "fs.write",
-          "input": {
-            "path": "cart.js",
-            "content": "const { tax } = require('./pricing');\nfunction total(items, discountRate, taxRate) {\n  const subtotal = items.reduce((sum, it) => sum + it.price * it.qty, 0);\n  const discount = subtotal * discountRate;\n  const taxable = subtotal - discount;\n  return taxable + tax(taxable, taxRate);\n}\nmodule.exports = { total };\n"
-          }
-        }
-      ],
-      "final": "Attempted a fix: cart.js."
-    },
     "pool-tokenize": {
       "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
       "steps": [
@@ -2274,6 +2236,44 @@
         }
       ],
       "final": "Attempted a fix, but the acceptance checks still fail."
+    },
+    "pool-json-pointer": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "steps.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "steps.js",
+            "content": "function walk(doc, segments) {\n  let current = doc;\n  for (const token of segments) {\n    const key = token.replace(/~0/g, '~').replace(/~1/g, '/');\n    if (current === null || typeof current !== 'object' || !Object.prototype.hasOwnProperty.call(current, key)) {\n      throw new Error(`no such path: ${JSON.stringify(key)}`);\n    }\n    current = current[key];\n  }\n  return current;\n}\n\nmodule.exports = { walk };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: steps.js."
+    },
+    "pool-color-hex": {
+      "note": "A held-out candidate: the scripted answer is a plausible but incorrect fix, so the base harness fails it. This task is not in train or held-out until calibration selects it.",
+      "steps": [
+        {
+          "tool": "fs.read",
+          "input": {
+            "path": "channels.js"
+          }
+        },
+        {
+          "tool": "fs.write",
+          "input": {
+            "path": "channels.js",
+            "content": "function hexChannels(hex) {\n  if (!/^[0-9a-f]+$/.test(hex)) return null;\n  if (hex.length === 3) return hex.split('').map((digit) => parseInt(digit + digit, 16));\n  if (hex.length === 6) return [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16));\n  return null;\n}\n\nmodule.exports = { hexChannels };\n"
+          }
+        }
+      ],
+      "final": "Attempted a fix: channels.js."
     }
   },
   "evolution": {

@@ -1297,9 +1297,9 @@ every train task and reports a finding when they share:
 * a hidden check with the same text, or a stored reference with the same text (the canary line is
   removed before the comparison — its token differs per task by design, and leaving it in would
   make two identical references look different);
-* or a fixture-file pair whose token-set Jaccard similarity is at or above `NEAR_COPY_THRESHOLD`
-  (0.9), with files under 12 tokens left to the exact hashes because a two-line module sharing
-  `module.exports` is boilerplate, not a copy.
+* or a fixture-file pair whose token similarity reaches the floor. As written in round 6 this
+  signal was token-set Jaccard on raw words, threshold 0.9, with files under 12 tokens skipped;
+  R7-M1 replaced it after the verifier showed that it missed renamed copies (below).
 
 `scripts/check-heldout-duplicates.mjs` runs it over the committed corpus, lists every finding and
 exits 1; it is a manual tool. The guard runs in CI through
@@ -1307,8 +1307,8 @@ exits 1; it is a manual tool. The guard runs in CI through
 `pnpm -r test` in the build workflow executes (`@maf/eval-harness`'s test script is
 `node --test dist/__tests__/*.test.js`). R7-H1 reverted the `check:heldout-duplicates` npm script
 and the workflow step that had been added without an exception; neither is needed for the guard to
-run. On the current corpus it compares 57 held-out/pool tasks against 59 train tasks and reports
-the closest unrelated file pair at 0.821, below the 0.9 floor.
+run. As measured in round 6 it compared 57 held-out/pool tasks against 59 train tasks and put the
+closest unrelated file pair at 0.821, below that 0.9 floor.
 
 The guard found one pre-existing pair on its first run: `pool-slugify/slug.js` was byte-identical
 to `train-title-case/title.js` — a shared starter stub, not a copied task, since the two prompts,
@@ -1322,12 +1322,13 @@ extract/edit/build cycle could not run at all. Extract now strips the canary (it
 task and path at build time); extract → build on the current store reproduces it byte for byte
 (`ed8bb79b…`).
 
-**Tests.** `heldoutDuplicates.test.ts` (2): the committed corpus has no finding and its closest
-pair is below the floor; a planted copy in a temporary corpus is caught on every signal — a
-byte-identical file, a comment-and-whitespace variant, a one-line-edit near-copy, and a reference
-re-caned for a train task that has none — and every finding names a non-train task as the
-duplicate. The reference proof (`reference-solutions.test.ts`, 50 tasks) passes on the replacement
-set, and the offline baseline and the CLI's full-dispatch e2e both reproduce it.
+**Tests.** `heldoutDuplicates.test.ts` (2, as written in round 6; R7-M1 adds a third): the
+committed corpus has no finding and its closest pair is below the floor; a planted copy in a
+temporary corpus is caught on every signal — a byte-identical file, a comment-and-whitespace
+variant, a one-line-edit near-copy, and a reference re-caned for a train task that has none — and
+every finding names a non-train task as the duplicate. The reference proof
+(`reference-solutions.test.ts`, 50 tasks) passes on the replacement set, and the offline baseline
+and the CLI's full-dispatch e2e both reproduce it.
 
 ### R6-M1 (D-57) — the budget is asked after every task, not only before a run
 
@@ -1562,6 +1563,15 @@ and solved is unchanged at 60/116. The reference proof passes through the bounda
 the compiled driver bypassed, `dist/hiddenCheck.js:219-220` — reddens 6 of the 7 boundary tests,
 the assert-disabling one among them; the restored file compared byte-for-byte.
 
+**The CLI's synthetic corpora.** Four CLI e2e tests built a one-task corpus by copying `coder-sum`'s
+fixture and its corpus entry, and no store. That was enough while a train task was scored by running
+its visible test; a task with a `test-script` verifier that has no expectations now fails closed, so
+`LOW-R2-2`, `MED-4`, the poisoned-graph isolation test and `L1-S7` recorded a failure they were not
+testing for. They now copy `tests/goldens/hidden-store.json` beside the corpus. The five held-out
+twins in the evolve test deliberately keep no entries: they are never dispatched, and failing closed
+on both sides of the gate is what leaves a candidate's scores identical, which is what that test
+needs. A separate commit repairs them; the full suite on both platforms is green after it.
+
 ### R7-H2b (D-57) — a script that names the store is caught by the name
 
 Round 6 scanned for the canary and for the store's file name; the round-6 verifier still decoded the
@@ -1580,3 +1590,87 @@ left in the worktree that reads `hidden-store.json` voids it (the artifact outli
 one that names `fixtures/pool-lru/.checks/test.js` voids it. A name the code builds while running —
 `['hidden','store.json'].join('-')` or any equivalent — stays the stated residual, and the
 `docs/SECURITY.md` paragraph keeps saying so.
+
+### R7-M1 (D-57) — the guard sees through a rename, and the two copied pool tasks leave the pool
+
+The round-6 guard compared token *sets* of raw words: a copied file whose variables were renamed
+shares almost no set members, because every renamed name is a different word. The verifier measured
+`pool-route-params/router.js` at 0.83 against `train-router-two-file/router.js` and
+`pool-cart-discount/cart.js` at 0.78 against `train-invoice-two-file/invoice.js` — under the 0.9
+floor, so both passed. The task was also skipped below 12 tokens, so a small copied module could
+pass by being small. The brief's two instructions are one fix and one consequence: strengthen the
+check, and replace the two tasks that were near-copies of practice tasks.
+
+**The metric.** A source file becomes an identifier-normalised token sequence: comments are removed
+and whitespace flattened (`normalizeSource`), each string literal becomes `STR`, each number `NUM`,
+each non-keyword identifier `ID`; keywords and punctuation are kept, because they carry the
+structure a rename does not touch. Two sequences are compared by the Dice coefficient of their
+4-gram multisets — `2·Σ min(count)` over `|A| + |B|` — so local order matters (a hash comparison
+cannot see an edited copy) and a renamed variable changes no token at all.
+
+Identifiers collapse to one placeholder rather than being numbered by first appearance. The brief
+says "positional placeholder"; a positional scheme was implemented and measured first, and it fails
+on the case the guard exists for: `pool-cart-discount` imports `{ tax }`, its train source inlines
+the equivalent and binds nothing, so renaming one to the other adds a binding, shifts every later
+placeholder, and scores the same code 0.653. Collapsed names scored it 0.861. The uniform
+placeholder is the rename-invariant half of the metric; the 4-gram window is the ordering half. The
+deviation is in the module header with the measurement that forced it.
+
+**The thresholds.** A pair fails at **0.85**, is printed for review from **0.70**, and is judged
+only when the two files share at least **20 4-grams**. The evidence floor replaces the 12-token
+skip: every task in the seed corpus is a tiny function, and once names are collapsed a two-line
+stub is textually identical to every other stub — measured, without the floor, 16 file pairs reach
+≥ 0.85 and 14 of them are identical 18–23-token starters (`fib.js` vs `reverse.js` scores 1.000 on
+15 shared 4-grams). The floor is on shared *content*, not file size, so a small file that really is
+a copied body is still judged and a small file with nothing to share is not. `mustNotModify` files
+(a task's own visible test) stay in the exact-byte and normalized comparisons but are excluded from
+the near-copy comparison: two tasks may share the test scaffolding the agent cannot change, and
+since R7-H2 that scaffolding is not what scores a run anyway. That exclusion is what removes the
+`coder-fib`/`coder-sum` test pair from the comparison; judged, it would be a review at 0.929 (39
+shared 4-grams), and it is the same assertion text under two prompts, not a copied solution.
+
+**What it reports on the committed corpus.** 57 candidates (7 held-out, 50 pool) against 59 train
+tasks. Before the replacements, exactly the two the verifier named:
+`pool-cart-discount/cart.js` vs `train-invoice-two-file/invoice.js` **0.861** (62 shared),
+`pool-route-params/router.js` vs `train-router-two-file/router.js` **0.860** (117 shared). Six
+pairs sit in the review band, the highest 0.759 (`review-off-by-one/loop.js` vs
+`train-factorial/factorial.js`). After the replacements the guard reports no finding, the six
+reviews are unchanged, and the ceiling is 0.759.
+
+**The replacements.** Both are two-file tasks, both domains are absent from the 59 train tasks, and
+both ship a hidden check with 8 assertion observations and a stored reference proven through the
+R7-H2 boundary:
+
+* `pool-json-pointer` (RFC 6901 `resolve(doc, pointer)`; `pointer.js` + `steps.js`). `~1` → `/`
+  before `~0` → `~`, `''` returns the document, a missing own property throws `/no such path/`, a
+  pointer not starting with `/` throws `/invalid pointer/`. The scripted answer unescapes in the
+  round-6 style but applies `~0` before `~1`; the check's `a~01b` case resolves to `a/b` instead of
+  `a~1b`, so the base fails on exactly that assertion (`no such path: "a/b"` in the baseline).
+* `pool-color-hex` (`parseColor(text)`; `color.js` + `channels.js`). `#rgb` doubles each digit
+  (`#abc` → 170/187/204), `#rrggbb`, `rgb(...)`, `rgba(...)` with alpha in 0..1, out-of-range
+  channels, wrong hex lengths and non-strings return null. The scripted answer fixes the hex
+  expansion and leaves alpha at 1, so the base fails the `rgba` assertion.
+
+The guard caught its own replacement on the way in: the first draft's `steps.js` — a two-line
+`pointer.slice(1).split('/')` helper — scored 0.889 against `train-router-two-file/segments.js` and
+was reported as a finding before the helper was restructured to walk the document. That is the
+check doing its job on the person writing the pool.
+
+**Tests.** `heldoutDuplicates.test.ts` is now three. The corpus test asserts no finding, a ceiling
+below the floor, every review inside the review band, and the reported thresholds. A new test is
+the verifier's counterexample made permanent: a train file with every non-keyword identifier
+renamed to a fresh name scores **1.000** and is caught as a `near-copy`, while the byte and
+normalized findings are empty — bytes cannot see a rename and the sequence cannot miss it. The
+planted-copy test is unchanged and still catches a byte copy, a re-indented copy, a one-line-edit
+copy and a re-caned reference. `reference-solutions.test.ts` (P2) passes on all 50 hidden-check
+tasks, the two new ones included.
+
+**Corpus figures.** The store now holds 50 checks and 75 references for 65 tasks (one more
+reference than before: `pool-color-hex` ships both `color.js` and `channels.js`), 112 expectation
+entries, 70 941 bytes. `corpusSha` moved `74733b1e…` → `a639569c…`; the offline baseline was
+regenerated and solved is unchanged at 60/116 — every pool task still fails by construction.
+
+**Mutants.** In the compiled `dist/`, keeping identifiers instead of collapsing them to `ID`
+(`dist/heldoutDuplicates.js:112`) reddens the renamed-copy test and leaves the other two green;
+setting the shared-gram floor to 0 reddens the corpus test with identical starter pairs at 1.000.
+Each mutant file was restored and compared byte-for-byte with the build's own output.

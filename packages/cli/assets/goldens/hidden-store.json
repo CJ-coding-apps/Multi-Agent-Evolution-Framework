@@ -29,14 +29,14 @@
     "pool-caesar-wrap": {
       ".checks/test.js": "H4sIAAAAAAACE3WOywrCMBBF937FdJUU0hZRqCjuBT9AcDd59IGxg0kLtuK/a4gFN92eOecyRQF3rLKm1dp0mcIO3ZiVO1Wh1EqrbSm1litFne8BvTeuhyM48xhaZzjrSJt9xCw9/LQXKDQeHbz/1byINHixyL8ntDxizp7jxARsUgEMpVrUTsZaEnAhZ3UyB+eGyAm4uoHqZDENswKydSgmlPPHZE1uqeaMbgF9AELsmSISAQAA"
     },
-    "pool-cart-discount": {
-      ".checks/test.js": "H4sIAAAAAAACE4WPyw6CMBBF937F7CgJ0BYwPIxfYlyUUpRYqbR1QQj/bnnEmLhgM5nMvWdmLsbwZE14b+tadCFnHdNDSHmV02PGsorERZo2B646Y4EZI7SFM2jRv1stkNepWpTrGBurW249/7S5R7DKMgnTLxBhzvRiWqnICUyixYkuI7zcDlECJYQE0NvBtTBdAyARnUvsB07LyR6fJMmGJ/94Vuzhx+/1eMWXDTPsHtsCKikiqW7IU485zgfSxehrSAEAAA=="
-    },
     "pool-checksum": {
       ".checks/test.js": "H4sIAAAAAAACE33OQQqDMBAF0H1PMTsjmBhDBdvSk5QuQjKpYkxootBSevcaVOjKzSz+fx+mLGGQhrad1uiokk6GN1VcqFMtdS3waKpKHJR3cQQZI4YRrhDwOXUBSea8xvMSZ/llZR9QLao+TgN8/zErtzzZZcXmUlqyFeTGX8YUkO49L0DsQV4lyEWC80Dv2YYvquHrm94is/5BMt+nb36mCHiDBwEAAA=="
     },
     "pool-cidr-two-file": {
       ".checks/test.js": "H4sIAAAAAAACE4WSzVLDIBSF930KdklmWhLIv07duHLvC9CEWKYIEehUx/HdhSY1aYo6mWzgu+eeey5xDF5Jt9mztqVi0xBB1McmpwWhuE3SsuqyXZqvGim0AURrqgzYAkXfjkzRMBCypXfDcayNYo0JovuR/gSsf5ZPwoCveQmMWT+HeqI0fWStWmKNPXPgatCH9obwcNQMgwSevyBag8RSfggNFHIUKsqyxKhAv9I4z+Hsd0UZrrO6KHGdT1Vmr+RJh2EEtg9gagUxTIPoPwznxcWSm20M1k7+k8PZNbJiMIurYGmWQEHNSarDGlymSzxQr2jH3tegur2yLQ1hQp/74MQp1G5Uo470TxpNWXaEazr53y381xiiooK2IMbZjbvdfIQJ9XCz5j/cuBifW18BHp7IwjDh/NrymGTsyZLzmSxOUpcBSqHHxdXGr/c5qKfDA3EeJKeQy5cwkAfX8huTQncyhwMAAA=="
+    },
+    "pool-color-hex": {
+      ".checks/test.js": "H4sIAAAAAAACE5WSUU/DIBDH3/0Ul+wBmkBLW7u6Gp+Mfg8KtDYibNA+GLPvLrRzW6KZGyG53PH//5I7Lsvgg3f0bZBSGSq44e6Trut6I5hgMt+sK9mJO2GNH4F7r9wIT+DUbhqcwshYqZqlnPnRDWJEyeNB/QVb7rx6tto62J+70kzEYpQu3lQqtX3ZTVzjkwejFW8FSkgguQbymhHoQ3yoCbQNFOyeAA857P/ldKw7coqqmjlsocTsOgrA6nU+8Is1x9torm9xTqAgUCanHhfazCpvIPEfFAGWVpd44fmcqP6cuYwAM2l9SRgbKFmYYrzJNQ5jR8rp4euP8rgsVqtU2x4j+x6X4huHTPG8lAIAAA=="
     },
     "pool-config-merge": {
       ".checks/test.js": "H4sIAAAAAAACE5WQQW7DIBBF9znF7HAkbFO5qlxXXeYgFIYEdQoJ4EiR5buXUbqwqi6aHZr/5vE1fQ9f2rUnby2G1uig0611zo3aPZnXwTwP6mXYmRhyAZ0zpgLvkPAy+4SNCNHidB/3uSRviti//dALUNQW1i3f9TVz/sjUfa2ziOfDZdbUMN4sUKdXTFPdP8dUJhiUUtWy7iUsO9jEp5hrLCgaTfwWcrMhoVBmCoP+ILQTOE0ZJRhkJMxELJXVSPHIIOEVqfp8cFFwsv6r5O9vSpqRzY8UHtX4R2E2PdqXTx8Ju8o0In7ynb8BVR9rJuIBAAA="
@@ -89,6 +89,9 @@
     "pool-heap": {
       ".checks/test.js": "H4sIAAAAAAACE02PzW7DIBCE73mKvRlLGDuJk/5E7a1SL30CywcE64BKwAGspKr67sUm/Tnu7Dczu3UNJz5USkuJthLccv9RbVE8NJI3e8Fbubm7XwlnQwQeAvoIT+DxPGmPpLBO4mOW6xC9FrEoDzf6E960fUU+wtd/C6tV0v6weUp7i5cfnqTd4DyQDFzBDdDtKKwpbClsKLR9udjYOAVFrr9RbpqP6/rD6qK0QSALpCOeAjNoj1HBMzTlzGVrDnGpMWXkN5hEHF/OEzckYRS69VKZilsKu/7W5Qwy446kcO/zJ9+VV9AqRQEAAA=="
     },
+    "pool-json-pointer": {
+      ".checks/test.js": "H4sIAAAAAAACE43R307DIBQG8Huf4txBk7ZAW/+kZt75FMYLWnAlMqjAZsyyPbuF1c3MbPH28P34IIcQWPG3YlBCSFP03HD3VVBZi+bult5XdVfTB3rTW+MDcO+lC7AAJz/WykmMjBWyPYyJD071AWWPc3o7xbzVGwm736Qko1UmSBeTB1pOZ1zjOY63wNtJdy2wie5yQISTDmU5sBMRUo7Pf9kLozlU9DWxSM6mlztR7Gihmgv3LDVW18A+gvoH0ATqq4BF0RzFoaO5TLTy4exTJM4IS4+jJxkGZz89xhksnuB4QQIr5b0yyyiIseDX/QAjDwP5j+aJKbPhWgmYV0fmJVstS22XGNn3uM1vKxsJnEwCAAA="
+    },
     "pool-jsonpath-two-file": {
       ".checks/test.js": "H4sIAAAAAAACE42Sy27CMBBF93zFLCrZQSGBCEqViu76FRGLwZ6CS7AhNuWl/HttUh5FqGXnx7n3zrWcprDAj85MSUm6I1Bjtes898VLfzIYEGaUDYeyJYy2DtBaqhyMoKLVWlXEmTaS8uY4ta5SwrHo9Yc+gDNz0mpPUF9rkvR4bq/JKblb6NMavUQ3C1iriUgk0fJ9tcaSn6w5e0qw6I5ZFEPhE3dLyoHNacdi+MJyHXbIoI7hfKm0pO3lugv12Ef8lVC0b/w3qpQCK8l+ad2sMhvLeQSjN7jIMZmwKJRoykojfNEDYB4MJzn0mun8KvN2MYjc76RP2Xp7qO+M5l+Le5sYfHmRyONsnr5b45rFojcOw3g8ewBun+BeDI/w3TP/mPlCWav09Cj5V7E/Y+EZTUlJaaacmXn4H9+j44gKxQIAAA=="
     },
@@ -124,9 +127,6 @@
     },
     "pool-round-sig": {
       ".checks/test.js": "H4sIAAAAAAACE3XOSw6CMBAG4L2nmB0lgVIqKtV4Ck8w9oGNtY0FFsZ4d+VhdMNy/vlm8hcF3NDkF6uU9rlEj/GRb8+1ERWXtTEcUe5WMvi2A2xbHTs4QtT33kZNEh+U3k9xkh5m9oQYeq9OtoHXP6bFmA9wOqGfDTry1aTk6yoDnmZQcsYWGaOM/eg0LWIh6Gb+Ob4cKganqQsNScJ1KPMG8bzC2AMBAAA="
-    },
-    "pool-route-params": {
-      ".checks/test.js": "H4sIAAAAAAACE5XPQQrCMBAF0L2nmI0kQttUsRUqLj3INJlqMU1smggivbuNdSGIC3fD5/8HIwR02KTnVikyqUSD7p4Wu0Zu13VebtaqKZvtQlozeMBhIOfhAI760DrizFhF1RyLwbtWerbav9uPCfbyDOPnIBPOBk8u1uZdpoiuxz6g5q8+ZyKIymBHLIF443KT12yVTGBMK2AINYPxL6H4Ml7qp0I/hZvAuDVB6/d3VlOm7Ykze4mfPAEA8pkuRQEAAA=="
     },
     "pool-semver-compare": {
       ".checks/test.js": "H4sIAAAAAAACE43PzQ6CMAwH8LtPsdtGwsaGSpjGp/AJKhQ1wqYbmhjjuzu+Ej3h7Z+2v7RNEtJAxU/nskTDCzDgnrw66AyyFap1Xuksh0VhjW8JeI+uJTvi8HY/O2TU2BI3Q5lG23HsRQrbXMHhHpsHOvL+FiLxfbUbH6AILajZj2FUiVQsaUzGEMVEzgolhRyIDiEQNUNSMQnZp0C4+uMwJafL9LSme93WKGp7ZNReuvc+IsuDBVsBAAA="
@@ -182,15 +182,16 @@
     "pool-caesar-wrap": {
       ".reference/caesar.js": "H4sIAAAAAAACE01Q3W7CIBi971N8N1PIVuyarVo7XBYfYU+AFAZLCw3QxMX03QetGm8I5ycn53ybDfRM5kq3rTA5Z4a5v5zXJdvtCtFuZf1WVCyTo+FBWwOcCc8cCuIcXsArLQOGSwbgRBidgcQTP3Q6oPUak54NCHGFgR5mFwC3xof4tgIocEW4Yu4Y0VdABW4eLCfmZ0tyHihU77BaLeiDQl3AZ6L2d73ePuqvZRkNkduDGbtuydUS0JJK6UzjW2uuFscVfgenzQ+RzvbHaz0UZ6TsfOn1fJv+BGUVUVndv0mfh0yY/Fpt0h2abMp6246dIOI8WBd8XHa53hKmJvsHw8rGuoUBAAA="
     },
-    "pool-cart-discount": {
-      ".reference/cart.js": "H4sIAAAAAAACE1WP3W7CMAyF7/MUviOFNkWTGJoq9ga72Rvkxx2RSAKJI4GqvvuSImC7s4/t7xz3PTg5dkdrDPpOSy/jrVNKve8+lNmO+IY7tWc6+EQwAckrzHCAiJdsI/KV6M/Raut/Vs3Axuw12eCBAskTt4QutWBs0iF7+paEbSXUooGJAdyxKavloHCXExHRZI2cp+zaIjVw+CxLDjalEdUPYV3LC91a2BbjB+lhhaawntgOviQdRSwTw5/q+l+wBRKRcvR/KZual7+EV/6BzcwFk08o8HoOkVKxnO6fwzywXx0EWM1YAQAA"
-    },
     "pool-checksum": {
       ".reference/checksum.js": "H4sIAAAAAAACE0WOywqDMBRE9/mKWZVISX1hN9KPyeuiVJOSByjiv1dpaVfD3DlzmbLELEkMozHWCS2dDKtoZSfbuqHmbkzb1YpRdjqN3kEPVj9jnrlak40FNgZMNuE44YGqPyz5AK69iwkKnvAlPwQ/5QpV4IJqIToLwaYcHHjT3SFO7h/ubPYmT/Zml5cPKR4ftt8G7D17A5pMYw6/AAAA"
     },
     "pool-cidr-two-file": {
       ".reference/cidr.js": "H4sIAAAAAAACE22SS2/iMBSF9/yKU6kqtlRCyqOaocAsOrNg00VndhVSTeKA22BnHGdgRPPf60fCQ2qkSLmv8x3Ht9/HlmW9jUhTLnsJk0z/7yX32Wg4HKfj7ys2StKkkyhZGhwgij9qIQ1qzKD530poTrpRXxRd+tDpZJVMjFASRi0K8o/lFac4dGBbTaUlXnwK8/kcg9EtyCm8u6e4wWA8vsh+OyZDzgfL6E0JaakOWZ9BC6ZL/ihSTQzfmwAOvm3FlNbxb6OFXIdyVBa5MKTbdzKAyEB8W5RzuTYbXM1mGFCYjVY7SL7DL62VJq9SGTA8Ln4+Y5Wr5H2C64MTrF+9TgPUPBN7S3yqtiuug/LL3fKIugqFSJT2b/K1a/EjFB8f7fQU8Vk0x/ArOyuWth3BuPPT4i48bVn5bh211uzxYvyw7wQk3mfNg+kUZDhAr+mj1F9EfJKR3OyUdkqkWYbmdPHS3ZajnM00F++uAu3oJKxHE9FbXwu48G1BhglZWgBtRo9K5Eh1xQse9YdqZB/8WO0Ea78mW5VWOY/4vlBhGQ6nhXEtn3PAQQ8IAwAA",
       ".reference/ip.js": "H4sIAAAAAAACE52QT0vDQBDF7/kUr1Booiap2hRraW4eehFBjyJddzfNQrIbdietkua7mz9V8ephGGbm8eY3E8coWRbmSgipQ840s58hv5OMzZMVXzHGM770slpzUkZDVS9mq8lXVYDGA7jRjlAxSw4bPJNVet8PI1cVivxZNAvWnUxl8AdRVEi9pxyTzQaLAJRbc4SWRzxYa6y/04bANLZPhwWYEFY6d49po6p2NxgVknBgRS27bfO+kRkL/5cCJhtpRrxx8yR+exXN9dVtO40jko4GlgCnEx7r8l3ac53iJkn+AYUfpDFfdD5LXP4x73VtF1ZSbfVZmKZpf0XreaURdSEj+VGZ8ZXN96vRrr0v/dsra6UBAAA="
+    },
+    "pool-color-hex": {
+      ".reference/channels.js": "H4sIAAAAAAACE3WQQWrDMBBF9zrFLwQiEct2HMchBHXTVc8QUhC2FAtk2UgypITcva5T0mbR1QzzH2+YyTJ0UvPWNI1yvJZO+k++LfRWllWZr3ebYl/viB5dHU3v0KrLWyudUzbQqWe4EsBo0Jfs45jzveT6tFpkaVQhzgCDV3H0Dm609vADT0FqlTvHFkIIbB7QdxAGayJdLlnayYHSxpxNZBCvGKQP6t3F+wgrzDXBumLsH3P1MB/zBEWC8nS3mmfjvNeaWlGTwEzqgv16nw64EdL1zWhVqi5D72OAwPXvW3A7kC968JRvVQEAAA==",
+      ".reference/color.js": "H4sIAAAAAAACE51TTU/jMBC951cMAmF7RZMGKCtaAodKe1r1ugcokptOGkuJnbWd3aLS/76O80FYxIVTPM57b968SaIISp5NcrHdopykXHL9Mom3s9t4Osvim+9xzK95kCppLBwgx/0y51JiYeAICWj8XQuNlIRR2t0TtgiCrJapFUpCxbXBpSqUphb3lsEhABAZUPtSocqguYSTJAFirBZyR5jTtLWWIOuiWDhw2/oPL2p0DRt86JAlZaFVP9Vf1EtukLJFp+uBobFcW/NL2JySU8Latr1W79TJjebpmYVIkcbMC0Jv5o3irDbO4KF9zF0oej68f5yuL2A3qmNXb0b1pav5HGI4NvrHYb6S2zR3hqJnvdvwhydKH5/Z+ht7YmdRiHtMW3vDmB2+c/NJaFUTghP1YGclNFUhLCUXhIUlryhtAAySe4/sYmVvfFmXG9SNglf6j+NP3gIhLo4VX7k0Vp7SgtjgthMKjSqRUunpJy00FOaHkMJic/36ChLuYNoe7uFyNmMfZhsLFih3ts3hagD6jXSIfiF92e2jL9+v4xPlazg/HxhXa7hLIO6/qC+3HOkNn8K7QY9BUKptXaBbf6XaRR5G/1ND+wck6UnWvQMAAA=="
     },
     "pool-config-merge": {
       ".reference/config.js": "H4sIAAAAAAACE11Ry26DMBC88xWbSwApGKVNWqUIoX5Be69yMHhp3Ro7NXZUhPj32jyUx8nWzO7M7G6aQkPr5IszhjKpqKS6S7bb8vGB7g8H9rR73u3LoFKyNdADw5paYVoYIAeNv5ZrjEKSLngYZ0FtZWW4ksDbd0G5jM5UWIyhD8C1GKsljAis8hykFQLWazDdCVU9E7kjQlV+Y2VCT65etaYd4e34znpZMFysGtSfGJW0xQ2oM2rN2ew4JVfWuMA9EEJ8EQyZo2qlIZr4jx/sNpP7EVyOt9GcoDSaYxstklAU0A/xpAxe1TcenfTdrC70gni/sSqG4irnCM2WMbxMH59quKzJ6d9MKRRl0e14c+Wku1zhage+v1HMCiT4d1Lanc7vwSv5JfwD6xQiSv4BAAA="
@@ -244,6 +245,9 @@
     "pool-heap": {
       ".reference/heap.js": "H4sIAAAAAAACE41Ty26DMBC85yv2FEFbCGmbRBVJzr30CxAHAiZYNTYyRkkV8e+1zcsmkdqDOezMzux48WoFZZJ7Bc4yRL00oQn/8ba7t93pI92+b9LgtNu8LVKS1DV8YfqJkgpuC4CU0VrwJhWMO66uAIgC1z4WqKzhAFEcymIrT9XUhXO9J/k9EE71pnIMnCB6FgV4sHZHLVaNdnoEEKySblNXFMShAcvBhYX7WqKj4Bwe+B0hGCzAFpZCSi80sYxdqBP0gq3+ciQaTtVkw9gyFx40LwUmCBxs+3TTVglHVM0rYRUbjkdYD3b2tFHHjWFvpcexCyeOku+hK7pvebEbVKzIqliEvikex5D0rjZlVkdfxJgyZxycMJwHJChX8TA8wSs8T9k6lONzoWDNMlCCBNRlQgjSy8TmjWjuHu7XuFyaKRQttnjRoChvzBBXRFO/m+lvA837l4NmmhYTdpDh3P7/ebTA2WpG/fkKR2C+anOJA8lcY7soWdYQ5KNrxbhQD/k2vvs2XPwCATxZ0C8EAAA="
     },
+    "pool-json-pointer": {
+      ".reference/steps.js": "H4sIAAAAAAACE12RQWuDQBCF7/6KCRRUSNSmkEMlx156aAo9lkK266zabHZkdsVKYn57VxNL6W1433s7b3fTFI5Craq6KNCspDCC+xU+ZOt1tpGbQmyUyGSgWiNdTQY6oQ9RQXIJFssjGmdjOAUAGh3IltkrsAVvyL2oiCGSZKwDRwc0QOpfDOCKD9j72GRKGBstJEbp5T4tlxCmYfxHyybtEsb5FK+V3zDv3W7BtFrD+Qyub9Bvm9HCo5A+v1C6cMSL3TQnDZOj0ZtUwu4688rUILs+kULr+eDlWC+eCwO4iqkDgx08MRNHe0NgW1lBI1z1CHen57fdS2Id16asVR+N6WF/Kzxcb/37VLfp3Zs+RsfIGV3LZkZ5MATBkYpWY4LfDbGzPneavgKGPPgBcOvpTsIBAAA="
+    },
     "pool-jsonpath-two-file": {
       ".reference/jsonpath.js": "H4sIAAAAAAACE5WSwW7CMBBE7/6K5UISqRipVUulNId+B+Jgkg24mHXq2BUpyr83toFQlUO52NLuvJmJ4vkc9qKebWVVIc1KQcJ0s0chnsWiwqfX9ctC1IKVmloLR7B6hyS/EXoowOCnkwbThM/DvE2ynLHaUWmlJtigTStdPkAj7DaDIwNQaKF0xiDZgV8O21U+jGttII0RwQh0fUlKAx1xgCgiPAQ+wL/wL6EcevyUcuYAZA1p8OS2axCKooBkh10yKqImOkyGNTmlYDoFrx8c4yJwev2BpU38cvJujOi4bMMd6SxQIStCkiKdXZIgfANvXLuNzPJKv8ryk7AHVC3e7C6pwsOf9v9p8xbLcIW08T/m3ia3Mq57jH6cR5vRhY3n+A484BV+btA6Q+dlznrG9rpyCjkeGm1sO+iP/mlBn7MfsI1jY7wCAAA=",
       ".reference/tokens.js": "H4sIAAAAAAACE3VTX2+bMBB/51PcpEhAU0iRpkZrxsMe9ro97GHSGGsd+1KsOgbZZiSN+O6zMaRLSyMh5Xy+35+782oFe7JLKs4YyoQSSdQx+UjXGV3fZojZLd2uSbBrJTW8lmDqJ5T8GaOGmCqGUwBAa6kNGDwYyOGHUVw++uzGJvkOog8ul2pDlNE/uamicBHGMZhK1R1I7OCrUrWKHgi4MvAXobM3YXEHi5Mr7x8GuJHLidCWrSjdoUAD3EaZC7qKC4SIw+dBUipQPk5KvRx3XPAS8jyHMA2n1AT+hEeLtfrzO42KL8kvkjzfl+Ofm+TTfXkVr1I8II28K8EpRjwe1E0MA4RFl60QMz63hA0sxFhzvAcuL026n7eYNq2uohOYY4N3ENqi8Br+EtHayAZFVkL/wgzLfDi9KUfXPtMDCo1vrRdvrKNk1vrgi0uGh++7KCwtI79wN9yyAEk2483uiag1MihmbXkeLiWqiWnsICwhu3YKLrjGm07ulZU725WOC0aJYuF/vTg7tnNky8UqNaiNR4vfgRkcv7T3W7vfohpLXiPPjlS3W00Vb4apurL5ybpNdS1c+n09z2caxUxL8dAgNbapHsxOcA66D/yn0LRqfKl6E/RBsK9ZK9BubVO7l5XD6fyOod8E/wAkMq/JAwQAAA=="
@@ -281,9 +285,6 @@
     },
     "pool-round-sig": {
       ".reference/round.js": "H4sIAAAAAAACE0WPTQ6CMBCF9z3FW7ZGBIIxGtIjuPIEtR2wCbamtBFjuLsEQXcvmfneT57jrprsZo0hl2nlVHhllTkcyOhjdaI9laeKNcnpaL1D8MmZi235sIWxrY29wJsBtgEfIKVEIRAopuBQ1NNBe9fHKaJ1NiZDkDireNtpsh2fVefbsvhKde35IIT4c43S0YcVevgnL4s1GNnfdkaW2Pl17jk12iwWAvmiajayuzepox0NDx8mI4n3bxjGmn0AyLYu6hQBAAA="
-    },
-    "pool-route-params": {
-      ".reference/router.js": "H4sIAAAAAAACE12QwW6DMAyG7zyFdyKoA9odqDbGc+xQ9RAFMyKFhAVH24R495mFabSHKNHvP5/9uyxhkF3e67ZFmytppf/OK+yeuvMZT5XC6lkdE+XsRDBDi8q1CAs04PEjaI8iLcpRejlMaVYnXbCKtLPMJNWLURKht4/Ajz6DOQGIpE9pCVumbI5iGo0mkZYr5M8kFQVpoqm/c+gORIQUBu079fDQNNuPTcl4RAregg3G/FNdIEbOy6p0zoMwSKBZOtZ8vcINlaXDIQ6+73nR12Ii6Wl609SL9CXNshV82ZWNVihO2ZXJcWsiTsfF3wQAaCa8he5CrLb7AAufTeJmdbIkg2uDwQK/RsfDrLni5oHj/QDXf/Xf2gEAAA=="
     },
     "pool-semver-compare": {
       ".reference/semver.js": "H4sIAAAAAAACE33Qz0rEMBAG8Hue4rttwtpudetCyeq+gReP4iFJJxho/pCmoix9d4OKIiweho8ZfjDD7HbwyjYvbhwpNEYFld+bw3Dobm/63vZkBjPsmV2CKS4GmOiTyvRI/pUyV1fQAmeGOg9zQVK4g2rnNLnCN+1GtF4l/rB4TVnIX6Yr0/8wGzP4RAWuwk7WOGJfY7v92gY4C86TenLPOJ3QCdyDJ/3TCmQqSw64lpf58TJvPv1a63vQSbYyH8dlopbeUsxlried//4Bq2QfV2JpOkgBAAA="
@@ -423,14 +424,14 @@
     "pool-caesar-wrap": {
       ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjKUEpOSlWp1CKnyzsjPL9JRiCoqzU9XJEJ9VWKSUm0sAMSDac59AAAA"
     },
-    "pool-cart-discount": {
-      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyDA0sDGp1CKsytyRClaGBQW0sAGIrReBzAAAA"
-    },
     "pool-checksum": {
       ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjKManUIqTA1JqjG0MiiNhYAnpQ1YGsAAAA="
     },
     "pool-cidr-two-file": {
       ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyDGp1CCkxNDM3NzcyNDMkrNTEyNLE0szcyNIUrrYkoyi/vBib4mqlEqB8qVItWWpxukHJ0EAPDJUIq7UgrKSkqDSVsCowixi3WRrpGZpZ6BkS5Tyq2o1iGDEhHQsAVRPBnz0CAAA="
+    },
+    "pool-color-hex": {
+      ".checks/test.js": "H4sIAAAAAAACE73Nvw6CMBDH8Xf5zRdT0AbT3dkHaDoUOE1MY1H+LIR39whlZDHi9s31rh87IjYwqJmby6v3AYQQY8swNx9aJkiN6GQlytMAYy3eoKxQjizuUudirhKUq9NcXmbOESq5uZYPrjpME33p5FonR63KMtlJSbWTk61KMo5/E9RBbxq89f+zD+GnW+4DhZBMpW8CAAA="
     },
     "pool-config-merge": {
       ".checks/test.js": "H4sIAAAAAAACE8VQuw6DMAz8l5s9ROqC2Dv3A6IMIZg+ZGGaBBbEvzdhLEM7tdudfXeWz67QCS165un8nL2AIKqJ0Q5eEhMKWpGLRMtqQWstEseFI+h9ftOUd3/wsmNHFpPGMjwZYyrLko4+Hn0n3IP2k1UWuJrGWcQ5QijqS/fgkLEdeFGLXo+hwgvXb+7joPiUstGPemhM80UPOc7/qcG9AGmEDlkQAgAA"
@@ -483,6 +484,9 @@
     "pool-heap": {
       ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0YY6RjrGOiY6prG1tbEA3lzBn0AAAAA="
     },
+    "pool-json-pointer": {
+      ".checks/test.js": "H4sIAAAAAAACE6WPMQ6DMAxFr4L+nAHaTuydewCUwQ2hUEU4TQIdEHevJRBDJUSlbtbz07d/NYE9StjXQA4KjjlalA25aBVkKma1KrW1/rqnTUiisKxGlFUFgloQrajI1SnXs9YKRvDt/rQmYd7Sdx84HSvnY+Xyw6F8c1Ib+B33e4al1ITIQzCC0XMWB9NmnlIry8bRIwqWgn+Edv1Irqszz12fbPjK1R8RxFcvvAEAAA=="
+    },
     "pool-jsonpath-two-file": {
       ".checks/test.js": "H4sIAAAAAAACE63PMQ7CMAwF0Lv8OQMwZmfmAFEGkxhRiEho0paq6t1JBQNCKoPF5i/7ybaZEBM0PHPa3zsKUAgxZoY+UcisUKsJpY5QbfXQ5pXiOxmUMXENVx5hlUFPoVsywVoFV0cPxwu7glmtyObm+fFpN9/Szgv+06FDE7yj1uPHlnJu45DXV3QQXYT6pgjuZGyrpFDGxMo+AQ6WIfeIAgAA"
     },
@@ -518,9 +522,6 @@
     },
     "pool-round-sig": {
       ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjIMjQwManUIKDLQMzAwNCKozBBoVCwANqShtnEAAAA="
-    },
-    "pool-route-params": {
-      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBK8oFSZUpW0dFKeYm5qUBOokKSUmysjlIyUNI/KSs1uUSptlaHEgNVjQzwGJmKy7i80pyc2lgAUedUnMsAAAA="
     },
     "pool-semver-compare": {
       ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjIManUIqDAkqELXkAhDYgHzwfZBigAAAA=="

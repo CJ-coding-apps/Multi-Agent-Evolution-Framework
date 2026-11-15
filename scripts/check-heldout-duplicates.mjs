@@ -7,8 +7,10 @@
 // no check compared the splits against each other.
 //
 // This fails on a shared fixture file, a shared file after comments and whitespace are removed, a
-// shared hidden check or reference, and on a fixture-file pair whose token similarity reaches
-// NEAR_COPY_THRESHOLD (0.9). See packages/eval-harness/src/heldoutDuplicates.ts.
+// shared hidden check or reference, and on a fixture-file pair whose identifier-normalised 4-gram
+// similarity reaches NEAR_COPY_THRESHOLD (0.85, R7-M1). Pairs in NEAR_COPY_REVIEW_THRESHOLD..0.85
+// (0.70..0.85) are printed as advisory reviews and do not fail. See
+// packages/eval-harness/src/heldoutDuplicates.ts.
 //
 // Exit: 0 no duplicate · 1 one or more, listed · 2 the corpus or splits are unreadable.
 
@@ -49,6 +51,14 @@ if (report.findings.length > 0) {
     `near-copy threshold ${report.threshold}`,
   );
   process.exit(1);
+}
+
+// R7-M1: these pairs are too close to ignore and not close enough to fail. Printing them is the
+// point of the band — a renamed copy of a small file lands here instead of passing silently.
+if (report.reviews.length > 0) {
+  console.log(`check-heldout-duplicates: ${report.reviews.length} pair(s) in the review band ` +
+    `(${report.reviewThreshold}..${report.threshold}); they do not fail the guard`);
+  for (const review of report.reviews) console.log(`  [review] ${review.detail}`);
 }
 
 console.log(
