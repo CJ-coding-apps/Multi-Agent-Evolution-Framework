@@ -865,3 +865,19 @@ gate refuse an improvement claim**, whatever the counts say. This catches a read
 record and stops casual snooping. It cannot see a program that reads the material and never lets the
 text reach any surface maf records — that remains out of scope until the sandbox exists, stated here
 rather than implied.
+
+**The check is judged in a process the solution does not run in.** A check that runs beside the
+solution cannot judge it: a module that overwrites `node:assert`'s functions passes every check
+without implementing anything, because the check's own assertion is whatever the module made it.
+Since R7-H2 the acceptance check is input/output across a process boundary. The checker process
+holds the expected values, read from the encoded store, and never sends them anywhere. A driver in a
+separate child process receives the check's source over stdin, loads the solution there, and reports
+what the check *observed* — each assertion's actual value, serialized — on a private pipe; the
+checker compares those observations with its own expectations. The solution's exit code, its stdout,
+and any global it patches in its own process cannot move the verdict: only a well-formed driver
+response counts, and a child that exits early, prints a verdict, times out, or returns a different
+number of observations is a failure. The driver captures the primitives it needs before any solution
+code loads. This protects against a solution that disables, forges or short-circuits the test that
+judges it — on held-out and train tasks alike, because the evolver's train scoring uses the same
+boundary. It does not protect the driver's own process from a solution that attacks it directly;
+that is the sandbox's problem, and the sandbox is 0.7.0's.

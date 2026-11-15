@@ -4,16 +4,17 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  assertGoldenCorpus, hiddenPaths, loadHiddenStore, readHiddenFile, runVerifiers,
+  assertGoldenCorpus, compareObservations, expectationPaths, hiddenPaths, loadHiddenStore,
+  readExpectations, readHiddenFile, runHiddenCheck,
 } from '../index.js';
 
-// ORACLE (WP-3.7b R5-P2, R6-H1): every hidden-check task is proven both solvable and failing,
-// offline. The unmodified fixture must fail the checks the runner decodes, and the task's stored
-// reference solution must pass them. Neither artifact is a plain file the agent can read: both live
-// in the encoded hidden store, and the runner decodes a task's checks into a private directory
-// only after the agent has finished. A task whose check no verifier runs, whose reference is
-// missing, or whose reference does not actually pass is a task that cannot be calibrated honestly,
-// so it cannot be committed.
+// ORACLE (WP-3.7b R5-P2, R6-H1, R7-H2): every hidden-check task is proven both solvable and
+// failing, offline, through the same process boundary a run faces. The unmodified fixture must
+// fail the check, and the task's stored reference solution must produce exactly the observations
+// the checker holds as expectations. Neither artifact is a plain file the agent can read: both live
+// in the encoded hidden store, and the expectations never leave the checker process at all. A task
+// whose check no verifier runs, whose reference is missing, or whose reference does not actually
+// pass is a task that cannot be calibrated honestly, so it cannot be committed.
 
 const CORPUS = path.resolve(__dirname, '../../../../tests/goldens');
 const NEVER_IN_WORKTREE = new Set(['.checks', '.reference']);
@@ -53,6 +54,8 @@ test('every hidden-check task is proven solvable by its reference and failing wi
   const store = await loadHiddenStore(CORPUS);
   const tasks = corpusJson.filter((t) => t.hiddenChecks !== undefined);
   assert.ok(tasks.length > 0, 'no hidden-check tasks found');
+  const first = tasks[0];
+  assert.ok(first !== undefined && expectationPaths(store, first.id).length > 0, 'the store holds no expectations');
 
   const failures: string[] = [];
   // R6-H1: the store replaced the plaintext directories, and a fixture that still carries one is
@@ -68,7 +71,7 @@ test('every hidden-check task is proven solvable by its reference and failing wi
   for (const task of tasks) {
     const fixtureDir = path.resolve(CORPUS, task.repoFixture);
     const checks = task.hiddenChecks ?? [];
-    // The checks are only scored if a verifier runs the file they are materialized as.
+    // The checks are only scored if a verifier runs the file they are stored as.
     const runnable = new Set(task.verifiers.flatMap((v) => (v.kind === 'test-script' ? v.args : [])));
     for (const rel of checks) {
       if (!runnable.has(rel.slice('.checks/'.length)))
@@ -78,20 +81,41 @@ test('every hidden-check task is proven solvable by its reference and failing wi
       failures.push(`${task.id}: ships no reference solution in the hidden store`);
       continue;
     }
+    const rel = checks[0];
+    if (rel === undefined) continue;
+    const checkSource = readHiddenFile(store, 'checks', task.id, rel);
+    let expectations;
+    try {
+      expectations = readExpectations(store, task.id, rel);
+    } catch (err) {
+      failures.push(`${task.id}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+    if (expectations.length === 0) {
+      failures.push(`${task.id}: the check holds no expectations, so it cannot judge a run`);
+      continue;
+    }
 
     for (const withReference of [false, true]) {
       const staged = await stage(fixtureDir);
       try {
-        await place(store, 'checks', task.id, staged.dir);
         if (withReference) await place(store, 'references', task.id, staged.dir);
-        const outcomes = await runVerifiers(task.verifiers, {
-          workDir: staged.dir, output: '', diff: '', corpusRoot: CORPUS,
-        });
-        const failed = outcomes.filter((o) => !o.passed);
-        if (withReference && failed.length > 0)
-          failures.push(`${task.id}: the reference fails ${failed.map((o) => o.detail).join('; ')}`);
-        if (!withReference && failed.length !== outcomes.length)
-          failures.push(`${task.id}: the unmodified fixture passes ${outcomes.filter((o) => o.passed).length}/${outcomes.length} verifiers`);
+        // R7-H2: the check runs in a child process; the expected values never leave this one.
+        const run = await runHiddenCheck(checkSource, staged.dir);
+        if (run.failure !== undefined) {
+          // A check that stops is a failed run: an unsolved fixture is expected to make it throw.
+          // A reference that cannot finish its own check is a task defect.
+          if (withReference)
+            failures.push(`${task.id}: the reference does not finish the check: ${run.failure}`);
+          else if (run.failure.startsWith('the check driver'))
+            failures.push(`${task.id}: the unmodified fixture stopped the driver: ${run.failure}`);
+          continue;
+        }
+        const verdict = compareObservations(run.observations, expectations);
+        if (withReference && !verdict.passed)
+          failures.push(`${task.id}: the reference fails its own check: ${verdict.detail}`);
+        if (!withReference && verdict.passed)
+          failures.push(`${task.id}: the unmodified fixture passes the check`);
       } finally {
         await staged.cleanup();
       }

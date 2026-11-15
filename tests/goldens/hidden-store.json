@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "encoding": "gzip+base64",
   "checks": {
     "pool-bigadd-two-file": {
@@ -357,6 +357,344 @@
     },
     "train-state-machine-two-file": {
       ".reference/machine.js": "H4sIAAAAAAACE32QPU/DQAyG9/wKMyUR7RUxUJGIgYGhSyvRblGGS85pA60PHB8pqvrfuXwg2oXNp3v82K9nMzjoarqrjUGalpo0f0/NfVE+zLF4NHpemjsdlJYagRNsXp+X68VmsVqu4QxPwPjpasYoVDNhTU0ttSfDOA0qR2X3AHYUNaIFJ4BfSDIBLxM8+mJvt96R5TGcAoC6guhmVbxhKWqnm1VL0cW4CfSSOAbZsW2BsIUXZstR6OidbEsDkEAItyObeuuwufg5F7Ks/8+zfqE8/R0u/8h7dJD3ZfzXpbZOs4nGWH5DRnFM/lxjbp8zgUwp5Ysczl3nNZKAKLHX4Hiunj8HB2vcHhUePyxL49OcusN2fz9qMFquwQEAAA=="
+    }
+  },
+  "expectations": {
+    "coder-capitalize": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-clamp": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-contains": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-fib": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-flatten": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-isodd": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-max": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-pad": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-repeat": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-reverse": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-sum": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "coder-unique": {
+      "test.js": "H4sIAAAAAAACE4uOBQApu0wNAgAAAA=="
+    },
+    "pool-bigadd-two-file": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylAyNjJVqdQgqM0AoKskoyi8vxqaqWqkEKF+qVEuEgYYGBgYkWozHMAxAlDaifG6oVBsLAKconpxHAQAA"
+    },
+    "pool-binary-search": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyjGt1CCkxIKxE15A6akqKSlNrYwGSAHAmtQAAAA=="
+    },
+    "pool-bowling": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjKMTGp1CCgxNCCoxMy8NhYAindP0GoAAAA="
+    },
+    "pool-bug-closure-capture": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyTGp1oEpSUlMLXHEpq1YqASpJBEqVKVlFG+gY6hjpGMfWkqMZqCsWABP3EU6XAAAA"
+    },
+    "pool-bug-immutable-merge": {
+      ".checks/test.js": "H4sIAAAAAAACE62PvQqAMBCD3yXzLf5Mtzv7AKVDq+cgxVOsLuK7W8FVh+KUQMJHYg7oDEYvMjfL5gIIQXUV8ODCKoTkDsRU0RTtYGPgQIUlAw+qbu1AtbWUlNH6UbqI86SHPGnMAZevwNypPxE/T9sLs8SpSlABAAA="
+    },
+    "pool-bug-loop-splice": {
+      ".checks/test.js": "H4sIAAAAAAACE72MIQ6AMBAE/7J6BS1g6nkFQZRQ1IVCSjGkf+cCLwCB22R2pj8RVzhMIazdlr2AkBhTgJu9pEDoOrHrxSs64HpDy5oN26EUvtcrGj7MEtDSkkU097wyytfwn9Y9Rqg8XEqaEOZCAQAA"
+    },
+    "pool-bug-memo-key": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyjGt1qKDEkLASU8JKjKhikSExPooFAPr/4yEZAQAA"
+    },
+    "pool-bug-regex-global": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1CKkCswapMlJ8EAsAqd5oYxABAAA="
+    },
+    "pool-caesar-wrap": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjKUEpOSlWp1CKnyzsjPL9JRiCoqzU9XJEJ9VWKSUm0sAMSDac59AAAA"
+    },
+    "pool-cart-discount": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyDA0sDGp1CKsytyRClaGBQW0sAGIrReBzAAAA"
+    },
+    "pool-checksum": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjKManUIqTA1JqjG0MiiNhYAnpQ1YGsAAAA="
+    },
+    "pool-cidr-two-file": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyDGp1CCkxNDM3NzcyNDMkrNTEyNLE0szcyNIUrrYkoyi/vBib4mqlEqB8qVItWWpxukHJ0EAPDJUIq7UgrKSkqDSVsCowixi3WRrpGZpZ6BkS5Tyq2o1iGDEhHQsAVRPBnz0CAAA="
+    },
+    "pool-config-merge": {
+      ".checks/test.js": "H4sIAAAAAAACE8VQuw6DMAz8l5s9ROqC2Dv3A6IMIZg+ZGGaBBbEvzdhLEM7tdudfXeWz67QCS165un8nL2AIKqJ0Q5eEhMKWpGLRMtqQWstEseFI+h9ftOUd3/wsmNHFpPGMjwZYyrLko4+Hn0n3IP2k1UWuJrGWcQ5QijqS/fgkLEdeFGLXo+hwgvXb+7joPiUstGPemhM80UPOc7/qcG9AGmEDlkQAgAA"
+    },
+    "pool-cron-two-file": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1qKMKzBrKhhkMSseTYmUsADbK7AvxAQAA"
+    },
+    "pool-csv-parse": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0WBGEhAnK8XW1uqQY4AORdqLEysVYpQyMmOUgCJVIFNiAVWgVYPHAAAA"
+    },
+    "pool-date-add": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylIwMjEx0DYx0jSyVanWIUW0MVm1BpGqg2Sa6xgbEqzbWNTQlUrWproEh2OxYAM7ResbnAAAA"
+    },
+    "pool-debounce": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjIManUoVmEIV5GSmlrgikNVtVIJUEUiUKZMySpaKVkptpYEfflQfdFKmSlKOoaxsTpAE6yU/JOyUpNLlGqp4AsjcnyRguwLwiaTr8KQoApjctyfRkksGGPEQiwA6/Uy8W8CAAA="
+    },
+    "pool-diff-lines": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0RBePpQXDdKvo2SrFKsTrZSTmZcK5CQqxcbqKCUDVfknZaUmlyjV6mDVpIusKYlITSg2JROpSRtZUwqGpthakD7qB0QFLW1C8VMlNptiAaCHFtDeAQAA"
+    },
+    "pool-duration": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyLA1qdQipMTQiQpGJKWE1ZkSoUTLMMDDNVSJCoVGGgQFQYSwAxwv7heQAAAA="
+    },
+    "pool-edit-distance": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyjGt16KPEoDYWANchm6iNAAAA"
+    },
+    "pool-feature-base58": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylJRqdQiqMSRKkaERMcp8QsuJUeacZ5EaFpWOUJqSmlrgikt5tVIJUEkiUKpMySra0MBEx9DAEIgtINjQMLaWHIMMdAx0kLXidK4BXElJRlF+eTFuo0uVamtjAVhtssmWAQAA"
+    },
+    "pool-feature-luhn": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1CKkCswgrI84wqlpJXWXGhJUY1cYCAEkwRJlVAQAA"
+    },
+    "pool-feature-shell-quote": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylNQTk5LVlWp1CCvMLFGPiVFXLyZONXGqEhWSiFSorqCepECcS5VqYwHmlTwr+AAAAA=="
+    },
+    "pool-feature-trie": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1CKkCs0hVlpKaWuCKS2m1UglQSSJQqkzJKlopObEIyASSKRCqRCm2lkoG6Sil5KeTaRxQVywAiNaKnEMBAAA="
+    },
+    "pool-feature-varint": {
+      ".checks/test.js": "H4sIAAAAAAACE8WOsQrCMBRF/+XOb0hqJaS7s+AaMqTtE5FAqklbpPTfzSAigkO14Pbg3nPeNRNChwotc7e79M6D4EOIjOrofGRCviakXHE5GlAZYeeZlmPyS0wVVCxDwwM1GJzvGbQRwpJBfUscD+xaZKMlNLm7r8/cJPzml292uap9tfVaCCW1LralKoXW8kml0zWM8fOk/uXDP7v2DmXl/TGuAgAA"
+    },
+    "pool-format-bytes": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylAwUnJRqdQgqMzQwMiZSpZ6BgjeRKk2JVmmg4Eu0SnegylgAWlN+/foAAAA="
+    },
+    "pool-gcd-lcm": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjIMjWp1CCkxJajEvDYWAOembm9pAAAA"
+    },
+    "pool-group-by": {
+      ".checks/test.js": "H4sIAAAAAAACE52NOw6DMBAF7/LqV/BL4546B7Bc2M5SIEsmAtIg3z2rQBWo6J5mVjt2Q55g8BKZ+vfqE4iU8ywwg0+zELo2LHqSVX1grEUF7sgfqGHniqNF/W9qtnyoc0RU/AyjxAWl8E739P03IvZ2c7Ih4CLtvsVDcu/0AAAA"
+    },
+    "pool-heap": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0YY6RjrGOiY6prG1tbEA3lzBn0AAAAA="
+    },
+    "pool-jsonpath-two-file": {
+      ".checks/test.js": "H4sIAAAAAAACE63PMQ7CMAwF0Lv8OQMwZmfmAFEGkxhRiEho0paq6t1JBQNCKoPF5i/7ybaZEBM0PHPa3zsKUAgxZoY+UcisUKsJpY5QbfXQ5pXiOxmUMXENVx5hlUFPoVsywVoFV0cPxwu7glmtyObm+fFpN9/Szgv+06FDE7yj1uPHlnJu45DXV3QQXYT6pgjuZGyrpFDGxMo+AQ6WIfeIAgAA"
+    },
+    "pool-lru": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyDGt1CCmpVioBSpcq1RJWSoRpxrWxAJRh2BuVAAAA"
+    },
+    "pool-matrix-multiply": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VsiopKk3VUQIyqpVKgCoSgTJlSlbRqDxDSx0jo9haHVRRE2MdU4PY2thakARF5lvqWGCYbq5jBjY7FgAjtPpavQAAAA=="
+    },
+    "pool-matrix-transpose": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0ag8Qx2T2FodVDEjHVMMMWMds9ja2FqQMKUWGpFrEFBXLAAR6TVL8QAAAA=="
+    },
+    "pool-maze-two-file": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0ag8Qx3j2FoddDHD2NrYWpAwqYYj6UrFpcOEsBIDwkp0DQmrMayNBQC0+JCzIQEAAA=="
+    },
+    "pool-parse-args": {
+      ".checks/test.js": "H4sIAAAAAAACE62NKw6AMBBE7zJ6Ha4ezQGairasIdAtpcUQ7s4iCY7gZjKfZw9IhsHInPu1+RmEWWRjmFoaE1QcqNoQTXYYa5H8wmp8SnBksXMJ94DugXOEqO0hTBwrzpM+AJ6P9CT+AYjSUlXXve/cBSkkTJYSAQAA"
+    },
+    "pool-pluralize": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjKUkhNLipVqdQgpS0msJEZZUn5FKjHqkjNLMkEKYwHrEggeoAAAAA=="
+    },
+    "pool-query-string": {
+      ".checks/test.js": "H4sIAAAAAAACE62NOwqEQBAFr7K8uBPdbHJjDzB0MGqDSEP7GTWQufs2uJnZsllBPerFCzYjYBCZm2VPCoKabYKQ110IDheyL8zNgRAjklMFpogOdMv0lagd3uDCTOhdtN0kfUYp9PvRP1KL0yiq9jpt1eEZ5Q+5vPLXCgEAAA=="
+    },
+    "pool-queue-batch": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VsiopKk3VUQIyqpVKgCoSgTJlSlbRqDxDHaPYWh1UMWMdEwwx09ja2FqQIIm2kaUJw4k6xmDrYwEdQotA7gAAAA=="
+    },
+    "pool-ranges": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0ag8Qx3j2FodVDFTHfPY2thakDClhlPNIGPqGAT2mg52w2MBW9Wb8k0BAAA="
+    },
+    "pool-roman": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylDzDlGp1CKrydfaNcCZKqQlhJYaWlia1sQDkrjATmwAAAA=="
+    },
+    "pool-round-sig": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjIMjQwManUIKDLQMzAwNCKozBBoVCwANqShtnEAAAA="
+    },
+    "pool-route-params": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBK8oFSZUpW0dFKeYm5qUBOokKSUmysjlIyUNI/KSs1uUSptlaHEgNVjQzwGJmKy7i80pyc2lgAUedUnMsAAAA="
+    },
+    "pool-semver-compare": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjIManUIqDAkqELXkAhDYgHzwfZBigAAAA=="
+    },
+    "pool-slugify": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylDJSc3Lydcvzi3JSdI0MjEyUanUI6knUTSJGWYVSbSwAdYMZBYEAAAA="
+    },
+    "pool-stats-median": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyjGp1qKFEz5SworzSnJzaWAAK4Le6kgAAAA=="
+    },
+    "pool-time-diff": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjIsDWp1CCgxIqzE2KA2FgAMx4z9agAAAA=="
+    },
+    "pool-token-bucket": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VsiopKk3VUQIyqpVKgCrygTJlSlbR0UqJOTn55akpSjogFbE60Uol+dmpecVKOgaxsTpKyUC1/klZqcklSrW1OpQYn5aYU4xqvp4pdW1A94AhvY2PBQDJdmvmgAEAAA=="
+    },
+    "pool-tokenize": {
+      ".checks/test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0RBePpQXrZSdmZcC5OSV5ialFinF6kQrlSXmlKYChQyVYmN1lJKBqv2TslKTS5RqdXBoBroBWaONLdE6sVhrhKE5thakfzB6dIT4U5vq/owFAJMgnna6AgAA"
+    },
+    "pool-tree-flatten": {
+      ".checks/test.js": "H4sIAAAAAAACE52NMQ6AIBAE/7L1hUTt6K19AKEAvMaQgAo2hL97xs7SbpKdzJqGlKGxMud5ry6CEFM6GboclQkCDUWMJMsFbQwcaLBk4FUAjS+tikGTtYQg7uI3DgW905+88s/BN2VvZn6YqqsAAAA="
+    },
+    "pool-wordwrap": {
+      ".checks/test.js": "H4sIAAAAAAACE43LsQ2AIBAF0FXMr5mAVcQC9FAE70Qkmhh31w20e81rL8gKDcrVJigkkULQ3qZCCq+wT9TkGvpo2G1ycOPlxK0+n3X9QH6cwhyT4YX/HGHC3T1LbzMdlAAAAA=="
+    },
+    "train-anagram": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1qKMKzCJWWSwAWrgoo5sAAAA="
+    },
+    "train-base32": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylHwjbcFAqVaHsNqoiHAzUtRGhjj5exJvvrkJTG0sAGaE2le5AAAA"
+    },
+    "train-bitset": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1Bp8qMIuwMpPaWACdEmnU4wAAAA=="
+    },
+    "train-bloom": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUYKxanUIKSspKiVCFSmGxQIA3jmbO5sAAAA="
+    },
+    "train-bug-async-order": {
+      "test.js": "H4sIAAAAAAACE52OMQ6DMAxF7/LnnCB7T4EYHDBIKK1pHLpEuTsmIFUdWDr5+9l+clcgKzxG5vXx3ijCIYoow08UlR0sFWRbIRt94LsWAvpa3R/Hmillf7T8Gls9SbjIjzjxwkPWe206tQUqWxoMI4g8DU6RZrUW9Wvjuxdbqv0O9mDU0gwBAAA="
+    },
+    "train-bug-float-sum": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyDPSMa3UIKzIjrMhYz8CQCKMIKzEyqI0FAPr4aJO4AAAA"
+    },
+    "train-bug-object-keys": {
+      "test.js": "H4sIAAAAAAACE52Nqw6AMBAE/2X1KWQ9mg9oKvo4BGk4CBQE6b9TwJHU1E2ymxl9QRYoBOalX5ONIESRjaFGGzcmFLqwl4uU6YDSGnLOoM6QRpoDj6DvkJCNIfiCg5vY78iZWvzusddMXLO81BL8l8wNGNUDxhUBAAA="
+    },
+    "train-bug-sort-comparator": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0YY6RjrGsbW1OqRrVUoCMkCcZCUyDQAxkkCmJJNrhLEO0ANArbEAF4IuBvsAAAA="
+    },
+    "train-bug-utf8-truncate": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylBKTkpVqdYhR9qhhGTEqiVT2Yf6MBhAmUTkIK9XGAgAbDi0x2AAAAA=="
+    },
+    "train-calc-eval": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjJMa3UIqDAjqMLIgKASQ8JKjGpjAVqHbf6tAAAA"
+    },
+    "train-camel-keys": {
+      "test.js": "H4sIAAAAAAACE4XNPQ7CMAwF4Lu82QtrNkAMSAgOEGUwjSsVBVLqtEuVuxMk/hSE2Cy/79l2RuxhINeRAwghRhWYloMKoUxou0HTns+CTH8xr9Zv5kX6zS86IxUSSzTBWPvxhrD0DEcWF9Ek/nA8gWoe+KV3cI7QlLhIaRLyvRs6Tc8aP2r1kVFl2HrQ4utArjfZ3QCOBEwtKgEAAA=="
+    },
+    "train-chunk": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0ag8Qx2j2FodVDFjHRMMMdPY2thakCCp1pGnC4sjqWIQhr+w+B5sVSwAmXS2K1oBAAA="
+    },
+    "train-config-two-file": {
+      "test.js": "H4sIAAAAAAACE81Ruw7CMAz8l5s9BLGU7sx8QJShD7eALFyStEvVfyetBEMrwYIQm+3znX22HaEdctTM3fHeFwKCqAZG3hQSmJCiETG1aIIG5NYisB/Yg9b1s4a48KtCltiRRac+FQ/GmDmLEkCLsnOEKtFP5ZWriGlGRdutqvDA81qXW6PYsFb5RD8ytDdm9zIUff9Xfp4jai77Ft/RfHOLzGQfnju5B0GjwrFpAgAA"
+    },
+    "train-crc8": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyjExManUIKTIgRkksAKCA1mpsAAAA"
+    },
+    "train-dedupe": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VsiopKk3VUQIyqpVKgCoSgTJlSlbRSklABoiTrBRbW6tDsn5jHUOy9AE1xQIAQ6KDFq4AAAA="
+    },
+    "train-factorial": {
+      "test.js": "H4sIAAAAAAACE4WKOwqAMBAF7/LqFGqZq4hFkDUKwdXNxyLk7q6NlWD33syMFXzAgs7sAgwCcyTYJJkMdPTN/BVD9zZpFb7iR1SRVIua8pzIWWbF2Mm7tBVSsQTnoyK01qYb2xubhJcAAAA="
+    },
+    "train-feature-csv-writer": {
+      "test.js": "H4sIAAAAAAACE42MMQ6EQAwDv3JynQpR8ZULReCCWBHtAiuKE+LvhBeQxnYxnu+JsqKDbocYCFZKVXSTWFWCL6wmKeOiV7BtIhRDaGDE0Cr/D3vP6cnYy/UxuaWsnIddZWFHYmreOTNG+vlFcfU3VrSnNkABAAA="
+    },
+    "train-feature-deep-equal": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1Bp8qMGtQK4sFAIJyx31cAQAA"
+    },
+    "train-feature-rate-limit": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1qKMKzKKWYdR3WCwAPLS+yw0BAAA="
+    },
+    "train-feature-retry": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylPKzlWp1CKkyhitJSU0tcMWlrFqpBKgkEShVpmQVbWigY2QQW0sj05WSElOMlYDGxwIAbkINW+QAAAA="
+    },
+    "train-feature-template": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylDwyFRzz8hSVanWorDS9NLW4hAZqq6vzEnNTa2uJUV5dnVRba6RUGwsA7ZEq9QgBAAA="
+    },
+    "train-graph-topo": {
+      "test.js": "H4sIAAAAAAACE62MMQ6FMAxD7+K5J+j+T4EYQn+AIVKggf9BVe9OJBYWFsRgyXby3BTohIgv8/SZVxIEiKoxYk9iHOCuYPEX8tMPsUFy07kIba3hwcB2BZcx69/uqXxSBaZrTl4j7UnY215oMM+ob6+1B1fFCXUXAQAA"
+    },
+    "train-grid-sum": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0cY65rG1tTpQjam4NJkSVmJIhBqD2lgAuP9dJ6QAAAA="
+    },
+    "train-heapify": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1oKpSUlMLXHGprFYqASpJBEqVKVlFG+oY6hjpGOuY6JjqmOlYxtbWxgIA2GwQLWwAAAA="
+    },
+    "train-hyphenate": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjKUEnWTdJOVanUIqcvPS9UtKc9Xqo0FAKtdKcxTAAAA"
+    },
+    "train-intervals": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKySopKU2t1CKkCs6isLBYAqh3/vJwAAAA="
+    },
+    "train-invoice-two-file": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyDA0sDGp1CKsytyRClaEBEWaZmljUxgIANsLyUZgAAAA="
+    },
+    "train-isbn-check": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRgjJqdaihKC0xpzi1NhYAwzlpcnEAAAA="
+    },
+    "train-matrix-diagonal": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjJMa3UIqDAkrMS8NhYAFVGk62gAAAA="
+    },
+    "train-max-subarray": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjLManUIqNA1JKjEtDYWAInVfPZoAAAA"
+    },
+    "train-merge-sorted": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VsiopKk3VUQIyqpVKgCoSgTJlSlbRhjpGOsY6JjqmsbW1OmToBkEj8vQCdcUCAJfvI4yxAAAA"
+    },
+    "train-mode": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjKManUIqDAlqMKkNhYAbgaHzGcAAAA="
+    },
+    "train-move-file": {
+      "test.js": "H4sIAAAAAAACE62MMQ4CMQwE/7J1XpCemgdEKRLjAyFLPuIcCEX5O0ZXX4NorPHaO2lAV0RcmNfTYyuCAFE1RlyKGAc4DXR/UT89EVNCcSLkkFB3yt8Zca53po45w6/W+hfXkaLfmr7suN/2/oDp1shj0JuEPV2kXM13l838ASe+hFY0AQAA"
+    },
+    "train-pagination-two-file": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKyjGt1CClRyigpKSi20tev0CtJLS7RzyxJzS22L84vKrHNS8xNVSu0TVQ1MkhSK0hMT7U1VKKygcZkGwjWbkSE9rzSnBzCqgypZRBYVSwAksOaMpoBAAA="
+    },
+    "train-parse-binary": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjIMDWp1KFdiZGpaGwsAFLauimsAAAA="
+    },
+    "train-parse-bool": {
+      "test.js": "H4sIAAAAAAACE72KsQ2AMAwEV0FfZwJWQRRWCFBEMdgJFFF2x0hINNR0/3c3VPCGHmEvFOEQmTWgz1KCwzOa+y2aKepb5VX41I+sIpsWM8d9lIt4w/CUEudOAk3m5kiLGkVrbbwAuVacvekAAAA="
+    },
+    "train-prefix-sum": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0YY6xjpmsbW1OqRrJU+XKVBbLAAfUNDWqQAAAA=="
+    },
+    "train-prime-sieve": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VsiopKk3VUQIyqpVKgCoSgTJlSlbRRjrGOqY65rG1tTr01QvUFQsADGbnk68AAAA="
+    },
+    "train-ring": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0UY6xrG1tTqka1RKUqJEYywAGoDGCqwAAAA="
+    },
+    "train-rle": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylIwTjZIMk5VqdQiqNDRKJEZZYmJiUlIykSrhQKk2FgDzRcUbrAAAAA=="
+    },
+    "train-rot13": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylEKLKiuTdBS8klIrCxWVanUIasglRpEjMYpCMlIVAkszk7MVnIryy/MU3PIrFAyNjJVqYwGAOpavtwAAAA=="
+    },
+    "train-rotate-array": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VsiopKk3VUQIyqpVKgCoSgTJlSlbRJjqmOoY6RjrGsbW1OiTrBurTMSRLpzHIVqDOWACvEjEZswAAAA=="
+    },
+    "train-router-two-file": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBK8oFSZUpW0dFKmSlAZqJCklJsrI5SMlDKPykrNblEqbZWh2zjzOlkWCoug/JKc3KIVBULAOrTTvg2AQAA"
+    },
+    "train-split-path": {
+      "test.js": "H4sIAAAAAAACE62NvQ7CMBCD38XzqQ+QDYmMCIk1yhCCxY9KU8I1qqj67tzIxIDY7LPvc1hQRjicyNE/ptRD0JfyJJzWiQITC9QaxZIGFwKGdKeZVPPl2thpqogSwFnten4hRkG2j/3xxqxYV/l95OA3253/4P+V3nFoX9nxDT2+XoUgAQAA"
+    },
+    "train-state-machine-two-file": {
+      "test.js": "H4sIAAAAAAACE62QMQ6DMAxF7/LnnIC9cw8QZUjB0FRpTOPQCiHuXiM6VaIdYLP9v/+TbSdwjwoNUX96DD7CIDILoWp9FDLQakJRC6v0RGUtpPhC2uUhpZA6OGN1qYNZjf5jXHy5wM3OGdQqnC83qgvm2eyhhibSFvJo1p8Lj8Y1nDZPQxtSkOuvd5Zr5pdsA/MaNUF4yLWOkbhfuG30nWirWTvC7qMUyuNXnnsDirVrbWMCAAA="
+    },
+    "train-template-render": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylDwyFRxTEhWVanUIKiVGjSExivLy81KVamMBROT+sZ0AAAA="
+    },
+    "train-title-case": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWySkvMKU7VUQKylDxSc3LyFcLzi3JSlGp1CCoPyUhV8MkvSlHwT1MAsd1yMlOLidGoVBsLAOCirtWNAAAA"
+    },
+    "train-truncate": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSi0sTcxR0lHKyc8vTlWyKikqTdVRAjKUMlJzcvIfNSxTqtUhpLQ4I7+ohAh1CCNjAaf2jRJ/AAAA"
+    },
+    "train-word-count": {
+      "test.js": "H4sIAAAAAAACE62OMQ6AIAxF7/LnLjqyO3sAwoBYQwwRjOhiuLs1MrqYuL38tr9Pn4gJCiNz6tbdBhBCjBtDTTZsTBA6kWUlyuiA0hrZM6g1pOFsBjU32WWs5J/MEJxc9cPMLqMU+v7phwoRq6rDm5S5ABz41fcAAQAA"
+    },
+    "train-zip": {
+      "test.js": "H4sIAAAAAAACE4uuVsovULJSSklNLXAtLE3MUdJRysnPL05VskpLzClO1VECsqqVSoBKEoFSZUpW0ag8Qx0gM7ZWB1XUSEcpCSgaWwuSINUC8nSh8pQqlHQMwQ6IBQAlYrba4wAAAA=="
     }
   }
 }

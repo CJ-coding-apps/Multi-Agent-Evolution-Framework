@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { refusePrototypeKey } from '@maf/types';
+import type { AssertOp, CheckExpectation, SerializedValue } from './hiddenCheck.js';
 
 /**
  * R6-H1 (D-57): the hidden checks and the reference solutions are the two things a golden run must
@@ -17,7 +18,13 @@ import { refusePrototypeKey } from '@maf/types';
  * and the D-57 entry in `docs/changes/WP-3.7b.md` for the limit, stated plainly.
  */
 export const HIDDEN_STORE_FILE = 'hidden-store.json';
-export const HIDDEN_STORE_VERSION = 1;
+/**
+ * R7-H2: version 2 adds the `expectations` section. A check's expected values are held by the
+ * checker process and compared there; they cannot travel with the check into the child process
+ * that loads the solution. A version-1 store has none, so it cannot score a task through the
+ * boundary and is refused rather than read as one that can.
+ */
+export const HIDDEN_STORE_VERSION = 2;
 export const HIDDEN_STORE_ENCODING = 'gzip+base64';
 
 /**
@@ -35,12 +42,18 @@ const COMMENT_PREFIX: Record<string, string> = {
 };
 
 export interface HiddenStoreFile {
-  version: 1;
+  version: 2;
   encoding: 'gzip+base64';
   /** task id → fixture-relative path (`.checks/…`) → base64(gzip(bytes)). */
   checks: Record<string, Record<string, string>>;
   /** task id → fixture-relative path (`.reference/…`) → base64(gzip(bytes)). */
   references: Record<string, Record<string, string>>;
+  /**
+   * R7-H2: task id → the check or protected test it scores → base64(gzip(JSON expectations)).
+   * The key is the check's store path (`.checks/test.js`) for a held-out task and the visible
+   * test's fixture path (`test.js`) for a train task.
+   */
+  expectations: Record<string, Record<string, string>>;
 }
 
 export function hiddenStorePath(corpusRoot: string, file: string = HIDDEN_STORE_FILE): string {
@@ -103,7 +116,7 @@ export async function loadHiddenStore(corpusRoot: string, file?: string): Promis
     text = await readFile(storePath, 'utf8');
   } catch (err) {
     if ((err as { code?: string }).code === 'ENOENT')
-      return { version: HIDDEN_STORE_VERSION, encoding: HIDDEN_STORE_ENCODING, checks: {}, references: {} };
+      return { version: HIDDEN_STORE_VERSION, encoding: HIDDEN_STORE_ENCODING, checks: {}, references: {}, expectations: {} };
     throw err;
   }
   let parsed: unknown;
@@ -122,10 +135,12 @@ export async function loadHiddenStore(corpusRoot: string, file?: string): Promis
     );
   assertEntryMap(o['checks'], 'checks');
   assertEntryMap(o['references'], 'references');
+  assertEntryMap(o['expectations'], 'expectations');
   return {
     version: HIDDEN_STORE_VERSION, encoding: HIDDEN_STORE_ENCODING,
     checks: (o['checks'] ?? {}) as Record<string, Record<string, string>>,
     references: (o['references'] ?? {}) as Record<string, Record<string, string>>,
+    expectations: (o['expectations'] ?? {}) as Record<string, Record<string, string>>,
   };
 }
 
@@ -153,14 +168,67 @@ export function hiddenPaths(store: HiddenStoreFile, section: 'checks' | 'referen
   return Object.keys(store[section][taskId] ?? {}).sort();
 }
 
+/** The expectations a task holds, keyed by the check or protected test they score. */
+export function expectationPaths(store: HiddenStoreFile, taskId: string): string[] {
+  return Object.keys(store.expectations[taskId] ?? {}).sort();
+}
+
+/**
+ * R7-H2: the expected values for one check. They never leave the checker process: the child that
+ * loads the solution is sent the check's source alone. A store entry that is not an array of
+ * well-formed expectations is refused — a malformed one would compare a run against nothing.
+ */
+export function readExpectations(
+  store: HiddenStoreFile, taskId: string, rel: string,
+): CheckExpectation[] {
+  const encoded = store.expectations[taskId]?.[rel];
+  if (encoded === undefined)
+    throw new Error(
+      `hidden store: expectations for ${taskId} at ${JSON.stringify(rel)} are missing; ` +
+      'a task scored through the process boundary needs them.',
+    );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decodeHidden(encoded).toString('utf8'), refusePrototypeKey);
+  } catch (err) {
+    throw new Error(`hidden store: expectations for ${taskId} at ${JSON.stringify(rel)} are not readable JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!Array.isArray(parsed))
+    throw new Error(`hidden store: expectations for ${taskId} at ${JSON.stringify(rel)} must be an array.`);
+  const out: CheckExpectation[] = [];
+  for (const [i, raw] of parsed.entries()) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
+      throw new Error(`hidden store: expectation ${i} for ${taskId} is not an object.`);
+    const o = raw as Record<string, unknown>;
+    if (typeof o['op'] !== 'string' || !KNOWN_ASSERT_OPS.has(o['op']))
+      throw new Error(`hidden store: expectation ${i} for ${taskId} names an unknown assertion ${JSON.stringify(o['op'])}.`);
+    if (typeof o['loose'] !== 'boolean')
+      throw new Error(`hidden store: expectation ${i} for ${taskId} must say whether the assertion was loose.`);
+    const rec: CheckExpectation = { op: o['op'] as AssertOp, loose: o['loose'] };
+    if (o['e'] !== undefined) rec.e = o['e'] as SerializedValue;
+    out.push(rec);
+  }
+  return out;
+}
+
+const KNOWN_ASSERT_OPS = new Set(['equal', 'notEqual', 'deepEqual', 'notDeepEqual', 'ok', 'throws', 'rejects']);
+
 /**
  * The strings whose presence in anything a run recorded means it saw the hidden material: any
  * canary, and the store's own file name (a read that stops at listing or opening it still leaves
  * the name in the record).
  */
 export function hiddenStoreMarkers(): readonly string[] {
-  return [CANARY_PREFIX, HIDDEN_STORE_FILE];
+  return [CANARY_PREFIX, HIDDEN_STORE_FILE, ...HIDDEN_DIRS];
 }
+
+/**
+ * R7-H2b: the two directory names the hidden material is written under, as they appear in a path.
+ * A run that names one of them is looking for the checks or the references; no fixture ships
+ * either directory, so the only way such a string reaches the record is from code that went after
+ * them. The trailing separator keeps an ordinary identifier like `checks` out of the scan.
+ */
+const HIDDEN_DIRS = ['.checks/', '.reference/'] as const;
 
 /** Every marker that appears in `text`, with the label of the surface it was found in. */
 export function findHiddenMarkers(text: string, label: string): string[] {

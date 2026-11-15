@@ -3,7 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalJson } from '@maf/harness-config';
 import type { GoldenTask } from './GoldenTask.js';
-import { loadHiddenStore, readHiddenFile } from './hiddenStore.js';
+import { expectationPaths, loadHiddenStore, readExpectations, readHiddenFile } from './hiddenStore.js';
 
 const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
 
@@ -50,6 +50,10 @@ export async function computeCorpusSha(
   for (const task of [...corpus].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
     for (const rel of [...(task.hiddenChecks ?? [])].sort())
       files.push([`${task.id}/${rel}`, sha256(readHiddenFile(store, 'checks', task.id, rel))]);
+    // R7-H2: the expected values are part of the yardstick. Two runs scored against different
+    // expectations were not measured against the same corpus, whatever their checks say.
+    for (const rel of expectationPaths(store, task.id))
+      files.push([`${task.id}/expectations:${rel}`, sha256(JSON.stringify(readExpectations(store, task.id, rel)))]);
   }
   return sha256(canonicalJson({ tasks: corpus, files }));
 }

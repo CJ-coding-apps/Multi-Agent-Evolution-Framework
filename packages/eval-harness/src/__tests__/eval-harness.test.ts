@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   GoldenRunner, GoldenCorpusError, assertGoldenCorpus, seesawDecision, runVerifier,
-  encodeHidden, injectCanary, HIDDEN_STORE_FILE,
+  encodeHidden, injectCanary, HIDDEN_STORE_FILE, HIDDEN_STORE_VERSION,
 } from '../index.js';
 import type { GoldenTask, GoldenSuiteResult, VerifierContext } from '../index.js';
 
@@ -107,9 +107,13 @@ test('runner: a hidden check is absent from the agent worktree and runs for scor
     };
     const check = "const assert = require('node:assert');\nconst { value } = require('./impl');\nassert.equal(value(), 42);\n";
     await writeFile(path.join(root, HIDDEN_STORE_FILE), JSON.stringify({
-      version: 1, encoding: 'gzip+base64',
+      version: HIDDEN_STORE_VERSION, encoding: 'gzip+base64',
       checks: { [task.id]: { '.checks/check.js': encodeHidden(injectCanary(check, task.id, '.checks/check.js')) } },
       references: {},
+      // R7-H2: the checker's half — the expected value never travels with the check.
+      expectations: {
+        [task.id]: { '.checks/check.js': encodeHidden(JSON.stringify([{ op: 'equal', loose: true, e: 42 }])) },
+      },
     }), 'utf8');
     await writeFile(path.join(root, 'corpus.json'), JSON.stringify([task]), 'utf8');
 

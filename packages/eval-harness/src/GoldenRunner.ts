@@ -5,11 +5,12 @@ import { snapshotDiff, runIsolatedGit } from '@maf/git-ops';
 import { refusePrototypeKey } from '@maf/types';
 import type { GoldenTask } from './GoldenTask.js';
 import { assertGoldenCorpus } from './GoldenTask.js';
-import { checkUnmodified, runVerifiers } from './verifiers.js';
+import { checkUnmodified, runVerifier } from './verifiers.js';
 import type { VerifierContext, VerifierOutcome } from './verifiers.js';
 import { computeCorpusSha } from './corpusSha.js';
 import type { JudgeDisclosure } from './judge.js';
-import { findHiddenMarkers, loadHiddenStore, readHiddenFile } from './hiddenStore.js';
+import { findHiddenMarkers, loadHiddenStore, readExpectations, readHiddenFile } from './hiddenStore.js';
+import { compareObservations, runHiddenCheck } from './hiddenCheck.js';
 import type { HiddenStoreFile } from './hiddenStore.js';
 
 /**
@@ -264,11 +265,8 @@ export class GoldenRunner {
       try {
         const scoringRepo = path.join(scoringRoot, 'repo');
         await cp(workDir, scoringRepo, { recursive: true });
-        await materializeHiddenChecks(store, task, scoringRepo);
-        outcomes = [...protectedFiles, ...await runVerifiers(task.verifiers, {
-          workDir: scoringRepo, output, diff, corpusRoot: this.opts.corpusRoot,
-          ...(this.opts.securityScore ? { securityScore: this.opts.securityScore } : {}),
-          ...(this.opts.llmJudge ? { llmJudge: this.opts.llmJudge.verdict } : {}),
+        outcomes = [...protectedFiles, ...await this.runChecks(task, scoringRepo, store, fixtureDir, {
+          output, diff,
         })];
       } finally {
         await rm(scoringRoot, { recursive: true, force: true });
@@ -282,6 +280,79 @@ export class GoldenRunner {
     } finally {
       await rm(workRoot, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /**
+   * R7-H2: every `test-script` verifier is scored across a process boundary. A held-out task's
+   * source is its stored hidden check; a train task's is the visible `test.js`, read from the
+   * pristine fixture rather than the worktree, so the script that judges the run is the one the
+   * corpus shipped. The expected values come from the store and stay in this process.
+   *
+   * A task that declares a `test-script` verifier but has no expectations for it fails closed: a
+   * check with nothing to compare against is a check that proves nothing, and scoring it as passed
+   * (or as absent) would let a run through on no evidence at all.
+   */
+  private async runChecks(
+    task: GoldenTask, scoringRepo: string, store: HiddenStoreFile, fixtureDir: string,
+    ctx: { output: string; diff: string },
+  ): Promise<VerifierOutcome[]> {
+    const outcomes: VerifierOutcome[] = [];
+    const hidden = task.hiddenChecks ?? [];
+    for (const v of task.verifiers) {
+      if (v.kind !== 'test-script') {
+        outcomes.push(await runVerifier(v, {
+          workDir: scoringRepo, output: ctx.output, diff: ctx.diff, corpusRoot: this.opts.corpusRoot,
+          ...(this.opts.securityScore ? { securityScore: this.opts.securityScore } : {}),
+          ...(this.opts.llmJudge ? { llmJudge: this.opts.llmJudge.verdict } : {}),
+        }));
+        continue;
+      }
+      const rel = hidden.find((h) => h.slice('.checks/'.length) === v.args[0]) ?? hidden[0];
+      let source: string;
+      let key: string;
+      if (rel !== undefined) {
+        source = readHiddenFile(store, 'checks', task.id, rel);
+        key = rel;
+      } else {
+        key = v.args[0] ?? '';
+        if (!task.mustNotModify?.includes(key)) {
+          outcomes.push({
+            kind: 'test-script', passed: false,
+            detail: `${v.command} ${v.args.join(' ')}: the script is neither a stored hidden check nor a protected fixture file, so it cannot be scored across the process boundary`,
+          });
+          continue;
+        }
+        try {
+          source = await readFile(path.join(fixtureDir, key), 'utf8');
+        } catch (err) {
+          outcomes.push({
+            kind: 'test-script', passed: false,
+            detail: `${key} could not be read from the pristine fixture: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          continue;
+        }
+      }
+      let expectations;
+      try {
+        expectations = readExpectations(store, task.id, key);
+      } catch (err) {
+        outcomes.push({
+          kind: 'test-script', passed: false,
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+      const run = await runHiddenCheck(source, scoringRepo, {
+        ...(this.opts.timeoutMs !== undefined ? { timeoutMs: this.opts.timeoutMs } : {}),
+      });
+      if (run.failure !== undefined) {
+        outcomes.push({ kind: 'test-script', passed: false, detail: `hidden check: ${run.failure}` });
+        continue;
+      }
+      const verdict = compareObservations(run.observations, expectations);
+      outcomes.push({ kind: 'test-script', passed: verdict.passed, detail: verdict.detail });
+    }
+    return outcomes;
   }
 
   /**
@@ -317,24 +388,6 @@ const NEVER_IN_WORKTREE = new Set(['.checks', '.reference']);
 
 function isHiddenDir(fixtureDir: string, source: string): boolean {
   return path.relative(fixtureDir, source).split(path.sep).some((seg) => NEVER_IN_WORKTREE.has(seg));
-}
-
-/**
- * Decodes each hidden check into `repoDir` at the path below `.checks/`, so a check stored as
- * `.checks/test.js` lands at `test.js` and keeps resolving the fixture's own modules. The target
- * must stay inside `repoDir`: a store entry that climbs out is refused rather than written.
- */
-async function materializeHiddenChecks(
-  store: HiddenStoreFile, task: GoldenTask, repoDir: string,
-): Promise<void> {
-  const root = path.resolve(repoDir);
-  for (const rel of task.hiddenChecks ?? []) {
-    const target = path.resolve(root, rel.slice('.checks/'.length));
-    if (!target.startsWith(root + path.sep))
-      throw new Error(`goldens: hidden check ${JSON.stringify(rel)} escapes the scoring dir.`);
-    await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, readHiddenFile(store, 'checks', task.id, rel), 'utf8');
-  }
 }
 
 /** Files above this are not where a canary lives, and reading them all would cost more than it finds. */

@@ -6,7 +6,8 @@ import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  GoldenRunner, HIDDEN_STORE_FILE, canaryToken, encodeHidden, injectCanary,
+  GoldenRunner, HIDDEN_STORE_FILE, HIDDEN_STORE_VERSION, canaryToken, captureExpectations,
+  encodeHidden, injectCanary,
 } from '../index.js';
 import type { GoldenTask, GoldenSuiteResult, RecordedSurface } from '../index.js';
 
@@ -43,10 +44,14 @@ async function withCorpus(fn: (root: string, canary: string) => Promise<void>): 
     await execFileAsync('git', ['add', '-A'], { cwd: repo });
     await execFileAsync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], { cwd: repo });
     await writeFile(path.join(root, 'corpus.json'), JSON.stringify([TASK]), 'utf8');
+    // R7-H2: the expected values live beside the check, in the checker's half of the store.
+    const captured = await captureExpectations(CHECK, repo);
+    assert.equal(captured.failure, undefined);
     await writeFile(path.join(root, HIDDEN_STORE_FILE), JSON.stringify({
-      version: 1, encoding: 'gzip+base64',
+      version: HIDDEN_STORE_VERSION, encoding: 'gzip+base64',
       checks: { [TASK.id]: { [CHECK_REL]: encodeHidden(injectCanary(CHECK, TASK.id, CHECK_REL)) } },
       references: {},
+      expectations: { [TASK.id]: { [CHECK_REL]: encodeHidden(JSON.stringify(captured.expectations)) } },
     }), 'utf8');
     await fn(root, canaryToken(TASK.id, CHECK_REL));
   } finally {

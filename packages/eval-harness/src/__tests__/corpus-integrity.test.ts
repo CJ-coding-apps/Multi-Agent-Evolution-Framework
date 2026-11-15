@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { GoldenRunner, assertGoldenCorpus, computeCorpusSha, describeJudge } from '../index.js';
+import {
+  GoldenRunner, HIDDEN_STORE_FILE, HIDDEN_STORE_VERSION, assertGoldenCorpus, computeCorpusSha,
+  describeJudge, encodeHidden,
+} from '../index.js';
 import type { GoldenTask, TaskDispatcher } from '../index.js';
 
 // ORACLE: D-14 — a result names the corpus it was measured on (sha over tasks AND the files they
@@ -31,6 +34,14 @@ async function withCorpus(tasks: GoldenTask[], fn: (root: string) => Promise<voi
     await writeFile(path.join(fixture, 'sum.js'), 'exports.sum = (a, b) => a - b;\n', 'utf8');
     await writeFile(path.join(fixture, 'test.js'), TEST_JS, 'utf8');
     await writeFile(path.join(root, 'corpus.json'), JSON.stringify(tasks), 'utf8');
+    // R7-H2: a train task is scored through the same boundary, so its visible test's expected
+    // values are held beside it in the store. This test's check is exit-status style: it calls
+    // process.exit(1) on failure and asserts nothing, so a passing run records no observation.
+    const expectations: Record<string, Record<string, string>> = {};
+    for (const task of tasks) expectations[task.id] = { 'test.js': encodeHidden('[]') };
+    await writeFile(path.join(root, HIDDEN_STORE_FILE), JSON.stringify({
+      version: HIDDEN_STORE_VERSION, encoding: 'gzip+base64', checks: {}, references: {}, expectations,
+    }), 'utf8');
     await fn(root);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -84,16 +95,19 @@ test('a result records the corpus sha, attempts, adapter, model and who judged',
   });
 });
 
-test('a coder that rewrites its protected test fails even though the test now passes', async () => {
+test('a coder that rewrites its protected test fails, and the rewrite is not what runs', async () => {
   await withCorpus([CODER], async (root) => {
     const result = await runner(root, async (_t, workDir) => {
       await writeFile(path.join(workDir, 'test.js'), 'process.exit(0);\n', 'utf8');
       return 'made the test pass';
     }).run();
     const outcomes = result.tasks[0]?.attempts[0]?.outcomes ?? [];
-    assert.deepEqual(outcomes.map((o) => [o.kind, o.passed]), [['must-not-modify', false], ['test-script', true]],
-      'the edited test passes, so only the protection check can catch this');
+    // R7-H2: two independent refusals. The edit is caught by `mustNotModify`, and the scored check
+    // is the corpus's own `test.js` — read from the pristine fixture — which still exits 1 because
+    // `sum` was never fixed. The rewritten file never reaches the process boundary.
+    assert.deepEqual(outcomes.map((o) => [o.kind, o.passed]), [['must-not-modify', false], ['test-script', false]]);
     assert.match(outcomes[0]?.detail ?? '', /protected file\(s\) modified: test\.js/);
+    assert.equal(outcomes[1]?.detail, 'the check exited or asserted: 1');
     assert.deepEqual(result.solvedTaskIds, []);
   });
 });

@@ -1490,3 +1490,74 @@ about the rule.
   accepting any signature and accepting an unsigned record each redden the R6-L2 splits test.
   R6-H1's three (markers off, contaminated attempt scored normally, gate ignoring contamination)
   were recorded with that commit.
+
+## Round 7 — the round-6 verifier findings
+
+### R7-H2 (D-57) — the check is judged across a process boundary the solution does not run in
+
+Round 6 ran a hidden check as `node test.js` beside the solution, in one process. The verifier showed
+what that permits: a solution that does nothing but overwrite `node:assert`'s functions passed a
+held-out check without reading a file and without implementing anything, and the same trick works on
+a train task, so the evolver could have selected for a harness that does this. A check cannot judge
+a process its subject can rewrite.
+
+**The expected values live in the checker.** The hidden store is version 2: beside `checks` and
+`references` it now holds `expectations` — one entry per scored task, keyed by the check it scores —
+built by `scripts/build-hidden-store.mjs` from a trusted run (the reference solution for a pool
+task; the fixture's own visible test for a train task, with the module proxy as the retry when the
+starter throws before the last assertion). The build refuses a check that records nothing unless it
+is exit-status style, and refuses a held-out check with no assertions at all. A version-1 store is
+refused rather than read as one that can score. The corpus sha covers the expectations, so two runs
+scored against different ones were not measured against the same corpus.
+
+**The solution's process only reports what the check observed.** On each `test-script` verifier the
+runner spawns a driver (`hiddenCheck.ts`'s `DRIVER_SOURCE`, written into the private `0700` scoring
+directory) with stdin the check's source and the repository path, and fd 3 reserved for
+observations. The driver compiles the check into *this* process, loads the solution through a
+`require` that returns its own recording `assert`/`assert/strict`, and writes one record per
+assertion — the actual value, serialized, and for `throws`/`rejects` whether it threw and the error.
+Records carry a per-run nonce; the checker ignores lines with another nonce, fails on a malformed
+line, and fails when the driver exits early, does not print its `done` line, or times out (120 s).
+The checker — the only process that has ever seen the expectations — compares. A solution's exit
+code, its stdout, a forged line on the pipe and any global it patches are all outside the verdict.
+
+**Two defects the corpus found, and what fixed them.** The first version of the driver ran the
+check in a fresh `vm` context: `Date`, `Array.prototype` and every built-in then have a different
+identity from the solution's, and `train-feature-deep-equal` failed its own check on
+`new Date(0)` vs `new Date(1)` because the solution's `instanceof Date` answered false. The check
+is now compiled into the driver's realm (a direct `eval` in a function whose parameters shadow
+`require`, `module`, `exports`, `process`, `console`), so the values the check builds are the values
+the solution sees. The second: a check written as an async IIFE (two corpus tasks end that way)
+returns its promise as the script's completion value, and the first compiled-function form dropped
+it, scoring `0 assertions; it must make 5`. A direct eval returns the completion value, so the
+driver awaits the check's own promise before it reports `done`.
+
+**Exit-status checks.** Twelve seed `coder-*` tasks have no assertion at all: they print and call
+`process.exit(1)` on failure. The driver's sandbox `process.exit` records an `exit` observation (and
+stops the check), and an exit-status check's expectations are empty on purpose; a passing run is one
+that makes no observation, because it never exits. Any early real `process.exit` in the solution's
+own process kills the child before `done`, which is a failure, not a verdict.
+
+**Train scoring uses the same boundary.** A train task's `test-script` verifier is read from the
+pristine fixture rather than the worktree, and scored through the same driver with the store's
+expectations. A coder that rewrites its protected test now fails twice: `mustNotModify` reports the
+edit, and the check that runs is the corpus's own test, which still fails against unfixed code. The
+baseline records both refusals.
+
+**Tests.** `hidden-check-boundary.test.ts` (7): a correct solution produces exactly the recorded
+observations and the check's pid is not the test's; an assert-disabling solution fails; a solution
+printing a fake `PASS` fails; `process.exit(0)` and `process.exit(1)` at load each fail; a forged
+observation line is not counted; an async check is awaited; and an exit-status check passes when
+left alone and fails when tripped. `reference-solutions.test.ts` is ported to the boundary and still
+proves all 50 hidden-check tasks solvable by their reference and failing without it. The synthetic
+corpora in `contamination.test.ts`, `eval-harness.test.ts` and `corpus-integrity.test.ts` now carry
+version-2 stores with expectations; the protected-test test asserts the double refusal.
+
+**Measurements.** The store holds 112 expectation entries for the 112 scored tasks (59 train, 7
+held-out, 50 pool; four corpus tasks have no `test-script` verifier), 69 841 bytes with the checks
+and references. `corpusSha` moved `4afb6139…` → `74733b1e…`; the offline baseline was regenerated
+and solved is unchanged at 60/116. The reference proof passes through the boundary.
+
+**Mutant.** Judging the check with the solution's own `node:assert` — the two interception lines in
+the compiled driver bypassed, `dist/hiddenCheck.js:219-220` — reddens 6 of the 7 boundary tests,
+the assert-disabling one among them; the restored file compared byte-for-byte.

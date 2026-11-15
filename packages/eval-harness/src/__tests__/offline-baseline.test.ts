@@ -59,7 +59,10 @@ test('the scripted model reproduces the committed baseline from the committed co
     'train-bug-utf8-truncate', 'train-bug-async-order', 'train-bug-object-keys',
   ]);
   const capitalize = result.tasks.find((t) => t.taskId === 'coder-capitalize')?.attempts[0]?.outcomes;
-  assert.deepEqual(capitalize?.map((o) => [o.kind, o.passed]), [['must-not-modify', false], ['test-script', true]],
-    'the scripted coder that rewrites test.js passes its test and must still fail');
+  // R7-H2: the scripted coder rewrites test.js instead of fixing capitalize.js. The edit fails
+  // `mustNotModify`, and the check that scores it is the corpus's own test — read from the pristine
+  // fixture — which still fails against the unfixed code. Two independent refusals, not one.
+  assert.deepEqual(capitalize?.map((o) => [o.kind, o.passed]), [['must-not-modify', false], ['test-script', false]],
+    'a coder that rewrites the test it is scored by must fail, and the rewrite must not be what runs');
   assert.equal(result.judge?.distinct, false);
 });
