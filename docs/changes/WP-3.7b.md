@@ -1696,3 +1696,32 @@ the same way: "a key the editor does not have" holds only when `MAF_SIGNING_KEY`
 `MAF_SIGNING_KEY`) and reaches no stack. The shared `calibrateSplitForTest` fixture now signs with a
 throwaway key it exports to the test process unless a test asks for `keySource: 'dev'`, so every
 other evolve test still reaches the subject it is about.
+
+### R7-L1 (D-57) — the corpus a verdict is about is fingerprinted when the session opens
+
+The residual so far was about reading. It is also about writing: a train attempt runs the agent with
+the user's write permission, so while a session is open it can rewrite the three files a held-out
+verdict rests on — `hidden-store.json` (the checks, references and expectations),
+`splits.json` (which tasks are held out) and `calibration.json` (the measurement the yardstick
+derives from). A verdict read afterwards would be about a corpus nobody measured.
+
+The mitigation is a tripwire rather than a fence, because there is no sandbox until 0.7.0,
+`maf evolve` fingerprints those three files' bytes at session start (`fingerprintCorpus`,
+`@maf/eval-harness`; sha256 per file, `null` when absent, so a file that appears mid-session is a
+change too). The held-out gate asks `verifyHeldOutCorpus` once, before the first repeat is projected
+or paid for; a `CorpusChangedError` naming the changed files is reported as
+`held-out: not scored — … changed under the corpus root since the session started`, with no verdict,
+no `gate`, and no held-out run. The train half of the session is unaffected: the guard is the gate's,
+and it answers the gate's question.
+
+The SECURITY.md residual — *Hidden evaluation material is detected, not sandboxed* — and the D-57
+paragraph above now say "read **or modify**" and state the tripwire beside the thing it cannot do:
+it catches a corpus that moved between the two checks, not one edited and restored in between
+(a content-addressed store would still match only if the bytes match, so an edit and an exact
+restore is not a change), and it does not police the worktree, which is a copy.
+
+**Tests.** `corpusGuard.test.ts` (4): the guarded set is exactly the three files; an unchanged and
+an absent-everything corpus report nothing; a rewritten `splits.json` is named alone and raises a
+`CorpusChangedError` with the file and the remedy; a file that appears or disappears is a change,
+and two changed files are named in order. `evolver.test.ts` (1): with the guard throwing, a session
+that shipped a candidate reports the refusal, no verdict, and runs zero held-out attempts.

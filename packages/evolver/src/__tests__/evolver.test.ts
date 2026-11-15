@@ -1769,6 +1769,34 @@ test('D-57 held-out: a broad gain over twenty tasks clears the exact stratified 
     assert.notEqual((r as { split?: string }).split, 'held-out', 'a held-out result was recorded');
 });
 
+// R7-L1: the gate asks, once, whether the corpus it is about to score is the one the session
+// started with. A train attempt runs the agent with the user's write access, so it can rewrite the
+// store, the split or the measurement while the session is open; a held-out run after that would
+// be scored against a yardstick neither side measured. The refusal happens before the first repeat
+// is projected or paid for.
+test('R7-L1: a corpus that changed during the session is not scored on the held-out split', async () => {
+  let heldOutRuns = 0;
+  const report = await evolve(loopOpts({
+    metaGenerate: improveManifest(),
+    runHeldOut: async (h) => {
+      heldOutRuns++;
+      return heldOutRunner(CURRENT, { base: [['t1', 't2', 't3']], candidate: [['t1', 't2', 't3', 't4']] })(h);
+    },
+    verifyHeldOutCorpus: async () => {
+      throw new Error('hidden-store.json changed under the corpus root since the session started');
+    },
+    heldOutSplitsSha: SPLITS_SHA,
+  }));
+
+  assert.equal(report.ships, 1, 'the train half still shipped: the guard is the gate\'s');
+  const held = report.heldOut;
+  assert.ok(held, 'the gate reports why it did not score');
+  assert.match(held!.skipped ?? '', /hidden-store\.json changed/);
+  assert.match(held!.statement, /held-out: not scored/);
+  assert.equal(held!.gate, undefined, 'no verdict is computed from a corpus that moved');
+  assert.equal(heldOutRuns, 0, 'not one held-out attempt was run');
+});
+
 test('R6-H1: one contaminated held-out attempt makes the gate refuse an improvement', async () => {
   // The same gain the test above clears, with one candidate attempt voided for reading a hidden
   // check. The counts would otherwise still clear the test; the gate must refuse anyway.

@@ -11,8 +11,8 @@ import { HarnessStore, shortSha } from '@maf/harness-config';
 import type { HarnessConfig } from '@maf/harness-config';
 import { effectiveTier, roleSetFromHarness } from '@maf/roles';
 import {
-  GoldenRunner, SCRIPTED_ADAPTER_NAME, ScoreRecorder, ScriptedAdapter, describeJudge,
-  isJudgeScored, loadScriptedBundle, loadSplits, makeLlmJudge,
+  GoldenRunner, SCRIPTED_ADAPTER_NAME, ScoreRecorder, ScriptedAdapter, assertCorpusUnchanged,
+  describeJudge, fingerprintCorpus, isJudgeScored, loadScriptedBundle, loadSplits, makeLlmJudge,
 } from '@maf/eval-harness';
 import type { GoldenSuiteResult, GoldenTask, LoadedSplits } from '@maf/eval-harness';
 import { readFile } from 'node:fs/promises';
@@ -328,6 +328,11 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
       const runGoldensFor = (harness: HarnessConfig): Promise<GoldenSuiteResult> =>
         runnerFor(harness, 2, { name: 'train', sha: splits.sha }).run(splits.train);
 
+      // R7-L1: the three files a verdict rests on are fingerprinted at session start. The gate asks
+      // before it scores a held-out split, so a train attempt that rewrote the store, the split or
+      // the calibration cannot have its result read as a verdict about this corpus.
+      const corpusFingerprints = await fingerprintCorpus(corpusRoot);
+
       // R2-H2: on the isolated stack, so a refusal or a gate failure during a held-out attempt
       // writes to the throwaway graph, not to the one the next digest reads.
       // R4-A2: one attempt per task per repeat. `heldOutRepeats` (10) repeats are therefore ten
@@ -384,6 +389,7 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         // scored held-out tasks are named so the loop can report them beside, never in, the gate.
         splitName: 'train',
         runHeldOut,
+        verifyHeldOutCorpus: () => assertCorpusUnchanged(corpusRoot, corpusFingerprints),
         heldOutSplitsSha: splits.sha,
         // R2-M1: the loop projects each golden run's cost from its task count before starting it.
         goldenTaskCounts: { train: splits.train.length, heldOut: splits.heldOut.length },

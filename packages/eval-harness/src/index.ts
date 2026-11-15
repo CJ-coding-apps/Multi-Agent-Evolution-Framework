@@ -9,6 +9,10 @@ export type {
 export { GoldenRunner, seesawDecision } from './GoldenRunner.js';
 export { ScoreRecorder } from './ScoreRecorder.js';
 export { computeCorpusSha } from './corpusSha.js';
+export type { CorpusFingerprints, GuardedCorpusFile } from './corpusGuard.js';
+export {
+  GUARDED_CORPUS_FILES, CorpusChangedError, assertCorpusUnchanged, changedCorpusFiles, fingerprintCorpus,
+} from './corpusGuard.js';
 export type { DuplicateFinding, DuplicateKind, DuplicateReport } from './heldoutDuplicates.js';
 export {
   NEAR_COPY_MIN_SHARED_GRAMS, NEAR_COPY_REVIEW_THRESHOLD, NEAR_COPY_THRESHOLD, SHINGLE_SIZE,

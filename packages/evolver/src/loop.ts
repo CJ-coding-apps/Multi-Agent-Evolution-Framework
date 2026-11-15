@@ -143,6 +143,14 @@ export interface EvolveOptions {
    * graph the planner reads, or they are no longer held out.
    */
   runHeldOut?: (harness: HarnessConfig) => Promise<GoldenSuiteResult>;
+  /**
+   * R7-L1: proves the corpus the held-out split came from is the one the session began with. A
+   * train attempt runs the agent with the user's write access, so it can rewrite the store, the
+   * split or the measurement while the session is open; a verdict read from the result would then
+   * be about a yardstick nobody measured. The gate asks this once, before the first repeat, and
+   * refuses to score on a throw.
+   */
+  verifyHeldOutCorpus?: () => Promise<void>;
   /** D-57: sha of the split definition the held-out runner measures, for the report. */
   heldOutSplitsSha?: string;
   /**
@@ -453,6 +461,15 @@ async function evaluateHeldOut(
     return skipped('no candidate shipped, so there is no survivor to score on the held-out split');
   if (opts.budget?.snapshot().exhausted === true)
     return skipped('the budget was exhausted before the held-out evaluation');
+  // R7-L1: the corpus guard is asked before a repeat is projected or paid for. A corpus that moved
+  // under the session cannot answer the question the gate exists to ask.
+  if (opts.verifyHeldOutCorpus !== undefined) {
+    try {
+      await opts.verifyHeldOutCorpus();
+    } catch (err) {
+      return skipped(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   const baselineRuns: GoldenSuiteResult[] = [];
   const candidateRuns: GoldenSuiteResult[] = [];
