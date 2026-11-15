@@ -1243,6 +1243,14 @@ a tool call, the transcript, the worktree — and stops casual snooping; it cann
 reads the material and never lets the text reach a recorded surface. That remains out of scope until
 0.7.0.
 
+**One byte, written as an escape.** The separator between task id and path in a canary token was
+pasted as a literal U+0000 byte. The compiled code, and every committed canary, was right — but a
+single NUL makes git classify the file as binary, so the new module (`hiddenStore.ts`) appeared in
+the PR as "Binary files differ" and the mechanism this round is about could not be reviewed. It is
+now the six-character escape sequence (`\u0000`) in the source, the same string at run time; the
+tokens are unchanged (the contamination tests recompute them against the store), and the file
+diffs as text. Fixed in `6e7ddb7` before the round was pushed.
+
 **Tests.** `contamination.test.ts` (5): the `/proc/<pid>/cwd` shape (a check and its canary in the
 final output), a canary in a tool call's stdout, the store's name in the record, a canary written
 into the final worktree — each voids the attempt and appears in the session report — and a clean
@@ -1446,18 +1454,22 @@ about the rule.
 ## Round 6 verification
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
-  --workspace-concurrency=1 test` at `b94f876`: **1835 tests, 1833 pass, 2 skipped, 0 fail**
+  --workspace-concurrency=1 test` at `6e7ddb7`: **1835 tests, 1833 pass, 2 skipped, 0 fail**
   (`TEST_RC=0`) across the 25 packages that declare a test script. The three corpus-sized tests
-  measured 1075.8 s (five stacks), 258.5 s (fresh-clone baseline) and 178.3 s (calibrate) — all
-  inside the 1800 s, 600 s and 450 s caps. Round 5's run at `098cc44` was 1819 tests; the 16 new
+  measured 1057.8 s (five stacks), 256.1 s (fresh-clone baseline) and 175.4 s (calibrate) — all
+  inside the 1800 s, 600 s and 450 s caps. (A first pass ran this suite while the Linux container
+  was also running and measured 1244.2 s, 350.0 s and 242.1 s; the counts were the same, and the
+  suite was re-run alone for the figures above.) Round 5's run at `098cc44` was 1819 tests; the 16 new
   ones are R6-H1's six (five contamination tests and the gate's refusal), R6-H2's two
   duplicate-guard tests, R6-M1's six, R6-L1's posterior test and R6-L2's splits test.
 - **Linux (node 22.23.4, `node:22` container)** — `pnpm install --frozen-lockfile`, `pnpm -r
-  build`, then the same serial command over a `git archive` of `b94f876`: `INSTALL_RC=0`,
-  `BUILD_RC=0`, `TEST_RC=0`, **1835 tests, 1833 pass, 2 skipped, 0 fail**, zero `not ok` lines.
-  Every count agrees with macOS; the three corpus-sized tests measured 465.9 s, 112.1 s and
-  74.7 s there. The container renders its summary marker as ASCII `#` and its test names as TAP,
-  which is the only difference in the logs.
+  build`, then the same serial command over a fresh `git archive` of `6e7ddb7`, run alone:
+  `INSTALL_RC=0` (55 s), `BUILD_RC=0` (25 s), `TEST_RC=0` (544 s), **1835 tests, 1833 pass,
+  2 skipped, 0 fail**, zero `not ok` lines. Every count agrees with macOS; the three corpus-sized
+  tests measured 463.8 s, 111.3 s and 75.2 s there. (As on macOS, a first pass ran beside the
+  other host's suite and measured 760.0 s, 191.0 s and 134.1 s; same counts, re-run alone for the
+  figures above.) The container renders its summary marker as ASCII `#` and its test names as
+  TAP, which is the only difference in the logs.
 - **Guards** — `check:test-scripts`, `check:build-output`, `check:workspace-deps`, `check:doc-refs`
   and the new `check:heldout-duplicates` all pass; the duplicate guard compares 57 held-out/pool
   tasks against 59 train tasks and reports the closest unrelated file pair at 0.821, below its 0.9
