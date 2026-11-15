@@ -1747,3 +1747,23 @@ the temp directory — the first version of this test — sees their directories
 Linux for that reason alone (round 7, before the branch was pushed); asking about the directory *this*
 check named has no such race. The mode assertion kills the mode mutant, the disappearance the leak
 mutant — both are observed red in the round-7 verification section.
+
+### R7-L5 (D-57) — the probe prints the exact probability beside the rounded one
+
+The probe's decision is made on `printedProbability`, the exact posterior probability rounded to two
+decimals. That is deliberate — 0.796852 is below the 0.80 bar, but "0.80" is what an operator reads
+and what a script compares — yet the rounded figure was the *only* one in the statement, so a reader
+could not tell 0.795 from 0.804. The statement now prints the exact value in parentheses beside it:
+
+```
+the chance it reaches the 20-task floor is 0.80 (exact 0.796852), against the 0.80 a full
+calibration needs — clears it
+```
+
+That example is the finding's own case: the decision clears on the rounded figure while the exact
+value is just under the bar, and both are now visible. `printedProbability`'s doc says the exact
+figure is printed beside it, and the golden calibrate test's regex is widened to require the exact
+part (0.0018 printed as 0.00 for the ten-task probe).
+
+The other half of R6-L5 — the `corpusSha.ts` line ranges declared in the PR body — is a declaration
+correction, made there rather than in the tree.

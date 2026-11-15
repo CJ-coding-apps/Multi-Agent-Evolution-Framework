@@ -297,7 +297,8 @@ test('--probe measures a seeded sample, writes only calibration-probe.json, and 
     // R6-L1: no qualifier in ten is a 0.0018 chance of reaching 20, printed 0.00.
     assert.match(stdout, /The sample holds 0 qualifiers/);
     assert.match(stdout, /puts the pool's count at 0–8 \(80% interval/);
-    assert.match(stdout, /chance it reaches the 20-task floor is 0\.00, against the 0\.80 a full calibration needs — below it/);
+    // R7-L5: the exact figure is printed beside the rounded one the decision uses.
+    assert.match(stdout, /chance it reaches the 20-task floor is 0\.00 \(exact 0\.001\d+\), against the 0\.80 a full calibration needs — below it/);
     assert.match(stderr, /a 0\.00 chance the pool reaches the 20-task floor, below the 0\.80 a full calibration needs — do not pay for it yet/);
     assert.match(stderr, /splits\.json and calibration\.json are unchanged/);
 

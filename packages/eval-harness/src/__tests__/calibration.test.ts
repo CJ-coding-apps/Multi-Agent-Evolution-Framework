@@ -193,7 +193,9 @@ test('R5-P5: the projection scales the sample with the rule', () => {
   assert.equal(p.posteriorMean.toFixed(2), '20.67');
   assert.match(p.statement, /The sample holds 4 qualifiers/);
   assert.match(p.statement, /puts the pool's count at 13–29 \(80% interval, mean 20\.7\)/);
-  assert.match(p.statement, /chance it reaches the 20-task floor is 0\.56, against the 0\.80 a full calibration needs — below it/);
+  // R7-L5: the exact figure is printed beside the rounded one the decision uses, so a reader can
+  // see the 0.56 is 0.557165 and not, say, 0.5649.
+  assert.match(p.statement, /chance it reaches the 20-task floor is 0\.56 \(exact 0\.557165\), against the 0\.80 a full calibration needs — below it/);
 
   // A weaker sample: 2 partial of 10 projects 10 partial, the cap allows 5, and the point figure is
   // 15. Three qualifiers in ten is a 0.2897 chance of reaching 20.
@@ -221,6 +223,10 @@ test('R5-P5: the projection scales the sample with the rule', () => {
   assert.equal(five.printedProbability, 0.8);
   assert.deepEqual(five.interval, { low: 17, high: 33, level: 0.8 });
   assert.equal(five.clears, true, 'the printed figure is the decision, and "5 of 10" is the bar');
+  // R7-L5: this is the case the finding is about — the printed 0.80 clears, and the exact value it
+  // rounds from is below the bar. Both are printed, so the operator sees the narrowness.
+  assert.match(five.statement,
+    /chance it reaches the 20-task floor is 0\.80 \(exact 0\.796852\), against the 0\.80 a full calibration needs — clears it/);
 
   // A projection is arithmetic over a sample; it refuses to speak for a pool smaller than the
   // sample, or for an empty measurement.

@@ -290,7 +290,10 @@ export interface CalibrationProbeProjection {
   interval: { low: number; high: number; level: number };
   /** R6-L1: exact P(pool qualifying count >= the yardstick floor). */
   probabilityReachesYardstick: number;
-  /** R6-L1: that probability as printed (two decimals) — the figure the decision uses. */
+  /**
+   * R6-L1: that probability as printed (two decimals) — the figure the decision uses. The statement
+   * prints the exact probability beside it, so a rounded figure never stands alone.
+   */
   printedProbability: number;
   /** R6-L1: the floor the probability is about (`CALIBRATION_MIN_SELECTED`). */
   yardstick: number;
@@ -386,7 +389,8 @@ export function projectProbe(
     `${sampledQualifying} qualifier${sampledQualifying === 1 ? '' : 's'}, so the posterior puts the pool's ` +
     `count at ${posterior.interval.low}–${posterior.interval.high} (${percent}% interval, mean ` +
     `${posterior.mean.toFixed(1)}); the chance it reaches the ${yardstick}-task floor is ` +
-    `${printedProbability.toFixed(2)}, against the ${confidence.toFixed(2)} a full calibration needs — ` +
+    `${printedProbability.toFixed(2)} (exact ${posterior.probabilityReachesYardstick.toFixed(6)}), ` +
+    `against the ${confidence.toFixed(2)} a full calibration needs — ` +
     (clears ? 'clears it' : 'below it');
 
   return {
