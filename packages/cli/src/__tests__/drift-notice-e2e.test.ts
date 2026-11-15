@@ -226,6 +226,9 @@ async function miniCorpus(root: string): Promise<string> {
   const corpus = path.join(root, 'corpus');
   await mkdir(path.join(corpus, 'fixtures'), { recursive: true });
   await cp(path.join(SEED, 'fixtures', 'coder-sum'), path.join(corpus, 'fixtures', 'coder-sum'), { recursive: true });
+  // R7-H2: a `test-script` verifier is scored against the store's expectations, so a copied task
+  // without a store is a task that fails closed. The seed store holds coder-sum's entry.
+  await cp(path.join(SEED, 'hidden-store.json'), path.join(corpus, 'hidden-store.json'));
   const tasks = JSON.parse(await readFile(path.join(SEED, 'corpus.json'), 'utf8')) as Array<{ id: string }>;
   const first = tasks[0];
   assert.ok(first, 'the seed corpus has a task');

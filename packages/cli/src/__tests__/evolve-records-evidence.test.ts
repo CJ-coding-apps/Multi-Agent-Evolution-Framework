@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
@@ -91,6 +91,11 @@ async function project(): Promise<Project> {
       );
     }
   }
+  // R7-H2: coder-sum's `test-script` is scored against the store's expectations. Without the store
+  // every task fails closed, and the run this test measures records a failure it did not cause.
+  // The five held-out twins deliberately have no entries: they are never dispatched, and a task
+  // that fails closed on both sides of the gate leaves the scores identical, as the split needs.
+  await cp(path.join(SEED, 'hidden-store.json'), path.join(corpus, 'hidden-store.json'));
   const corpusJson = JSON.parse(await readFile(path.join(SEED, 'corpus.json'), 'utf8')) as Array<Record<string, unknown>>;
   const task = corpusJson.find((t) => t['id'] === 'coder-sum');
   assert.ok(task, 'the seed corpus has coder-sum');

@@ -103,6 +103,8 @@ test('a poisoned project graph and an earlier attempt\'s memory never reach the 
     await cp(path.join(REPO, '.maf/policy.yaml'), path.join(root, '.maf/policy.yaml'));
     const corpus = path.join(root, 'corpus');
     await cp(path.join(SEED, 'fixtures/coder-sum'), path.join(corpus, 'fixtures/coder-sum'), { recursive: true });
+    // R7-H2: the check is scored against the store's expectations, so the corpus needs the store.
+    await cp(path.join(SEED, 'hidden-store.json'), path.join(corpus, 'hidden-store.json'));
     await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([{
       id: 'coder-sum', repoFixture: 'fixtures/coder-sum', prompt, role: 'coder',
       verifiers: [{ kind: 'test-script', command: 'node', args: ['test.js'], expectExit: 0 }],
@@ -162,6 +164,8 @@ test('L1-S7: a goldens task\'s security-gate call reaches the suite bundle', nee
     await cp(path.join(REPO, '.maf/policy.yaml'), path.join(root, '.maf/policy.yaml'));
     const corpus = path.join(root, 'corpus');
     await cp(path.join(SEED, 'fixtures/coder-sum'), path.join(corpus, 'fixtures/coder-sum'), { recursive: true });
+    // R7-H2: the check is scored against the store's expectations, so the corpus needs the store.
+    await cp(path.join(SEED, 'hidden-store.json'), path.join(corpus, 'hidden-store.json'));
     await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([{
       id: 'coder-sum', repoFixture: 'fixtures/coder-sum', prompt, role: 'coder',
       verifiers: [{ kind: 'test-script', command: 'node', args: ['test.js'], expectExit: 0 }],
