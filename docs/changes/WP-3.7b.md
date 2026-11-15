@@ -1710,7 +1710,7 @@ verdict rests on — `hidden-store.json` (the checks, references and expectation
 `splits.json` (which tasks are held out) and `calibration.json` (the measurement the yardstick
 derives from). A verdict read afterwards would be about a corpus nobody measured.
 
-The mitigation is a tripwire rather than a fence, because there is no sandbox until 0.7.0,
+The mitigation is a tripwire rather than a fence. There is no sandbox until 0.7.0, so
 `maf evolve` fingerprints those three files' bytes at session start (`fingerprintCorpus`,
 `@maf/eval-harness`; sha256 per file, `null` when absent, so a file that appears mid-session is a
 change too). The held-out gate asks `verifyHeldOutCorpus` once, before the first repeat is projected
@@ -1767,3 +1767,48 @@ part (0.0018 printed as 0.00 for the ten-task probe).
 
 The other half of R6-L5 — the `corpusSha.ts` line ranges declared in the PR body — is a declaration
 correction, made there rather than in the tree.
+
+## Round 7 verification
+
+Measured at `f8cd7da` (the code tip; this commit adds this section), each suite run alone, after
+`pnpm install --frozen-lockfile` and a full `pnpm -r build`.
+
+- **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
+  --workspace-concurrency=1 test`: **1853 tests, 1851 pass, 2 skipped, 0 fail** (`TEST_RC=0`) across
+  the 25 packages that declare a test script, 1478 s wall. The three corpus-sized tests measured
+  **1221.0 s** (five stacks), **320.1 s** (fresh-clone baseline) and **225.3 s** (calibrate) — inside
+  the 1800 s, 600 s and 450 s caps. Round 6's run at `6e7ddb7` was 1835 tests; the 18 new ones are
+  R7-H2's seven boundary tests (`hidden-check-boundary.test.ts`), R7-H2b's three store-name tests,
+  R7-M1's renamed-copy test, R7-L1's four corpus-guard tests and one evolver test, R7-L2's one
+  runner test and R7-L3's one CLI test.
+- **Linux (node 22.23.4, `node:22` container)** — over a fresh `git archive` of the same tree, run
+  alone: `pnpm install --frozen-lockfile` **RC 0** (25.6 s), `pnpm -r build` **RC 0**, the same
+  serial test command **RC 0** (795 s total): **1853 tests, 1851 pass, 2 skipped, 0 fail**, zero
+  `not ok` lines. The corpus-sized tests measured **627.2 s**, **181.1 s** and **123.0 s**. The
+  logs differ only in the per-suite summary marker — `# tests 311` on Linux against `ℹ tests 311`
+  on macOS — because the container has no UTF-8 locale; the test stream is TAP on both.
+- **One defect found by the Linux run and fixed before the push.** The first Linux run — over the
+  pre-fix tip, since the branch was not yet pushed — was red on R7-L2 alone. The test listed
+  `tmpdir()` before and after its own attempt and treated any new `maf-score-*` directory as a leak;
+  while it ran, a *different* test file in the same package was scoring, and its directory appeared
+  in the window. macOS had passed by timing. The test now asks about the exact directory its own
+  check names (the check writes that path to a witness file the test owns), which has no such race;
+  the rewrite is inside the R7-L2 commit because one commit per item forbids a follow-up, and the
+  first version never reached a pushed commit. It was re-measured on macOS three times green, and
+  both hosts were re-run at the fixed tip for the figures above.
+- **Guards** (all pass): `check:test-scripts` 25/27 (the same two packages have no tests yet);
+  `check:build-output` 27/27; `check:workspace-deps` 27 packages, 94 internal edges, acyclic;
+  `check:doc-refs` OK (two named exemptions, WORKFLOW.md in the target project);
+  `check-heldout-duplicates.mjs` compares 57 held-out/pool tasks against 59 train tasks — no shared
+  file hash, normalized-code hash, hidden check or reference, the strongest identifier-normalized
+  token similarity **0.759**, below the 0.85 floor, with six pairs in the advisory 0.7–0.85 band and
+  named; `check:package`: **220 files**, installed and run, `goldens solved 60/116`.
+- **Mutants** (applied to the compiled `dist/`, observed red, reversed; every restored file compared
+  byte-for-byte by sha256 — `GoldenRunner.js` `9a22cdf1…`, `loop.js` `b66a1c5e…`, `evolve.js`
+  `13759b7f…`, `calibration.js` `1e02e75a…`, `corpusGuard.js` `0d190a67…`): the scoring directory
+  created 0755 reddens R7-L2, and so does skipping its removal (re-measured after the rewrite);
+  removing the gate's `verifyHeldOutCorpus` call reddens the R7-L1 evolver test; removing the
+  `keySource: "dev"` refusal reddens the R7-L3 CLI test; removing the exact probability from the
+  probe statement reddens the R5-P5 projection test; making `changedCorpusFiles` always return
+  empty reddens two of the four corpus-guard tests. The round-7 code mutants (R7-H2b's literal-name
+  scan, R7-M1's identifier normalization) were recorded with their commits.
