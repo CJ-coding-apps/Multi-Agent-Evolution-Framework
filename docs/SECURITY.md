@@ -864,7 +864,11 @@ and listed in the session report; **one contaminated attempt in a held-out gate 
 gate refuse an improvement claim**, whatever the counts say. This catches a read that reaches the
 record and stops casual snooping. It cannot see a program that reads the material and never lets the
 text reach any surface maf records — that remains out of scope until the sandbox exists, stated here
-rather than implied.
+rather than implied. The same access lets it **modify** rather than read: a train attempt runs with
+your write permission, so `hidden-store.json`, `splits.json` and `calibration.json` can be rewritten
+while a session is open. maf fingerprints all three when the session starts and refuses to score the
+held-out split if any of them changed — a verdict from a corpus that moved is about a yardstick
+nobody measured.
 
 **The check is judged in a process the solution does not run in.** A check that runs beside the
 solution cannot judge it: a module that overwrites `node:assert`'s functions passes every check

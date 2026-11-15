@@ -1243,6 +1243,11 @@ a tool call, the transcript, the worktree — and stops casual snooping; it cann
 reads the material and never lets the text reach a recorded surface. That remains out of scope until
 0.7.0.
 
+**And it can write, not only read.** A train attempt runs with your permission, so `hidden-store.json`,
+`splits.json` and `calibration.json` can be rewritten while a session is open. `maf evolve`
+fingerprints all three when the session starts and refuses to score the held-out split if any changed
+(R7-L1) — a verdict from a corpus that moved is about a yardstick nobody measured.
+
 **One byte, written as an escape.** The separator between task id and path in a canary token was
 pasted as a literal U+0000 byte. The compiled code, and every committed canary, was right — but a
 single NUL makes git classify the file as binary, so the new module (`hiddenStore.ts`) appeared in
