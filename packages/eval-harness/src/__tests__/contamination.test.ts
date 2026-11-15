@@ -112,6 +112,47 @@ test('a canary in a tool call\'s stdout voids the attempt', async () => {
   });
 });
 
+test('a tool call\'s input naming the store voids the attempt', async () => {
+  await withCorpus(async (root) => {
+    // R7-H2b: a script that goes after the store by name appears first in the call that ran it.
+    const surfaces = async (): Promise<RecordedSurface[]> => [
+      { label: 'tool test.run input', text: '{"command":"node","args":["probe.js"]}' },
+      { label: 'tool fs.write input', text: `{"path":"probe.js","content":"read('${HIDDEN_STORE_FILE}')"}` },
+    ];
+    const result = await runner(root, async (workDir) => { await fix(workDir); return 'done'; }, surfaces).run();
+    const attempt = only(result);
+    assert.equal(attempt.passed, false);
+    assert.match(attempt.contaminated?.evidence.join('\n') ?? '', /test\.run input|fs\.write input/);
+  });
+});
+
+test('a script left in the worktree that names the store voids the attempt', async () => {
+  await withCorpus(async (root) => {
+    // The literal-name case the round-7 brief closes: the record may be gone, the artifact is not.
+    const result = await runner(root, async (workDir) => {
+      await fix(workDir);
+      await writeFile(path.join(workDir, 'probe.js'),
+        "const fs = require('node:fs');\nfs.readFileSync('tests/goldens/" + HIDDEN_STORE_FILE + "');\n", 'utf8');
+      return 'done';
+    }).run();
+    const attempt = only(result);
+    assert.equal(attempt.passed, false);
+    assert.match(attempt.contaminated?.evidence.join('\n') ?? '', new RegExp(`${HIDDEN_STORE_FILE} in the file probe\\.js`));
+  });
+});
+
+test('a script left in the worktree that names the hidden directories voids the attempt', async () => {
+  await withCorpus(async (root) => {
+    const result = await runner(root, async (workDir) => {
+      await fix(workDir);
+      await writeFile(path.join(workDir, 'probe.js'), "readFileSync('fixtures/pool-lru/.checks/test.js')\n", 'utf8');
+      return 'done';
+    }).run();
+    assert.equal(only(result).passed, false);
+    assert.match(only(result).contaminated?.evidence.join('\n') ?? '', /\.checks\/ in the file probe\.js/);
+  });
+});
+
 test('the store\'s own name in the record voids the attempt', async () => {
   await withCorpus(async (root) => {
     const result = await runner(root, async (workDir) => {

@@ -1561,3 +1561,22 @@ and solved is unchanged at 60/116. The reference proof passes through the bounda
 **Mutant.** Judging the check with the solution's own `node:assert` — the two interception lines in
 the compiled driver bypassed, `dist/hiddenCheck.js:219-220` — reddens 6 of the 7 boundary tests,
 the assert-disabling one among them; the restored file compared byte-for-byte.
+
+### R7-H2b (D-57) — a script that names the store is caught by the name
+
+Round 6 scanned for the canary and for the store's file name; the round-6 verifier still decoded the
+store and copied an answer out, because its script built the name at run time and the read's text
+never reached a recorded surface. Decoding is the stated residual until 0.7.0. The *literal* name is
+not: a script written as `hidden-store.json`, or a path under `.checks/` or `.reference/`, is
+recorded wherever it appears.
+
+The marker list is now the canary prefix, `hidden-store.json`, `.checks/` and `.reference/` (with the
+trailing separator, so an ordinary identifier `checks` does not trip it). The surfaces were already
+the ones the brief names and are now pinned by tests: a tool call's **input** — where a `test.run`
+command or an `fs.write`'s content lives — and its stdout/stderr; the transcript; the final answer;
+and the worktree, both every path and every file's text. Three tests are added to
+`contamination.test.ts`: a `test.run`/`fs.write` input naming the store voids the attempt; a script
+left in the worktree that reads `hidden-store.json` voids it (the artifact outlives the record); and
+one that names `fixtures/pool-lru/.checks/test.js` voids it. A name the code builds while running —
+`['hidden','store.json'].join('-')` or any equivalent — stays the stated residual, and the
+`docs/SECURITY.md` paragraph keeps saying so.
