@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -136,6 +136,64 @@ test('runner: a hidden check is absent from the agent worktree and runs for scor
     assert.deepEqual(r.solvedTaskIds, ['t-hello'], 'the scorer materialized the check and it passed');
     assert.equal(r.tasks[0]?.attempts[0]?.outcomes[0]?.passed, true);
   });
+});
+
+// R7-L2 (round-6 finding R6-L2): two guarantees about the scoring directory had no test, and the
+// mutants that broke them survived — a directory left behind after an attempt, and one created
+// world-readable. Both are asserted here from the scored side: the check reads the mode of the
+// directory that holds it (the parent of the scoring copy's cwd), and writes that directory's path
+// to a witness file the test owns. The test asks about *its own* directory, not about the temp
+// directory in general: other test files score concurrently, so a before/after listing of `tmpdir`
+// sees their directories too and fails on a busy host (observed on Linux, round 7).
+test('R7-L2: the scoring directory is private while a check runs and gone afterwards', async () => {
+  const witnessDir = await mkdtemp(path.join(tmpdir(), 'maf-witness-'));
+  try {
+    const witness = path.join(witnessDir, 'scoring-root.txt');
+    await withCorpus(async (root) => {
+      const task: GoldenTask = {
+        ...TASK,
+        hiddenChecks: ['.checks/check.js'],
+        verifiers: [{ kind: 'test-script', command: 'node', args: ['check.js'], expectExit: 0 }],
+      };
+      const check = [
+        "const assert = require('node:assert');",
+        "const fs = require('node:fs');",
+        "const path = require('node:path');",
+        "const dir = path.join(process.cwd(), '..');",
+        `fs.writeFileSync(${JSON.stringify(witness)}, dir);`,
+        "assert.equal(fs.statSync(dir).mode & 0o777, 0o700);",
+      ].join('\n');
+      await writeFile(path.join(root, HIDDEN_STORE_FILE), JSON.stringify({
+        version: HIDDEN_STORE_VERSION, encoding: 'gzip+base64',
+        checks: { [task.id]: { '.checks/check.js': encodeHidden(injectCanary(check, task.id, '.checks/check.js')) } },
+        references: {},
+        expectations: {
+          [task.id]: { '.checks/check.js': encodeHidden(JSON.stringify([{ op: 'equal', loose: true, e: 0o700 }])) },
+        },
+      }), 'utf8');
+      await writeFile(path.join(root, 'corpus.json'), JSON.stringify([task]), 'utf8');
+
+      const runner = new GoldenRunner({
+        corpusRoot: root, harnessSha: 'd'.repeat(64), harnessId: 'h4', adapter: 'stub', attempts: 1,
+        dispatch: async (_t, workDir) => {
+          await writeFile(path.join(workDir, 'impl.js'), 'exports.value = () => 42;\n', 'utf8');
+          return 'wrote impl';
+        },
+      });
+      const r = await runner.run();
+
+      assert.deepEqual(r.solvedTaskIds, ['t-hello'],
+        'the check saw a 0700 directory and passed; a 0755 one would fail it');
+      assert.equal(r.tasks[0]?.attempts[0]?.outcomes[0]?.passed, true);
+      const scoringRoot = (await readFile(witness, 'utf8')).trim();
+      assert.match(path.basename(scoringRoot), /^maf-score-/,
+        'the check ran inside the scoring directory it named');
+      await assert.rejects(access(scoringRoot), { code: 'ENOENT' },
+        'the decoded material is removed with its directory in the `finally`');
+    });
+  } finally {
+    await rm(witnessDir, { recursive: true, force: true });
+  }
 });
 
 test('runner: isolation — fixture copies get fresh working dirs per attempt', async () => {

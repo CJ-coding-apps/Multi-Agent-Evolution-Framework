@@ -1730,3 +1730,20 @@ an absent-everything corpus report nothing; a rewritten `splits.json` is named a
 `CorpusChangedError` with the file and the remedy; a file that appears or disappears is a change,
 and two changed files are named in order. `evolver.test.ts` (1): with the guard throwing, a session
 that shipped a candidate reports the refusal, no verdict, and runs zero held-out attempts.
+
+### R7-L2 (D-57) — the scoring directory is private while it exists and gone when the attempt ends
+
+The plaintext checks are decoded into a `mkdtemp` directory, chmod-ed 0700, and removed in a
+`finally`. Round 6 found that neither the mode nor the cleanup was asserted anywhere: a mutant that
+created the directory world-readable, or one that skipped the removal, stayed green. Both are now
+asserted from the side that can see them.
+
+The check runs in `scoringRoot/repo`, so its own `process.cwd()`'s parent *is* the scoring directory:
+it `statSync`es it and reports the mode through the ordinary expectation channel (the store's
+expectation for that check is `0o700`), and writes that directory's path to a witness file the test
+owns. After the run the test reads the path back and asserts it no longer exists. The witness is what
+makes the second assertion precise: other test files score concurrently, so a before/after listing of
+the temp directory — the first version of this test — sees their directories too and went red on
+Linux for that reason alone (round 7, before the branch was pushed); asking about the directory *this*
+check named has no such race. The mode assertion kills the mode mutant, the disappearance the leak
+mutant — both are observed red in the round-7 verification section.
