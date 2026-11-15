@@ -1302,9 +1302,13 @@ every train task and reports a finding when they share:
   `module.exports` is boilerplate, not a copy.
 
 `scripts/check-heldout-duplicates.mjs` runs it over the committed corpus, lists every finding and
-exits 1; `pnpm check:heldout-duplicates` is a CI step beside the other guards. On the current
-corpus it compares 57 held-out/pool tasks against 59 train tasks and reports the closest unrelated
-file pair at 0.821, below the 0.9 floor.
+exits 1; it is a manual tool. The guard runs in CI through
+`packages/eval-harness/src/__tests__/heldoutDuplicates.test.ts`, which the default
+`pnpm -r test` in the build workflow executes (`@maf/eval-harness`'s test script is
+`node --test dist/__tests__/*.test.js`). R7-H1 reverted the `check:heldout-duplicates` npm script
+and the workflow step that had been added without an exception; neither is needed for the guard to
+run. On the current corpus it compares 57 held-out/pool tasks against 59 train tasks and reports
+the closest unrelated file pair at 0.821, below the 0.9 floor.
 
 The guard found one pre-existing pair on its first run: `pool-slugify/slug.js` was byte-identical
 to `train-title-case/title.js` — a shared starter stub, not a copied task, since the two prompts,
@@ -1470,10 +1474,12 @@ about the rule.
   other host's suite and measured 760.0 s, 191.0 s and 134.1 s; same counts, re-run alone for the
   figures above.) The container renders its summary marker as ASCII `#` and its test names as
   TAP, which is the only difference in the logs.
-- **Guards** — `check:test-scripts`, `check:build-output`, `check:workspace-deps`, `check:doc-refs`
-  and the new `check:heldout-duplicates` all pass; the duplicate guard compares 57 held-out/pool
-  tasks against 59 train tasks and reports the closest unrelated file pair at 0.821, below its 0.9
-  floor. `check:package`: **220 files**, installed and run, `goldens solved 60/116` (round 5's row
+- **Guards** — `check:test-scripts`, `check:build-output`, `check:workspace-deps` and
+  `check:doc-refs` all pass. The duplicate guard compares 57 held-out/pool tasks against 59 train
+  tasks and reports the closest unrelated file pair at 0.821, below its 0.9 floor. (R7-H1 removed
+  the `check:heldout-duplicates` npm script and the workflow step that round 6 listed here: both
+  were added without CJ's exception, and the guard runs through its own test in the default suite,
+  so neither is needed.) `check:package`: **220 files**, installed and run, `goldens solved 60/116` (round 5's row
   read 342; the plaintext `.checks/` and `.reference/` trees are gone from the package, replaced by
   the one encoded store).
 - **Mutants** — five round-6 mechanisms were broken on the compiled `dist/`, observed red, and
