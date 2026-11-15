@@ -1719,7 +1719,7 @@ or paid for; a `CorpusChangedError` naming the changed files is reported as
 no `gate`, and no held-out run. The train half of the session is unaffected: the guard is the gate's,
 and it answers the gate's question.
 
-The SECURITY.md residual — *Hidden evaluation material is detected, not sandboxed* — and the D-57
+The `docs/SECURITY.md` residual — *Hidden evaluation material is detected, not sandboxed* — and the D-57
 paragraph above now say "read **or modify**" and state the tripwire beside the thing it cannot do:
 it catches a corpus that moved between the two checks, not one edited and restored in between
 (a content-addressed store would still match only if the bytes match, so an edit and an exact
@@ -1770,7 +1770,8 @@ correction, made there rather than in the tree.
 
 ## Round 7 verification
 
-Measured at `f8cd7da` (the code tip; this commit adds this section), each suite run alone, after
+Measured at `f8cd7da`, where the suites ran; the commits after it add this section and correct
+two doc references, and touch no executable line. Each suite was run alone, after
 `pnpm install --frozen-lockfile` and a full `pnpm -r build`.
 
 - **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail

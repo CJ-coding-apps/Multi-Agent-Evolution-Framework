@@ -29,7 +29,7 @@ import { toolEnv } from '@maf/types';
  * loads, and writes each observation to a private pipe as it is made.
  *
  * This is a boundary, not a sandbox. A solution that deliberately tampers with the driver's own
- * process (rather than with the check it is meant to help) is the residual D-57 and SECURITY.md
+ * process (rather than with the check it is meant to help) is the residual D-57 and `docs/SECURITY.md`
  * state; the 0.7.0 sandbox is where that ends.
  */
 
