@@ -189,6 +189,23 @@ export function registerEvolveCommand(program: Command, deps: EvolveDeps = {}): 
         return;
       }
 
+      // R7-L3 (round-6 finding R6-L3): the signature is only evidence if its key is private. A
+      // record signed with the public development key verifies on every machine — that is what lets
+      // a calibration run where no key is set — but anyone can recompute that signature, so the
+      // counts are as editable as the sha they were meant to replace. The gate is the one consumer
+      // whose verdict is a generalisation claim; it refuses such a measurement rather than score
+      // it, and says which key it needs.
+      if (splits.calibration?.keySource === 'dev') {
+        console.error(
+          '[maf] evolve: calibration.json is signed with the public development key ' +
+          '(keySource "dev"), so anyone could have rewritten its counts. Set MAF_SIGNING_KEY to the ' +
+          'private key the calibration was signed with — the same key `maf goldens calibrate` ran ' +
+          'under — and re-run; nothing was opened or paid for.',
+        );
+        process.exitCode = 2;
+        return;
+      }
+
       // The scripted stand-in is built from this corpus's scripts (D-14). The registry's bare
       // `scripted` adapter has no scripts, so `evolve --adapter scripted` could not answer its own
       // first task. Only that bare one is replaced: a caller-injected adapter (a test's map, or a

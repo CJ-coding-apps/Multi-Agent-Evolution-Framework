@@ -1674,3 +1674,25 @@ regenerated and solved is unchanged at 60/116 — every pool task still fails by
 (`dist/heldoutDuplicates.js:112`) reddens the renamed-copy test and leaves the other two green;
 setting the shared-gram floor to 0 reddens the corpus test with identical starter pairs at 1.000.
 Each mutant file was restored and compared byte-for-byte with the build's own output.
+
+### R7-L3 (D-57) — a dev-signed calibration does not open the gate
+
+The round-6 signature made an altered record detectable, but only under a key the reader has. With
+`MAF_SIGNING_KEY` unset, signer and verifier both fall back to the public development key, which is
+in this repository: anyone can recompute a signature over counts they wrote. The round-6 paragraph
+said a dev-signed record is "still verifiable — that is what makes a calibration runnable on a
+machine with no key", and that remains true of the loader; it is false of the gate, whose verdict is
+the generalisation claim the signature exists to protect.
+
+`maf evolve` now refuses a split whose committed calibration names `keySource: "dev"`, before the
+stack is built and before anything is paid for. The message says what to do: set
+`MAF_SIGNING_KEY` to the private key `maf goldens calibrate` ran under, and re-run. A calibration
+made on a machine with no key is still a usable measurement for `goldens run` and for reading the
+corpus locally; it is not evidence for a held-out verdict. `signCalibration`'s comment is corrected
+the same way: "a key the editor does not have" holds only when `MAF_SIGNING_KEY` is set.
+
+**Tests.** `eval-commands.test.ts`: a corpus calibrated with the development key, with
+`MAF_SIGNING_KEY` unset for the run, exits 2 with the message (naming `keySource "dev"` and
+`MAF_SIGNING_KEY`) and reaches no stack. The shared `calibrateSplitForTest` fixture now signs with a
+throwaway key it exports to the test process unless a test asks for `keySource: 'dev'`, so every
+other evolve test still reaches the subject it is about.

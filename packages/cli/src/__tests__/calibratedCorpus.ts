@@ -3,6 +3,14 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { CALIBRATION_RULE, selectCalibrated, signCalibration } from '@maf/eval-harness';
 import type { CalibrationUsage } from '@maf/eval-harness';
+import { DEV_SIGNING_KEY } from '@maf/attestation';
+
+/**
+ * R7-L3: `maf evolve`'s held-out gate refuses a measurement signed with the public development
+ * key, so a fixture that wants the gate to reach its own subject must sign with a key of its own.
+ * This is a test key, exported to the process so `loadSplits` verifies under it and names it `env`.
+ */
+const TEST_SIGNING_KEY = 'wp-3.7b-test-signing-key';
 
 /**
  * R5-P3 test fixture: give a corpus the calibration record its `heldOut` must be derived from.
@@ -17,7 +25,7 @@ import type { CalibrationUsage } from '@maf/eval-harness';
  */
 export async function calibrateSplitForTest(
   corpusRoot: string,
-  opts: { usage?: CalibrationUsage; adapter?: string } = {},
+  opts: { usage?: CalibrationUsage; adapter?: string; keySource?: 'env' | 'dev' } = {},
 ): Promise<void> {
   const splitsPath = path.join(corpusRoot, 'splits.json');
   const splits = JSON.parse(await readFile(splitsPath, 'utf8')) as {
@@ -25,15 +33,21 @@ export async function calibrateSplitForTest(
     preRegistration: Record<string, unknown>;
   };
   const counts = splits.heldOut.map((taskId) => ({ taskId, passes: 1, attempts: 3 }));
-  // R6-L2: `loadSplits` refuses an unsigned measurement, so the fixture signs with the same
-  // default the command uses (the development key, since the environment names none).
+  // R6-L2: `loadSplits` refuses an unsigned measurement. R7-L3: it also has to be signed with a key
+  // of the fixture's own, because `maf evolve`'s gate refuses a dev-signed record; the key is
+  // exported to the process so the loader verifies under the same one. `keySource: 'dev'` is for
+  // the one test that proves the refusal.
+  if (opts.keySource !== 'dev') process.env['MAF_SIGNING_KEY'] ??= TEST_SIGNING_KEY;
+  const signing = opts.keySource === 'dev'
+    ? { secret: DEV_SIGNING_KEY }
+    : { secret: process.env['MAF_SIGNING_KEY'] };
   const record = signCalibration({
     version: 1, harnessId: 'test-fixture', harnessSha: 'a'.repeat(64),
     adapter: opts.adapter ?? 'scripted', runs: 3,
     ranAt: '2026-11-13T00:00:00.000Z', splitsSha: 'test-fixture', rule: CALIBRATION_RULE,
     tasks: counts, errors: [], selection: selectCalibrated(counts),
     ...(opts.usage !== undefined ? { usage: opts.usage } : {}),
-  });
+  }, signing);
   const text = `${JSON.stringify(record, null, 2)}\n`;
   await writeFile(path.join(corpusRoot, 'calibration.json'), text, 'utf8');
   splits.preRegistration['calibrationSha'] = createHash('sha256').update(text, 'utf8').digest('hex');

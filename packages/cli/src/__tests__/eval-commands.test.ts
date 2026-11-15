@@ -38,7 +38,9 @@ const STOP = 'stopped where the stack is built';
 type StackConfig = Parameters<typeof wiring.buildRunStack>[0];
 
 /** What a fresh clone has under .maf/: the committed roles, prompts, policy and default harness — no state. */
-async function freshClone(): Promise<{ root: string; defaultSha: string }> {
+async function freshClone(
+  opts: { calibration?: 'env' | 'dev' } = {},
+): Promise<{ root: string; defaultSha: string }> {
   const root = await mkdtemp(path.join(tmpdir(), 'maf-eval-commands-'));
   const from = path.join(REPO, '.maf');
   const to = path.join(root, '.maf');
@@ -52,7 +54,7 @@ async function freshClone(): Promise<{ root: string; defaultSha: string }> {
   // exercisable offline. `goldens run` reads no split and is unaffected.
   const corpus = path.join(root, 'tests', 'goldens');
   await cp(SEED, corpus, { recursive: true });
-  await calibrateSplitForTest(corpus);
+  await calibrateSplitForTest(corpus, opts.calibration !== undefined ? { keySource: opts.calibration } : {});
   return { root, defaultSha: name.slice('default-'.length, -'.json'.length) };
 }
 
@@ -289,6 +291,38 @@ test('maf evolve refuses a split with no calibration behind its heldOut (R5-P3)'
   } finally {
     process.exitCode = saved;
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+// R7-L3 (round-6 finding R6-L3): a signature is evidence only when its key is private. A record
+// signed with the public development key verifies everywhere — that is what lets a calibration run
+// where no key is set — but anyone can recompute it, so the counts are as editable as the sha the
+// signature was meant to replace. `evolve`'s gate refuses such a measurement before anything is
+// opened or paid for.
+test("maf evolve refuses a calibration signed with the public development key (R7-L3)", async (t) => {
+  const savedKey = process.env['MAF_SIGNING_KEY'];
+  delete process.env['MAF_SIGNING_KEY'];
+  const saved = process.exitCode;
+  process.exitCode = 0;
+  let root: string | undefined;
+  try {
+    ({ root } = await freshClone({ calibration: 'dev' }));
+    const { stacks } = stopAtStack(t);
+    const errors: string[] = [];
+    t.mock.method(console, 'error', (...parts: unknown[]) => { errors.push(parts.map(String).join(' ')); });
+    const program = new Command().exitOverride();
+    registerEvolveCommand(program);
+    await program.parseAsync(evolve(root, '--rounds', '1'), { from: 'user' });
+    assert.equal(process.exitCode, 2, 'a dev-signed measurement is refused, non-zero');
+    assert.ok(
+      errors.some((l) => l.includes('keySource "dev"') && l.includes('MAF_SIGNING_KEY')),
+      errors.join('\n'),
+    );
+    assert.deepEqual(stacks, [], 'no stack, no round, no money');
+  } finally {
+    process.exitCode = saved;
+    if (savedKey !== undefined) process.env['MAF_SIGNING_KEY'] = savedKey;
+    if (root !== undefined) await rm(root, { recursive: true, force: true });
   }
 });
 

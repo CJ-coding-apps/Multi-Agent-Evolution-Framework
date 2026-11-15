@@ -498,8 +498,10 @@ export type UnsignedCalibrationRecord = Omit<CalibrationRecord, 'signature'>;
  * development key, which `keySource` then names.
  *
  * The split already pins this record's bytes through `preRegistration.calibrationSha`, but anyone
- * who edits the counts can recompute that sha. The signature is what they cannot recompute: it is
- * the one thing in this corpus that needs a key the editor does not have.
+ * who edits the counts can recompute that sha. The signature is what they cannot recompute — a key
+ * the editor does not have, which holds only when `MAF_SIGNING_KEY` is set: under the public
+ * development key the "key" is in this repository, and `maf evolve`'s gate refuses such a record
+ * rather than score it (R7-L3).
  */
 export function signCalibration(
   record: UnsignedCalibrationRecord, signing: SigningOptions = {},
