@@ -1813,3 +1813,134 @@ two doc references, and touch no executable line. Each suite was run alone, afte
   probe statement reddens the R5-P5 projection test; making `changedCorpusFiles` always return
   empty reddens two of the four corpus-guard tests. The round-7 code mutants (R7-H2b's literal-name
   scan, R7-M1's identifier normalization) were recorded with their commits.
+
+## Round 8 — the round-7 verifier findings
+
+### R8-H1 (D-57) — the child receives calls, not the check
+
+Round 7 moved the check across a process boundary but sent the whole check to the child: the source,
+the expected literals and the store's canary. The verifier wrote a solution that implemented nothing,
+walked its caller frames for the check's source (`fn.caller.arguments[0]`), parsed the expected value
+out of each `assert.equal(cache.get(KEY), VALUE)` and replayed it. It passed, and nothing flagged
+it. The R7-H2 paragraph in `docs/SECURITY.md` — "never sends them anywhere" — was false in exactly
+the way that mattered.
+
+**The check now runs in the checker, always.** `vm.compileFunction('return eval(source)', CHECK_PARAMS,
+{ filename: 'hidden-check.js' })` compiles the check into the checker's realm with a recording
+`node:assert`; the expected values, the comparisons and the canary never leave that process.
+
+**The child receives call descriptions.** A driver (`DRIVER_SOURCE`) in the child process loads the
+solution and answers a small wire protocol: `{k:'call', id, fid, self?, ctor?, args}`, `{k:'get', id,
+target, key}`, `{k:'require', id, spec}`, and `{k:'ret', id, ok, value|error, pending?}` back.
+Arguments and return values cross as values — primitives, arrays, maps, sets, typed arrays, dates,
+regular expressions, errors, and object graphs by identity. A stateful check becomes a sequence of
+calls: the checker issues `new Lru(2)`, `set`, `set`, `set`, `get`, and compares each answer with an
+expectation it holds. A call that returns a thenable answers `pending` and settles later; a check
+callback that returns a thenable gets the mirror protocol, so an async predicate still awaits.
+
+**Signed, and keyed before the solution loads.** The exchange is two append-only files in a private
+session directory (`mkdtemp`, `0700`): `to-child.log` written by the checker, `to-checker.log` by the
+driver, each line `sign(text) + ' ' + text`. The key is an HMAC-SHA256 secret the driver reads once
+from its stdin JSON `{key, dir, repoDir}` before any solution code is loaded. An unsigned or
+badly-signed line is ignored; the driver starts with `--disallow-code-generation-from-strings` and
+`'use strict'`, and its frames have no `arguments`, so the round-7 read has nothing to read even
+inside the driver.
+
+**Tests.** The verifier's exploit, reproduced as `REPLAY_SOLUTION`, fails: assertion 2 sees
+`undefined` where 3 was expected. A second solution scans everything it can see — `process.argv`, the
+environment, the globals' values and `Function.prototype.toString`, `process.title`, and its own stdin
+— for the check's planted sentinel and for a store canary, and finds neither; its first answer proves
+the scan sees what it is given, so the test is not vacuous. The mutant — putting the check's source
+back into the child (`config.source` plus `globalThis.__checkSource`) — reddens the scan test, and the
+replay test fails at assertion 2 for the different reason that the source is gone. Every pool task's
+reference solution still passes its check through the protocol and the unfixed starter still fails;
+`reference-solutions.test.ts` is green: every hidden-check task is still proven solvable by its
+reference and failing without it, through the new protocol.
+
+**Two protocol defects the store rebuild found, fixed here.** A settlement read in the same drain as
+the reply that named it was dropped — the waiter was registered after the pump returned — so the call
+never settled, the probe hit the 120 s deadline, and `train-feature-retry` silently fell back to the
+three-assertion proxy path (the store stopped rebuilding byte-identically; the cause was measured, not
+guessed). Both sides now hold an early settlement until a waiter exists. Separately, the checker's
+`fromWire` read an error as `{name, message}` while the driver sends `{t:'E', n, m}`, so every error
+crossed as "the solution raised an error": a `shouldRetry` predicate that inspects `e.message` retried
+once too often, and the committed baseline was red on `train-feature-retry`. The store rebuilds
+byte-identically again (`2b734585…`) and the baseline is green.
+
+### R8-L1 — the scorer reads a bounded amount
+
+A solution could answer with one unbounded message, or with enough answers to exhaust the parent's
+memory before the deadline. The checker refuses a message larger than 1 MiB and the run once the
+child has written more than 8 MiB in all; the child's own read loop enforces the same limits on the
+checker's messages. Both outcomes are failures and the child is killed. The per-message check is on
+the complete line, not only on a leftover partial buffer — a full oversized line in one read is the
+case that matters. Four tests: a 2 MiB answer, twelve 900 KiB answers, a check that never finishes
+(failure at the deadline, not a hang), and 4 MiB of printed output (no effect: the verdict is the
+check's, not the stream's).
+
+### R8-L2 — the corpus is checked before every repeat
+
+The gate fingerprinted the store once, before the first baseline repeat, then ran every remaining
+repeat on a store it had stopped watching. `evaluateHeldOut` now calls `verifyHeldOutCorpus` before
+each repeat of both the baseline and the candidate run; a move stops the gate where it happened and
+the report is skipped with the corpus reason, as before the first repeat. Test: a store that changes
+after the first repeat leaves two guard checks, one held-out run, no held-out gate and empty
+baseline scores.
+
+### R8-L3 — the probe record is signed
+
+`calibration.json` was signed and verified; `calibration-probe.json`, the record the fit is built
+from, was written unsigned. `signRecord` is now the generic signer (`signCalibration` delegates to
+it) and the probe CLI signs its record with the same key source, warning when it is the public
+development key. Tests: the record carries a `keySource` and a 64-hex signature, `verifyCalibration`
+accepts it, and a record edited after signing no longer verifies.
+
+### R8-L4 — the declarations name every range
+
+`packages/eval-harness/src/corpusSha.ts` line 39–41 — the `readByARun` filter `R5-P1` added to
+`computeCorpusSha` — was missing from both cumulative range blocks in the PR body. Restored; the
+final cumulative is 6, 23–28, 30–32, 34–37, 39–41, 46–57 (`git diff -U0 6150914..HEAD`). Body only;
+no code change.
+
+### R8-L5 — `docs/SECURITY.md` says what the child receives
+
+The R7-H2 paragraph is replaced: the check runs in the checker; the child receives call descriptions
+and nothing else; the key is read from stdin before solution code loads; output is bounded at 1 MiB
+per message and 8 MiB in all; the driver runs with `--disallow-code-generation-from-strings` and
+strict mode; and the residual is stated — this does not protect the driver's own process from a
+solution that attacks it directly.
+
+## Round 8 verification
+
+Measured at `e47da18`, where the suites ran; the commit after it adds this section and the PR body's
+round-8 rows, and touches no executable line. Each suite was run alone, after
+`pnpm install --frozen-lockfile` and a full `pnpm -r build`.
+
+- **macOS (Darwin 24.5.0), the recorded serial form** — `pnpm -r --no-bail
+  --workspace-concurrency=1 test`: **1860 tests, 1858 pass, 2 skipped, 0 fail** (`TEST_RC=0`) across
+  the 25 packages that declare a test script; 1298 s wall, and zero `not ok` lines. Round 7's run at
+  `f8cd7da` was 1853 tests; the seven new ones are R8-H1's two boundary tests (the replay and the
+  scan), R8-L1's four (the per-message cap, the total cap, the deadline, the stdout flood) and R8-L2's
+  one evolver test.
+- **The corpus-sized tests, and what the boundary costs.** The five-stacks test measured
+  **1294.8 s** against its 1800 s cap (round 7: 1221.0 s), the fresh-clone baseline **356.0 s**
+  against 600 s (320.1 s), and `calibrate` **242.3 s** against 450 s (225.3 s). The increase is the
+  call-description protocol's per-call round trip: +6.0 % on the five-stacks test, +11.2 % on the
+  fresh-clone baseline and +7.6 % on `calibrate` against round 7's measured figures, all still inside
+  their caps.
+- **Linux (node 22.23.4, `node:22` container)** — over a fresh `git archive` of `e47da18`, run
+  alone: `pnpm install --frozen-lockfile` **RC 0**, `pnpm -r build` **RC 0**, the same serial test
+  command **RC 0** across the same 25 suites: **1860 tests, 1858 pass, 2 skipped, 0 fail**, zero
+  `not ok` lines. The corpus-sized tests measured **531.3 s**, **139.8 s** and **92.2 s** (round 7:
+  627.2 s, 181.1 s, 123.0 s); the whole container run — install, build, test — took 718 s. Every
+  count agrees with macOS; the logs differ only in the per-suite summary marker (`# tests` against
+  `ℹ tests`), the test stream being TAP on both.
+- **Guards** (macOS, all pass): `check:test-scripts` 25/27 (the same two packages have no tests
+  yet); `check:build-output` 27/27; `check:workspace-deps` 27 packages, 94 internal edges, acyclic;
+  `check:doc-refs` OK — 96 `.md` references across 5 dirs and 4 root files all resolving, and 6
+  runtime-artifact sites named; `check:package` — 220 files, installed and run, `goldens solved 60/116`.
+- **Mutants.** The R8-H1 mutant puts the check's source back into the child's process
+  (`config.source` and `globalThis.__checkSource`); the scan test goes red and the replay test fails
+  at assertion 2 for the other reason. Applied to the compiled `dist/`, observed red, reversed, and
+  the restored file compared byte-for-byte by sha256 (`hiddenCheck.js` `46b73b0b…`).
+- **No paid run on real `claude` has been made.** The probe is CJ's to run.
