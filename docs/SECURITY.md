@@ -873,15 +873,25 @@ nobody measured.
 **The check is judged in a process the solution does not run in.** A check that runs beside the
 solution cannot judge it: a module that overwrites `node:assert`'s functions passes every check
 without implementing anything, because the check's own assertion is whatever the module made it.
-Since R7-H2 the acceptance check is input/output across a process boundary. The checker process
-holds the expected values, read from the encoded store, and never sends them anywhere. A driver in a
-separate child process receives the check's source over stdin, loads the solution there, and reports
-what the check *observed* — each assertion's actual value, serialized — on a private pipe; the
-checker compares those observations with its own expectations. The solution's exit code, its stdout,
-and any global it patches in its own process cannot move the verdict: only a well-formed driver
-response counts, and a child that exits early, prints a verdict, times out, or returns a different
-number of observations is a failure. The driver captures the primitives it needs before any solution
-code loads. This protects against a solution that disables, forges or short-circuits the test that
-judges it — on held-out and train tasks alike, because the evolver's train scoring uses the same
-boundary. It does not protect the driver's own process from a solution that attacks it directly;
-that is the sandbox's problem, and the sandbox is 0.7.0's.
+Since R7-H2 the acceptance check is input/output across a process boundary, and since R8-H1 the
+boundary carries **calls, not code**. The checker process runs the check itself — its own realm, its
+own `node:assert` — and holds the expected values, the comparisons and the canary. A driver in a
+separate child process holds the solution and receives only **call descriptions**: which function to
+call, with which arguments, as data. Arguments and return values cross as values (primitives,
+arrays, maps, sets, typed arrays, dates, regular expressions, errors, and object graphs by
+identity), never as source, over a signed append-only exchange in a private session directory; the
+key for that exchange is read once from the driver's stdin before any solution code loads. A
+stateful check is a sequence of calls: the checker issues one, compares the answer with its own
+expectation, and issues the next. **No part of the check is sent to the child** — not its source,
+not one literal, not the canary — so a solution that walks its caller frames, `process.argv`, the
+environment, the globals or its own stdin finds no expected value to replay; that is tested by
+replaying the round-7 exploit and by a solution that scans everything it can see. The driver starts
+with `--disallow-code-generation-from-strings` and `'use strict'` as defence in depth. The
+solution's exit code, its stdout, and any global it patches in its own process cannot move the
+verdict: only a well-formed, signed driver response counts, and the scorer reads a bounded amount of
+it — 1 MiB per message and 8 MiB in all. A child that exits early, prints a verdict, hangs past the
+deadline, writes an oversized or unreadable message, or returns a different number of observations
+is a failure, and the child is killed. This protects against a solution that disables, forges or
+short-circuits the test that judges it — on held-out and train tasks alike, because the evolver's
+train scoring uses the same boundary. It does not protect the driver's own process from a solution
+that attacks it directly; that is the sandbox's problem, and the sandbox is 0.7.0's.
