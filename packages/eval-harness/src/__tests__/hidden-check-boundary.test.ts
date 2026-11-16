@@ -356,3 +356,82 @@ test('a solution that searches everything it can see finds no expected value and
     await searching.cleanup();
   }
 });
+
+/* ---------- R8-L1: the scorer reads a bounded amount of the solution's output ---------- */
+
+test('a solution that answers with more than one message may carry fails, and is killed', async () => {
+  const check = [
+    "const assert = require('node:assert/strict');",
+    "const { huge } = require('./lib');",
+    "assert.equal(huge(), 'small');",
+    '',
+  ].join('\n');
+  const staged = await repo("module.exports = { huge: () => 'A'.repeat(2 * 1024 * 1024) };\n");
+  try {
+    const run = await runHiddenCheck(check, staged.dir, { timeoutMs: 20_000 });
+    assert.match(String(run.failure), /larger than 1048576 bytes/);
+  } finally {
+    await staged.cleanup();
+  }
+});
+
+test('a solution that keeps answering just under the cap still runs out of total budget', async () => {
+  const check = [
+    "const assert = require('node:assert/strict');",
+    "const { big } = require('./lib');",
+    'for (let i = 0; i < 12; i++) assert.equal(big(), "small");',
+    '',
+  ].join('\n');
+  const staged = await repo("module.exports = { big: () => 'B'.repeat(900 * 1024) };\n");
+  try {
+    const run = await runHiddenCheck(check, staged.dir, { timeoutMs: 60_000 });
+    assert.match(String(run.failure), /more than 8388608 bytes/);
+  } finally {
+    await staged.cleanup();
+  }
+});
+
+test('a solution that never answers is a failure at the deadline, not a hang', async () => {
+  const check = [
+    "const assert = require('node:assert/strict');",
+    "const { spin } = require('./lib');",
+    'assert.equal(spin(), 1);',
+    '',
+  ].join('\n');
+  const staged = await repo('module.exports = { spin: () => { for (;;) {} } };\n');
+  try {
+    const started = Date.now();
+    const run = await runHiddenCheck(check, staged.dir, { timeoutMs: 500 });
+    assert.match(String(run.failure), /did not finish within 500 ms/);
+    assert.ok(Date.now() - started < 10_000, 'the deadline did not stop the run');
+  } finally {
+    await staged.cleanup();
+  }
+});
+
+test('a solution that floods stdout and stderr changes nothing: the verdict is the check\'s', async () => {
+  const check = [
+    "const assert = require('node:assert/strict');",
+    "const { noisy } = require('./lib');",
+    'assert.equal(noisy(), 4);',
+    '',
+  ].join('\n');
+  const staged = await repo([
+    "const block = 'C'.repeat(1024 * 1024);",
+    'module.exports = {',
+    '  noisy() {',
+    '    for (let i = 0; i < 4; i++) { process.stdout.write(block); process.stderr.write(block); }',
+    '    return 4;',
+    '  },',
+    '};',
+    '',
+  ].join('\n'));
+  try {
+    const run = await runHiddenCheck(check, staged.dir, { timeoutMs: 20_000 });
+    assert.equal(run.failure, undefined);
+    assert.equal(run.observations.length, 1);
+    assert.equal(run.observations[0]?.a, 4);
+  } finally {
+    await staged.cleanup();
+  }
+});

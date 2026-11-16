@@ -96,6 +96,9 @@ export interface HiddenCheckResult {
 }
 
 const OBSERVATION_TIMEOUT_MS = 120_000;
+/** R8-L1: caps on what the checker will read from the child. Over either one is a failure. */
+const MAX_MESSAGE_BYTES = 1024 * 1024;
+const MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 const PUMP_SLEEP_MS = 1;
 
 /**
@@ -163,6 +166,8 @@ const BigIntFn = BigInt;
 const SymbolFn = Symbol;
 const theSetInterval = setInterval;
 
+const MAX_LINE = 1048576;
+const MAX_TOTAL = 8388608;
 const LIFE_MS = 600000;
 
 const cfg = parse(readFileSync(0, 'utf8'));
@@ -177,6 +182,7 @@ const outFd = openSync(OUT, 'a');
 const inFd = openSync(IN, 'r');
 let offset = 0;
 let acc = Buffer.alloc(0);
+let received = 0;
 let stopping = false;
 const rets = new Map();
 const pendings = new Map();
@@ -604,15 +610,19 @@ function readNew() {
   const n = readSync(inFd, chunk, 0, len, offset);
   if (n <= 0) return;
   offset += n;
+  received += n;
+  if (received > MAX_TOTAL) { fatal('the check driver read more than ' + MAX_TOTAL + ' bytes'); return; }
   acc = Buffer.concat([acc, chunk.subarray(0, n)]);
   for (;;) {
     const nl = acc.indexOf(10);
     if (nl < 0) break;
+    if (nl > MAX_LINE) { fatal('the check driver read an oversized message'); return; }
     const line = acc.subarray(0, nl).toString('utf8');
     acc = acc.subarray(nl + 1);
     handleLine(line);
     if (stopping) return;
   }
+  if (acc.length > MAX_LINE) fatal('the check driver read an oversized message');
 }
 
 function waitFor(id) {
@@ -705,6 +715,7 @@ class CheckerBridge {
 
   private offset = 0;
   private acc: Buffer = Buffer.alloc(0);
+  private total = 0;
   private seq = 0;
   private fnSeq = 0;
   private closed = false;
@@ -827,14 +838,23 @@ class CheckerBridge {
     const read = readSync(this.inFd, chunk, 0, chunk.length, this.offset);
     if (read <= 0) return;
     this.offset += read;
+    this.total += read;
+    if (this.total > MAX_TOTAL_BYTES)
+      throw new BoundaryFailure(`the check driver wrote more than ${MAX_TOTAL_BYTES} bytes`);
     this.acc = Buffer.concat([this.acc, chunk.subarray(0, read)]);
     for (;;) {
       const nl = this.acc.indexOf(10);
       if (nl < 0) break;
+      // The per-message cap is on the message, not only on a partial buffer: a line that is already
+      // complete can still be too large to read.
+      if (nl > MAX_MESSAGE_BYTES)
+        throw new BoundaryFailure(`the check driver wrote a message larger than ${MAX_MESSAGE_BYTES} bytes`);
       const line = this.acc.subarray(0, nl).toString('utf8');
       this.acc = this.acc.subarray(nl + 1);
       this.receive(line);
     }
+    if (this.acc.length > MAX_MESSAGE_BYTES)
+      throw new BoundaryFailure(`the check driver wrote a message larger than ${MAX_MESSAGE_BYTES} bytes`);
   }
 
   private receive(line: string): void {
