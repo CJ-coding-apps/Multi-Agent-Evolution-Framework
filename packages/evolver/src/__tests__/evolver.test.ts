@@ -1797,6 +1797,36 @@ test('R7-L1: a corpus that changed during the session is not scored on the held-
   assert.equal(heldOutRuns, 0, 'not one held-out attempt was run');
 });
 
+// R7-L2: the guard is asked before every repeat, not only before the first. A store rewritten
+// after the baseline's first repeat would otherwise be read by repeats two through ten, and the
+// counts compared would come from two different corpora. The repeat after the move is refused, and
+// the ones already measured are not compared.
+test('R7-L2: a corpus that changes between repeats stops the gate before the next repeat', async () => {
+  let heldOutRuns = 0;
+  let guards = 0;
+  const report = await evolve(loopOpts({
+    metaGenerate: improveManifest(),
+    runHeldOut: async (h) => {
+      heldOutRuns++;
+      return heldOutRunner(CURRENT, { base: [['t1', 't2', 't3']], candidate: [['t1', 't2', 't3', 't4']] })(h);
+    },
+    verifyHeldOutCorpus: async () => {
+      guards++;
+      if (guards > 1) throw new Error('hidden-store.json changed under the corpus root between repeats');
+    },
+    heldOutSplitsSha: SPLITS_SHA,
+  }));
+
+  assert.equal(report.ships, 1, 'the train half still shipped: the guard is the gate\'s');
+  assert.equal(guards, 2, 'the guard was asked before the second repeat');
+  assert.equal(heldOutRuns, 1, 'no repeat after the move was run');
+  const held = report.heldOut;
+  assert.ok(held, 'the gate reports why it did not score');
+  assert.match(held!.skipped ?? '', /changed under the corpus root between repeats/);
+  assert.equal(held!.gate, undefined, 'no verdict is computed from a corpus that moved');
+  assert.deepEqual(held!.baselineScores, [], 'the partial measurement is not compared');
+});
+
 test('R6-H1: one contaminated held-out attempt makes the gate refuse an improvement', async () => {
   // The same gain the test above clears, with one candidate attempt voided for reading a hidden
   // check. The counts would otherwise still clear the test; the gate must refuse anyway.

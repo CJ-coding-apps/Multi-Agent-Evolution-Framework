@@ -461,15 +461,19 @@ async function evaluateHeldOut(
     return skipped('no candidate shipped, so there is no survivor to score on the held-out split');
   if (opts.budget?.snapshot().exhausted === true)
     return skipped('the budget was exhausted before the held-out evaluation');
-  // R7-L1: the corpus guard is asked before a repeat is projected or paid for. A corpus that moved
-  // under the session cannot answer the question the gate exists to ask.
-  if (opts.verifyHeldOutCorpus !== undefined) {
+  // R7-L1/R7-L2: the corpus guard is asked before *every* repeat is projected or paid for, not
+  // once at the start. A train attempt runs with the user's write access, so the store can be
+  // rewritten between the first repeat and the last; a repeat that reads a different corpus than
+  // the one the session started with would be scored against a yardstick nobody measured.
+  const corpusMoved = async (): Promise<HeldOutReport | undefined> => {
+    if (opts.verifyHeldOutCorpus === undefined) return undefined;
     try {
       await opts.verifyHeldOutCorpus();
+      return undefined;
     } catch (err) {
       return skipped(err instanceof Error ? err.message : String(err));
     }
-  }
+  };
 
   const baselineRuns: GoldenSuiteResult[] = [];
   const candidateRuns: GoldenSuiteResult[] = [];
@@ -491,12 +495,12 @@ async function evaluateHeldOut(
   try {
     // Baseline first, then the survivor — the same split, the same runner, N times each.
     for (let i = 0; i < repeats; i++) {
-      const stop = overBudgetAfter('baseline', i) ?? projectionStops('baseline', i);
+      const stop = (await corpusMoved()) ?? overBudgetAfter('baseline', i) ?? projectionStops('baseline', i);
       if (stop !== undefined) return stop;
       baselineRuns.push(await measureGolden(() => runHeldOut(base)));
     }
     for (let i = 0; i < repeats; i++) {
-      const stop = overBudgetAfter('candidate', i) ?? projectionStops('candidate', i);
+      const stop = (await corpusMoved()) ?? overBudgetAfter('candidate', i) ?? projectionStops('candidate', i);
       if (stop !== undefined) return stop;
       candidateRuns.push(await measureGolden(() => runHeldOut(finalHarness)));
     }
