@@ -1,0 +1,139 @@
+{
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "subject": [
+    {
+      "name": "node-1.diff",
+      "digest": {
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    }
+  ],
+  "predicateType": "https://maf.dev/attestation/run/v1",
+  "predicate": {
+    "runId": "run-lcm",
+    "keySource": "dev",
+    "provenance": {
+      "buildType": "https://maf.dev/build/v1",
+      "builder": {
+        "id": "@maf/test@0.5.1",
+        "modelVersion": "scripted"
+      },
+      "invocation": {
+        "configSource": {
+          "uri": "fixture:lcm",
+          "digest": {
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "parameters": {},
+        "environment": {}
+      },
+      "materials": [],
+      "runEnv": {
+        "platform": "test",
+        "nodeVersion": "test",
+        "timestamp": "2026-01-01T00:00:20.000Z"
+      }
+    },
+    "toolCalls": [
+      {
+        "id": "call-1",
+        "toolId": "test.run",
+        "agentId": "agent-1",
+        "runId": "run-lcm",
+        "taskId": "node-1",
+        "input": {},
+        "result": {
+          "stdout": "PASS",
+          "stderr": "",
+          "exitCode": 0,
+          "duration": 10,
+          "metadata": {}
+        },
+        "invokedAt": "2026-01-01T00:00:02.000Z",
+        "durationMs": 10,
+        "policyDecision": {
+          "verdict": "Allow"
+        }
+      }
+    ],
+    "approvals": [],
+    "diffHashes": {
+      "node-1.diff": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "modelSurfaces": [
+      {
+        "role": "coder",
+        "taskId": "node-1",
+        "turn": 1,
+        "tier": "in-process",
+        "kind": "role-call",
+        "systemPromptSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "toolCatalog": "[]",
+        "argv": []
+      },
+      {
+        "role": "coder",
+        "taskId": "node-1",
+        "turn": 2,
+        "tier": "in-process",
+        "kind": "lcm-summary",
+        "systemPromptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "toolCatalog": "",
+        "argv": [],
+        "lcmSummary": {
+          "summaryId": "sum-1",
+          "level": 0,
+          "messages": 4,
+          "chars": 800,
+          "contentTokens": 200,
+          "reportedTokens": 512,
+          "tokenBudgetCharged": 512,
+          "nodeId": "node-1",
+          "taskId": "node-1"
+        }
+      }
+    ],
+    "executionTiers": [
+      {
+        "nodeId": "node-1",
+        "role": "coder",
+        "tier": "in-process",
+        "adapter": "scripted"
+      }
+    ],
+    "lcmSettings": {
+      "mode": "on",
+      "operator": "LLM-Map",
+      "contextThreshold": 20000,
+      "freshTailCount": 20,
+      "summaryTimeoutMs": 60000,
+      "model": "claude-haiku-4-5-20251001"
+    },
+    "lcmDegraded": [
+      {
+        "sessionId": "run-lcm",
+        "nodeId": "node-1",
+        "taskId": "node-1",
+        "reason": "root-over-budget",
+        "tokens": 24000
+      }
+    ],
+    "outcome": {
+      "status": "Succeeded",
+      "nodes": [
+        {
+          "nodeId": "node-1",
+          "runId": "run-lcm",
+          "status": "Succeeded",
+          "attempt": 1,
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "finishedAt": "2026-01-01T00:00:20.000Z"
+        }
+      ],
+      "unscheduled": []
+    },
+    "bundledAt": "2026-01-01T00:00:20.000Z"
+  },
+  "signature": "8c9411c8a2852f6e91ce61cfa245c766aa24d70d4ae16d50b70a45dea1f3da39"
+}

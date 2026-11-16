@@ -1,0 +1,206 @@
+{
+  "rounds": [
+    {
+      "round": 0,
+      "outcome": "no-op",
+      "note": "baseline scored 1/2"
+    },
+    {
+      "round": 1,
+      "manifest": {
+        "edits": [
+          {
+            "op": "set-role-prompt",
+            "role": "coder",
+            "value": "Be precise."
+          }
+        ],
+        "summary": "tighten the coder prompt"
+      },
+      "gate": {
+        "verdict": "reject",
+        "stage": "seesaw",
+        "reason": "regressed t2"
+      },
+      "outcome": "reject",
+      "note": "seesaw: regressed t2",
+      "evaluation": {
+        "candidateSha": "cand-sha-1",
+        "currentScores": {
+          "harnessSha": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+          "harnessId": "default",
+          "tasks": [
+            {
+              "taskId": "t1",
+              "role": "coder",
+              "passed": true,
+              "attempts": [
+                {
+                  "attempt": 0,
+                  "output": "",
+                  "outcomes": [],
+                  "passed": true
+                }
+              ]
+            },
+            {
+              "taskId": "t2",
+              "role": "coder",
+              "passed": false,
+              "attempts": [
+                {
+                  "attempt": 0,
+                  "output": "",
+                  "outcomes": [],
+                  "passed": false
+                }
+              ]
+            }
+          ],
+          "solvedTaskIds": [
+            "t1"
+          ],
+          "ranAt": "2026-01-01T00:00:00.000Z"
+        },
+        "candidateScores": {
+          "harnessSha": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+          "harnessId": "default",
+          "tasks": [
+            {
+              "taskId": "t1",
+              "role": "coder",
+              "passed": true,
+              "attempts": [
+                {
+                  "attempt": 0,
+                  "output": "",
+                  "outcomes": [],
+                  "passed": true
+                }
+              ]
+            },
+            {
+              "taskId": "t2",
+              "role": "coder",
+              "passed": false,
+              "attempts": [
+                {
+                  "attempt": 0,
+                  "output": "",
+                  "outcomes": [],
+                  "passed": false
+                }
+              ]
+            }
+          ],
+          "solvedTaskIds": [
+            "t1"
+          ],
+          "ranAt": "2026-01-01T00:00:00.000Z"
+        }
+      }
+    },
+    {
+      "round": 2,
+      "manifest": {
+        "edits": [],
+        "summary": "no edits"
+      },
+      "gate": {
+        "verdict": "ship",
+        "improvements": [
+          "t2"
+        ]
+      },
+      "outcome": "ship",
+      "note": "ships t2",
+      "evaluation": {
+        "candidateSha": "cand-sha-2",
+        "currentScores": {
+          "harnessSha": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+          "harnessId": "default",
+          "tasks": [
+            {
+              "taskId": "t1",
+              "role": "coder",
+              "passed": true,
+              "attempts": [
+                {
+                  "attempt": 0,
+                  "output": "",
+                  "outcomes": [],
+                  "passed": true
+                }
+              ]
+            },
+            {
+              "taskId": "t2",
+              "role": "coder",
+              "passed": false,
+              "attempts": [
+                {
+                  "attempt": 0,
+                  "output": "",
+                  "outcomes": [],
+                  "passed": false
+                }
+              ]
+            }
+          ],
+          "solvedTaskIds": [
+            "t1"
+          ],
+          "ranAt": "2026-01-01T00:00:00.000Z"
+        },
+        "candidateScores": {
+          "harnessSha": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+          "harnessId": "default",
+          "tasks": [
+            {
+              "taskId": "t1",
+              "role": "coder",
+              "passed": true,
+              "attempts": [
+                {
+                  "attempt": 0,
+                  "output": "",
+                  "outcomes": [],
+                  "passed": true
+                }
+              ]
+            },
+            {
+              "taskId": "t2",
+              "role": "coder",
+              "passed": true,
+              "attempts": [
+                {
+                  "attempt": 0,
+                  "output": "",
+                  "outcomes": [],
+                  "passed": true
+                }
+              ]
+            }
+          ],
+          "solvedTaskIds": [
+            "t1",
+            "t2"
+          ],
+          "ranAt": "2026-01-01T00:00:00.000Z"
+        }
+      }
+    }
+  ],
+  "finalHarness": {
+    "version": 1,
+    "id": "default-r2",
+    "sha": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+    "roleSet": {
+      "roles": []
+    },
+    "processorBundles": []
+  },
+  "ships": 1,
+  "stopReason": "budget"
+}

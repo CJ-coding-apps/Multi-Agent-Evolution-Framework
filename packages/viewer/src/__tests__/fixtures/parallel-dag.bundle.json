@@ -1,0 +1,214 @@
+{
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "subject": [
+    {
+      "name": "node-a.diff",
+      "digest": {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "node-b.diff",
+      "digest": {
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "name": "node-c.diff",
+      "digest": {
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    }
+  ],
+  "predicateType": "https://maf.dev/attestation/run/v1",
+  "predicate": {
+    "runId": "run-parallel",
+    "keySource": "dev",
+    "provenance": {
+      "buildType": "https://maf.dev/build/v1",
+      "builder": {
+        "id": "@maf/test@0.5.1",
+        "modelVersion": "scripted"
+      },
+      "invocation": {
+        "configSource": {
+          "uri": "fixture:parallel",
+          "digest": {
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "parameters": {},
+        "environment": {}
+      },
+      "materials": [],
+      "runEnv": {
+        "platform": "test",
+        "nodeVersion": "test",
+        "timestamp": "2026-01-01T00:00:09.000Z"
+      }
+    },
+    "toolCalls": [
+      {
+        "id": "call-a1",
+        "toolId": "fs.read",
+        "agentId": "agent-a",
+        "runId": "run-parallel",
+        "taskId": "node-a",
+        "input": {
+          "path": "docs/spec.txt"
+        },
+        "result": {
+          "stdout": "# spec\n",
+          "stderr": "",
+          "exitCode": 0,
+          "duration": 3,
+          "metadata": {}
+        },
+        "invokedAt": "2026-01-01T00:00:01.000Z",
+        "durationMs": 3,
+        "policyDecision": {
+          "verdict": "Allow"
+        }
+      },
+      {
+        "id": "call-b1",
+        "toolId": "fs.write",
+        "agentId": "agent-b",
+        "runId": "run-parallel",
+        "taskId": "node-b",
+        "input": {
+          "path": ".env",
+          "content": "TOKEN=x"
+        },
+        "result": {
+          "stdout": "",
+          "stderr": "policy Deny: .env files are not writable",
+          "exitCode": 1,
+          "duration": 0,
+          "metadata": {
+            "refused": true,
+            "ruleId": "deny-env-files"
+          }
+        },
+        "invokedAt": "2026-01-01T00:00:04.000Z",
+        "durationMs": 0,
+        "policyDecision": {
+          "verdict": "Deny",
+          "reason": ".env files are not writable",
+          "ruleId": "deny-env-files"
+        }
+      }
+    ],
+    "approvals": [],
+    "diffHashes": {
+      "node-a.diff": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "node-b.diff": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "node-c.diff": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "securityFindings": [
+      {
+        "nodeId": "node-b",
+        "result": {
+          "findings": [],
+          "summary": "No findings.",
+          "passed": true
+        }
+      }
+    ],
+    "policyInForce": {
+      "sourceKind": "file",
+      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "ruleCount": 1,
+      "rules": [
+        {
+          "id": "deny-env-files",
+          "effect": "Deny",
+          "matcher": "pathGlob=.env"
+        }
+      ],
+      "counts": {
+        "allow": 1,
+        "deny": 1,
+        "escalate": 0,
+        "indeterminate": 0
+      }
+    },
+    "modelSurfaces": [
+      {
+        "role": "coder",
+        "taskId": "node-a",
+        "turn": 1,
+        "tier": "in-process",
+        "systemPromptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "promptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "outputSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "toolCatalog": "[]",
+        "argv": []
+      },
+      {
+        "role": "coder",
+        "taskId": "node-b",
+        "turn": 1,
+        "tier": "in-process",
+        "systemPromptSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "promptSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "outputSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "toolCatalog": "[]",
+        "argv": []
+      }
+    ],
+    "executionTiers": [
+      {
+        "nodeId": "node-a",
+        "role": "coder",
+        "tier": "in-process",
+        "adapter": "scripted"
+      },
+      {
+        "nodeId": "node-b",
+        "role": "coder",
+        "tier": "in-process",
+        "adapter": "scripted"
+      },
+      {
+        "nodeId": "node-c",
+        "role": "reviewer",
+        "tier": "cli",
+        "adapter": "claude",
+        "fellBackFrom": "in-process"
+      }
+    ],
+    "outcome": {
+      "status": "Succeeded",
+      "nodes": [
+        {
+          "nodeId": "node-a",
+          "runId": "run-parallel",
+          "status": "Succeeded",
+          "attempt": 1,
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "finishedAt": "2026-01-01T00:00:03.000Z"
+        },
+        {
+          "nodeId": "node-b",
+          "runId": "run-parallel",
+          "status": "Succeeded",
+          "attempt": 1,
+          "startedAt": "2026-01-01T00:00:02.000Z",
+          "finishedAt": "2026-01-01T00:00:06.000Z"
+        },
+        {
+          "nodeId": "node-c",
+          "runId": "run-parallel",
+          "status": "Succeeded",
+          "attempt": 1,
+          "startedAt": "2026-01-01T00:00:05.000Z",
+          "finishedAt": "2026-01-01T00:00:09.000Z"
+        }
+      ],
+      "unscheduled": []
+    },
+    "bundledAt": "2026-01-01T00:00:09.000Z"
+  },
+  "signature": "ba4d97d6b6ade2d9932ad3a3a2e0e22cf5b95a5cf29f0f1096a44b567342b02a"
+}

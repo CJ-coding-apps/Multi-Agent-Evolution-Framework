@@ -251,6 +251,9 @@ importers:
       '@maf/types':
         specifier: workspace:*
         version: link:../types
+      '@maf/viewer':
+        specifier: workspace:*
+        version: link:../viewer
       commander:
         specifier: ^12.0.0
         version: 12.1.0
@@ -598,6 +601,15 @@ importers:
       typescript:
         specifier: '*'
         version: 5.9.3
+
+  packages/viewer:
+    dependencies:
+      '@maf/attestation':
+        specifier: workspace:*
+        version: link:../attestation
+      '@maf/types':
+        specifier: workspace:*
+        version: link:../types
 
 packages:
 

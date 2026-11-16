@@ -1,0 +1,44 @@
+{
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "subject": [],
+  "predicateType": "https://maf.dev/attestation/run/v1",
+  "predicate": {
+    "runId": "run-plan-failed",
+    "keySource": "dev",
+    "provenance": {
+      "buildType": "https://maf.dev/build/v1",
+      "builder": {
+        "id": "@maf/test@0.5.1",
+        "modelVersion": "scripted"
+      },
+      "invocation": {
+        "configSource": {
+          "uri": "fixture:planner",
+          "digest": {
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "parameters": {},
+        "environment": {}
+      },
+      "materials": [],
+      "runEnv": {
+        "platform": "test",
+        "nodeVersion": "test",
+        "timestamp": "2026-01-01T00:00:02.000Z"
+      }
+    },
+    "toolCalls": [],
+    "approvals": [],
+    "diffHashes": {},
+    "outcome": {
+      "status": "Failed",
+      "unscheduled": [],
+      "failure": {
+        "kind": "planning_failed"
+      }
+    },
+    "bundledAt": "2026-01-01T00:00:02.000Z"
+  },
+  "signature": "aa35c557584456c3eb5dd19b32b69c5c5c0d62d984549bdbe0584e8052028082"
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@maf/viewer",
+  "version": "0.5.1",
+  "description": "Self-contained, network-free HTML view of a signed MAF run record (WP-3.18)",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test dist/__tests__/*.test.js"
+  },
+  "dependencies": {
+    "@maf/attestation": "workspace:*",
+    "@maf/types": "workspace:*"
+  }
+}

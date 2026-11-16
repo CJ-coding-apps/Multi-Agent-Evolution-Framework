@@ -1,0 +1,45 @@
+{
+  "runId": "run-legacy",
+  "provenance": {
+    "buildType": "https://maf.dev/build/v1",
+    "builder": {
+      "id": "@maf/test@0.5.1",
+      "modelVersion": "scripted"
+    },
+    "invocation": {
+      "configSource": {
+        "uri": "fixture:legacy",
+        "digest": {
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "parameters": {},
+      "environment": {}
+    },
+    "materials": [],
+    "runEnv": {
+      "platform": "test",
+      "nodeVersion": "test",
+      "timestamp": "2026-01-01T00:00:01.000Z"
+    }
+  },
+  "toolCalls": [],
+  "approvals": [],
+  "diffHashes": {},
+  "outcome": {
+    "status": "Succeeded",
+    "nodes": [
+      {
+        "nodeId": "task-legacy",
+        "runId": "run-legacy",
+        "status": "Succeeded",
+        "attempt": 1,
+        "startedAt": "2026-01-01T00:00:00.000Z",
+        "finishedAt": "2026-01-01T00:00:01.000Z"
+      }
+    ],
+    "unscheduled": []
+  },
+  "bundledAt": "2026-01-01T00:00:01.000Z",
+  "signature": "dae0dae0455ff2ac8de192ba360e1b71c34d35e49d60ca6d604c40374fd02873"
+}

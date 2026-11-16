@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; script-src 'none'; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
+<title>MAF run run-single</title>
+<style>
+:root{color-scheme:light dark;font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+body{margin:0;padding:24px;max-width:1100px}
+h1{font-size:18px;margin:0 0 4px}
+h2{font-size:15px;margin:24px 0 8px}
+table{border-collapse:collapse;width:100%;margin:8px 0}
+th,td{border:1px solid #8884;padding:4px 6px;text-align:left;vertical-align:top}
+th{background:#8881}
+.banner{padding:12px 16px;border-radius:6px;border:1px solid}
+.banner.valid{border-color:#2a7;background:#2a71}
+.banner.dev{border-color:#d90;background:#d901}
+.banner.invalid{border-color:#d22;background:#d221}
+.banner.session{border-color:#888;background:#8881}
+.muted{color:#888}
+code{word-break:break-all}
+</style>
+</head>
+<body>
+<header id="verification" class="banner dev">
+<h1>Run run-single</h1>
+<p class="verdict">VERIFIED — signed with the public development key (no evidence of authorship).</p>
+</header>
+<main>
+<section id="run">
+<h2>Run</h2>
+<dl>
+<dt>status</dt><dd>Succeeded</dd>
+<dt>started</dt><dd>2026-01-01T00:00:00.000Z</dd>
+<dt>finished</dt><dd>2026-01-01T00:00:01.000Z</dd>
+<dt>wall-clock</dt><dd>1000 ms</dd>
+<dt>diff subjects</dt><dd>0</dd>
+</dl>
+</section>
+<section id="nodes">
+<h2>Nodes (1)</h2>
+<table>
+<thead>
+<tr><th>node</th><th>status</th><th>attempt</th><th>role</th><th>tier</th><th>adapter</th><th>started</th><th>finished</th><th>failure</th></tr>
+</thead>
+<tbody>
+<tr><td><code>task-1</code></td><td>Succeeded</td><td>1</td><td>not recorded</td><td>not recorded</td><td>not recorded</td><td>2026-01-01T00:00:00.000Z</td><td>2026-01-01T00:00:01.000Z</td><td>none</td></tr>
+</tbody>
+</table>
+<p class="muted">Peak concurrent nodes: 1 (computed from the recorded times; maxConcurrent and edges are not recorded).</p>
+</section>
+<section id="node-task-1">
+<h2>Node <code>task-1</code></h2>
+<dl>
+<dt>model surfaces</dt><dd>not recorded</dd>
+<dt>tool calls</dt><dd>none (recorded)</dd>
+<dt>security gate</dt><dd>not recorded</dd>
+<dt>LCM summaries</dt><dd>not recorded</dd>
+<dt>LCM degradation</dt><dd>none (recorded)</dd>
+<dt>changed paths</dt><dd>none (recorded)</dd>
+<dt>model text</dt><dd>not recorded</dd>
+</dl>
+</section>
+<section id="totals">
+<h2>Totals</h2>
+<dl>
+<dt>calls by kind</dt><dd>none (recorded)</dd>
+<dt>tokens (reported)</dt><dd>not recorded</dd>
+<dt>tokens (estimated)</dt><dd>not recorded</dd>
+<dt>dollars</dt><dd>not recorded</dd>
+<dt>wall-clock</dt><dd>1000 ms</dd>
+</dl>
+</section>
+<section id="policy">
+<h2>Policy in force</h2>
+<dl>
+<dt>rule count</dt><dd>not recorded</dd>
+<dt>allow / deny / escalate / indeterminate</dt><dd>not recorded</dd>
+<dt>source</dt><dd>not recorded</dd>
+<dt>rules</dt><dd>not recorded</dd>
+</dl>
+</section>
+<section id="lcm">
+<h2>LCM</h2>
+<dl>
+<dt>settings</dt><dd>not recorded</dd>
+<dt>degradation</dt><dd>none (recorded)</dd>
+</dl>
+</section>
+<section id="unscheduled">
+<h2>Not scheduled</h2>
+<dl>
+<dt>unscheduled</dt><dd>none (recorded)</dd>
+<dt>deferred writers</dt><dd>not recorded</dd>
+</dl>
+</section>
+</main>
+<footer class="muted">maf view — self-contained; every network request is forbidden by the CSP above.</footer>
+</body>
+</html>
