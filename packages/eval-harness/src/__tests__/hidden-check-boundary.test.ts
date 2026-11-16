@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { captureExpectations, compareObservations, runHiddenCheck } from '../index.js';
+import { captureExpectations, compareObservations, injectCanary, runHiddenCheck } from '../index.js';
 
 // R6-H2 / R7-H2 (D-57): the hidden check is judged across a process boundary. The verifier showed
 // that a solution doing nothing but overwriting `node:assert`'s functions passed every check,
@@ -197,5 +197,162 @@ test('an exit-status check passes when the solution leaves it alone and fails wh
     assert.equal(compareObservations(run.observations, captured.expectations).passed, false);
   } finally {
     await bad.cleanup();
+  }
+});
+
+/* ---------- R8-H1: the child receives call descriptions, never the check ---------- */
+
+// The verifier's round-7 exploit: the whole check, expected literals and canary included, was sent
+// into the solution's process, and a solution that implemented nothing read it out of its caller's
+// frame (`fn.caller.arguments[0]`) and replayed the answers. Now the check never leaves this
+// process: the child is told which function to call and with which inputs, as data. This solution
+// tries the same trick and can only return what it can actually compute.
+const REPLAY_CHECK = [
+  "const assert = require('node:assert/strict');",
+  "const { Lru } = require('./lib');",
+  'const cache = new Lru(2);',
+  "cache.set('a', 1);",
+  "cache.set('b', 2);",
+  "cache.set('c', 3);",
+  // Expected values that are never passed to the solution as inputs: an evicted key, and the value
+  // that survived. Reading either out of this file is exactly what the exploit did.
+  "assert.equal(cache.get('a'), undefined);",
+  "assert.equal(cache.get('c'), 3);",
+  '',
+].join('\n');
+
+const REPLAY_SOLUTION = [
+  '// The verifier\'s no-op: it implements no cache at all. It walks its caller frames for the check',
+  '// source, parses the expected value out of `cache.get(KEY), <value>)`, and replays it.',
+  'function harvest() {',
+  '  var text = "";',
+  '  try {',
+  '    var frame = harvest.caller;',
+  '    for (var i = 0; i < 8 && frame; i++) {',
+  '      try {',
+  '        var args = frame.arguments;',
+  '        if (args) for (var j = 0; j < args.length; j++) if (typeof args[j] === "string") text += args[j] + "\\n";',
+  '      } catch (e) { /* a strict frame has no arguments */ }',
+  '      try { frame = frame.caller; } catch (e) { frame = null; }',
+  '    }',
+  '  } catch (e) { /* no caller chain at all */ }',
+  '  return text.indexOf("assert.equal") < 0 ? null : text;',
+  '}',
+  'function Lru(limit) { this.limit = limit; }',
+  'Lru.prototype.set = function () { return this; };',
+  'Lru.prototype.get = function (key) {',
+  '  var source = harvest();',
+  '  if (source === null) return undefined;',
+  '  var match = source.match(new RegExp("cache\\\\.get\\\\(\'\" + key + "\'\\),\\s*([^)]+)\\)"));',
+  '  if (!match) return undefined;',
+  '  var literal = match[1].trim();',
+  '  return literal === "undefined" ? undefined : Number(literal);',
+  '};',
+  'module.exports = { Lru: Lru };',
+  '',
+].join('\n');
+
+test('a solution that replays what it reads out of its caller finds nothing, and fails', async () => {
+  const reference = await repo([
+    'class Lru {',
+    '  constructor(limit) { this.limit = limit; this.map = new Map(); }',
+    '  set(key, value) { this.map.delete(key); this.map.set(key, value);',
+    '    while (this.map.size > this.limit) this.map.delete(this.map.keys().next().value); return this; }',
+    '  get(key) { return this.map.get(key); }',
+    '}',
+    'module.exports = { Lru };',
+    '',
+  ].join('\n'));
+  let captured: Awaited<ReturnType<typeof captureExpectations>>;
+  try {
+    captured = await captureExpectations(REPLAY_CHECK, reference.dir);
+  } finally {
+    await reference.cleanup();
+  }
+  assert.equal(captured.failure, undefined);
+  assert.equal(captured.expectations.length, 2);
+
+  const replay = await repo(REPLAY_SOLUTION);
+  try {
+    const run = await runHiddenCheck(REPLAY_CHECK, replay.dir);
+    assert.equal(run.failure, undefined);
+    const verdict = compareObservations(run.observations, captured.expectations);
+    assert.equal(verdict.passed, false, 'a solution that computed nothing passed');
+    // It reached the second assertion with nothing to replay: the eviction answer it needed was
+    // never in its process to read.
+    assert.match(verdict.detail, /assertion 2: equal saw \{"t":"u"\}, expected 3/);
+  } finally {
+    await replay.cleanup();
+  }
+});
+
+// The scan is the mutant-killer for "the check source sent to the child again": if any part of the
+// check — a literal or the store's canary — reaches the child's process, this solution finds it in
+// what it can see (argv, the environment, the globals, its own stdin) and the check fails.
+const SCAN_CHECK = [
+  "const assert = require('node:assert/strict');",
+  "const { scan } = require('./lib');",
+  '// SENTINEL-R8H1-9d2b41 is an expected value of this file and nothing else.',
+  "assert.equal(scan('INPUT-R8H1-77aa'), 'saw:INPUT-R8H1-77aa');",
+  "assert.equal(scan(), 'clean');",
+  '',
+].join('\n');
+
+const SCAN_SOLUTION = [
+  'const fs = require("node:fs");',
+  'function surface() {',
+  '  const parts = [];',
+  '  for (const arg of process.argv) parts.push(String(arg));',
+  '  for (const key of Object.keys(process.env)) parts.push(String(process.env[key]));',
+  '  for (const key of Object.getOwnPropertyNames(globalThis)) {',
+  '    let value;',
+  '    try { value = globalThis[key]; } catch (e) { continue; }',
+  '    if (typeof value === "string") parts.push(value);',
+  '    else if (typeof value === "function") {',
+  '      try { parts.push(Function.prototype.toString.call(value)); } catch (e) { /* native */ }',
+  '    }',
+  '  }',
+  '  try { parts.push(String(process.title)); } catch (e) { /* gone */ }',
+  '  // The driver reads its configuration from stdin once; nothing of the check is there.',
+  '  try { parts.push(String(fs.readFileSync(0, "utf8"))); } catch (e) { /* closed */ }',
+  '  return parts.join("\\n");',
+  '}',
+  'function scan(input) {',
+  '  if (input !== undefined) return "saw:" + input;',
+  '  const text = surface();',
+  '  if (text.includes("SENTINEL-R8H1-9d2b41")) return "LEAK:sentinel";',
+  '  if (text.includes("maf-hidden-canary-")) return "LEAK:canary";',
+  '  return "clean";',
+  '}',
+  'module.exports = { scan };',
+  '',
+].join('\n');
+
+test('a solution that searches everything it can see finds no expected value and no canary', async () => {
+  // The store injects the canary as the first line of every hidden file; the scan looks for it too.
+  const check = injectCanary(SCAN_CHECK, 'r8-scan', '.checks/scan.js');
+  const reference = await repo("module.exports = { scan: (input) => input === undefined ? 'clean' : 'saw:' + input };\n");
+  let captured: Awaited<ReturnType<typeof captureExpectations>>;
+  try {
+    captured = await captureExpectations(check, reference.dir);
+  } finally {
+    await reference.cleanup();
+  }
+  assert.equal(captured.failure, undefined);
+  assert.deepEqual(captured.expectations, [
+    { op: 'equal', loose: false, e: 'saw:INPUT-R8H1-77aa' },
+    { op: 'equal', loose: false, e: 'clean' },
+  ]);
+
+  const searching = await repo(SCAN_SOLUTION);
+  try {
+    const run = await runHiddenCheck(check, searching.dir);
+    assert.equal(run.failure, undefined);
+    // The first answer proves the scan saw what it was given: the check is not vacuous.
+    assert.equal(run.observations[0]?.a, 'saw:INPUT-R8H1-77aa');
+    assert.equal(run.observations[1]?.a, 'clean', 'the child could see part of the check');
+    assert.equal(compareObservations(run.observations, captured.expectations).passed, true);
+  } finally {
+    await searching.cleanup();
   }
 });
