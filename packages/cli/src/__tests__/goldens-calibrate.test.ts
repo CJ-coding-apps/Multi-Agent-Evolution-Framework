@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { LcmEngine } from '@maf/lcm';
-import { CALIBRATION_MIN_SELECTED, CALIBRATION_RULE, HELD_OUT_RULE, loadSplits } from '@maf/eval-harness';
+import {
+  CALIBRATION_MIN_SELECTED, CALIBRATION_RULE, HELD_OUT_RULE, loadSplits, verifyCalibration,
+} from '@maf/eval-harness';
 import type { GoldenSuiteResult, GoldenTask } from '@maf/eval-harness';
 import { calibrationTaskIds, runCalibration } from '../commands/goldens.js';
 
@@ -311,6 +313,7 @@ test('--probe measures a seeded sample, writes only calibration-probe.json, and 
         probabilityReachesYardstick: number; printedProbability: number; yardstick: number; confidence: number;
       };
       usage?: { tokens: number; tasks: number; calls: number };
+      keySource?: string; signature?: string;
     };
     assert.equal(probe.kind, 'probe', 'a probe can never be mistaken for the calibration a split derives from');
     assert.equal(probe.runs, 3);
@@ -330,6 +333,14 @@ test('--probe measures a seeded sample, writes only calibration-probe.json, and 
     assert.equal(probe.projection.confidence, 0.8);
     assert.equal(probe.projection.printedProbability, 0);
     assert.ok(probe.projection.probabilityReachesYardstick < 0.002);
+    // R8-L3: the probe's record is signed by the same rule as calibration.json, and names the key.
+    assert.equal(probe.keySource, 'dev');
+    assert.match(probe.signature ?? '', /^[0-9a-f]{64}$/);
+    assert.match(stderr, /calibration probe: the record was signed with the public development key/);
+    // The signature verifies, and it covers the counts: a record edited after signing does not.
+    const signing = { secret: process.env['MAF_SIGNING_KEY'] };
+    assert.deepEqual(verifyCalibration(probe, signing), { valid: true, keySource: 'dev' });
+    assert.equal(verifyCalibration({ ...probe, tasks: [] }, signing).valid, false);
     assert.equal(probe.usage?.tasks, 10, 'the probe is metered like the full run');
     assert.ok((probe.usage?.tokens ?? 0) > 0);
 

@@ -510,9 +510,19 @@ export type UnsignedCalibrationRecord = Omit<CalibrationRecord, 'signature'>;
 export function signCalibration(
   record: UnsignedCalibrationRecord, signing: SigningOptions = {},
 ): CalibrationRecord {
-  // First pass for the keySource, second over the record that carries it, so the claim is signed.
+  return signRecord(record, signing);
+}
+
+/**
+ * R8-L3: the same two-pass signing for any record at this boundary — the calibration's and the
+ * probe's. The first pass names the key, the second signs the record that carries the name, so the
+ * claim about which key signed is itself signed.
+ */
+export function signRecord<T extends object>(
+  record: T, signing: SigningOptions = {},
+): T & { keySource: KeySource; signature: string } {
   const { keySource } = signPayload(record, signing);
-  const complete: UnsignedCalibrationRecord = { ...record, keySource };
+  const complete = { ...record, keySource };
   return { ...complete, signature: signPayload(complete, signing).signature };
 }
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { componentId } from '@maf/attestation';
-import type { SigningOptions } from '@maf/attestation';
+import type { KeySource, SigningOptions } from '@maf/attestation';
 import { SecurityReviewGate } from '@maf/git-ops';
 import { makeRunId, refusePrototypeKey } from '@maf/types';
 import type { CliAdapter, RunId, RunStatus } from '@maf/types';
@@ -18,7 +18,7 @@ import {
   PROBE_DEFAULT_TASKS, PROBE_FILE,
   ScoreRecorder, ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SPLITS_FILE, applyCalibration,
   assertGoldenCorpus, describeJudge, loadScriptedTasks, loadSplits, makeLlmJudge, projectProbe,
-  seesawDecision, selectCalibrated, selectProbeTasks, signCalibration,
+  seesawDecision, selectCalibrated, selectProbeTasks, signCalibration, signRecord,
 } from '@maf/eval-harness';
 import type {
   CalibrationCount, CalibrationProbeProjection, CalibrationRecord, CalibrationSelection,
@@ -416,6 +416,10 @@ export interface CalibrationProbeRecord {
   errors: { taskId: string; attempt: number; error: string }[];
   projection: CalibrationProbeProjection;
   usage?: CalibrationUsage;
+  /** R8-L3: which key signed this record; inside the signed bytes. */
+  keySource?: KeySource;
+  /** R8-L3: HMAC-SHA256 over the record's canonical JSON less this field. */
+  signature?: string;
 }
 
 export interface CalibrationProbeOutcome {
@@ -436,7 +440,10 @@ export async function runCalibrationProbe(o: CalibrationProbeOptions): Promise<C
   const { counts, errors } = measurement(result);
   const usage = o.usage?.();
   const projection = projectProbe(counts, o.poolSize);
-  const record: CalibrationProbeRecord = {
+  // R8-L3: the probe's record is signed by the same rule as `calibration.json`. A sample that
+  // prices a measurement is an input to a spending decision; an unsigned one can be rewritten by
+  // anyone and still look like the machine's own count.
+  const measured: CalibrationProbeRecord = {
     version: 1, kind: 'probe',
     harnessId: o.harness.id, harnessSha: o.harness.sha, adapter: o.adapter.name,
     ...(o.model !== undefined ? { model: o.model } : {}),
@@ -447,6 +454,7 @@ export async function runCalibrationProbe(o: CalibrationProbeOptions): Promise<C
     tasks: counts, errors, projection,
     ...(usage !== undefined ? { usage } : {}),
   };
+  const record = signRecord(measured, o.signing ?? { secret: process.env['MAF_SIGNING_KEY'] });
   const probePath = path.join(o.corpusRoot, PROBE_FILE);
   await writeFile(probePath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
   return { path: probePath, record, projection };
@@ -687,6 +695,14 @@ export function registerGoldensCommand(program: Command): void {
         });
         for (const e of probe.record.errors)
           console.error(`[maf] calibration probe: ${e.taskId} attempt ${e.attempt + 1} failed: ${e.error}`);
+        // R8-L3: the probe's record is signed like the calibration's, and a public key is said out
+        // loud here too — a forgeable sample is still an input to a spending decision.
+        if (probe.record.keySource === 'dev')
+          console.error(
+            '[maf] calibration probe: the record was signed with the public development key ' +
+            '(MAF_SIGNING_KEY is unset or is that key), and names it in keySource — anyone can forge ' +
+            'a record under that key.',
+          );
         console.log(`[maf] calibration probe: wrote ${probe.path}`);
         if (probe.record.usage !== undefined && probe.record.usage.tasks > 0)
           console.log(
