@@ -74,25 +74,28 @@ Rendered as `not recorded` under acceptance 6 and §4; never as empty or zero.
     repository does not carry. A decision is a §5 authority; the maintainer must add it, and this
     lane cannot. Reported as a spec defect.
 
-## CONFLICT — the workspace link the ownership list omits, measured
+## CONFLICT — the workspace link the ownership list omits, measured (exception granted)
 
 The spec puts the command in `packages/cli/src/commands/view.ts` and the renderer in the new
 `packages/viewer`, but the declared owned files are only `packages/viewer/**` and `view.ts` (plus
 the `main.ts` registration line), under "no dependency or reserved-file changes". A CLI that
 imports a new workspace package cannot be built without:
 
-- `packages/cli/package.json` — one `"@maf/viewer": "workspace:*"` entry (not owned);
-- `pnpm-lock.yaml` — the importer entries that mirror it (reserved, §1: only under a written
-  one-PR exception naming the files and the branch).
+- `packages/cli/package.json` — one `"@maf/viewer": "workspace:*"` entry;
+- `packages/cli/tsconfig.json` — one `{ "path": "../viewer" }` reference, beside the other 25
+  (the CLI lists a project reference for every package it depends on);
+- `packages/viewer/package.json` — `typescript: "*"` and `@types/node: "*"`, the pair every sibling
+  package declares; both resolve to versions already in the lockfile (5.9.3 and 20.19.43);
+- `pnpm-lock.yaml` — the importer entries that mirror them (reserved, §1).
 
-Measured in a scratch copy of this tree (pnpm 10.34.7, offline):
+Measured before the exception, with the pre-exception manifests (pnpm 10.34.7, offline, scratch copy):
 
 ```
 ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile" …
 * 2 dependencies were added: @maf/attestation@workspace:*, @maf/types@workspace:*
 ```
 
-and the exact lockfile delta after a non-frozen install:
+The lockfile delta after `pnpm install --offline` (added lines, unchanged context trimmed):
 
 ```
 +      '@maf/viewer':            (packages/cli importer)
@@ -107,15 +110,26 @@ and the exact lockfile delta after a non-frozen install:
 +      '@maf/types':
 +        specifier: workspace:*
 +        version: link:../types
++    devDependencies:
++      '@types/node':
++        specifier: '*'
++        version: 20.19.43
++      typescript:
++        specifier: '*'
++        version: 5.9.3
 ```
 
-12 added lines: three workspace links, no external package, no resolved version moved. This is the
-case the standing rule covers ("a `workspace:*` link inside the monorepo needs no ask if the
-lockfile diff is only the new importer and there's no cycle — measure and show the delta"). It is
-**not** a written one-PR exception. The lane proceeds with this measured delta and asks the
-maintainer to accept or reject it as that exception for `wp/3.18-viewer`; the revert is the same
-12 lines. Viewer declares no external dependency and no `devDependencies` (it inherits the root
-`tsc`, measured), so no outside specifier is added.
+19 added lines: three workspace links, the new importer, and the sibling devDependency pair at
+**versions already in the lockfile — no new external specifier, no resolved version moved, no
+registry change**. The standing rule covers the workspace links, but a lockfile edit needs a
+written one-PR exception, so the lane asked for one.
+
+### The maintainer's exception (granted 2026-11-16, with PR #66)
+
+> One-PR exception for PR #66 (WP-3.18): the coder may change pnpm-lock.yaml, packages/cli/package.json and packages/cli/tsconfig.json, and create packages/viewer/package.json (including its version field), only to add the workspace package @maf/viewer and its links (@maf/cli → @maf/viewer; @maf/viewer → @maf/attestation, @maf/types; and the sibling-standard devDependencies typescript and @types/node at the versions the other packages already use). No other dependency, version or registry change.
+
+The four files above are exactly the files it names, and the diff adds nothing outside them; the
+revert is the same lines.
 
 ## Design
 
@@ -157,7 +171,7 @@ Two changes after the first run, both mechanical and disclosed (§8: neither tou
 
 **macOS 15.5 (x86_64), Node v25.6.0, pnpm 10.34.7 — measured at this tree:**
 
-- `pnpm install --frozen-lockfile --offline` passes with the 12-line delta above (it fails without
+- `pnpm install --frozen-lockfile --offline` passes with the 19-line delta above (it fails without
   it, as quoted). `pnpm -r build`: 28/28. `pnpm -r typecheck`: all 28 Done.
 - `@maf/viewer` suite: **24 tests, 24 passed, 0 failed**. Acceptance 5's own figure, re-measured
   outside the suite: 500 nodes / 10,000 surfaces → **520 ms, 4.71 MiB** (budgets 10 s / 8 MiB).

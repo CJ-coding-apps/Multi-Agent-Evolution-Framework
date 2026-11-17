@@ -19,5 +19,9 @@
   "dependencies": {
     "@maf/attestation": "workspace:*",
     "@maf/types": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "*",
+    "@types/node": "*"
   }
 }
