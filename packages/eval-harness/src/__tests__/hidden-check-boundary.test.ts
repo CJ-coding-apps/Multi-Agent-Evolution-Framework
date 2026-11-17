@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { captureExpectations, compareObservations, injectCanary, runHiddenCheck } from '../index.js';
@@ -355,6 +355,108 @@ test('a solution that searches everything it can see finds no expected value and
   } finally {
     await searching.cleanup();
   }
+});
+
+/* ---------- R8-L2: the scan also covers the child's heap ---------- */
+
+// The sweep above reads what the solution can *reach* by name — argv, environment, globals, stdin.
+// It cannot see a string that is alive in the child's heap and reachable only through a closure,
+// which is exactly how a leaked check source would sit if the boundary ever regressed. These two
+// runs use a heap snapshot written from inside the child and searched by the test:
+//
+//  - the control holds the sentinel in a driver-side closure; the snapshot must contain it, or the
+//    scan is blind and a clean result means nothing;
+//  - the real run holds an inert marker instead — the snapshot must contain that marker, and must
+//    not contain the sentinel or the canary.
+//
+// The markers are assembled at runtime from character codes, so no copy of either string exists in
+// the solution's source; a snapshot hit can only come from the closure.
+
+const HEAP_CHECK = [
+  "const assert = require('node:assert/strict');",
+  "const { scan, heapFile } = require('./lib');",
+  '// SENTINEL-R8H1-9d2b41 is an expected value of this file and nothing else.',
+  "assert.equal(scan('INPUT-R8H1-77aa'), 'saw:INPUT-R8H1-77aa');",
+  // The path of the snapshot crosses as an ordinary string; the test reads the file.
+  "assert.notEqual(heapFile(), '');",
+  '',
+].join('\n');
+
+function heapSolution(held: string): string {
+  const codes = Array.from(held, (c) => c.codePointAt(0)).join(', ');
+  return [
+    'const v8 = require("node:v8");',
+    'const fs = require("node:fs");',
+    'const os = require("node:os");',
+    'const path = require("node:path");',
+    'function hold(codes) {',
+    '  const s = String.fromCharCode.apply(null, codes);',
+    '  return function () { return s; };',
+    '}',
+    'module.exports.held = hold([' + codes + ']);',
+    'function scan(input) {',
+    '  if (input !== undefined) return "saw:" + input;',
+    '  return "clean";',
+    '}',
+    'function heapFile() {',
+    '  const keep = module.exports.held;', // on the stack at snapshot time, so the closure is a root
+    '  const file = path.join(os.tmpdir(), "maf-r9l2-" + process.pid + ".heapsnapshot");',
+    '  v8.writeHeapSnapshot(file);',
+    '  return typeof keep === "function" ? file : "";',
+    '}',
+    'module.exports.scan = scan;',
+    'module.exports.heapFile = heapFile;',
+    '',
+  ].join('\n');
+}
+
+async function snapshotText(observations: Array<{ a?: unknown }>): Promise<{ text: string; file: string }> {
+  const file = observations[1]?.a;
+  assert.equal(typeof file, 'string', 'the child did not report a heap snapshot path');
+  const text = await readFile(file as string, 'utf8');
+  await rm(file as string, { force: true });
+  return { text, file: file as string };
+}
+
+test("the scan covers the child's heap, and a closure-held sentinel would be seen", async () => {
+  const check = injectCanary(HEAP_CHECK, 'r9l2-scan', '.checks/scan-heap.js');
+  const reference = await repo(
+    "module.exports = { scan: (i) => 'saw:' + i, heapFile: () => '/dev/null' };\n",
+  );
+  let captured: Awaited<ReturnType<typeof captureExpectations>>;
+  try {
+    captured = await captureExpectations(check, reference.dir);
+  } finally {
+    await reference.cleanup();
+  }
+  assert.equal(captured.failure, undefined);
+
+  const run = async (held: string) => {
+    const staged = await repo(heapSolution(held));
+    try {
+      const result = await runHiddenCheck(check, staged.dir);
+      assert.equal(result.failure, undefined);
+      assert.equal(result.observations[0]?.a, 'saw:INPUT-R8H1-77aa');
+      return result;
+    } finally {
+      await staged.cleanup();
+    }
+  };
+
+  // Positive control: the sentinel lives only in a closure in the child's heap. If the snapshot
+  // does not show it, the scan below would be green for the wrong reason.
+  const control = await snapshotText((await run('SENTINEL-R8H1-9d2b41')).observations as Array<{ a?: unknown }>);
+  assert.ok(control.text.includes('SENTINEL-R8H1-9d2b41'),
+    'a closure-held marker was not in the heap snapshot: the scan cannot see a leaked check');
+
+  // The real run. The inert marker proves the snapshot was readable and searched; the sentinel and
+  // the canary must not appear anywhere in it.
+  const real = await run('CLEAN-CONTROL-R9L2');
+  assert.equal(compareObservations(real.observations, captured.expectations).passed, true);
+  const heap = await snapshotText(real.observations as Array<{ a?: unknown }>);
+  assert.ok(heap.text.includes('CLEAN-CONTROL-R9L2'), 'the snapshot did not show the marker the child holds');
+  assert.equal(heap.text.includes('SENTINEL-R8H1-9d2b41'), false, 'the check source reached the child heap');
+  assert.equal(heap.text.includes('maf-hidden-canary-'), false, 'the canary reached the child heap');
 });
 
 /* ---------- R8-L1: the scorer reads a bounded amount of the solution's output ---------- */
