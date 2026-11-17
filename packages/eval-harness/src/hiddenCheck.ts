@@ -76,6 +76,8 @@ export interface CheckExpectation {
   /** `node:assert` (loose) rather than `node:assert/strict`. */
   loose: boolean;
   e?: SerializedValue;
+  /** R9-L4: the name of the constructor `throws`/`rejects` was given, e.g. `TypeError`. */
+  errType?: string;
 }
 
 /** One observation the check reported while it ran in the checker; `exit` is its own `process.exit`. */
@@ -88,6 +90,10 @@ export interface CheckObservation {
   same?: boolean;
   threw?: boolean;
   err?: { name: string; message: string };
+  /** R9-L4: `doesNotThrow` records a `throws` observation with this set; its verdict is inverted. */
+  negate?: boolean;
+  /** R9-L4: the constructor named as `throws`'s second argument, if it was a function. */
+  errType?: string;
 }
 
 export interface HiddenCheckResult {
@@ -1215,6 +1221,14 @@ function makeAssert(
     if (extra !== undefined) Object.assign(record, extra);
     observations.push(record);
   };
+  // R9-L4: `assert.throws(fn, TypeError)` names a constructor. The error itself crosses the
+  // boundary as `{name, message}`, so the name is the part of the contract that can be compared
+  // here; an old expectation recorded before this carries no `errType` and only requires a throw.
+  const errTypeOf = (expected: unknown): string | undefined => {
+    if (typeof expected !== 'function') return undefined;
+    const name = (expected as { name?: unknown }).name;
+    return typeof name === 'string' && name !== '' ? name : undefined;
+  };
   const pending: Promise<void>[] = [];
   const assert: Record<string, (...args: never[]) => void> = {
     equal(actual: never, expected: never) { emit('equal', actual, expected, { same: actual === expected }); },
@@ -1234,18 +1248,19 @@ function makeAssert(
         e: expected === undefined ? { t: 'u' } : ser(expected, []), threw,
       };
       if (threw && err !== undefined) record.err = err;
+      const errType = errTypeOf(expected);
+      if (errType !== undefined) record.errType = errType;
       observations.push(record);
     },
     doesNotThrow(fn: never, expected: never) {
       let threw = false;
       let err: { name: string; message: string } | undefined;
       try { (fn as unknown as () => void)(); } catch (e) { threw = true; err = errorOf(e); }
-      const record: CheckObservation & { negate?: boolean } = {
+      const record: CheckObservation = {
         op: 'throws', loose, a: null,
-        e: expected === undefined ? { t: 'u' } : ser(expected, []), threw,
+        e: expected === undefined ? { t: 'u' } : ser(expected, []), threw, negate: true,
       };
       if (threw && err !== undefined) record.err = err;
-      record.negate = true;
       observations.push(record);
     },
     rejects(promise: never, expected: never) {
@@ -1258,6 +1273,8 @@ function makeAssert(
           e: expected === undefined ? { t: 'u' } : ser(expected, []), threw,
         };
         if (threw && err !== undefined) record.err = err;
+        const errType = errTypeOf(expected);
+        if (errType !== undefined) record.errType = errType;
         observations.push(record);
       })();
       pending.push(settled);
@@ -1467,6 +1484,7 @@ export async function captureExpectations(
       return { expectations: [], failure: `assertion ${i + 1} (${o.op}) recorded no expected value` };
     const e: CheckExpectation = { op: o.op, loose: o.loose };
     if (o.e !== undefined) e.e = o.e;
+    if (o.errType !== undefined) e.errType = o.errType;
     expectations.push(e);
   }
   return { expectations, ...(exitStyle ? { exitStyle: true } : {}) };
@@ -1625,11 +1643,22 @@ function deepSerializedEqual(a: SerializedValue, e: SerializedValue, loose: bool
       return true;
     }
     case 'm': case 's': {
+      // R9-L4: `deepStrictEqual` compares Maps and Sets without regard to insertion order; an
+      // entry-by-entry scan judged two equal collections unequal when they were built differently.
       const av = ao['v'] as Array<[SerializedValue, SerializedValue]>;
       const ev = eo['v'] as Array<[SerializedValue, SerializedValue]>;
-      return av.length === ev.length && av.every((pair, i) => {
-        const other = ev[i] as [SerializedValue, SerializedValue];
-        return deepSerializedEqual(pair[0], other[0], loose) && deepSerializedEqual(pair[1], other[1], loose);
+      if (av.length !== ev.length) return false;
+      const used = new Array<boolean>(ev.length).fill(false);
+      return av.every((pair) => {
+        for (let j = 0; j < ev.length; j++) {
+          if (used[j] === true) continue;
+          const other = ev[j] as [SerializedValue, SerializedValue];
+          if (deepSerializedEqual(pair[0], other[0], loose) && deepSerializedEqual(pair[1], other[1], loose)) {
+            used[j] = true;
+            return true;
+          }
+        }
+        return false;
       });
     }
     default:
@@ -1665,6 +1694,13 @@ export function compareObservations(
     if (o.op !== e.op)
       return { passed: false, detail: `assertion ${i + 1}: the check reported ${o.op}, expected ${e.op}` };
     if (o.op === 'throws' || o.op === 'rejects') {
+      // R9-L4: `doesNotThrow` is the same observation with its verdict inverted. Judged as a throw
+      // it passed exactly the solution that threw and failed the one that did not.
+      if (o.negate === true) {
+        if (o.threw !== true) continue;
+        const what = o.err === undefined ? 'an error' : `${o.err.name}: ${o.err.message}`;
+        return { passed: false, detail: `assertion ${i + 1}: doesNotThrow saw ${what}` };
+      }
       if (o.threw !== true) return { passed: false, detail: `assertion ${i + 1}: expected a throw, none was raised` };
       const expected = e.e;
       if (expected !== undefined && expected !== null && typeof expected === 'object' && (expected as { t?: string }).t === 'r') {
@@ -1673,8 +1709,16 @@ export function compareObservations(
         const message = o.err?.message ?? '';
         if (!re.test(message) && !new RegExp(source, flags).test(String(o.err?.name ?? '')))
           return { passed: false, detail: `assertion ${i + 1}: ${JSON.stringify(message)} does not match ${re}` };
+      } else if (e.errType !== undefined) {
+        // R9-L4: a constructor was named; the error's class is part of the contract.
+        const got = o.err?.name ?? '';
+        if (got !== e.errType)
+          return {
+            passed: false,
+            detail: `assertion ${i + 1}: threw ${got === '' ? 'an unnamed error' : got}, expected ${e.errType}`,
+          };
       } else if (expected !== undefined && expected !== null && typeof expected === 'object' && (expected as { t?: string }).t === 'f') {
-        // a constructor argument was given but its name was not recorded; a throw is the contract.
+        // An expectation recorded before errType existed: a throw is the contract.
       }
       continue;
     }
