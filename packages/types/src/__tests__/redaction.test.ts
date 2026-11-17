@@ -56,3 +56,78 @@ test('a credential inside a path is masked and leaves no path fragment behind', 
   assert.doesNotMatch(out, /ghp_/);
   assert.doesNotMatch(out, /notes\.txt/, 'the whole path went, not just the secret segment');
 });
+
+// R3-L2: an unquoted path with a space used to be matched only to the first space, so the tail
+// after it survived the mask — a leak in free-text reasons, where nothing bounds the path but the
+// path itself. The whole path goes; a token that still carries a separator is part of it.
+test('an unquoted POSIX path with a space is one path, not a head and a leaked tail', () => {
+  const out = redactEvidenceText('Path /Users/a b/secret.txt refused');
+  assert.equal(out, 'Path [REDACTED:path] refused');
+  assert.doesNotMatch(out, /b\/secret\.txt/, 'nothing after the space survives');
+});
+
+test('an unquoted Windows path with a space is masked whole', () => {
+  const out = redactEvidenceText('Path C:\\Program Files\\x\\key.pem refused');
+  assert.equal(out, 'Path [REDACTED:path] refused');
+  assert.doesNotMatch(out, /Files|x\\key\.pem/, 'nothing after the space survives');
+});
+
+test('an unquoted spaced path inside the repo still keeps its repo-relative tail', () => {
+  const out = redactEvidenceText('refused /Users/a b/proj/secret.txt', ['/Users/a b/proj']);
+  assert.equal(out, 'refused secret.txt');
+  assert.doesNotMatch(out, /\/Users/);
+});
+
+// R2-L2: the space-tolerant pattern continued past a space only when that word still carried a
+// separator, so a path whose LAST word carried it leaked every word before it. These are the
+// verdict's three residual shapes.
+test('an unquoted path ending in a multi-word segment is masked whole (R2-L2)', () => {
+  const out = redactEvidenceText('refused write to /Users/Mary Ann Lee/secret.txt because policy');
+  assert.equal(out, 'refused write to [REDACTED:path] because policy');
+  assert.doesNotMatch(out, /Ann Lee|secret\.txt/, 'no word of the path survives');
+});
+
+test('an unquoted path ending in a spaced filename is masked whole (R2-L2)', () => {
+  assert.equal(redactEvidenceText('refused /home/u/my secret notes.txt'),
+    'refused [REDACTED:path]');
+  assert.equal(redactEvidenceText('refused C:\\Users\\x\\my key.pem now'),
+    'refused [REDACTED:path] now');
+});
+
+// R2-L2: the spaced continuation reached to the last filename-looking word in the sentence, so a
+// refusal that quoted one path and named a file in prose masked the prose as well. It now crosses
+// at most three words and ends at the first path-shaped word.
+test('prose after an unquoted path is left alone (R2-L2)', () => {
+  assert.equal(redactEvidenceText('policy denied /etc/passwd for coder see policy.yaml'),
+    'policy denied [REDACTED:path] for coder see policy.yaml');
+  assert.equal(redactEvidenceText('error at /home/u/x.js:3 in test.js'),
+    'error at [REDACTED:path] in test.js');
+});
+
+// R3-L4: the spaced-path run crossed a clause connector, so `/tmp/x then src/foo.ts` read as one
+// path and the prose between two paths went with it. A connector cannot be a directory name; the
+// run ends at it, and the second path keeps its own words.
+test('a clause connector between two paths ends the spaced-path run (R3-L4)', () => {
+  assert.equal(redactEvidenceText('wrote /tmp/x then src/foo.ts was read'),
+    'wrote [REDACTED:path] then src/foo.ts was read');
+  // A spaced filename in one clause is still one path: the connector guard applies only to the
+  // first word of the run, not to a word inside a path.
+  assert.equal(redactEvidenceText('refused /home/u/my secret notes.txt then stopped'),
+    'refused [REDACTED:path] then stopped');
+});
+
+// R4-L1: `and` and `or` were treated as clause connectors, but a directory can be named "Tom and
+// Jerry". Ending the run at `and` left the head unclosed and the second half was never a head, so
+// the whole path reached the evidence. They are ordinary path words now; `then` and the rest still
+// end a run.
+test('a directory named "Tom and Jerry" is masked whole (R4-L1)', () => {
+  assert.equal(redactEvidenceText('read /Users/Tom and Jerry/secret.txt'),
+    'read [REDACTED:path]');
+  assert.equal(redactEvidenceText('read /Users/Tom or Jerry/secret.txt'),
+    'read [REDACTED:path]');
+  assert.equal(redactEvidenceText('read /Users/Tom and Jerry/secret.txt then stopped'),
+    'read [REDACTED:path] then stopped', 'then still ends the run');
+  // Prose that happens to contain "and" after a bare path is still prose: no file-naming or
+  // separating word follows within the run, so nothing beyond the head is swallowed.
+  assert.equal(redactEvidenceText('denied /etc/passwd and more'), 'denied [REDACTED:path] and more');
+});

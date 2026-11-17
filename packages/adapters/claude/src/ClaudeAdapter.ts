@@ -148,7 +148,21 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       // The turn fails in two places — the spawn rejects when the binary cannot run, and `turnStdout`
       // throws when it ran and did not finish cleanly — so both are inside the `try`: a record of a
       // failed turn is the one a reader most wants, and it must not depend on which way it failed.
-      return { ...parseTurn(turnStdout(this.name, result)), modelSurface: surface };
+      const stdout = turnStdout(this.name, result);
+      // R2-M2: a governed turn is a model call like any other, so `reportUsage` asks it for the
+      // CLI's own per-turn usage. `--output-format json` wraps the protocol text in a report
+      // envelope; the envelope's `result` is what the wire-protocol parser must read, and the
+      // usage block is the turn's reported token count. A report that does not parse (an older
+      // build) falls back to the raw stdout exactly as before.
+      const reported = opts.reportUsage === true ? parseReportedUsage(stdout) : undefined;
+      const turn = parseTurn(reported?.text ?? stdout);
+      return {
+        ...turn,
+        ...(reported?.tokensUsed !== undefined ? { tokensUsed: reported.tokensUsed } : {}),
+        // R3-L2: the same envelope carries a cost; a caller metering dollars reads it off the turn.
+        ...(reported?.costUsd !== undefined ? { costUsd: reported.costUsd } : {}),
+        modelSurface: surface,
+      };
     } catch (err: unknown) {
       throw attach(err, surface, sent);
     }
@@ -228,16 +242,24 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
       ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
     }).catch((err: unknown): never => { throw attach(err, surface, false); });
 
+    // R2-H4: with `--output-format json` the CLI's report carries its own usage and price. The
+    // answer is the `result` field; a report that does not parse (an older build, an error path)
+    // leaves the raw stdout in place and the call is estimated by the caller.
+    const reported = options.reportUsage === true ? parseReportedUsage(result.stdout) : undefined;
+    const output = reported?.text ?? result.stdout;
+
     return {
       success:     result.exitCode === 0,
-      output:      result.stdout,
+      output,
+      ...(reported?.tokensUsed !== undefined ? { tokensUsed: reported.tokensUsed } : {}),
+      ...(reported?.costUsd !== undefined ? { costUsd: reported.costUsd } : {}),
       toolCallLog: [] as ToolCallRecord[],
       exitCode:    result.exitCode,
       duration:    this.elapsed(start),
       // Forwarded so the dispatcher can tell a timeout or a silent exit — retryable (D-06) —
       // from an answer that happens to be a failure.
       ...(result.transportError !== undefined ? { transportError: result.transportError } : {}),
-      modelSurface: { ...surface, outputSha256: sha256Hex(result.stdout) },
+      modelSurface: { ...surface, outputSha256: sha256Hex(output) },
     };
   }
 
@@ -252,6 +274,9 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     const args: string[] = ['--print'];
     if (options.systemPrompt) args.push('--system-prompt', options.systemPrompt);
     if (options.model)        args.push('--model', options.model);
+    // R2-H4: opt-in only. A caller that meters spend asks for the CLI's own report, which carries
+    // `usage` and `total_cost_usd`; every other caller keeps the plain text answer.
+    if (options.reportUsage === true) args.push('--output-format', 'json');
     // NOTE: the claude CLI has neither a token-cap nor a temperature flag in --print mode
     // (`claude --help | grep -c max-tokens` → 0; passing `--max-tokens` made every node of a
     // role with a tokenBudget exit 1 on "unknown option"), so opts.tokenBudget and
@@ -264,6 +289,33 @@ export class ClaudeAdapter extends BaseAdapter implements TurnAdapter {
     args.push('-p', '--', options.prompt);
     return args;
   }
+}
+
+/**
+ * R2-H4: what `claude --print --output-format json` reported about one call. `usage` is the sum of
+ * every billed token kind (input, output, cache write, cache read); `total_cost_usd` is the CLI's
+ * own price. A stdout that is not that report (an older build, a non-zero exit that printed text)
+ * yields undefined, and the caller falls back to the raw text and its own estimate.
+ */
+function parseReportedUsage(stdout: string): { text: string; tokensUsed?: number; costUsd?: number } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout.trim());
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined;
+  const o = parsed as Record<string, unknown>;
+  if (typeof o['result'] !== 'string') return undefined;
+  const usage = (typeof o['usage'] === 'object' && o['usage'] !== null ? o['usage'] : {}) as Record<string, unknown>;
+  const billed = ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens']
+    .reduce<number>((sum, k) => sum + (typeof usage[k] === 'number' ? (usage[k] as number) : 0), 0);
+  const cost = typeof o['total_cost_usd'] === 'number' ? o['total_cost_usd'] : undefined;
+  return {
+    text: o['result'],
+    ...(billed > 0 ? { tokensUsed: billed } : {}),
+    ...(cost !== undefined ? { costUsd: cost } : {}),
+  };
 }
 
 /**

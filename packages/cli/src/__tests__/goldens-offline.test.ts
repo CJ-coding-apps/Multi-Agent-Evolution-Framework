@@ -42,7 +42,12 @@ function lcmLoads(): boolean {
 }
 const needsLcm = {
   skip: lcmLoads() || process.env['CI'] ? false : 'better-sqlite3 does not load on this host (CI runs this)',
-  timeout: 120_000,
+  // R3-G1 grew the corpus from 16 tasks to 56; this test runs all of it through a real stack. It
+  // measured 117 s on the recording host, so 120 s was no longer a budget — it was a coin toss.
+  // R5: the 116-task corpus measured 203 s in isolation and 297.6 s inside the serial suite, which
+  // left 2.4 s under the old 300 s cap — a backstop has to sit above the measurement, not on it.
+  // 600 s is about twice the serial figure; the cap is a backstop, not a budget.
+  timeout: 600_000,
 };
 
 const stable = ({ ranAt: _ranAt, ...rest }: GoldenSuiteResult) => rest;
@@ -98,6 +103,8 @@ test('a poisoned project graph and an earlier attempt\'s memory never reach the 
     await cp(path.join(REPO, '.maf/policy.yaml'), path.join(root, '.maf/policy.yaml'));
     const corpus = path.join(root, 'corpus');
     await cp(path.join(SEED, 'fixtures/coder-sum'), path.join(corpus, 'fixtures/coder-sum'), { recursive: true });
+    // R7-H2: the check is scored against the store's expectations, so the corpus needs the store.
+    await cp(path.join(SEED, 'hidden-store.json'), path.join(corpus, 'hidden-store.json'));
     await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([{
       id: 'coder-sum', repoFixture: 'fixtures/coder-sum', prompt, role: 'coder',
       verifiers: [{ kind: 'test-script', command: 'node', args: ['test.js'], expectExit: 0 }],
@@ -157,6 +164,8 @@ test('L1-S7: a goldens task\'s security-gate call reaches the suite bundle', nee
     await cp(path.join(REPO, '.maf/policy.yaml'), path.join(root, '.maf/policy.yaml'));
     const corpus = path.join(root, 'corpus');
     await cp(path.join(SEED, 'fixtures/coder-sum'), path.join(corpus, 'fixtures/coder-sum'), { recursive: true });
+    // R7-H2: the check is scored against the store's expectations, so the corpus needs the store.
+    await cp(path.join(SEED, 'hidden-store.json'), path.join(corpus, 'hidden-store.json'));
     await writeFile(path.join(corpus, 'corpus.json'), JSON.stringify([{
       id: 'coder-sum', repoFixture: 'fixtures/coder-sum', prompt, role: 'coder',
       verifiers: [{ kind: 'test-script', command: 'node', args: ['test.js'], expectExit: 0 }],
@@ -198,6 +207,19 @@ async function compare(dir: string, a: string, b: string): Promise<{ code: numbe
     (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code ?? -1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }),
   );
 }
+
+test('goldens compare refuses results measured on different splits (D-57)', () => {
+  const one = 'c'.repeat(64);
+  const sha = 'e'.repeat(64);
+  const train = result({ corpusSha: one, split: 'train', splitsSha: sha });
+  // A train score and a held-out score answer different questions.
+  assert.match(incomparable(train, result({ corpusSha: one, split: 'held-out', splitsSha: sha })) ?? '', /different splits \(train vs held-out\)/);
+  assert.match(incomparable(train, result({ corpusSha: one })) ?? '', /different splits \(train vs the full corpus\)/);
+  // Two definitions of the same-named split are two yardsticks.
+  assert.match(incomparable(train, result({ corpusSha: one, split: 'train', splitsSha: 'f'.repeat(64) })) ?? '', /different split definitions/);
+  assert.equal(incomparable(train, result({ corpusSha: one, split: 'train', splitsSha: sha })), undefined);
+  assert.equal(incomparable(result({ corpusSha: one }), result({ corpusSha: one })), undefined);
+});
 
 test('goldens compare refuses results measured on different corpora, or on an unknown one', async () => {
   const one = 'c'.repeat(64);

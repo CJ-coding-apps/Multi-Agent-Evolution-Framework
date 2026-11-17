@@ -121,6 +121,33 @@ export function signBundle(
 }
 
 /**
+ * R6-L2: the same signature rule for a JSON record that is not a run bundle — `calibration.json`
+ * is the first. The bytes are the RFC 8785 form of the payload (exactly as `signBundle` signs a
+ * statement), and the key is chosen by the same rule: `MAF_SIGNING_KEY` if set, else the public
+ * development key, which the returned `keySource` names.
+ */
+export function signPayload(payload: object, signing: SigningOptions = {}): {
+  signature: string; keySource: KeySource;
+} {
+  const { secret, keySource } = signingKey(signing);
+  return { signature: hmacHex(secret, signedBytes(payload)), keySource };
+}
+
+/**
+ * Whether `signature` over `payload` matches this check's key AND the payload's own `keySource`
+ * claim names that key — a record re-signed with the public development key cannot pass while
+ * claiming `"env"`. A claim of `undefined` is allowed only because a 0.2.x bundle allows it; a
+ * caller whose records always carry a claim should require one, as `verifyCalibration` does.
+ */
+export function verifyPayload(
+  payload: object, signature: unknown, claimedKeySource: unknown, signing: SigningOptions = {},
+): boolean {
+  const { secret, keySource } = signingKey(signing);
+  if (!signatureMatches(secret, signedBytes(payload), signature)) return false;
+  return claimedKeySource === undefined || claimedKeySource === keySource;
+}
+
+/**
  * A bundle file's text, as either shape `verify` reads. Refuses, with a sentence, what is not
  * JSON, not an object, or carries no signature; everything else is the signature's to judge.
  */
