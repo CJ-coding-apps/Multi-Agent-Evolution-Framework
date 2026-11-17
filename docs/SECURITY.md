@@ -885,13 +885,23 @@ stateful check is a sequence of calls: the checker issues one, compares the answ
 expectation, and issues the next. **No part of the check is sent to the child** — not its source,
 not one literal, not the canary — so a solution that walks its caller frames, `process.argv`, the
 environment, the globals or its own stdin finds no expected value to replay; that is tested by
-replaying the round-7 exploit and by a solution that scans everything it can see. The driver starts
-with `--disallow-code-generation-from-strings` and `'use strict'` as defence in depth. The
-solution's exit code, its stdout, and any global it patches in its own process cannot move the
-verdict: only a well-formed, signed driver response counts, and the scorer reads a bounded amount of
+replaying the round-7 exploit, by a solution that scans everything it can see, and by a solution
+that searches a heap snapshot taken inside its own process. The driver starts with
+`--disallow-code-generation-from-strings` and `'use strict'`. The flag is exact in what it does: it
+blocks `eval` and `new Function` in the driver's own realm. It does not restrict the `vm` module,
+so it guards the driver's own string handling rather than acting as a barrier to code a solution
+chooses to compile. The solution's exit code, its stdout, and any global it patches in its own
+process cannot move the verdict: only a well-formed, signed driver response counts, and the scorer reads a bounded amount of
 it — 1 MiB per message and 8 MiB in all. A child that exits early, prints a verdict, hangs past the
 deadline, writes an oversized or unreadable message, or returns a different number of observations
 is a failure, and the child is killed. This protects against a solution that disables, forges or
 short-circuits the test that judges it — on held-out and train tasks alike, because the evolver's
 train scoring uses the same boundary. It does not protect the driver's own process from a solution
 that attacks it directly; that is the sandbox's problem, and the sandbox is 0.7.0's.
+
+The session key lives in the child's heap and a solution that scans its own memory can recover it.
+That lets it forge lines in the exchange, and it gains the solution nothing: the verdict is a
+comparison in the checker against expectations that never crossed, so a forged reply can only
+misreport a value that is judged on its merits, and a solution that wants to fail its own run can
+exit, which it can already do. The key's exposure is a limit of the boundary's integrity story, not
+a way around the check.

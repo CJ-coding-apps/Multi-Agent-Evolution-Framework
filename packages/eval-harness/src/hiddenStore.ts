@@ -19,10 +19,11 @@ import type { AssertOp, CheckExpectation, SerializedValue } from './hiddenCheck.
  */
 export const HIDDEN_STORE_FILE = 'hidden-store.json';
 /**
- * R7-H2: version 2 adds the `expectations` section. A check's expected values are held by the
- * checker process and compared there; they cannot travel with the check into the child process
- * that loads the solution. A version-1 store has none, so it cannot score a task through the
- * boundary and is refused rather than read as one that can.
+ * R7-H2: version 2 adds the `expectations` section. A check's expected values are recorded from a
+ * trusted run and compared in the checker; since R8-H1 the child that loads the solution receives
+ * call descriptions only — neither the check nor its expected values reach it. A version-1 store
+ * has no expectations, so it cannot score a task through the boundary and is refused rather than
+ * read as one that can.
  */
 export const HIDDEN_STORE_VERSION = 2;
 export const HIDDEN_STORE_ENCODING = 'gzip+base64';
@@ -174,9 +175,10 @@ export function expectationPaths(store: HiddenStoreFile, taskId: string): string
 }
 
 /**
- * R7-H2: the expected values for one check. They never leave the checker process: the child that
- * loads the solution is sent the check's source alone. A store entry that is not an array of
- * well-formed expectations is refused — a malformed one would compare a run against nothing.
+ * R7-H2: the expected values for one check. They never leave the checker process: since R8-H1 the
+ * child that loads the solution is sent call descriptions alone, and the check runs in the checker.
+ * A store entry that is not an array of well-formed expectations is refused — a malformed one
+ * would compare a run against nothing.
  */
 export function readExpectations(
   store: HiddenStoreFile, taskId: string, rel: string,
