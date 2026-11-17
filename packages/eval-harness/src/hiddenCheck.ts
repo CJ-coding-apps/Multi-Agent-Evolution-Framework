@@ -695,7 +695,9 @@ class BoundaryFailure extends Error {}
  * mirrors of every value that has crossed. Values keep their identity by id, so a mutation the
  * solution makes is applied to the very object the check holds.
  */
-class CheckerBridge {
+// Exported for this package's protocol tests only (R9-L3). It is not part of the harness's API:
+// the entry points are `runHiddenCheck`, `captureExpectations` and `compareObservations`.
+export class CheckerBridge {
   failure?: string;
   readonly childPid: number | undefined;
 

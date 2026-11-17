@@ -30,6 +30,8 @@ export type {
 } from './hiddenCheck.js';
 export {
   DRIVER_SOURCE, runHiddenCheck, captureExpectations, compareObservations,
+  // Protocol tests reach the bridge directly (R9-L3); nothing outside this package should use it.
+  CheckerBridge,
 } from './hiddenCheck.js';
 export type { CorpusSplits, LoadedSplits, SplitName } from './splits.js';
 export { SPLITS_FILE, MIN_HELD_OUT, SplitsError, computeSplitsSha, isDeterministicTask, isJudgeScored, loadSplits } from './splits.js';
