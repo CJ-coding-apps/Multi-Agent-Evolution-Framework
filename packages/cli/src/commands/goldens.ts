@@ -14,7 +14,8 @@ import { MemoryGraph } from '@maf/memory-graph';
 import { RoleRegistry, roleSetFromHarness } from '@maf/roles';
 import { createDefaultRegistry } from '@maf/tools';
 import {
-  CALIBRATION_FILE, CALIBRATION_PROBE_CONFIDENCE, CALIBRATION_RULE, CALIBRATION_RUNS, GoldenRunner,
+  CALIBRATION_FILE, CALIBRATION_MIN_SELECTED, CALIBRATION_PROBE_CONFIDENCE, CALIBRATION_RULE,
+  CALIBRATION_RUNS, GoldenRunner,
   PROBE_DEFAULT_TASKS, PROBE_FILE,
   ScoreRecorder, ScriptedAdapter, SCRIPTED_ADAPTER_NAME, SPLITS_FILE, applyCalibration,
   assertGoldenCorpus, describeJudge, loadScriptedTasks, loadSplits, makeLlmJudge, projectProbe,
@@ -611,7 +612,7 @@ export function registerGoldensCommand(program: Command): void {
     .option('--probe [n]', `Measure only a seeded sample of n pool tasks (default ${PROBE_DEFAULT_TASKS}), report the posterior for the whole pool, and exit 1 when the chance it reaches the yardstick floor is below ${CALIBRATION_PROBE_CONFIDENCE.toFixed(2)}; writes ${PROBE_FILE} and never touches ${SPLITS_FILE} or ${CALIBRATION_FILE}`, undefined)
     .option('--policy <path>', 'Policy file', '.maf/policy.yaml')
     .option('--allow-ungoverned', "Let writer roles run on the cli tier, outside MAF's policy, redaction, attestation and processor hooks (D-01)")
-    .description('Measure the base harness on the held-out task pool, then select the tasks that have headroom into heldOut (writes calibration.json and splits.json; exits 1 when fewer than 10 qualify)')
+    .description(`Measure the base harness on the held-out task pool, then select the tasks that have headroom into heldOut (writes calibration.json and splits.json; exits 1 when fewer than ${CALIBRATION_MIN_SELECTED} qualify)`)
     .action(async (opts: CalibrationOpts, cmd: Command) => {
       const cwd = path.resolve(opts.dir);
       const mafDir = await ensureMafDir(path.join(cwd, '.maf'));
