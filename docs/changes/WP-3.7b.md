@@ -1944,3 +1944,149 @@ round-8 rows, and touches no executable line. Each suite was run alone, after
   at assertion 2 for the other reason. Applied to the compiled `dist/`, observed red, reversed, and
   the restored file compared byte-for-byte by sha256 (`hiddenCheck.js` `46b73b0b…`).
 - **No paid run on real `claude` has been made.** The probe is CJ's to run.
+
+## Round 9 — the round-8 verifier findings
+
+Six LOWs, no HIGH or MED, and no pool check touched: the probe CJ runs at the round-8 head scores
+the same tasks under the same expectations. One commit per item, `[WP-3.7b, D-57, R9-<id>]`.
+
+### R8-L4 (`709e122`) — the comparator judges what the assertion says
+
+Three ways `compareObservations` misjudged a solution. `assert.doesNotThrow(fn)` was recorded as a
+`throws` observation and compared as one, so it passed exactly the solution that threw and failed
+the one that did not. `assert.throws(fn, TypeError)` checked only that something was thrown, not
+what. And Maps and Sets were compared entry by entry, so two equal collections built in a different
+order failed — node's `deepStrictEqual` is order-independent for both.
+
+An observation now carries `negate` (set by `doesNotThrow`, whose verdict is inverted) and `errType`
+(the constructor's `name`, recorded on both sides of the expectation), and the `'m'`/`'s'` branch of
+`deepSerializedEqual` matches pairs in any order. `hidden-comparator.test.ts` adds four tests: a
+throwing solution fails `doesNotThrow`, a correct one passes it (the old comparator failed this),
+a `RangeError` fails a `TypeError` expectation and is named in the detail, and Maps/Sets compare
+without regard to insertion order while still rejecting different contents.
+
+Measured mutants: reverting `negate` reddens the `doesNotThrow` tests; reverting the type check
+reddens the constructor test; reverting the order-independent match reddens the collection test
+each on its own, with the other tests green.
+
+### R8-L3 (`ce58cb5`) — the two protocol fixes have tests of their own
+
+The round-7 probe's two protocol defects were fixed and covered only by the corpus baseline. Both
+now have direct tests on the bridge itself (`hidden-protocol.test.ts`), so reverting either reddens
+its own test:
+
+- a `settled` line read before any promise exists for its pid is held and handed to the promise
+  `promiseFor` returns afterwards (the dropped-settlement defect: the call never settled and the
+  probe timed out); the opposite order — waiter first — is asserted too, so the test cannot pass by
+  storing everything;
+- the driver's error record `{t:'E', n, m}` decodes to an error carrying the driver's name and
+  message, and an unnamed error still carries its message rather than the generic sentence.
+
+`CheckerBridge` is exported from the package so the tests can drive it; the harness's entry points
+are unchanged. Mutants: dropping the early-settlement store reddens the two settlement tests and
+leaves the decoding test green; replacing the `'E'` branch with a generic `Error` reddens only the
+decoding test.
+
+### R8-L2 (`aaa2098`) — the sentinel scan covers the child's heap
+
+The scan read what the solution can reach by name — argv, the environment, globals, stdin. A string
+alive only through a closure was invisible, which is exactly how a leaked check would sit. The child
+now writes a heap snapshot from inside its own process and returns the path as an ordinary
+observation; the test reads and searches it. Two runs of one check: the control holds the sentinel
+in a closure in the child and the snapshot must contain it, so a clean result cannot be blind; the
+real run holds an inert marker, which the snapshot must contain, and must not contain the sentinel
+or the canary. Both markers are assembled at runtime from character codes, so neither string exists
+in the solution's source. Mutant: binding an extra closure that holds the sentinel reddens the run
+at "the check source reached the child heap".
+
+### R8-L1 (`c4b9214`) — `docs/SECURITY.md` says what the boundary does and does not cover
+
+The session key is in the child's heap and a solution that scans its own memory can recover it; the
+document now says so and why it gains nothing — the verdict is a comparison in the checker against
+expectations that never crossed, so a forged reply only misreports a value that is judged, and a
+solution that wants to fail its own run can exit. `--disallow-code-generation-from-strings` is
+named for what it does: it blocks `eval` and `new Function` in the driver's own realm and does not
+restrict the `vm` module. The two `hiddenStore.ts` comments that still said the child is sent the
+check's source now say it is sent call descriptions alone.
+
+### R8-L5 (`07b3d41`) — the routes to the environment are named
+
+The note said agent code can reach the parent's environment "by other means" without naming one.
+It now names them: on Linux, `/proc/<ppid>/environ`; on macOS, `ps -E -p <ppid>` — measured on
+2026-11-16 on this host, where a same-user child read a parent-only marker by that route (`ps e -p`
+works too, and macOS has no `/proc`). Both belong to the no-sandbox residual class and close with
+the 0.7.0 sandbox; until then the signing key is only as private as the user the agent runs as and
+should be used for nothing else.
+
+### R8-L6 (`99bc414`) — `calibrate --help` names the real floor
+
+The help text said the command exits 1 when fewer than 10 tasks qualify; `CALIBRATION_MIN_SELECTED`
+is 20. The sentence now interpolates the constant.
+
+## Round 9 verification
+
+Measured at `99bc414`, where the suites ran; the commit after it adds this section and the PR body's
+round-9 rows, and touches no executable line. Both hosts ran `pnpm -r --no-bail
+--workspace-concurrency=1 test` on the same tree, one host at a time.
+
+**A figure from the first attempt is withdrawn.** The macOS and Linux suites were initially run at
+the same time — the Linux one in a container on the same machine — and the corpus-sized tests were
+measuring the contention: five stacks **1693.9 s** against its 1800 s cap, the fresh-clone baseline
+**578.7 s** against 600 s, `calibrate` **414.6 s** against 450 s. Those runs' *counts* were sound and
+are unchanged; their *durations* were not, and every figure below comes from a run in which nothing
+else was running.
+
+- **macOS (Darwin 24.5.0), serial form, run alone** — **1868 tests, 1866 pass, 2 skipped, 0 fail**
+  across the 25 packages that declare a test script, **1922 s wall** (32:02.20), zero `not ok`
+  lines. Round 8's run was 1860 tests; the eight new ones are R8-L4's four comparator tests, R8-L3's
+  three protocol tests (a new file) and R8-L2's one heap test.
+- **The corpus-sized tests, in the suite and in isolation.** Inside that serial suite they measured
+  five stacks **1570.6 s** (cap 1800), the fresh-clone baseline **410.6 s** (cap 600) and
+  `calibrate` **297.1 s** (cap 450) — all pass. Each is materially slower there than when its file
+  is run in its own process: **1061.2 s**, **216.7 s** and **131.8 s**, measured on the same tree
+  and host in separate runs with nothing else running, `--test-name-pattern` selecting the one
+  test.
+  The difference is `node --test`'s default file-level concurrency: in the suite the five-stacks
+  test shares the machine with its sibling files in `packages/cli`, and alone it does not. Both
+  figures pass; the in-suite one is the one a CI-like run sees and is reported first for that
+  reason.
+- **Against round 8, the corpus tests are slower and the increase is not attributed.** On macOS the
+  in-suite figures are **+21.3 %**, **+15.3 %** and **+22.6 %** on round 8's 1294.8 s, 356.0 s and
+  242.3 s; on Linux they are **+54.1 %**, **+71.2 %** and **+86.5 %** on 531.3 s, 139.8 s and
+  92.2 s. The only change in this round that reaches the corpus path is the comparator's collection
+  branch, which runs for Map and Set comparisons and is not reached by a plain-value comparison. The
+  host is a plausible cause and is not a measurement: `/System/Volumes/Data` is at **98 % (568 of
+  652 GB, 17 GiB free)** with Docker.raw at 73 GB, and these three tests are I/O-heavy — worktrees,
+  copies, builds. I have not separated code cost from host cost, so the numbers are reported as
+  measured and the comparison is left open. The remaining margin is 229 s, 189 s and 153 s on macOS
+  and 981 s, 361 s and 278 s on Linux.
+- **Round 8's wall figure does not reconcile, and is not compared.** That record gives a 1298 s
+  wall for the same serial command beside a 1294.8 s five-stacks test; a run with
+  `--workspace-concurrency=1` spends the sum over packages, so its wall cannot be 3 s more than one
+  test in it. Round 9's walls are reported as measured.
+- **Linux (`node:22` = v22.23.4) over the `git archive` of `99bc414`, run alone** — `pnpm install
+  --frozen-lockfile` and `pnpm -r build` before it, then the same serial command: **RC 0**, **1868
+  tests, 1866 pass, 2 skipped, 0 fail**, zero `not ok` lines, **982 s wall** (16:21.68). The
+  corpus-sized tests measured **818.7 s**, **239.3 s** and **172.0 s** in the suite, and **529.4 s**,
+  **97.7 s** and **65.5 s** in isolation. Every count agrees with macOS; the logs differ only in the
+  per-suite summary marker (`# tests` against `ℹ tests`), the test stream being TAP on both.
+- **One Linux run failed and is not explained.** The run before this one, same tree, same container,
+  reported **RC 1** with one failing test — five-stacks — and finished in about 800 s, far too
+  quickly for the 1800 s cap to have been the cause, so the stress child failed early. The container
+  was `--rm` and its log went with it, so the diagnostic is lost; that is my error, and the run
+  above keeps its log in the mounted directory for that reason. The same package re-run alone passed
+  (**311 tests, 310 pass, 1 skipped, 0 fail**; five-stacks 832.1 s) and the full run passed. It is
+  recorded as observed: the only failure in six suite runs, on the test closest to its cap.
+- **Guards** (macOS, all pass; CI runs them on the pushed head): `check:test-scripts` 25/27 (the
+  same two packages have no tests yet); `check:build-output` 27/27; `check:workspace-deps` 27
+  packages / 94 internal edges, acyclic; `check:doc-refs` OK — **96** `.md` references across 5 dirs
+  and 4 root files all resolving, 6 runtime-artifact sites named; `check:package` **220 files**,
+  installed and run, `goldens solved 60/116`. Round 8's body said 97 references; the guard has
+  reported 96 at both heads, so that number was wrong and is corrected here.
+- **Mutants.** Each round-9 fix was reverted in the compiled `dist/` and observed red on its own
+  test with its siblings green: `negate` dropped (`doesNotThrow`), the constructor check dropped
+  (`throws(fn, TypeError)`), the order-independent collection match dropped (the Map/Set test), the
+  early-settlement store dropped (the two settlement tests), the `{t:'E'}` branch replaced with a
+  generic error (the decoding test), and an extra closure bound to the sentinel (the heap test, at
+  "the check source reached the child heap").
+- **No paid run on real `claude` has been made.** The probe is CJ's to run.
