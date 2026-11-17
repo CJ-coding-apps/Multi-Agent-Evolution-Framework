@@ -43,6 +43,7 @@
     "@maf/tools": "workspace:*",
     "@maf/transcript": "workspace:*",
     "@maf/types": "workspace:*",
+    "@maf/viewer": "workspace:*",
     "commander": "^12.0.0"
   },
   "devDependencies": {

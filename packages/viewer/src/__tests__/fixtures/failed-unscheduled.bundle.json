@@ -1,0 +1,67 @@
+{
+  "_type": "https://in-toto.io/Statement/v0.1",
+  "subject": [],
+  "predicateType": "https://maf.dev/attestation/run/v1",
+  "predicate": {
+    "runId": "run-failed",
+    "keySource": "dev",
+    "provenance": {
+      "buildType": "https://maf.dev/build/v1",
+      "builder": {
+        "id": "@maf/test@0.5.1",
+        "modelVersion": "scripted"
+      },
+      "invocation": {
+        "configSource": {
+          "uri": "fixture:failed",
+          "digest": {
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "parameters": {},
+        "environment": {}
+      },
+      "materials": [],
+      "runEnv": {
+        "platform": "test",
+        "nodeVersion": "test",
+        "timestamp": "2026-01-01T00:00:05.000Z"
+      }
+    },
+    "toolCalls": [],
+    "approvals": [],
+    "diffHashes": {},
+    "outcome": {
+      "status": "Failed",
+      "nodes": [
+        {
+          "nodeId": "node-build",
+          "runId": "run-failed",
+          "status": "Failed",
+          "attempt": 1,
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "finishedAt": "2026-01-01T00:00:04.000Z",
+          "error": "no change in the working tree",
+          "failure": {
+            "kind": "no_change"
+          }
+        },
+        {
+          "nodeId": "node-unclaimed",
+          "runId": "run-failed",
+          "status": "Unclaimed",
+          "attempt": 0
+        }
+      ],
+      "unscheduled": [
+        "node-test",
+        "node-deploy"
+      ],
+      "deferredWriters": [
+        "node-docs"
+      ]
+    },
+    "bundledAt": "2026-01-01T00:00:05.000Z"
+  },
+  "signature": "25386c02204970ff39bc46ea9b3d88b7b9ef8f1d47f049d1b7fb75a88d7b2277"
+}
