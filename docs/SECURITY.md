@@ -111,7 +111,12 @@ How a bundle is signed, and what a signature does **not** establish today, state
   can read, including maf's own environment, agent code can read. Isolating the key needs a separate
   user or sandbox, which maf does not provide — so an agent that can run a command can still reach the
   parent process's environment by other means, and a signature only shows that whoever made the bundle
-  held the key. What maf does do is give every process it starts for an agent a policy rather than
+  held the key. The routes are concrete. On Linux a child reads `/proc/<ppid>/environ`. On macOS a
+  same-user child reads the parent's environment with `ps -E -p <ppid>`; this was measured on
+  2026-11-16, and macOS has no `/proc`. Both belong to the no-sandbox residual class and close with the
+  0.7.0 sandbox. Until then, give maf a signing key that is used for nothing else: the key is only as
+  private as the user the agent runs as. What maf does do is give every process it starts for an agent
+  a policy rather than
   `process.env` (`packages/types/src/childEnv.ts`): the backend CLIs — `claude`, `codex`, `gemini` —
   get the environment minus every `MAF_*` variable (`backendEnv`), so `MAF_SIGNING_KEY` is absent and
   each provider's own key still reaches the backend that needs it; the tools that start a process —
