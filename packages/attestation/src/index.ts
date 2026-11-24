@@ -1,7 +1,11 @@
-export { Attestor, buildInTotoStatement, parseBundle, MAF_RUN_PREDICATE_TYPE, DEV_SIGNING_KEY } from './Attestor.js';
+export {
+  Attestor, buildInTotoStatement, parseBundle, MAF_RUN_PREDICATE_TYPE, DEV_SIGNING_KEY,
+  signPayload, verifyPayload,
+} from './Attestor.js';
 export type {
   AnyBundle, BundleReport, RunPredicate, SignedRunStatement, SigningOptions, VerifyResult,
 } from './Attestor.js';
+export type { KeySource } from '@maf/types';
 export { ProvenanceBuilder } from './ProvenanceBuilder.js';
 export type { ProvenanceOptions } from './ProvenanceBuilder.js';
 export { BundleSigner } from './BundleSigner.js';

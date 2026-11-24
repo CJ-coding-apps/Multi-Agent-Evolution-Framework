@@ -111,7 +111,12 @@ How a bundle is signed, and what a signature does **not** establish today, state
   can read, including maf's own environment, agent code can read. Isolating the key needs a separate
   user or sandbox, which maf does not provide — so an agent that can run a command can still reach the
   parent process's environment by other means, and a signature only shows that whoever made the bundle
-  held the key. What maf does do is give every process it starts for an agent a policy rather than
+  held the key. The routes are concrete. On Linux a child reads `/proc/<ppid>/environ`. On macOS a
+  same-user child reads the parent's environment with `ps -E -p <ppid>`; this was measured on
+  2026-11-16, and macOS has no `/proc`. Both belong to the no-sandbox residual class and close with the
+  0.7.0 sandbox. Until then, give maf a signing key that is used for nothing else: the key is only as
+  private as the user the agent runs as. What maf does do is give every process it starts for an agent
+  a policy rather than
   `process.env` (`packages/types/src/childEnv.ts`): the backend CLIs — `claude`, `codex`, `gemini` —
   get the environment minus every `MAF_*` variable (`backendEnv`), so `MAF_SIGNING_KEY` is absent and
   each provider's own key still reaches the backend that needs it; the tools that start a process —
@@ -837,3 +842,71 @@ does not exist.
 The permission levels are the registry's — the same `ToolPlugin.permissionLevel` the run builds its
 tool surface from — and `maf evolve` passes the map in from `createDefaultRegistry()`, so the gate
 cannot disagree with the tools it is judging.
+
+### Hidden evaluation material is detected, not sandboxed
+
+A held-out or pool task's acceptance checks and reference solutions must not reach the agent being
+measured: an agent that can read the test can pass it without doing the work, and the score is what
+the whole evaluation is for. maf keeps them out of the worktree the agent edits, and since 0.6.0 they
+are not plain files in the repository either: `tests/goldens/hidden-store.json` holds each one
+gzip-compressed and base64-encoded, and a run decodes a task's checks into a fresh directory owned by
+that run (mode `0700`, under the system temporary directory) only after the attempt's agent session
+has ended and its process group is gone. Scoring runs there, and the directory is removed in a
+`finally`.
+
+That is cheap prevention for a casual attempt, not a boundary for a determined program. **There is no
+sandbox until 0.7.0: any file the agent's code can read, it can also read.** The encoded store is a
+file on the same disk, and code running as your user can open and decode it, or find the decoded copy
+while another check is being scored. Nothing in 0.6.0 prevents that.
+
+What maf can do is **detect a read that reaches the record, and void the attempt**. Every hidden check
+and reference carries a unique canary (`maf-hidden-canary-…`) on its first line that is not a valid
+part of the program otherwise. After each attempt the runner scans the final answer, every tool call
+the run attested (its input and its stdout/stderr — where a `test.run` script and its output live),
+the run's transcript, and the worktree the attempt leaves, for any canary and for the encoded store's
+own name. A hit voids the attempt: it is scored as a failure, marked `contaminated` with the evidence,
+and listed in the session report; **one contaminated attempt in a held-out gate session makes the
+gate refuse an improvement claim**, whatever the counts say. This catches a read that reaches the
+record and stops casual snooping. It cannot see a program that reads the material and never lets the
+text reach any surface maf records — that remains out of scope until the sandbox exists, stated here
+rather than implied. The same access lets it **modify** rather than read: a train attempt runs with
+your write permission, so `hidden-store.json`, `splits.json` and `calibration.json` can be rewritten
+while a session is open. maf fingerprints all three when the session starts and refuses to score the
+held-out split if any of them changed — a verdict from a corpus that moved is about a yardstick
+nobody measured.
+
+**The check is judged in a process the solution does not run in.** A check that runs beside the
+solution cannot judge it: a module that overwrites `node:assert`'s functions passes every check
+without implementing anything, because the check's own assertion is whatever the module made it.
+Since R7-H2 the acceptance check is input/output across a process boundary, and since R8-H1 the
+boundary carries **calls, not code**. The checker process runs the check itself — its own realm, its
+own `node:assert` — and holds the expected values, the comparisons and the canary. A driver in a
+separate child process holds the solution and receives only **call descriptions**: which function to
+call, with which arguments, as data. Arguments and return values cross as values (primitives,
+arrays, maps, sets, typed arrays, dates, regular expressions, errors, and object graphs by
+identity), never as source, over a signed append-only exchange in a private session directory; the
+key for that exchange is read once from the driver's stdin before any solution code loads. A
+stateful check is a sequence of calls: the checker issues one, compares the answer with its own
+expectation, and issues the next. **No part of the check is sent to the child** — not its source,
+not one literal, not the canary — so a solution that walks its caller frames, `process.argv`, the
+environment, the globals or its own stdin finds no expected value to replay; that is tested by
+replaying the round-7 exploit, by a solution that scans everything it can see, and by a solution
+that searches a heap snapshot taken inside its own process. The driver starts with
+`--disallow-code-generation-from-strings` and `'use strict'`. The flag is exact in what it does: it
+blocks `eval` and `new Function` in the driver's own realm. It does not restrict the `vm` module,
+so it guards the driver's own string handling rather than acting as a barrier to code a solution
+chooses to compile. The solution's exit code, its stdout, and any global it patches in its own
+process cannot move the verdict: only a well-formed, signed driver response counts, and the scorer reads a bounded amount of
+it — 1 MiB per message and 8 MiB in all. A child that exits early, prints a verdict, hangs past the
+deadline, writes an oversized or unreadable message, or returns a different number of observations
+is a failure, and the child is killed. This protects against a solution that disables, forges or
+short-circuits the test that judges it — on held-out and train tasks alike, because the evolver's
+train scoring uses the same boundary. It does not protect the driver's own process from a solution
+that attacks it directly; that is the sandbox's problem, and the sandbox is 0.7.0's.
+
+The session key lives in the child's heap and a solution that scans its own memory can recover it.
+That lets it forge lines in the exchange, and it gains the solution nothing: the verdict is a
+comparison in the checker against expectations that never crossed, so a forged reply can only
+misreport a value that is judged on its merits, and a solution that wants to fail its own run can
+exit, which it can already do. The key's exposure is a limit of the boundary's integrity story, not
+a way around the check.

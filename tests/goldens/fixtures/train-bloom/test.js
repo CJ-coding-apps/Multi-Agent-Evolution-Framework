@@ -1,0 +1,10 @@
+const assert = require('node:assert/strict');
+const { Bloom } = require('./bloom');
+const bloom = new Bloom(64);
+assert.equal(bloom.has('apple'), false);
+bloom.add('apple');
+assert.equal(bloom.has('apple'), true);
+assert.equal(bloom.has('banana'), false);
+bloom.add('banana');
+assert.equal(bloom.has('banana'), true);
+console.log('ok');

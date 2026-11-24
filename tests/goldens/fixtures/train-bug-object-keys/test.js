@@ -1,0 +1,10 @@
+const assert = require('node:assert/strict');
+const { pick } = require('./pick');
+const obj = Object.create({ inherited: 1 });
+obj.own = 2;
+obj.undef = undefined;
+assert.deepEqual(pick(obj, ['own', 'undef', 'inherited']), { own: 2, undef: undefined });
+assert.deepEqual(pick({ a: 1, b: 2 }, ['b']), { b: 2 });
+assert.equal(Object.hasOwn(pick(obj, ['inherited']), 'inherited'), false);
+assert.deepEqual(pick({ a: 1 }, ['missing']), {});
+console.log('ok');

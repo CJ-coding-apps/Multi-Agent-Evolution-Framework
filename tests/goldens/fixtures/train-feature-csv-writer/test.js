@@ -1,0 +1,10 @@
+const assert = require('node:assert/strict');
+const { formatRow, formatRows, escapeCell } = require('./csv-writer');
+assert.equal(escapeCell('plain'), 'plain');
+assert.equal(escapeCell(42), '42');
+assert.equal(escapeCell('a,b'), '"a,b"');
+assert.equal(escapeCell('say "hi"'), '"say ""hi"""');
+assert.equal(formatRow(['a', 'b']), 'a,b');
+assert.equal(formatRow(['line\nbreak', '']), '"line\nbreak",');
+assert.equal(formatRows([['a', 'b'], ['c,d', 'e']]), 'a,b\r\n"c,d",e');
+console.log('ok');

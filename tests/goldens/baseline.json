@@ -1,7 +1,7 @@
 {
   "harnessSha": "3124b5a9d019624e7e6e6a5d9983244a442eeeb15050f2867c66fd806b618379",
   "harnessId": "legacy-default",
-  "corpusSha": "912f22db4579af646a7362769982892fec5174fd3aa323744fa8b767647989d3",
+  "corpusSha": "a639569cc271a5027d6e1b8c31252bebf379cf8211b780237697d947d61d9f56",
   "attempts": 2,
   "adapter": "scripted",
   "judge": {
@@ -28,7 +28,7 @@
             {
               "kind": "test-script",
               "passed": true,
-              "detail": "node exited 0"
+              "detail": "the check completed without exiting"
             }
           ],
           "passed": true
@@ -45,7 +45,7 @@
             {
               "kind": "test-script",
               "passed": true,
-              "detail": "node exited 0"
+              "detail": "the check completed without exiting"
             }
           ],
           "passed": true
@@ -69,7 +69,7 @@
             {
               "kind": "test-script",
               "passed": true,
-              "detail": "node exited 0"
+              "detail": "the check completed without exiting"
             }
           ],
           "passed": true
@@ -86,7 +86,7 @@
             {
               "kind": "test-script",
               "passed": true,
-              "detail": "node exited 0"
+              "detail": "the check completed without exiting"
             }
           ],
           "passed": true
@@ -110,7 +110,7 @@
             {
               "kind": "test-script",
               "passed": true,
-              "detail": "node exited 0"
+              "detail": "the check completed without exiting"
             }
           ],
           "passed": true
@@ -127,7 +127,7 @@
             {
               "kind": "test-script",
               "passed": true,
-              "detail": "node exited 0"
+              "detail": "the check completed without exiting"
             }
           ],
           "passed": true
@@ -151,7 +151,7 @@
             {
               "kind": "test-script",
               "passed": true,
-              "detail": "node exited 0"
+              "detail": "the check completed without exiting"
             }
           ],
           "passed": true
@@ -168,7 +168,7 @@
             {
               "kind": "test-script",
               "passed": true,
-              "detail": "node exited 0"
+              "detail": "the check completed without exiting"
             }
           ],
           "passed": true
@@ -191,8 +191,8 @@
             },
             {
               "kind": "test-script",
-              "passed": true,
-              "detail": "node exited 0"
+              "passed": false,
+              "detail": "the check exited or asserted: 1"
             }
           ],
           "passed": false
@@ -208,11 +208,93 @@
             },
             {
               "kind": "test-script",
-              "passed": true,
-              "detail": "node exited 0"
+              "passed": false,
+              "detail": "the check exited or asserted: 1"
             }
           ],
           "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "coder-repeat",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed repeat.js: it returned the string once; it now repeats it n times.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed repeat.js: it returned the string once; it now repeats it n times.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-contains",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed contains.js: indexOf returns 0 for the first element; it now tests !== -1.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed contains.js: indexOf returns 0 for the first element; it now tests !== -1.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
         }
       ]
     },
@@ -233,7 +315,7 @@
             {
               "kind": "test-script",
               "passed": false,
-              "detail": "node exited 1"
+              "detail": "the check exited or asserted: 1"
             }
           ],
           "passed": false
@@ -250,10 +332,174 @@
             {
               "kind": "test-script",
               "passed": false,
-              "detail": "node exited 1"
+              "detail": "the check exited or asserted: 1"
             }
           ],
           "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "coder-max",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed max.js: it returned the smaller of the two values; it now returns the larger.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed max.js: it returned the smaller of the two values; it now returns the larger.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-unique",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed unique.js: it returned its input; it now removes duplicates in first-seen order.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed unique.js: it returned its input; it now removes duplicates in first-seen order.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-flatten",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed flatten.js: it returned the nested array; it now flattens one level.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed flatten.js: it returned the nested array; it now flattens one level.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "coder-pad",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed pad.js: it never padded; it now left-pads with zeros to the requested width.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed pad.js: it never padded; it now left-pads with zeros to the requested width.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check completed without exiting"
+            }
+          ],
+          "passed": true
         }
       ]
     },
@@ -380,13 +626,3668 @@
           "passed": false
         }
       ]
+    },
+    {
+      "taskId": "pool-csv-parse",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: csv.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: deepEqual saw {\"t\":\"a\",\"v\":[\"a\",\"b\",\"c\"]}, expected {\"t\":\"a\",\"v\":[\"a,b\",\"c\"]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: csv.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: deepEqual saw {\"t\":\"a\",\"v\":[\"a\",\"b\",\"c\"]}, expected {\"t\":\"a\",\"v\":[\"a,b\",\"c\"]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-duration",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: duration.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 5: equal saw \"1h5m\", expected \"1h05m\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: duration.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 5: equal saw \"1h5m\", expected \"1h05m\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-ranges",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: ranges.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,3]},{\"t\":\"a\",\"v\":[5,7]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[5,7]},{\"t\":\"a\",\"v\":[1,3]}]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: ranges.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,3]},{\"t\":\"a\",\"v\":[5,7]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[5,7]},{\"t\":\"a\",\"v\":[1,3]}]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-wordwrap",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: wrap.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw \"\\nabcdefghijkl\\nmn\", expected \"abcdefghijkl\\nmn\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: wrap.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw \"\\nabcdefghijkl\\nmn\", expected \"abcdefghijkl\\nmn\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-roman",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: roman.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 6, expected 4"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: roman.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 6, expected 4"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-matrix-transpose",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: matrix.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,2,3]},{\"t\":\"a\",\"v\":[4,5,6]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,4]},{\"t\":\"a\",\"v\":[2,5]},{\"t\":\"a\",\"v\":[3,6]}]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: matrix.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,2,3]},{\"t\":\"a\",\"v\":[4,5,6]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,4]},{\"t\":\"a\",\"v\":[2,5]},{\"t\":\"a\",\"v\":[3,6]}]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-lru",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: lru.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw 2, expected {\"t\":\"u\"}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: lru.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw 2, expected {\"t\":\"u\"}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-edit-distance",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: distance.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 1, expected 3"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: distance.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 1, expected 3"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-heap",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: heap.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[1,3,4,2,5]}, expected {\"t\":\"a\",\"v\":[1,2,3,4,5]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: heap.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[1,3,4,2,5]}, expected {\"t\":\"a\",\"v\":[1,2,3,4,5]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-date-add",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: dateadd.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw \"2024-04-31\", expected \"2024-04-30\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: dateadd.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw \"2024-04-31\", expected \"2024-04-30\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-stats-median",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: stats.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 2, expected 2.5"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: stats.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 2, expected 2.5"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-slugify",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: slug.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw \"hello,-world!-2024\", expected \"hello-world-2024\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: slug.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw \"hello,-world!-2024\", expected \"hello-world-2024\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-binary-search",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: search.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 2, expected -1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: search.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 2, expected -1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-diff-lines",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: diff.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"op\",\"=\"],[\"line\",\"a\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"+\"],[\"line\",\"c\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"+\"],[\"line\",\"d\"]],\"c\":\"Object\"}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"op\",\"=\"],[\"line\",\"a\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"-\"],[\"line\",\"b\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"=\"],[\"line\",\"c\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"+\"]..."
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: diff.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"op\",\"=\"],[\"line\",\"a\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"+\"],[\"line\",\"c\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"+\"],[\"line\",\"d\"]],\"c\":\"Object\"}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"op\",\"=\"],[\"line\",\"a\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"-\"],[\"line\",\"b\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"=\"],[\"line\",\"c\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"op\",\"+\"]..."
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-format-bytes",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: bytes.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw \"1.0 KB\", expected \"1023 B\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: bytes.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw \"1.0 KB\", expected \"1023 B\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-group-by",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: groupby.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"0\",{\"t\":\"a\",\"v\":[4]}],[\"1\",{\"t\":\"a\",\"v\":[5]}]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"0\",{\"t\":\"a\",\"v\":[2,4]}],[\"1\",{\"t\":\"a\",\"v\":[1,3,5]}]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: groupby.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"0\",{\"t\":\"a\",\"v\":[4]}],[\"1\",{\"t\":\"a\",\"v\":[5]}]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"0\",{\"t\":\"a\",\"v\":[2,4]}],[\"1\",{\"t\":\"a\",\"v\":[1,3,5]}]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-config-merge",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: config.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: deepEqual saw {\"t\":\"o\",\"v\":[[\"server\",{\"t\":\"o\",\"v\":[[\"host\",\"localhost\"],[\"port\",8080],[\"tls\",{\"t\":\"o\",\"v\":[[\"enabled\",true]],\"c\":\"Object\"}]],\"c\":\"Object\"}],[\"log\",{\"t\":\"o\",\"v\":[[\"level\",\"info\"]],\"c\":\"Object\"}]]..., expected {\"t\":\"o\",\"v\":[[\"server\",{\"t\":\"o\",\"v\":[[\"host\",\"localhost\"],[\"port\",8080],[\"tls\",{\"t\":\"o\",\"v\":[[\"enabled\",true],[\"cert\",null]],\"c\":\"Object\"}]],\"c\":\"Object\"}],[\"log\",{\"t\":\"o\",\"v\":[[\"level\",\"info\"]],\"..."
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: config.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: deepEqual saw {\"t\":\"o\",\"v\":[[\"server\",{\"t\":\"o\",\"v\":[[\"host\",\"localhost\"],[\"port\",8080],[\"tls\",{\"t\":\"o\",\"v\":[[\"enabled\",true]],\"c\":\"Object\"}]],\"c\":\"Object\"}],[\"log\",{\"t\":\"o\",\"v\":[[\"level\",\"info\"]],\"c\":\"Object\"}]]..., expected {\"t\":\"o\",\"v\":[[\"server\",{\"t\":\"o\",\"v\":[[\"host\",\"localhost\"],[\"port\",8080],[\"tls\",{\"t\":\"o\",\"v\":[[\"enabled\",true],[\"cert\",null]],\"c\":\"Object\"}]],\"c\":\"Object\"}],[\"log\",{\"t\":\"o\",\"v\":[[\"level\",\"info\"]],\"..."
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-color-hex",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: channels.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 5: deepEqual saw {\"t\":\"o\",\"v\":[[\"r\",1],[\"g\",2],[\"b\",3],[\"a\",1]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"r\",1],[\"g\",2],[\"b\",3],[\"a\",0.5]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: channels.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 5: deepEqual saw {\"t\":\"o\",\"v\":[[\"r\",1],[\"g\",2],[\"b\",3],[\"a\",1]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"r\",1],[\"g\",2],[\"b\",3],[\"a\",0.5]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-json-pointer",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: steps.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "hidden check: the check script stopped: Error: no such path: \"a/b\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: steps.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "hidden check: the check script stopped: Error: no such path: \"a/b\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-tokenize",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix: rules.js, tokenizer.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"kind\",\"number\"],[\"value\",\"1\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"kind\",\"op\"],[\"value\",\"<\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"kind\",\"op\"],[\"value\",\"=\"]],\"c\":\"Object\"},{\"t\":\"o\"..., expected {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"kind\",\"number\"],[\"value\",\"1\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"kind\",\"op\"],[\"value\",\"<=\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"kind\",\"number\"],[\"value\",\"2\"]],\"c\":\"Object\"}]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix: rules.js, tokenizer.js.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"kind\",\"number\"],[\"value\",\"1\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"kind\",\"op\"],[\"value\",\"<\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"kind\",\"op\"],[\"value\",\"=\"]],\"c\":\"Object\"},{\"t\":\"o\"..., expected {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"kind\",\"number\"],[\"value\",\"1\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"kind\",\"op\"],[\"value\",\"<=\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"kind\",\"number\"],[\"value\",\"2\"]],\"c\":\"Object\"}]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-semver-compare",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote semver.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: equal saw 0, expected 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote semver.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: equal saw 0, expected 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-debounce",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote debounce.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "hidden check: the check script stopped: TypeError: Cannot read properties of undefined (reading 'args')"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote debounce.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "hidden check: the check script stopped: TypeError: Cannot read properties of undefined (reading 'args')"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-matrix-multiply",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote multiply.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[26,30]},{\"t\":\"a\",\"v\":[38,44]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[19,22]},{\"t\":\"a\",\"v\":[43,50]}]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote multiply.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[26,30]},{\"t\":\"a\",\"v\":[38,44]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[19,22]},{\"t\":\"a\",\"v\":[43,50]}]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-parse-args",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote args.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"name\",\"ann\"],[\"verbose\",{\"t\":\"u\"}]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"name\",\"ann\"],[\"verbose\",true]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote args.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"name\",\"ann\"],[\"verbose\",{\"t\":\"u\"}]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"name\",\"ann\"],[\"verbose\",true]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-pluralize",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote plural.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw \"boxs\", expected \"boxes\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote plural.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw \"boxs\", expected \"boxes\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-time-diff",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote time.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw -1420, expected 20"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote time.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw -1420, expected 20"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-tree-flatten",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote flatten-keys.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"a\",1],[\"bc\",2],[\"bde\",3]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"a\",1],[\"b.c\",2],[\"b.d.e\",3]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote flatten-keys.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"a\",1],[\"bc\",2],[\"bde\",3]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"a\",1],[\"b.c\",2],[\"b.d.e\",3]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-query-string",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote query.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"a\",{\"t\":\"a\",\"v\":[\"1\"]}],[\"b\",{\"t\":\"a\",\"v\":[\"2\",\"3\"]}]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"a\",\"1\"],[\"b\",{\"t\":\"a\",\"v\":[\"2\",\"3\"]}]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote query.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"a\",{\"t\":\"a\",\"v\":[\"1\"]}],[\"b\",{\"t\":\"a\",\"v\":[\"2\",\"3\"]}]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"a\",\"1\"],[\"b\",{\"t\":\"a\",\"v\":[\"2\",\"3\"]}]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-checksum",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote checksum.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw 5, expected 253"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote checksum.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw 5, expected 253"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-queue-batch",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote batch.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,2]},{\"t\":\"a\",\"v\":[3,4]},{\"t\":\"a\",\"v\":[5,{\"t\":\"u\"}]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,2]},{\"t\":\"a\",\"v\":[3,4]},{\"t\":\"a\",\"v\":[5]}]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote batch.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,2]},{\"t\":\"a\",\"v\":[3,4]},{\"t\":\"a\",\"v\":[5,{\"t\":\"u\"}]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,2]},{\"t\":\"a\",\"v\":[3,4]},{\"t\":\"a\",\"v\":[5]}]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-gcd-lcm",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote lcm.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw 4, expected 12"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote lcm.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw 4, expected 12"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bowling",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote bowling.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw 17, expected 24"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote bowling.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw 17, expected 24"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-caesar-wrap",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote caesar.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw \"xyz\", expected \"abc\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote caesar.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw \"xyz\", expected \"abc\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-token-bucket",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote bucket.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"allowed\",true],[\"tokens\",1]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"allowed\",true],[\"tokens\",0]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote bucket.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"allowed\",true],[\"tokens\",1]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"allowed\",true],[\"tokens\",0]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "pool-round-sig",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote round.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw 1000, expected 1200"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote round.js, but the tests still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw 1000, expected 1200"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-crc8",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed crc.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed crc.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-bitset",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed bitset.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 6 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed bitset.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 6 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-rle",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed rle.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed rle.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-base32",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed base32.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed base32.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-intervals",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed intervals.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed intervals.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-heapify",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed heapify.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 2 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed heapify.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 2 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-bloom",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed bloom.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed bloom.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-anagram",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed anagram.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed anagram.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-rot13",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed rot13.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed rot13.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-ring",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed ring.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed ring.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-grid-sum",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed grid.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed grid.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-title-case",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed title.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed title.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-chunk",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed chunk.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed chunk.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-zip",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed zip.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed zip.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-prefix-sum",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed prefix.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed prefix.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-word-count",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed words.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed words.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-camel-keys",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed keys.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed keys.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-template-render",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed render.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed render.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-graph-topo",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed visit.js, topo.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed visit.js, topo.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-move-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed move.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed move.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-max-subarray",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote maxSubarray.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote maxSubarray.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-factorial",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote factorial.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote factorial.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-prime-sieve",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote sieve.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote sieve.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-rotate-array",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote rotate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote rotate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-parse-binary",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote binary.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote binary.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-isbn-check",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote isbn.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote isbn.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-parse-bool",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote parseBool.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote parseBool.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-merge-sorted",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote merge.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote merge.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-matrix-diagonal",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote diagonal.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote diagonal.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-hyphenate",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote hyphenate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 2 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote hyphenate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 2 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-calc-eval",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote evaluate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote evaluate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-dedupe",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote dedupe.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote dedupe.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-truncate",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote truncate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote truncate.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-split-path",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote paths.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote paths.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "train-mode",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Rewrote mode.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Rewrote mode.js.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 3 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-cidr-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: expected a throw, none was raised"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: expected a throw, none was raised"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-invoice-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-maze-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,1]},{\"t\":\"a\",\"v\":[1,3]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,3]},{\"t\":\"a\",\"v\":[1,1]}]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,1]},{\"t\":\"a\",\"v\":[1,3]}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"a\",\"v\":[1,3]},{\"t\":\"a\",\"v\":[1,1]}]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-router-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bigadd-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw \"000123\", expected \"123\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw \"000123\", expected \"123\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-state-machine-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 6 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 6 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-cron-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: equal saw false, expected true"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: equal saw false, expected true"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-config-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-jsonpath-two-file",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"type\",\"key\"],[\"value\",\"a[0]\"]],\"c\":\"Object\"}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"type\",\"key\"],[\"value\",\"a\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"type\",\"index\"],[\"value\",0]],\"c\":\"Object\"}]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"type\",\"key\"],[\"value\",\"a[0]\"]],\"c\":\"Object\"}]}, expected {\"t\":\"a\",\"v\":[{\"t\":\"o\",\"v\":[[\"type\",\"key\"],[\"value\",\"a\"]],\"c\":\"Object\"},{\"t\":\"o\",\"v\":[[\"type\",\"index\"],[\"value\",0]],\"c\":\"Object\"}]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-pagination-two-file",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 8 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 8 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-varint",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 7: deepEqual saw -1, expected 9007199254740991"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 7: deepEqual saw -1, expected 9007199254740991"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-csv-writer",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 7 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 7 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-luhn",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 8: equal saw 0, expected 3"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 8: equal saw 0, expected 3"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-template",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 6 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 6 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-trie",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: deepEqual saw {\"t\":\"a\",\"v\":[\"car\",\"cart\",\"card\",\"car\"]}, expected {\"t\":\"a\",\"v\":[\"car\",\"card\",\"cart\"]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 4: deepEqual saw {\"t\":\"a\",\"v\":[\"car\",\"cart\",\"card\",\"car\"]}, expected {\"t\":\"a\",\"v\":[\"car\",\"card\",\"cart\"]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-retry",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-base58",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw \"\", expected \"1\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: equal saw \"\", expected \"1\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-rate-limit",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 7 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 7 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-feature-shell-quote",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw \"\\\"abc\\\"\", expected \"'abc'\""
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: equal saw \"\\\"abc\\\"\", expected \"'abc'\""
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-feature-deep-equal",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 9 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 9 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-memo-key",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 2, expected 1"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 3: equal saw 2, expected 1"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-sort-comparator",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-loop-splice",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[1,false,2,\"\",3,null,4,{\"t\":\"u\"},5]}, expected {\"t\":\"a\",\"v\":[1,2,3,4,5]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"a\",\"v\":[1,false,2,\"\",3,null,4,{\"t\":\"u\"},5]}, expected {\"t\":\"a\",\"v\":[1,2,3,4,5]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-float-sum",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-closure-capture",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"u\"},{\"t\":\"u\"},{\"t\":\"u\"},{\"t\":\"u\"}]}, expected {\"t\":\"a\",\"v\":[0,1,2,3]}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 2: deepEqual saw {\"t\":\"a\",\"v\":[{\"t\":\"u\"},{\"t\":\"u\"},{\"t\":\"u\"},{\"t\":\"u\"}]}, expected {\"t\":\"a\",\"v\":[0,1,2,3]}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-utf8-truncate",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 5 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-regex-global",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 5: equal saw true, expected false"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 5: equal saw true, expected false"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-async-order",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
+    },
+    {
+      "taskId": "pool-bug-immutable-merge",
+      "role": "coder",
+      "passed": false,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"b\",2],[\"c\",4],[\"a\",1]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"a\",1],[\"b\",3],[\"c\",4]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        },
+        {
+          "attempt": 1,
+          "output": "Attempted a fix, but the acceptance checks still fail.",
+          "outcomes": [
+            {
+              "kind": "test-script",
+              "passed": false,
+              "detail": "assertion 1: deepEqual saw {\"t\":\"o\",\"v\":[[\"b\",2],[\"c\",4],[\"a\",1]],\"c\":\"Object\"}, expected {\"t\":\"o\",\"v\":[[\"a\",1],[\"b\",3],[\"c\",4]],\"c\":\"Object\"}"
+            }
+          ],
+          "passed": false
+        }
+      ]
+    },
+    {
+      "taskId": "train-bug-object-keys",
+      "role": "coder",
+      "passed": true,
+      "attempts": [
+        {
+          "attempt": 0,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        },
+        {
+          "attempt": 1,
+          "output": "Fixed it; the test passes.",
+          "outcomes": [
+            {
+              "kind": "must-not-modify",
+              "passed": true,
+              "detail": "unchanged: test.js"
+            },
+            {
+              "kind": "test-script",
+              "passed": true,
+              "detail": "the check made 4 assertions"
+            }
+          ],
+          "passed": true
+        }
+      ]
     }
   ],
   "solvedTaskIds": [
     "coder-sum",
     "coder-reverse",
     "coder-clamp",
-    "coder-isodd"
-  ],
-  "ranAt": "2026-11-09T02:04:43.113Z"
+    "coder-isodd",
+    "coder-repeat",
+    "coder-contains",
+    "coder-max",
+    "coder-unique",
+    "coder-flatten",
+    "coder-pad",
+    "train-crc8",
+    "train-bitset",
+    "train-rle",
+    "train-base32",
+    "train-intervals",
+    "train-heapify",
+    "train-bloom",
+    "train-anagram",
+    "train-rot13",
+    "train-ring",
+    "train-grid-sum",
+    "train-title-case",
+    "train-chunk",
+    "train-zip",
+    "train-prefix-sum",
+    "train-word-count",
+    "train-camel-keys",
+    "train-template-render",
+    "train-graph-topo",
+    "train-move-file",
+    "train-max-subarray",
+    "train-factorial",
+    "train-prime-sieve",
+    "train-rotate-array",
+    "train-parse-binary",
+    "train-isbn-check",
+    "train-parse-bool",
+    "train-merge-sorted",
+    "train-matrix-diagonal",
+    "train-hyphenate",
+    "train-calc-eval",
+    "train-dedupe",
+    "train-truncate",
+    "train-split-path",
+    "train-mode",
+    "train-invoice-two-file",
+    "train-router-two-file",
+    "train-state-machine-two-file",
+    "train-config-two-file",
+    "train-pagination-two-file",
+    "train-feature-csv-writer",
+    "train-feature-template",
+    "train-feature-retry",
+    "train-feature-rate-limit",
+    "train-feature-deep-equal",
+    "train-bug-sort-comparator",
+    "train-bug-float-sum",
+    "train-bug-utf8-truncate",
+    "train-bug-async-order",
+    "train-bug-object-keys"
+  ]
 }
