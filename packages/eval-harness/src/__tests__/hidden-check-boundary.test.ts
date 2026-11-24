@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFileSync, spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { captureExpectations, compareObservations, injectCanary, runHiddenCheck } from '../index.js';
@@ -506,6 +508,148 @@ test('a solution that never answers is a failure at the deadline, not a hang', a
     const run = await runHiddenCheck(check, staged.dir, { timeoutMs: 500 });
     assert.match(String(run.failure), /did not finish within 500 ms/);
     assert.ok(Date.now() - started < 10_000, 'the deadline did not stop the run');
+  } finally {
+    await staged.cleanup();
+  }
+});
+
+/* ---------- R10 (D-57): no driver outlives the checker it serves ---------- */
+
+// The leak: a driver waited on its 1 ms pump for as long as the process lived, so a driver whose
+// checker died kept polling a log nobody wrote — measured survivors had run for a week at 9 % of a
+// core. The driver now waits on a control pipe the checker holds for as long as it lives, and exits
+// when that pipe ends. These two tests are the property: a killed checker takes its driver with it,
+// and an idle driver costs nothing.
+
+/** A check that makes one call and then leaves the attempt open for `sleepMs`. */
+function r10Check(sleepMs: number): string {
+  return [
+    "const assert = require('node:assert/strict');",
+    "const { quick } = require('./lib');",
+    '(async () => {',
+    '  assert.equal(quick(), 1);',
+    // The attempt stays open: the checker is mid-check and the driver has no call in flight.
+    `  await new Promise((resolve) => setTimeout(resolve, ${sleepMs}));`,
+    '})();',
+    '',
+  ].join('\n');
+}
+
+interface ProcessRow { pid: number; ppid: number; args: string }
+
+function processTable(): ProcessRow[] {
+  const out = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,args='], { encoding: 'utf8' });
+  const rows: ProcessRow[] = [];
+  for (const line of out.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (m !== null) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), args: m[3] ?? '' });
+  }
+  return rows;
+}
+
+/** Drivers whose parent is `pid`: the child is spawned by the checker and started as driver.cjs. */
+function driverChildrenOf(pid: number): number[] {
+  return processTable().filter((r) => r.ppid === pid && r.args.includes('driver.cjs')).map((r) => r.pid);
+}
+
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); } catch { return false; }
+  try {
+    const stat = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+    return stat !== '' && !stat.startsWith('Z');
+  } catch { return false; }
+}
+
+/**
+ * The process's cumulative CPU time in seconds. Linux reads /proc (10 ms resolution); macOS's `ps`
+ * cputime has the same resolution, where Linux `ps` rounds to whole seconds and would hide a leak.
+ */
+function cpuSeconds(pid: number): number {
+  if (process.platform === 'linux') {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // After "pid (comm) " the fields start at state, so utime (field 14) is index 11.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return (Number(fields[11]) + Number(fields[12])) / 100; // clock ticks are 1/100 s
+  }
+  const raw = execFileSync('ps', ['-o', 'cputime=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/.exec(raw);
+  assert.ok(m !== null, `unexpected cputime format from ps: ${JSON.stringify(raw)}`);
+  const [, d, h, mi, s] = m as unknown as [string, string | undefined, string | undefined, string, string];
+  return Number(d ?? 0) * 86400 + Number(h ?? 0) * 3600 + Number(mi) * 60 + Number(s);
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForDriver(ppid: number, withinMs: number): Promise<number> {
+  const deadline = Date.now() + withinMs;
+  for (;;) {
+    const [pid] = driverChildrenOf(ppid);
+    if (pid !== undefined) return pid;
+    if (Date.now() > deadline) throw new Error('the driver was never started');
+    await sleep(25);
+  }
+}
+
+test('a driver exits within 2 s when its checker is killed mid-attempt', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'maf-reap-'));
+  const repoDir = path.join(scratch, 'solution');
+  const tmp = path.join(scratch, 'tmp');
+  await mkdir(repoDir, { recursive: true });
+  await mkdir(tmp, { recursive: true });
+  await writeFile(path.join(repoDir, 'lib.js'), 'module.exports = { quick: () => 1 };\n', 'utf8');
+  // The checker must be a process of its own, so killing it is possible and its driver is orphaned.
+  const harness = path.join(__dirname, '..', 'index.js');
+  const checkerScript = path.join(scratch, 'checker.cjs');
+  await writeFile(checkerScript, [
+    `const { runHiddenCheck } = require(${JSON.stringify(harness)});`,
+    `const check = ${JSON.stringify(r10Check(60000))};`,
+    'runHiddenCheck(check, process.argv[2], { timeoutMs: 60000 }).then(',
+    "  () => process.stdout.write('done\\n'),",
+    "  (e) => process.stdout.write('failed: ' + e.message + '\\n'),",
+    ');',
+    '',
+  ].join('\n'), 'utf8');
+  const checker = spawn(process.execPath, [checkerScript, repoDir], {
+    // The session directory the checker creates goes under this TMPDIR, so it can be removed here.
+    env: { ...process.env, TMPDIR: tmp },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let driver: number | undefined;
+  try {
+    assert.ok(checker.pid !== undefined);
+    driver = await waitForDriver(checker.pid, 15_000);
+    // The call has long since returned; the check is sleeping, so the driver is idle. Kill the
+    // checker the hard way: no cleanup, no `done`.
+    await sleep(1000);
+    const killedAt = Date.now();
+    process.kill(checker.pid, 'SIGKILL');
+    let survivedMs = -1;
+    while (alive(driver)) {
+      if (Date.now() - killedAt > 2000) { survivedMs = Date.now() - killedAt; break; }
+      await sleep(25);
+    }
+    assert.equal(survivedMs, -1, `a driver survived its checker by ${survivedMs} ms`);
+  } finally {
+    try { checker.kill('SIGKILL'); } catch { /* already gone */ }
+    // A survivor is reparented to init, so this cleanup is the only handle left on it.
+    if (driver !== undefined) { try { process.kill(driver, 'SIGKILL'); } catch { /* already gone */ } }
+    await rm(scratch, { recursive: true, force: true });
+  }
+});
+
+test("an idle driver's CPU time stays near zero over 5 s", async () => {
+  const staged = await repo('module.exports = { quick: () => 1 };\n');
+  try {
+    const run = runHiddenCheck(r10Check(8000), staged.dir, { timeoutMs: 20_000 });
+    const driver = await waitForDriver(process.pid, 15_000);
+    // Past the one call; for the next eight seconds the driver has nothing to do.
+    await sleep(1500);
+    const before = cpuSeconds(driver);
+    await sleep(5000);
+    const spent = cpuSeconds(driver) - before;
+    assert.ok(spent < 0.05, `an idle driver used ${spent.toFixed(3)} s of CPU in 5 s`);
+    const result = await run;
+    assert.equal(result.failure, undefined);
   } finally {
     await staged.cleanup();
   }

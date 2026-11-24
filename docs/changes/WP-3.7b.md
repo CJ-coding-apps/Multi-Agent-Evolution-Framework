@@ -2090,3 +2090,52 @@ else was running.
   generic error (the decoding test), and an extra closure bound to the sentinel (the heap test, at
   "the check source reached the child heap").
 - **No paid run on real `claude` has been made.** The probe is CJ's to run.
+
+## Round 10 — the driver leak (R10-driver-reap)
+
+The disk cleanup before the calibration found two `maf-hidden-*/driver.cjs` processes alive for seven
+days, each at 9.2 % of a core. A driver's only liveness mechanism was a 1 ms `setInterval` over its
+inbox: the timer kept the process alive, and nothing stopped it when the checker that owned it died.
+Every boundary that ended without `close()` — a killed run, a crashed probe — leaked one driver.
+
+One commit, `[WP-3.7b, D-57, R10-driver-reap]`. The driver no longer polls. The checker holds the
+write end of a control pipe (fd 3, `stdio` slot 3 — stdin still carries the key and is closed before
+solution code loads) for exactly as long as it lives, and writes one byte after each signed line it
+appends. The driver wraps its end in a `net.Socket` and waits on it: with nothing in flight the
+process is parked in the event loop with no timer, and when the pipe ends — `close()`, or the
+checker process dying — the driver sends its `bye` and exits. Two further details:
+
+- a callback round trip (`waitFor`, a function the solution owns calling back into the checker) is
+  still synchronous and still parks a millisecond at a time, because it runs inside a call the
+  checker is executing, not in an idle driver; it also checks `process.ppid`, so a checker that dies
+  while the event loop is blocked is noticed within a millisecond;
+- a solution that finds the control pipe can steal a wake byte; that denies itself the driver's
+  progress and the check ends at its deadline as a failure. It cannot make the driver do anything.
+
+Two tests, both in `hidden-check-boundary.test.ts`:
+
+- **the reap.** A checker of its own process (`runHiddenCheck` mid-check, its driver idle) is killed
+  with `SIGKILL`; the driver, found as the checker's child through `ps`, must be gone within 2 s.
+  Measured: gone in 16 ms.
+- **the idle cost.** Over an interior 5 s window of an open attempt, the driver's CPU time (from
+  `/proc/<pid>/stat` on Linux, `ps -o cputime=` on macOS) must grow by less than 0.05 s — 1 % of a
+  core. Measured: 0.000 s with the fix on both hosts, 0.31 s with the 1 ms pump restored (macOS).
+
+Mutants, applied to the compiled `dist/hiddenCheck.js` and restored from a kept copy (sha256
+compared): restoring `setInterval(pollOnce, 1)` beside the control pipe reddens only the CPU test
+(0.31 s; the reap is still 12 ms); reverting the whole block — the pre-R10 driver — reddens both
+(the driver survives its checker by 2018 ms and idles at 0.29 s of CPU). The reap test kills any
+survivor before it removes its scratch directory, so a red mutant leaves no process behind.
+
+Measured on the tree this commit records, before it was committed; both hosts ran the same serial
+command, `pnpm -r --no-bail --workspace-concurrency=1 test`, one host at a time.
+
+- **macOS (Darwin 24.5.0), run alone** — **1870 tests, 1868 pass, 2 skipped, 0 fail** across the 25
+  packages that declare a test script, **1476 s wall** (24:36) after a 15 s `pnpm -r build`, zero
+  `not ok` lines. Round 9's run was 1868 tests; the two new ones are R10's, at 1.45 s and 8.34 s.
+  No `driver.cjs` process survived the run (`ps -A` afterwards).
+- **Linux (`node:22-bookworm`, Node v22.23.4) over the same tree, run alone** — `pnpm install
+  --frozen-lockfile` and `pnpm -r build` first, then the serial command: **RC 0**, **1870 tests,
+  1868 pass, 2 skipped, 0 fail**, zero `not ok` lines, **865 s wall** for install, build and suite
+  together. Both new tests pass there too; the idle-cost test measured **0.000 s**, read from
+  `/proc/<pid>/stat`.

@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 import vm from 'node:vm';
 import { toolEnv } from '@maf/types';
 
@@ -119,6 +120,7 @@ export const DRIVER_SOURCE = String.raw`'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const net = require('node:net');
 const { createRequire } = require('node:module');
 
 const readFileSync = fs.readFileSync;
@@ -170,7 +172,10 @@ const NumberFn = Number;
 const StringFn = String;
 const BigIntFn = BigInt;
 const SymbolFn = Symbol;
-const theSetInterval = setInterval;
+const SocketCtor = net.Socket;
+// Readable's own on(), not EventEmitter's: attaching 'data' through the base class leaves the
+// stream paused, and then the control pipe is never read at all.
+const socketOn = SocketCtor.prototype.on;
 
 const MAX_LINE = 1048576;
 const MAX_TOTAL = 8388608;
@@ -183,6 +188,7 @@ const ROOT = cfg.repoDir;
 const IN = path.join(DIR, 'to-child.log');
 const OUT = path.join(DIR, 'to-checker.log');
 const startedAt = dateNow();
+const parentPid = process.ppid;
 
 const outFd = openSync(OUT, 'a');
 const inFd = openSync(IN, 'r');
@@ -637,6 +643,9 @@ function waitFor(id) {
     const got = rets.get(id);
     if (got !== undefined) { rets.delete(id); return got; }
     if (stopping) throw new ErrorCtor('the check driver stopped');
+    // A callback is outstanding, so the event loop is blocked and the control pipe cannot report;
+    // a reparented process is a checker that died.
+    if (process.ppid !== parentPid) checkerGone();
     if (dateNow() - startedAt > LIFE_MS) fatal('the check driver outlived its checker');
     apply(AtomicsObject.wait, AtomicsObject, [sleepCell, 0, 0, 1]);
   }
@@ -644,6 +653,20 @@ function waitFor(id) {
 
 function pollOnce() {
   try { readNew(); } catch (e) { fatal('the check driver could not read its inbox'); }
+}
+
+/* ---------- the checker's control pipe: the driver waits on it instead of polling ---------- */
+
+// R10 (D-57): the checker holds the write end of a control pipe for exactly as long as it lives,
+// and writes one byte each time it appends a message. The driver waits on the pipe — parked in the
+// event loop with no timer — so an idle driver costs nothing, and the pipe ending means the checker
+// closed it or the checker process died: the driver exits rather than polling a log nobody writes.
+const CONTROL_FD = 3;
+
+function checkerGone() {
+  stopping = true;
+  try { send({ k: 'bye', message: 'the checker closed the driver channel' }); } catch (e) { /* the reader is gone */ }
+  exitProcess(0);
 }
 
 processOn('exit', function () {
@@ -654,7 +677,15 @@ processOn('uncaughtException', function (e) {
   exitProcess(4);
 });
 
-theSetInterval(pollOnce, 1);
+let control = null;
+try {
+  control = new SocketCtor({ fd: CONTROL_FD, readable: true, writable: false });
+} catch (e) {
+  fatal('the check driver has no control pipe');
+}
+apply(socketOn, control, ['data', function () { pollOnce(); }]);
+apply(socketOn, control, ['end', checkerGone]);
+apply(socketOn, control, ['error', checkerGone]);
 send({ k: 'ret', id: 'ready', ok: true });
 `;
 
@@ -705,6 +736,7 @@ export class CheckerBridge {
   private readonly dir: string;
   private readonly timeoutMs: number;
   private readonly child: ChildProcess;
+  private readonly control: Writable | null;
   private readonly inFd: number;
   private readonly outFd: number;
   private readonly sleepCell = new Int32Array(new SharedArrayBuffer(4));
@@ -734,6 +766,12 @@ export class CheckerBridge {
     this.key = opts.key;
     this.timeoutMs = opts.timeoutMs;
     this.childPid = opts.child.pid;
+    // R10 (D-57): the driver's control pipe. This process holds the write end for as long as it
+    // lives; when it dies, the end closes and the driver exits. A write that fails means the driver
+    // is already gone, and the deadline reports it.
+    const slot = opts.child.stdio?.[3];
+    this.control = slot instanceof Writable ? slot : null;
+    this.control?.on('error', () => { /* the driver is gone; its absence is the deadline's to report */ });
     this.inFd = openSync(path.join(opts.dir, 'to-checker.log'), 'r');
     this.outFd = openSync(path.join(opts.dir, 'to-child.log'), 'a');
     this.deadline = Date.now() + opts.timeoutMs;
@@ -811,6 +849,12 @@ export class CheckerBridge {
     let text: string;
     try { text = JSON.stringify(message); } catch { throw new BoundaryFailure('a value could not be serialized'); }
     writeSync(this.outFd, `${sign(this.key, text)} ${text}\n`);
+    // One wake byte per message, after the line is durable. The byte carries nothing: the driver
+    // drains the signed log and reads the message from there. It is what lets the driver wait on
+    // the pipe rather than poll the log a millisecond at a time.
+    if (this.control !== null && this.control.writable) {
+      try { this.control.write('\n'); } catch { /* the driver is gone; the deadline reports it */ }
+    }
   }
 
   /** A blocking pump: while the check's synchronous stack waits for the solution, the checker
@@ -1507,7 +1551,8 @@ async function runBoundary(
     const child = spawn(process.execPath, ['--disallow-code-generation-from-strings', driverPath], {
       cwd: repoDir,
       env: toolEnv(),
-      stdio: ['pipe', 'ignore', 'ignore', 'ignore'],
+      // fd 3 is the control pipe: the driver waits on it, and its end is the driver's reap signal.
+      stdio: ['pipe', 'ignore', 'ignore', 'pipe'],
     });
     bridge = new CheckerBridge({ child, dir, key, timeoutMs });
     // The driver reads this once, before any solution code exists, and keeps it in its own scope.
